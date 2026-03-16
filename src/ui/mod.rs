@@ -218,6 +218,7 @@ pub struct EngineNodeIds {
 
 #[derive(Clone, Copy)]
 pub enum ParamMouseDragTarget {
+    CirklonStepParam { step: usize },
     TrackParam { row_idx: usize },
     TrackListVolume,
     AccumParam { row_idx: usize },

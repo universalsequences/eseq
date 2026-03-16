@@ -310,12 +310,23 @@ impl StepParam {
     }
 
     pub fn normalize(self, val: f32) -> f32 {
-        let min = self.min();
-        let max = self.max();
+        let min = self.slider_min();
+        let max = self.slider_max();
         if (max - min).abs() < f32::EPSILON {
             return 0.0;
         }
         ((val - min) / (max - min)).clamp(0.0, 1.0)
+    }
+
+    pub fn slider_min(self) -> f32 {
+        self.min()
+    }
+
+    pub fn slider_max(self) -> f32 {
+        match self {
+            StepParam::Duration => 2.0,
+            _ => self.max(),
+        }
     }
 
     pub fn format_value(self, val: f32) -> String {
@@ -637,7 +648,7 @@ impl TrackParams {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TrackParamsSnapshot {
     pub gate: bool,
     pub attack_ms: f32,

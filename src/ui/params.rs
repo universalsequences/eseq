@@ -68,11 +68,13 @@ impl App {
                     self.for_each_selected_track(|app, track| {
                         app.state.pattern.track_params[track].toggle_gate();
                     });
+                    self.state.publish_scheduler_snapshot();
                 }
                 ToolRow::Track(TP_POLY) => {
                     self.for_each_selected_track(|app, track| {
                         app.state.pattern.track_params[track].toggle_polyphonic();
                     });
+                    self.state.publish_scheduler_snapshot();
                 }
                 ToolRow::Track(TP_TIMEBASE) => {
                     self.ui.dropdown_open = true;
@@ -163,6 +165,7 @@ impl App {
                     for step in self.selected_steps() {
                         self.state.pattern.timebase_plocks[self.ui.cursor_track].clear(step);
                     }
+                    self.state.publish_scheduler_snapshot();
                 }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => match self.active_tool_row() {
@@ -183,6 +186,40 @@ impl App {
                 }
                 _ => {}
             },
+            _ => {}
+        }
+
+        match code {
+            KeyCode::Char('+') | KeyCode::Char('=')
+                if matches!(
+                    self.active_tool_row(),
+                    ToolRow::Track(TP_ATTACK)
+                        | ToolRow::Track(TP_RELEASE)
+                        | ToolRow::Track(TP_SWING)
+                        | ToolRow::Track(TP_SWING_RESOLUTION)
+                        | ToolRow::Track(TP_STEPS)
+                        | ToolRow::Track(TP_TIMEBASE)
+                        | ToolRow::Track(TP_FTS)
+                        | ToolRow::Accum(AC_LIMIT)
+                ) =>
+            {
+                self.state.publish_scheduler_snapshot();
+            }
+            KeyCode::Char('-')
+                if matches!(
+                    self.active_tool_row(),
+                    ToolRow::Track(TP_ATTACK)
+                        | ToolRow::Track(TP_RELEASE)
+                        | ToolRow::Track(TP_SWING)
+                        | ToolRow::Track(TP_SWING_RESOLUTION)
+                        | ToolRow::Track(TP_STEPS)
+                        | ToolRow::Track(TP_TIMEBASE)
+                        | ToolRow::Track(TP_FTS)
+                        | ToolRow::Accum(AC_LIMIT)
+                ) =>
+            {
+                self.state.publish_scheduler_snapshot();
+            }
             _ => {}
         }
     }
@@ -280,6 +317,7 @@ impl App {
             tp.set_send(tp.get_send() + delta);
             app.push_send_gain(track);
         });
+        self.state.publish_scheduler_snapshot();
     }
 
     fn adjust_track_volume(&mut self, delta: f32) {
@@ -288,6 +326,7 @@ impl App {
             tp.set_volume(tp.get_volume() + delta);
             app.push_track_volume(track);
         });
+        self.state.publish_scheduler_snapshot();
     }
 
     fn adjust_track_pan(&mut self, delta: f32) {
@@ -296,6 +335,7 @@ impl App {
             tp.set_pan(tp.get_pan() + delta);
             app.push_track_pan(track);
         });
+        self.state.publish_scheduler_snapshot();
     }
 
     fn adjust_master_volume(&mut self, delta: f32) {
@@ -305,6 +345,7 @@ impl App {
             Ordering::Relaxed,
         );
         self.push_master_volume();
+        self.state.publish_scheduler_snapshot();
     }
 
     pub(super) fn handle_dropdown(&mut self, code: KeyCode) {
@@ -501,6 +542,7 @@ impl App {
                     }
                 }
             }
+            self.state.publish_scheduler_snapshot();
             return;
         }
 
@@ -524,6 +566,7 @@ impl App {
                 self.send_instrument_param(self.ui.cursor_track, param_idx, val);
                 self.mark_track_sound_dirty(self.ui.cursor_track);
             }
+            self.state.publish_scheduler_snapshot();
             return;
         }
         if self.ui.effect_tab == EffectTab::Mod {
@@ -572,6 +615,7 @@ impl App {
                 self.ui.dropdown_cursor,
             );
             slot.defaults.set(param_idx, val);
+            self.state.publish_scheduler_snapshot();
             return;
         }
 
@@ -582,6 +626,7 @@ impl App {
         } else {
             slot.defaults.set(param_idx, val);
         }
+        self.state.publish_scheduler_snapshot();
     }
 }
 

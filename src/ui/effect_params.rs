@@ -6,6 +6,7 @@ use crate::effects::{
 };
 use crate::reverb;
 
+use super::draw::rect_contains;
 use super::{App, EffectPaneEntry, EffectTab, InputMode, ParamMouseDragTarget};
 
 impl App {
@@ -442,6 +443,7 @@ impl App {
             slot.defaults.set(param_idx, new_val);
             self.send_slot_param(track, slot_idx, param_idx, new_val);
         }
+        self.state.publish_scheduler_snapshot();
     }
 
     pub(super) fn send_slot_param(
@@ -524,6 +526,7 @@ impl App {
                 );
             }
         }
+        self.state.publish_scheduler_snapshot();
     }
 
     fn update_delay_time_param_kind(&mut self) {
@@ -580,6 +583,7 @@ impl App {
             desc.params[TIME_PARAM].max = 2000.0;
             slot.defaults.set(TIME_PARAM, 250.0);
         }
+        self.state.publish_scheduler_snapshot();
     }
 
     fn get_current_slot_value(&self) -> f32 {
@@ -642,7 +646,7 @@ impl App {
         Some(param_desc.stored_to_user(slot.defaults.get(param_idx)))
     }
 
-    pub(super) fn apply_param_mouse_drag(&mut self, col: u16) {
+    pub(super) fn apply_param_mouse_drag(&mut self, col: u16, row: u16) {
         let Some(drag) = self.ui.param_mouse_drag else {
             return;
         };
@@ -652,6 +656,21 @@ impl App {
 
         let dx = col as i32 - drag.start_col as i32;
         match drag.target {
+            ParamMouseDragTarget::CirklonStepParam { step } => {
+                let step = if rect_contains(self.ui.layout.bars, col, row) {
+                    self.step_from_click_x(col, self.ui.layout.bars.x)
+                        .unwrap_or(step)
+                } else {
+                    step
+                };
+                let Some(value) = self.step_param_value_from_bar_position(self.ui.active_param, row)
+                else {
+                    return;
+                };
+                self.ui.cursor_step = step;
+                self.state
+                    .set_step_param(drag.track, step, self.ui.active_param, value);
+            }
             ParamMouseDragTarget::TrackListVolume => {
                 let layout = super::cirklon::track_list_row_layout(self.ui.layout.track_list);
                 let inner_width = layout.volume_inner_width.max(1);
@@ -856,6 +875,7 @@ impl App {
                     slot.defaults.set(param_idx, new_stored);
                     self.send_slot_param(drag.track, slot_idx, param_idx, new_stored);
                 }
+                self.state.publish_scheduler_snapshot();
             }
             ParamMouseDragTarget::ReverbParam { param_idx } => {
                 let sensitivity = 1.0 / 48.0;

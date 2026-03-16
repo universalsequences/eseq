@@ -609,7 +609,7 @@ impl EffectSlotState {
 
 // ── EffectSlotSnapshot (for pattern save/restore) ──
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EffectSlotSnapshot {
     pub node_id: u32,
     pub num_params: u32,

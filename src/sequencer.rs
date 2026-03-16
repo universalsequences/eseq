@@ -2,6 +2,8 @@
 mod clock;
 #[path = "sequencer/data.rs"]
 mod data;
+#[path = "sequencer/snapshot.rs"]
+mod snapshot;
 #[path = "sequencer/state.rs"]
 mod state;
 
@@ -13,6 +15,10 @@ pub use data::{
     SwingResolution, Timebase, TimebasePLockData, TrackParams, TrackParamsSnapshot, TrackPattern,
     TrackSoundState, Trigger, DEFAULT_BPM, MAX_STEPS, MAX_TRACKS, NUM_PARAMS, STEPS_PER_PAGE,
     SYNC_COUNT, SYNC_RESOLUTIONS, TRACK_PATTERN_WORDS,
+};
+#[allow(unused_imports)]
+pub use snapshot::{
+    SequencerSnapshot, SequencerStepSnapshot, SequencerTrackSnapshot, SequencerTransportSnapshot,
 };
 #[allow(unused_imports)]
 pub use state::{default_empty_effect_chain, PatternSnapshot, SequencerState, StepSnapshot};

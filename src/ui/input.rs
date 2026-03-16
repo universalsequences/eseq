@@ -13,7 +13,7 @@ use super::cirklon::track_list_row_layout;
 use super::draw::rect_contains;
 use super::{
     App, BrowserState, CompileTarget, EffectPaneEntry, EffectTab, InputMode, ParamMouseDrag,
-    ParamMouseDragTarget, PendingEditor, Region, SidebarMode, SidebarTab, COL_WIDTH,
+    ParamMouseDragTarget, PendingEditor, Region, SidebarMode, SidebarTab, BAR_HEIGHT, COL_WIDTH,
 };
 
 // ── App impl: input handling ──
@@ -950,7 +950,17 @@ impl App {
         // Bars area: click selects step, double-click toggles
         if rect_contains(l.bars, col, row) {
             if let Some(step) = self.step_from_click_x(col, l.bars.x) {
-                self.handle_step_click(step);
+                self.touch_follow_timer();
+                self.ui.cursor_step = step;
+                self.ui.focused_region = Region::Cirklon;
+                self.ui.param_mouse_drag = Some(ParamMouseDrag {
+                    track: self.ui.cursor_track,
+                    target: ParamMouseDragTarget::CirklonStepParam { step },
+                    start_col: col,
+                    start_display_value: self.state.pattern.step_data[self.ui.cursor_track]
+                        .get(step, self.ui.active_param),
+                });
+                self.apply_param_mouse_drag(col, row);
             }
             return;
         }
@@ -1254,7 +1264,7 @@ impl App {
 
     fn handle_mouse_drag(&mut self, col: u16, row: u16) {
         if self.ui.param_mouse_drag.is_some() {
-            self.apply_param_mouse_drag(col);
+            self.apply_param_mouse_drag(col, row);
             return;
         }
         if let Some(anchor) = self.ui.track_drag_anchor {
@@ -1304,7 +1314,7 @@ impl App {
         }
     }
 
-    fn step_from_click_x(&self, col: u16, area_x: u16) -> Option<usize> {
+    pub(super) fn step_from_click_x(&self, col: u16, area_x: u16) -> Option<usize> {
         let x_offset = 2u16;
         if col < area_x + x_offset {
             return None;
@@ -1318,6 +1328,31 @@ impl App {
         } else {
             None
         }
+    }
+
+    fn normalized_step_value_from_bar_row(&self, row: u16) -> Option<f32> {
+        let bars = self.ui.layout.bars;
+        if row < bars.y || row >= bars.y + BAR_HEIGHT as u16 {
+            return None;
+        }
+        let rel_row = row.saturating_sub(bars.y) as usize;
+        let clamped = rel_row.min(BAR_HEIGHT.saturating_sub(1));
+        Some(1.0 - (clamped as f32 + 0.5) / BAR_HEIGHT as f32)
+    }
+
+    pub(super) fn step_param_value_from_bar_position(
+        &self,
+        param: StepParam,
+        row: u16,
+    ) -> Option<f32> {
+        let normalized = self.normalized_step_value_from_bar_row(row)?;
+        let value = param.slider_min() + normalized * (param.slider_max() - param.slider_min());
+        Some(match param {
+            StepParam::AuxA | StepParam::Chop | StepParam::Sync | StepParam::Transpose => {
+                value.round()
+            }
+            _ => value,
+        })
     }
 
     fn handle_value_entry(&mut self, code: KeyCode) {
@@ -1365,6 +1400,7 @@ impl App {
         if self.ui.bpm_entry {
             let bpm = (val as u32).clamp(20, 999);
             self.state.transport.bpm.store(bpm, Ordering::Relaxed);
+            self.state.publish_scheduler_snapshot();
             self.ui.bpm_entry = false;
             return;
         }
@@ -1441,6 +1477,7 @@ impl App {
                         }
                         _ => {}
                     }
+                    self.state.publish_scheduler_snapshot();
                 } else if self.ui.effect_tab == EffectTab::Reverb {
                     self.set_reverb_param(self.ui.reverb_param_cursor, val);
                 } else if self.ui.effect_tab == EffectTab::Mod {
@@ -1546,6 +1583,7 @@ impl App {
                         slot.defaults.set(param_idx, store_val);
                         self.send_slot_param(track, slot_idx, param_idx, store_val);
                     }
+                    self.state.publish_scheduler_snapshot();
                 }
             }
         }
@@ -2064,5 +2102,7 @@ impl App {
                 duration_steps as f32,
             );
         }
+
+        self.state.publish_scheduler_snapshot();
     }
 }

@@ -972,6 +972,7 @@ impl App {
             self.send_instrument_param(track, param_idx, value);
             self.mark_track_sound_dirty(track);
         }
+        self.state.publish_scheduler_snapshot();
     }
 
     fn adjust_instrument_param(&self, direction: f32) {

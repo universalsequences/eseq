@@ -1883,6 +1883,7 @@ fn register_sequencer_natives(
             let step_idx = parse_step_arg(&args, 0)?;
             let timebase = parse_timebase_arg(&args, 1)?;
             state_for_timebase_plock.pattern.timebase_plocks[track_idx].set(step_idx, timebase);
+            state_for_timebase_plock.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} timebase {}",
                 track_idx + 1,
@@ -1969,6 +1970,7 @@ fn register_sequencer_natives(
                 .ok_or_else(|| "effect descriptor missing for parameter".to_string())?;
             let value = param_desc.denormalize(normalized);
             slot.plocks.set(step_idx, param_idx, value);
+            state_for_effect_plock.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} effect {} param {} {}",
                 track_idx + 1,
@@ -2003,6 +2005,7 @@ fn register_sequencer_natives(
                 return Err("effect param index out of range".to_string());
             }
             slot.plocks.set(step_idx, param_idx, value);
+            state_for_effect_plock_raw.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} effect {} param {} {}",
                 track_idx + 1,
@@ -2087,6 +2090,7 @@ fn register_sequencer_natives(
                 .ok_or_else(|| "instrument descriptor missing for parameter".to_string())?;
             let value = param_desc.denormalize(normalized);
             slot.plocks.set(step_idx, param_idx, value);
+            state_for_instrument_plock.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} instrument param {} {}",
                 track_idx + 1,
@@ -2115,6 +2119,7 @@ fn register_sequencer_natives(
                 return Err("instrument param index out of range".to_string());
             }
             slot.plocks.set(step_idx, param_idx, value);
+            state_for_instrument_plock_raw.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} instrument param {} {}",
                 track_idx + 1,

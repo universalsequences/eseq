@@ -456,6 +456,7 @@ impl App {
             .transport
             .master_volume
             .store(master_volume.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+        self.state.publish_scheduler_snapshot();
 
         self.ui.cursor_track = 0;
         self.ui.cursor_step = 0;

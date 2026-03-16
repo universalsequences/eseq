@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, EffectSlotState, MAX_SLOT_PARAMS};
 use crate::voice::MAX_VOICES;
@@ -9,6 +9,7 @@ use super::data::{
     TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState, DEFAULT_BPM, MAX_STEPS,
     MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
+use super::snapshot::SequencerSnapshot;
 
 #[derive(Clone)]
 pub struct StepSlotPlocks {
@@ -370,6 +371,8 @@ pub struct SequencerState {
     pub pattern: PatternState,
     pub transport: TransportState,
     pub runtime: RuntimeBindingState,
+    scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
+    scheduler_snapshot_version: AtomicU64,
 }
 
 impl SequencerState {
@@ -390,7 +393,7 @@ impl SequencerState {
 
         let chord_data: Vec<ChordData> = (0..MAX_TRACKS).map(|_| ChordData::new()).collect();
 
-        Self {
+        let state = Self {
             pattern: PatternState {
                 patterns,
                 step_data,
@@ -458,11 +461,30 @@ impl SequencerState {
                     .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
                     .collect(),
             },
-        }
+            scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
+            scheduler_snapshot_version: AtomicU64::new(0),
+        };
+        state.publish_scheduler_snapshot();
+        state
     }
 
     pub fn active_track_count(&self) -> usize {
         self.transport.num_tracks.load(Ordering::Acquire) as usize
+    }
+    pub fn scheduler_snapshot_version(&self) -> u64 {
+        self.scheduler_snapshot_version.load(Ordering::Acquire)
+    }
+    pub fn latest_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
+        self.scheduler_snapshot.lock().unwrap().clone()
+    }
+    pub fn publish_scheduler_snapshot(&self) -> Arc<SequencerSnapshot> {
+        let snapshot = Arc::new(SequencerSnapshot::capture(self));
+        {
+            let mut published = self.scheduler_snapshot.lock().unwrap();
+            *published = Arc::clone(&snapshot);
+        }
+        self.scheduler_snapshot_version.fetch_add(1, Ordering::AcqRel);
+        snapshot
     }
     pub fn current_step(&self) -> usize {
         self.transport.playhead.load(Ordering::Relaxed) as usize
@@ -475,6 +497,7 @@ impl SequencerState {
     }
     pub fn toggle_play(&self) {
         self.transport.playing.fetch_xor(true, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
     }
     pub fn schedule_mod_resync(&self) {
         if self.is_playing() {
@@ -507,6 +530,7 @@ impl SequencerState {
             .current_pattern
             .store(new_idx as u32, Ordering::Relaxed);
         self.schedule_mod_resync();
+        self.publish_scheduler_snapshot();
         Some(bank[new_idx].sample_ids.clone())
     }
 
@@ -529,6 +553,7 @@ impl SequencerState {
         self.pattern
             .num_patterns
             .store(bank.len() as u32, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
         new_idx
     }
 
@@ -555,6 +580,7 @@ impl SequencerState {
             .num_patterns
             .store(bank.len() as u32, Ordering::Relaxed);
         self.schedule_mod_resync();
+        self.publish_scheduler_snapshot();
         Some(bank[new_idx].sample_ids.clone())
     }
 
@@ -567,6 +593,7 @@ impl SequencerState {
             }
             self.pattern.chord_data[track].clear_step(step);
         }
+        self.publish_scheduler_snapshot();
     }
 
     pub fn capture_step_snapshot(&self, track: usize, step: usize) -> StepSnapshot {
@@ -610,7 +637,7 @@ impl SequencerState {
         }
     }
 
-    pub fn clear_step_payload(&self, track: usize, step: usize) {
+    fn clear_step_payload_inner(&self, track: usize, step: usize) {
         for param in StepParam::ALL {
             self.pattern.step_data[track].set(step, param, param.default_value());
         }
@@ -631,7 +658,12 @@ impl SequencerState {
         }
     }
 
-    pub fn set_step_param(&self, track: usize, step: usize, param: StepParam, value: f32) {
+    pub fn clear_step_payload(&self, track: usize, step: usize) {
+        self.clear_step_payload_inner(track, step);
+        self.publish_scheduler_snapshot();
+    }
+
+    fn set_step_param_inner(&self, track: usize, step: usize, param: StepParam, value: f32) {
         let previous = self.pattern.step_data[track].get(step, param);
         self.pattern.step_data[track].set(step, param, value);
 
@@ -660,12 +692,17 @@ impl SequencerState {
         }
     }
 
+    pub fn set_step_param(&self, track: usize, step: usize, param: StepParam, value: f32) {
+        self.set_step_param_inner(track, step, param, value);
+        self.publish_scheduler_snapshot();
+    }
+
     pub fn adjust_step_param(&self, track: usize, step: usize, param: StepParam, delta: f32) {
         let current = self.pattern.step_data[track].get(step, param);
         self.set_step_param(track, step, param, current + delta);
     }
 
-    pub fn restore_step_snapshot(&self, track: usize, step: usize, snapshot: &StepSnapshot) {
+    fn restore_step_snapshot_inner(&self, track: usize, step: usize, snapshot: &StepSnapshot) {
         for param in StepParam::ALL {
             self.pattern.step_data[track].set(step, param, snapshot.params[param.index()]);
         }
@@ -713,6 +750,11 @@ impl SequencerState {
         }
     }
 
+    pub fn restore_step_snapshot(&self, track: usize, step: usize, snapshot: &StepSnapshot) {
+        self.restore_step_snapshot_inner(track, step, snapshot);
+        self.publish_scheduler_snapshot();
+    }
+
     /// Cyclically rotate `steps` (sorted) left (direction < 0) or right (direction > 0).
     pub fn rotate_steps(&self, track: usize, steps: &[usize], direction: isize) {
         if steps.len() < 2 {
@@ -735,8 +777,9 @@ impl SequencerState {
                 // Rotate left: slot i gets content from slot i+1 (first wraps to last)
                 (i + 1) % n
             };
-            self.restore_step_snapshot(track, step, &snapshots[src]);
+            self.restore_step_snapshot_inner(track, step, &snapshots[src]);
         }
+        self.publish_scheduler_snapshot();
     }
 
     pub fn move_step_range(&self, track: usize, lo: usize, hi: usize, new_lo: usize) {
@@ -756,13 +799,14 @@ impl SequencerState {
 
         for step in lo..=hi {
             if step < new_lo || step > new_hi {
-                self.clear_step_payload(track, step);
+                self.clear_step_payload_inner(track, step);
             }
         }
 
         for (offset, step) in (new_lo..=new_hi).enumerate() {
-            self.restore_step_snapshot(track, step, &snapshots[offset]);
+            self.restore_step_snapshot_inner(track, step, &snapshots[offset]);
         }
+        self.publish_scheduler_snapshot();
     }
 
     pub fn duplicate_track_pattern(&self, track: usize) -> usize {
@@ -813,6 +857,7 @@ impl SequencerState {
         }
 
         self.pattern.track_params[track].set_num_steps(new_len);
+        self.publish_scheduler_snapshot();
         new_len
     }
 
@@ -823,6 +868,7 @@ impl SequencerState {
             return num_steps;
         }
         self.pattern.track_params[track].set_num_steps(new_len);
+        self.publish_scheduler_snapshot();
         new_len
     }
 }
@@ -1235,5 +1281,49 @@ mod tests {
         // step 4 was never populated — clearing it should not panic
         state.clear_step_payload(0, 4);
         assert_step_is_default(&state, 0, 4);
+    }
+
+    #[test]
+    fn published_scheduler_snapshot_reflects_initial_state() {
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
+
+        let snapshot = state.latest_scheduler_snapshot();
+
+        assert_eq!(state.scheduler_snapshot_version(), 1);
+        assert_eq!(snapshot.transport.num_tracks, 2);
+        assert_eq!(snapshot.transport.bpm, DEFAULT_BPM);
+        assert_eq!(snapshot.tracks.len(), 2);
+        assert_eq!(snapshot.tracks[0].params.num_steps, 16);
+    }
+
+    #[test]
+    fn published_scheduler_snapshot_updates_on_step_mutation() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let before = state.scheduler_snapshot_version();
+
+        state.toggle_step_and_clear_plocks(0, 3);
+        state.set_step_param(0, 3, StepParam::Transpose, 9.0);
+
+        let snapshot = state.latest_scheduler_snapshot();
+        assert!(state.scheduler_snapshot_version() > before);
+        assert!(snapshot.tracks[0].steps[3].active);
+        assert_eq!(
+            snapshot.tracks[0].steps[3].params[StepParam::Transpose.index()],
+            9.0
+        );
+    }
+
+    #[test]
+    fn publish_scheduler_snapshot_captures_transport_changes() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+
+        state.transport.bpm.store(172, Ordering::Relaxed);
+        state.publish_scheduler_snapshot();
+
+        let snapshot = state.latest_scheduler_snapshot();
+        assert_eq!(snapshot.transport.bpm, 172);
     }
 }

@@ -1,7 +1,7 @@
 use crate::sequencer::{StepData, StepParam};
 
 /// A step's parameters resolved from StepData atomics into plain f32 fields.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedStep {
     pub duration: f32,
     pub velocity: f32,

@@ -19,6 +19,8 @@ mod recorder;
 mod reverb;
 mod sampler;
 mod scale;
+mod scheduler;
+mod scheduled_event;
 #[allow(dead_code)]
 mod sequencer;
 #[allow(dead_code)]
