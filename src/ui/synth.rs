@@ -320,6 +320,7 @@ impl App {
         self.state.pattern.instrument_base_note_offsets[track]
             .store(value.to_bits(), Ordering::Relaxed);
         self.mark_track_sound_dirty(track);
+        self.state.publish_scheduler_snapshot();
     }
 
     pub(super) fn synth_row_count(&self) -> usize {
@@ -1010,6 +1011,7 @@ impl App {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
+            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
@@ -1043,6 +1045,7 @@ impl App {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
+            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
@@ -1076,6 +1079,7 @@ impl App {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
+            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
@@ -1172,6 +1176,7 @@ impl App {
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
+            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
@@ -1196,6 +1201,7 @@ impl App {
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
+            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
@@ -1220,6 +1226,7 @@ impl App {
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
+            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }

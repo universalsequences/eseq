@@ -21,6 +21,7 @@ use crate::sequencer::{
 
 mod browser;
 mod cirklon;
+pub mod command;
 mod draw;
 mod effect_params;
 mod effects;
@@ -34,6 +35,8 @@ mod recording;
 mod synth;
 
 pub use browser::BrowserNode;
+#[allow(unused_imports)]
+pub use command::{apply_command, AppCommand};
 pub use draw::draw;
 
 const BAR_HEIGHT: usize = 8;

@@ -426,6 +426,7 @@ impl App {
             let new_val = param_desc.clamp(old + direction * inc);
             self.apply_effect_sidechain_selection(track, slot_idx, param_idx, new_val as usize);
             slot.defaults.set(param_idx, new_val);
+            self.state.publish_scheduler_snapshot();
         } else if self.has_selection() {
             for step in self.selected_steps() {
                 let current = slot
@@ -436,12 +437,14 @@ impl App {
                 let new_val = param_desc.clamp(current + direction * inc);
                 slot.plocks.set(step, param_idx, new_val);
             }
+            self.state.publish_scheduler_snapshot();
         } else {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
             slot.defaults.set(param_idx, new_val);
             self.send_slot_param(track, slot_idx, param_idx, new_val);
+            self.state.publish_scheduler_snapshot();
         }
         self.state.publish_scheduler_snapshot();
     }
@@ -508,6 +511,7 @@ impl App {
                 let new_val = if current > 0.5 { 0.0 } else { 1.0 };
                 slot.plocks.set(step, param_idx, new_val);
             }
+            self.state.publish_scheduler_snapshot();
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
@@ -525,6 +529,7 @@ impl App {
                     new_val,
                 );
             }
+            self.state.publish_scheduler_snapshot();
         }
         self.state.publish_scheduler_snapshot();
     }
@@ -698,70 +703,76 @@ impl App {
                     tp.set_volume(volume);
                     self.push_track_volume(drag.track);
                 }
+                self.state.publish_scheduler_snapshot();
             }
-            ParamMouseDragTarget::TrackParam { row_idx } => match row_idx {
-                super::TP_ATTACK => self.for_each_selected_track(|app, track| {
-                    app.state.pattern.track_params[track].set_attack_ms(
-                        (drag.start_display_value + dx as f32 * 5.0).clamp(0.0, 500.0),
-                    );
-                }),
-                super::TP_RELEASE => self.for_each_selected_track(|app, track| {
-                    app.state.pattern.track_params[track].set_release_ms(
-                        (drag.start_display_value + dx as f32 * 10.0).clamp(0.0, 2000.0),
-                    );
-                }),
-                super::TP_SWING => self.for_each_selected_track(|app, track| {
-                    app.state.pattern.track_params[track]
-                        .set_swing((drag.start_display_value + dx as f32 * 0.5).clamp(50.0, 75.0));
-                }),
-                super::TP_STEPS => self.for_each_selected_track(|app, track| {
-                    app.state.pattern.track_params[track].set_num_steps(
-                        (drag.start_display_value + (dx as f32 / 2.0).round())
-                            .clamp(1.0, crate::sequencer::MAX_STEPS as f32)
-                            as usize,
-                    );
-                }),
-                super::TP_VOLUME => {
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_volume(
-                            (drag.start_display_value + dx as f32 * 0.01).clamp(0.0, 1.0),
+            ParamMouseDragTarget::TrackParam { row_idx } => {
+                match row_idx {
+                    super::TP_ATTACK => self.for_each_selected_track(|app, track| {
+                        app.state.pattern.track_params[track].set_attack_ms(
+                            (drag.start_display_value + dx as f32 * 5.0).clamp(0.0, 500.0),
                         );
-                        app.push_track_volume(track);
-                    });
-                }
-                super::TP_PAN => {
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_pan(
-                            (drag.start_display_value + dx as f32 * 0.01).clamp(-1.0, 1.0),
+                    }),
+                    super::TP_RELEASE => self.for_each_selected_track(|app, track| {
+                        app.state.pattern.track_params[track].set_release_ms(
+                            (drag.start_display_value + dx as f32 * 10.0).clamp(0.0, 2000.0),
                         );
-                        app.push_track_pan(track);
-                    });
-                }
-                super::TP_SEND => {
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_send(
-                            (drag.start_display_value + dx as f32 * 0.01).clamp(0.0, 1.0),
+                    }),
+                    super::TP_SWING => self.for_each_selected_track(|app, track| {
+                        app.state.pattern.track_params[track].set_swing(
+                            (drag.start_display_value + dx as f32 * 0.5).clamp(50.0, 75.0),
                         );
-                        app.push_send_gain(track);
-                    });
+                    }),
+                    super::TP_STEPS => self.for_each_selected_track(|app, track| {
+                        app.state.pattern.track_params[track].set_num_steps(
+                            (drag.start_display_value + (dx as f32 / 2.0).round())
+                                .clamp(1.0, crate::sequencer::MAX_STEPS as f32)
+                                as usize,
+                        );
+                    }),
+                    super::TP_VOLUME => {
+                        self.for_each_selected_track(|app, track| {
+                            app.state.pattern.track_params[track].set_volume(
+                                (drag.start_display_value + dx as f32 * 0.01).clamp(0.0, 1.0),
+                            );
+                            app.push_track_volume(track);
+                        });
+                    }
+                    super::TP_PAN => {
+                        self.for_each_selected_track(|app, track| {
+                            app.state.pattern.track_params[track].set_pan(
+                                (drag.start_display_value + dx as f32 * 0.01).clamp(-1.0, 1.0),
+                            );
+                            app.push_track_pan(track);
+                        });
+                    }
+                    super::TP_SEND => {
+                        self.for_each_selected_track(|app, track| {
+                            app.state.pattern.track_params[track].set_send(
+                                (drag.start_display_value + dx as f32 * 0.01).clamp(0.0, 1.0),
+                            );
+                            app.push_send_gain(track);
+                        });
+                    }
+                    super::TP_MASTER => {
+                        self.state.transport.master_volume.store(
+                            (drag.start_display_value + dx as f32 * 0.01)
+                                .clamp(0.0, 2.0)
+                                .to_bits(),
+                            Ordering::Relaxed,
+                        );
+                        self.push_master_volume();
+                    }
+                    _ => {}
                 }
-                super::TP_MASTER => {
-                    self.state.transport.master_volume.store(
-                        (drag.start_display_value + dx as f32 * 0.01)
-                            .clamp(0.0, 2.0)
-                            .to_bits(),
-                        Ordering::Relaxed,
-                    );
-                    self.push_master_volume();
-                }
-                _ => {}
-            },
+                self.state.publish_scheduler_snapshot();
+            }
             ParamMouseDragTarget::AccumParam { row_idx } => {
                 if row_idx == super::AC_LIMIT {
                     self.for_each_selected_track(|app, track| {
                         app.state.pattern.track_params[track]
                             .set_accum_limit((drag.start_display_value + dx as f32).max(0.0));
                     });
+                    self.state.publish_scheduler_snapshot();
                 }
             }
             ParamMouseDragTarget::SynthParam { row_idx } => {

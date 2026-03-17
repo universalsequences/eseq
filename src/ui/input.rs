@@ -10,6 +10,7 @@ use crate::sequencer::{KeyboardTrigger, StepParam, STEPS_PER_PAGE};
 
 use super::browser::BrowserNode;
 use super::cirklon::track_list_row_layout;
+use super::command::{apply_command, AppCommand};
 use super::draw::rect_contains;
 use super::{
     App, BrowserState, CompileTarget, EffectPaneEntry, EffectTab, InputMode, ParamMouseDrag,
@@ -129,9 +130,7 @@ impl App {
                     {
                         let track = self.ui.cursor_track;
                         let steps: Vec<usize> = self.ui.visual_steps.drain().collect();
-                        for step in steps {
-                            self.state.clear_step_payload(track, step);
-                        }
+                        apply_command(self, AppCommand::ClearSteps { track, steps });
                         return Ok(());
                     }
                     match self.ui.input_mode {
@@ -240,7 +239,7 @@ impl App {
             }
             KeyCode::Char(' ') if self.ui.focused_region != Region::Sidebar => {
                 let was_playing = self.state.is_playing();
-                self.state.toggle_play();
+                apply_command(self, AppCommand::TogglePlay);
                 if was_playing {
                     self.state.transport.playhead.store(0, Ordering::Relaxed);
                     for tph in &self.state.transport.track_playheads {
@@ -384,18 +383,13 @@ impl App {
                     if let Some(clipboard) = self.ui.step_clipboard.take() {
                         let track = self.ui.cursor_track;
                         let dest_start = self.ui.cursor_step;
-                        let ns = self.num_steps();
-                        for (offset, snap) in &clipboard {
-                            let dest = dest_start + offset;
-                            if dest >= ns {
-                                continue;
-                            }
-                            // Skip pasting an empty step over an existing active step
-                            if !snap.active && self.state.pattern.patterns[track].is_active(dest) {
-                                continue;
-                            }
-                            self.state.restore_step_snapshot(track, dest, snap);
-                        }
+                        let num_steps = self.num_steps();
+                        apply_command(self, AppCommand::PasteSteps {
+                            track,
+                            clipboard: clipboard.clone(),
+                            dest_start,
+                            num_steps,
+                        });
                         // Put clipboard back so it can be pasted again
                         self.ui.step_clipboard = Some(clipboard);
                     }
@@ -474,32 +468,12 @@ impl App {
                     }
                     '[' => {
                         // Shift record quantize threshold earlier (compensate for more output latency)
-                        let cur = f32::from_bits(
-                            self.state
-                                .transport
-                                .record_quantize_thresh
-                                .load(Ordering::Relaxed),
-                        );
-                        let new = (cur - 0.05).max(0.1);
-                        self.state
-                            .transport
-                            .record_quantize_thresh
-                            .store(new.to_bits(), Ordering::Relaxed);
+                        apply_command(self, AppCommand::AdjustRecordQuantizeThresh { delta: -0.05 });
                         return;
                     }
                     ']' => {
                         // Shift record quantize threshold later
-                        let cur = f32::from_bits(
-                            self.state
-                                .transport
-                                .record_quantize_thresh
-                                .load(Ordering::Relaxed),
-                        );
-                        let new = (cur + 0.05).min(0.9);
-                        self.state
-                            .transport
-                            .record_quantize_thresh
-                            .store(new.to_bits(), Ordering::Relaxed);
+                        apply_command(self, AppCommand::AdjustRecordQuantizeThresh { delta: 0.05 });
                         return;
                     }
                     _ => {
@@ -782,7 +756,7 @@ impl App {
         // Play button: click toggles playback
         if rect_contains(l.info_bar, col, row) {
             let was_playing = self.state.is_playing();
-            self.state.toggle_play();
+            apply_command(self, AppCommand::TogglePlay);
             if !self.state.is_playing() {
                 self.state.transport.playhead.store(0, Ordering::Relaxed);
             } else if !was_playing {
@@ -1178,9 +1152,10 @@ impl App {
 
         if !is_active {
             // Activate the step and set this semitone as the Transpose value
-            self.state.pattern.patterns[track].set_step_active(step, true);
-            self.state.pattern.step_data[track].set(step, StepParam::Transpose, semitone as f32);
-            self.state.publish_scheduler_snapshot();
+            apply_command(self, AppCommand::SetStepActive { track, step, active: true });
+            apply_command(self, AppCommand::SetStepParam {
+                track, step, param: StepParam::Transpose, value: semitone as f32,
+            });
             return;
         }
 
@@ -1191,11 +1166,13 @@ impl App {
                 .round() as i32;
             if semitone == current {
                 // Clicking the same note deactivates the step
-                self.state.pattern.patterns[track].set_step_active(step, false);
+                apply_command(self, AppCommand::SetStepActive { track, step, active: false });
             } else {
                 // Add a second note: migrate Transpose into chord_data, then add new note
+                // These chord mutations go directly through state (ChordData has no AppCommand yet)
                 self.state.pattern.chord_data[track].add_note(step, current as f32);
                 self.state.pattern.chord_data[track].add_note(step, semitone as f32);
+                self.state.publish_scheduler_snapshot();
             }
         } else {
             // Step has chord data — toggle the clicked semitone
@@ -1204,14 +1181,20 @@ impl App {
             if !added {
                 if new_count == 0 {
                     // Removed last note: deactivate step
-                    self.state.pattern.patterns[track].set_step_active(step, false);
+                    apply_command(self, AppCommand::SetStepActive { track, step, active: false });
+                    return;
                 } else if new_count == 1 {
                     // One note left: migrate back to Transpose, clear chord
                     let remaining = self.state.pattern.chord_data[track].get(step, 0);
-                    self.state.pattern.step_data[track].set(step, StepParam::Transpose, remaining);
+                    apply_command(self, AppCommand::SetStepParam {
+                        track, step, param: StepParam::Transpose, value: remaining,
+                    });
                     self.state.pattern.chord_data[track].clear_step(step);
+                    self.state.publish_scheduler_snapshot();
+                    return;
                 }
             }
+            self.state.publish_scheduler_snapshot();
         }
 
         self.state.publish_scheduler_snapshot();
@@ -1411,8 +1394,7 @@ impl App {
     fn apply_value_entry(&mut self, val: f32) {
         if self.ui.bpm_entry {
             let bpm = (val as u32).clamp(20, 999);
-            self.state.transport.bpm.store(bpm, Ordering::Relaxed);
-            self.state.publish_scheduler_snapshot();
+            apply_command(self, AppCommand::SetBpm { bpm });
             self.ui.bpm_entry = false;
             return;
         }
@@ -1423,69 +1405,66 @@ impl App {
 
         match self.ui.focused_region {
             Region::Cirklon => {
+                let track = self.ui.cursor_track;
+                let param = self.ui.active_param;
                 for step in self.selected_steps() {
-                    self.state.set_step_param(
-                        self.ui.cursor_track,
-                        step,
-                        self.ui.active_param,
-                        val,
-                    );
+                    apply_command(self, AppCommand::SetStepParam { track, step, param, value: val });
                 }
             }
             Region::Params | Region::Sidebar => {
                 if self.ui.focused_region == Region::Sidebar || self.ui.params_column == 0 {
                     match self.active_tool_row() {
                         super::params::ToolRow::Accum(super::AC_LIMIT) => {
-                            self.for_each_selected_track(|app, track| {
-                                app.state.pattern.track_params[track].set_accum_limit(val.max(0.0));
-                            });
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                apply_command(self, AppCommand::SetTrackAccumLimit { track, value: val.max(0.0) });
+                            }
                         }
                         super::params::ToolRow::Track(super::TP_ATTACK) => {
-                            self.for_each_selected_track(|app, track| {
-                                app.state.pattern.track_params[track].set_attack_ms(val);
-                            });
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                apply_command(self, AppCommand::SetTrackAttack { track, ms: val });
+                            }
                         }
                         super::params::ToolRow::Track(super::TP_RELEASE) => {
-                            self.for_each_selected_track(|app, track| {
-                                app.state.pattern.track_params[track].set_release_ms(val);
-                            });
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                apply_command(self, AppCommand::SetTrackRelease { track, ms: val });
+                            }
                         }
                         super::params::ToolRow::Track(super::TP_SWING) => {
-                            self.for_each_selected_track(|app, track| {
-                                app.state.pattern.track_params[track].set_swing(val);
-                            });
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                apply_command(self, AppCommand::SetTrackSwing { track, value: val });
+                            }
                         }
                         super::params::ToolRow::Track(super::TP_STEPS) => {
-                            self.for_each_selected_track(|app, track| {
-                                app.state.pattern.track_params[track].set_num_steps(val as usize);
-                            });
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                apply_command(self, AppCommand::SetTrackNumSteps { track, n: val as usize });
+                            }
                             self.clamp_cursor_to_steps();
                         }
                         super::params::ToolRow::Track(super::TP_VOLUME) => {
-                            self.for_each_selected_track(|app, track| {
-                                app.state.pattern.track_params[track]
-                                    .set_volume(val.clamp(0.0, 1.0));
-                                app.push_track_volume(track);
-                            });
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                apply_command(self, AppCommand::SetTrackVolume { track, value: val.clamp(0.0, 1.0) });
+                            }
                         }
                         super::params::ToolRow::Track(super::TP_PAN) => {
-                            self.for_each_selected_track(|app, track| {
-                                app.state.pattern.track_params[track].set_pan(val.clamp(-1.0, 1.0));
-                                app.push_track_pan(track);
-                            });
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                apply_command(self, AppCommand::SetTrackPan { track, value: val.clamp(-1.0, 1.0) });
+                            }
                         }
                         super::params::ToolRow::Track(super::TP_SEND) => {
-                            self.for_each_selected_track(|app, track| {
-                                app.state.pattern.track_params[track].set_send(val.clamp(0.0, 1.0));
-                                app.push_send_gain(track);
-                            });
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                apply_command(self, AppCommand::SetTrackSend { track, value: val.clamp(0.0, 1.0) });
+                            }
                         }
                         super::params::ToolRow::Track(super::TP_MASTER) => {
-                            self.state
-                                .transport
-                                .master_volume
-                                .store(val.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
-                            self.push_master_volume();
+                            apply_command(self, AppCommand::SetMasterVolume { value: val.clamp(0.0, 2.0) });
                         }
                         _ => {}
                     }
@@ -1523,10 +1502,8 @@ impl App {
                     let track = self.ui.cursor_track;
                     if self.ui.instrument_param_cursor == 0 {
                         let store_val = val.clamp(-48.0, 48.0);
-                        self.state.pattern.instrument_base_note_offsets[track]
-                            .store(store_val.to_bits(), Ordering::Relaxed);
-                        self.mark_track_sound_dirty(track);
-                        self.state.publish_scheduler_snapshot();
+                        // Use the helper so publish_scheduler_snapshot is called
+                        self.set_instrument_base_note_offset(track, store_val);
                     } else {
                         let synth_indices = self.synth_param_indices(track);
                         let Some(&param_idx) =
@@ -1548,6 +1525,7 @@ impl App {
                             }
                             self.state.publish_scheduler_snapshot();
                         } else {
+                            // publish is called inside set_instrument_param_or_plock
                             self.set_instrument_param_or_plock(track, param_idx, store_val);
                         }
                     }
@@ -1603,13 +1581,14 @@ impl App {
         }
     }
 
-    pub(super) fn adjust_selected(&self, delta: f32) {
+    pub(super) fn adjust_selected(&mut self, delta: f32) {
         if self.tracks.is_empty() {
             return;
         }
+        let track = self.ui.cursor_track;
+        let param = self.ui.active_param;
         for step in self.selected_steps() {
-            self.state
-                .adjust_step_param(self.ui.cursor_track, step, self.ui.active_param, delta);
+            apply_command(self, AppCommand::AdjustStepParam { track, step, param, delta });
         }
     }
 
@@ -1626,8 +1605,8 @@ impl App {
         if new_lo == lo {
             return;
         }
-        self.state
-            .move_step_range(self.ui.cursor_track, lo, hi, new_lo);
+        let track = self.ui.cursor_track;
+        apply_command(self, AppCommand::ShiftStepRange { track, lo, hi, new_lo });
 
         self.ui.cursor_step =
             (self.ui.cursor_step as isize + shift).clamp(0, (ns - 1) as isize) as usize;
@@ -1854,7 +1833,7 @@ impl App {
             }
             KeyCode::Char(' ') => {
                 let was_playing = self.state.is_playing();
-                self.state.toggle_play();
+                apply_command(self, AppCommand::TogglePlay);
                 if was_playing {
                     self.state.transport.playhead.store(0, Ordering::Relaxed);
                 }
@@ -1889,11 +1868,10 @@ impl App {
                     if is_double {
                         let track = self.ui.cursor_track;
                         let ns = self.num_steps();
-                        for step in 0..ns {
-                            if self.state.pattern.patterns[track].is_active(step) {
-                                self.state.toggle_step_and_clear_plocks(track, step);
-                            }
-                        }
+                        let steps: Vec<usize> = (0..ns)
+                            .filter(|&s| self.state.pattern.patterns[track].is_active(s))
+                            .collect();
+                        apply_command(self, AppCommand::ClearSteps { track, steps });
                         self.ui.last_x_press = None;
                         self.editor.status_message =
                             Some(("Pattern cleared".to_string(), Instant::now()));
@@ -1909,15 +1887,19 @@ impl App {
 
                     if is_active && is_accent {
                         // Already active + accent: lift velocity to 1.0 instead of toggling off
-                        self.state.pattern.step_data[track].set(step, StepParam::Velocity, 1.0);
+                        apply_command(self, AppCommand::SetStepParam {
+                            track, step, param: StepParam::Velocity, value: 1.0,
+                        });
                     } else if is_active {
                         // Already active + no accent: toggle off
-                        self.state.toggle_step_and_clear_plocks(track, step);
+                        apply_command(self, AppCommand::ToggleStep { track, step });
                     } else {
                         // Inactive: toggle on with appropriate velocity
-                        self.state.pattern.patterns[track].toggle_step(step);
                         let vel = if is_accent { 1.0 } else { 0.5 };
-                        self.state.pattern.step_data[track].set(step, StepParam::Velocity, vel);
+                        apply_command(self, AppCommand::SetStepActive { track, step, active: true });
+                        apply_command(self, AppCommand::SetStepParam {
+                            track, step, param: StepParam::Velocity, value: vel,
+                        });
                     }
                     self.ui.cursor_step = step;
                 }
@@ -1946,7 +1928,7 @@ impl App {
             }
             KeyCode::Char(' ') => {
                 let was_playing = self.state.is_playing();
-                self.state.toggle_play();
+                apply_command(self, AppCommand::TogglePlay);
                 if was_playing {
                     self.state.transport.playhead.store(0, Ordering::Relaxed);
                 }
@@ -1961,12 +1943,17 @@ impl App {
                 self.mode_next_page();
             }
             KeyCode::Char('x') | KeyCode::Char('X') => {
-                // Delete: untoggle all selected steps
+                // Delete: untoggle all selected active steps
                 let track = self.ui.cursor_track;
-                for &step in &self.ui.visual_steps {
-                    if self.state.pattern.patterns[track].is_active(step) {
-                        self.state.toggle_step_and_clear_plocks(track, step);
-                    }
+                let steps: Vec<usize> = self
+                    .ui
+                    .visual_steps
+                    .iter()
+                    .copied()
+                    .filter(|&s| self.state.pattern.patterns[track].is_active(s))
+                    .collect();
+                for step in steps {
+                    apply_command(self, AppCommand::ToggleStep { track, step });
                 }
                 self.ui.visual_steps.clear();
             }

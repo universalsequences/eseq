@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use crate::sequencer::{SwingResolution, Timebase, MAX_STEPS};
 
+use super::command::{apply_command, AppCommand};
 use super::effects_draw::draw_effects_column;
 use crate::accumulator::{AccumMode, ACCUMULATOR_REGISTRY};
 
@@ -93,16 +94,16 @@ impl App {
             KeyCode::Left => {} // Already at leftmost column
             KeyCode::Enter => match self.active_tool_row() {
                 ToolRow::Track(TP_GATE) => {
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].toggle_gate();
-                    });
-                    self.state.publish_scheduler_snapshot();
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::ToggleTrackGate { track });
+                    }
                 }
                 ToolRow::Track(TP_POLY) => {
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].toggle_polyphonic();
-                    });
-                    self.state.publish_scheduler_snapshot();
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::ToggleTrackPolyphonic { track });
+                    }
                 }
                 ToolRow::Track(TP_TIMEBASE) => {
                     self.ui.dropdown_open = true;
@@ -146,55 +147,130 @@ impl App {
                 _ => {}
             },
             KeyCode::Char('+') | KeyCode::Char('=') => match self.active_tool_row() {
-                ToolRow::Track(TP_ATTACK) => tp.set_attack_ms(tp.get_attack_ms() + 5.0),
-                ToolRow::Track(TP_RELEASE) => tp.set_release_ms(tp.get_release_ms() + 10.0),
-                ToolRow::Track(TP_SWING) => tp.set_swing(tp.get_swing() + 1.0),
-                ToolRow::Track(TP_SWING_RESOLUTION) => tp.next_swing_resolution(),
+                ToolRow::Track(TP_ATTACK) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::AdjustTrackAttack { track, delta: 5.0 });
+                }
+                ToolRow::Track(TP_RELEASE) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::AdjustTrackRelease { track, delta: 10.0 });
+                }
+                ToolRow::Track(TP_SWING) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::AdjustTrackSwing { track, delta: 1.0 });
+                }
+                ToolRow::Track(TP_SWING_RESOLUTION) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::NextTrackSwingResolution { track });
+                }
                 ToolRow::Track(TP_STEPS) => {
-                    tp.set_num_steps(tp.get_num_steps() + 1);
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::AdjustTrackNumSteps { track, delta: 1 });
                     self.clamp_cursor_to_steps();
                 }
-                ToolRow::Track(TP_VOLUME) => self.adjust_track_volume(0.05),
-                ToolRow::Track(TP_PAN) => self.adjust_track_pan(0.05),
-                ToolRow::Track(TP_TIMEBASE) => tp.next_timebase(),
-                ToolRow::Track(TP_SEND) => self.adjust_track_send(0.05),
-                ToolRow::Track(TP_MASTER) => self.adjust_master_volume(0.05),
-                ToolRow::Track(TP_FTS) => {
-                    tp.set_fts_scale((tp.get_fts_scale() + 1).min(crate::scale::SCALES.len() - 1))
+                ToolRow::Track(TP_VOLUME) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::AdjustTrackVolume { track, delta: 0.05 });
+                    }
                 }
-                ToolRow::Accum(AC_LIMIT) => self.for_each_selected_track(|app, track| {
-                    let tp = &app.state.pattern.track_params[track];
-                    tp.set_accum_limit(tp.get_accum_limit() + 1.0);
-                }),
+                ToolRow::Track(TP_PAN) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::AdjustTrackPan { track, delta: 0.05 });
+                    }
+                }
+                ToolRow::Track(TP_TIMEBASE) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::NextTrackTimebase { track });
+                }
+                ToolRow::Track(TP_SEND) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::AdjustTrackSend { track, delta: 0.05 });
+                    }
+                }
+                ToolRow::Track(TP_MASTER) => {
+                    apply_command(self, AppCommand::AdjustMasterVolume { delta: 0.05 });
+                }
+                ToolRow::Track(TP_FTS) => {
+                    let track = self.ui.cursor_track;
+                    let new_scale = (tp.get_fts_scale() + 1).min(crate::scale::SCALES.len() - 1);
+                    apply_command(self, AppCommand::SetTrackFtsScale { track, scale_idx: new_scale });
+                }
+                ToolRow::Accum(AC_LIMIT) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::AdjustTrackAccumLimit { track, delta: 1.0 });
+                    }
+                }
                 _ => {}
             },
             KeyCode::Char('-') => match self.active_tool_row() {
-                ToolRow::Track(TP_ATTACK) => tp.set_attack_ms(tp.get_attack_ms() - 5.0),
-                ToolRow::Track(TP_RELEASE) => tp.set_release_ms(tp.get_release_ms() - 10.0),
-                ToolRow::Track(TP_SWING) => tp.set_swing(tp.get_swing() - 1.0),
-                ToolRow::Track(TP_SWING_RESOLUTION) => tp.prev_swing_resolution(),
+                ToolRow::Track(TP_ATTACK) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::AdjustTrackAttack { track, delta: -5.0 });
+                }
+                ToolRow::Track(TP_RELEASE) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::AdjustTrackRelease { track, delta: -10.0 });
+                }
+                ToolRow::Track(TP_SWING) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::AdjustTrackSwing { track, delta: -1.0 });
+                }
+                ToolRow::Track(TP_SWING_RESOLUTION) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::PrevTrackSwingResolution { track });
+                }
                 ToolRow::Track(TP_STEPS) => {
-                    tp.set_num_steps(tp.get_num_steps().saturating_sub(1).max(1));
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::AdjustTrackNumSteps { track, delta: -1 });
                     self.clamp_cursor_to_steps();
                 }
-                ToolRow::Track(TP_VOLUME) => self.adjust_track_volume(-0.05),
-                ToolRow::Track(TP_PAN) => self.adjust_track_pan(-0.05),
-                ToolRow::Track(TP_TIMEBASE) => tp.prev_timebase(),
-                ToolRow::Track(TP_SEND) => self.adjust_track_send(-0.05),
-                ToolRow::Track(TP_MASTER) => self.adjust_master_volume(-0.05),
-                ToolRow::Track(TP_FTS) => tp.set_fts_scale(tp.get_fts_scale().saturating_sub(1)),
-                ToolRow::Accum(AC_LIMIT) => self.for_each_selected_track(|app, track| {
-                    let tp = &app.state.pattern.track_params[track];
-                    tp.set_accum_limit(tp.get_accum_limit() - 1.0);
-                }),
+                ToolRow::Track(TP_VOLUME) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::AdjustTrackVolume { track, delta: -0.05 });
+                    }
+                }
+                ToolRow::Track(TP_PAN) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::AdjustTrackPan { track, delta: -0.05 });
+                    }
+                }
+                ToolRow::Track(TP_TIMEBASE) => {
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::PrevTrackTimebase { track });
+                }
+                ToolRow::Track(TP_SEND) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::AdjustTrackSend { track, delta: -0.05 });
+                    }
+                }
+                ToolRow::Track(TP_MASTER) => {
+                    apply_command(self, AppCommand::AdjustMasterVolume { delta: -0.05 });
+                }
+                ToolRow::Track(TP_FTS) => {
+                    let track = self.ui.cursor_track;
+                    let new_scale = tp.get_fts_scale().saturating_sub(1);
+                    apply_command(self, AppCommand::SetTrackFtsScale { track, scale_idx: new_scale });
+                }
+                ToolRow::Accum(AC_LIMIT) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::AdjustTrackAccumLimit { track, delta: -1.0 });
+                    }
+                }
                 _ => {}
             },
             KeyCode::Backspace | KeyCode::Delete => {
                 if self.active_tool_row() == ToolRow::Track(TP_TIMEBASE) && self.has_selection() {
-                    for step in self.selected_steps() {
-                        self.state.pattern.timebase_plocks[self.ui.cursor_track].clear(step);
-                    }
-                    self.state.publish_scheduler_snapshot();
+                    let track = self.ui.cursor_track;
+                    let steps = self.selected_steps();
+                    apply_command(self, AppCommand::ClearTimebasePlockMulti { track, steps });
                 }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => match self.active_tool_row() {
@@ -338,43 +414,6 @@ impl App {
                 );
             }
         }
-    }
-
-    fn adjust_track_send(&mut self, delta: f32) {
-        self.for_each_selected_track(|app, track| {
-            let tp = &app.state.pattern.track_params[track];
-            tp.set_send(tp.get_send() + delta);
-            app.push_send_gain(track);
-        });
-        self.state.publish_scheduler_snapshot();
-    }
-
-    fn adjust_track_volume(&mut self, delta: f32) {
-        self.for_each_selected_track(|app, track| {
-            let tp = &app.state.pattern.track_params[track];
-            tp.set_volume(tp.get_volume() + delta);
-            app.push_track_volume(track);
-        });
-        self.state.publish_scheduler_snapshot();
-    }
-
-    fn adjust_track_pan(&mut self, delta: f32) {
-        self.for_each_selected_track(|app, track| {
-            let tp = &app.state.pattern.track_params[track];
-            tp.set_pan(tp.get_pan() + delta);
-            app.push_track_pan(track);
-        });
-        self.state.publish_scheduler_snapshot();
-    }
-
-    fn adjust_master_volume(&mut self, delta: f32) {
-        let current = f32::from_bits(self.state.transport.master_volume.load(Ordering::Relaxed));
-        self.state.transport.master_volume.store(
-            (current + delta).clamp(0.0, 2.0).to_bits(),
-            Ordering::Relaxed,
-        );
-        self.push_master_volume();
-        self.state.publish_scheduler_snapshot();
     }
 
     pub(super) fn handle_dropdown(&mut self, code: KeyCode) {
@@ -531,59 +570,69 @@ impl App {
         if self.ui.track_param_dropdown {
             match self.active_tool_row() {
                 ToolRow::Accum(row) => {
-                    self.for_each_selected_track(|app, track| {
-                        let tp = &app.state.pattern.track_params[track];
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
                         match row {
                             AC_FN => {
-                                tp.set_accumulator_idx(app.ui.dropdown_cursor);
-                                let builtin_count = ACCUMULATOR_REGISTRY.len();
-                                if app.ui.dropdown_cursor < builtin_count {
-                                    tp.set_script_accumulator_name(None);
-                                } else {
-                                    let script_name = app
-                                        .editor
-                                        .scratch_runtime
-                                        .as_ref()
-                                        .and_then(|runtime| {
-                                            runtime
-                                                .accumulator_names()
-                                                .get(app.ui.dropdown_cursor - builtin_count)
-                                                .cloned()
-                                        });
-                                    tp.set_script_accumulator_name(script_name);
-                                }
-                                if let Some(def) = ACCUMULATOR_REGISTRY.get(app.ui.dropdown_cursor)
-                                {
-                                    tp.set_accum_limit(def.default_limit);
-                                }
+                                let default_limit = ACCUMULATOR_REGISTRY
+                                    .get(self.ui.dropdown_cursor)
+                                    .map(|def| def.default_limit);
+                                apply_command(
+                                    self,
+                                    AppCommand::SetTrackAccumIdx {
+                                        track,
+                                        idx: self.ui.dropdown_cursor,
+                                        default_limit,
+                                    },
+                                );
                             }
-                            AC_MODE => tp.set_accum_mode(app.ui.dropdown_cursor as u32),
+                            AC_MODE => {
+                                apply_command(
+                                    self,
+                                    AppCommand::SetTrackAccumMode {
+                                        track,
+                                        mode: self.ui.dropdown_cursor as u32,
+                                    },
+                                );
+                            }
                             _ => {}
                         }
-                    });
+                    }
                 }
                 ToolRow::Track(TP_FTS) => {
                     let scale_idx = self.ui.dropdown_cursor;
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_fts_scale(scale_idx);
-                    });
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::SetTrackFtsScale { track, scale_idx });
+                    }
                 }
                 ToolRow::Track(TP_SWING_RESOLUTION) => {
                     let resolution = SwingResolution::from_index(self.ui.dropdown_cursor as u32);
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_swing_resolution(resolution);
-                    });
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(
+                            self,
+                            AppCommand::SetTrackSwingResolution { track, resolution },
+                        );
+                    }
                 }
                 ToolRow::Track(_) => {
                     let tb = Timebase::from_index(self.ui.dropdown_cursor as u32);
                     if self.has_selection() {
-                        for step in self.selected_steps() {
-                            self.state.pattern.timebase_plocks[self.ui.cursor_track].set(step, tb);
-                        }
+                        let steps = self.selected_steps();
+                        let track = self.ui.cursor_track;
+                        apply_command(
+                            self,
+                            AppCommand::SetTimebasePlockMulti { track, steps, timebase: tb },
+                        );
                     } else {
-                        self.for_each_selected_track(|app, track| {
-                            app.state.pattern.track_params[track].set_timebase(tb);
-                        });
+                        let tracks = self.selected_tracks();
+                        for track in tracks {
+                            apply_command(
+                                self,
+                                AppCommand::SetTrackTimebase { track, timebase: tb },
+                            );
+                        }
                     }
                 }
             }

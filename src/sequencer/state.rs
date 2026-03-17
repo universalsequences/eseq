@@ -576,6 +576,12 @@ impl SequencerState {
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
     }
+    /// Publish a snapshot of all pattern/transport atomics so that future
+    /// snapshot-based audio-thread readers can pick up the latest state.
+    ///
+    /// Currently this is a **no-op** because the audio thread reads atomics
+    /// directly from `SequencerState`.  The method exists as a hook for the
+    /// planned `Arc<SequencerSnapshot>` architecture — once that lands, this
     pub fn schedule_mod_resync(&self) {
         if self.is_playing() {
             self.transport

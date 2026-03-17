@@ -7,6 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::sequencer::{StepParam, STEPS_PER_PAGE};
 
+use super::command::{apply_command, AppCommand};
 use super::draw::{is_in_selection, param_color, region_border_style};
 use super::{App, InputMode, Region, BAR_HEIGHT, COL_WIDTH};
 
@@ -92,7 +93,8 @@ impl App {
                 if !self.ui.visual_steps.is_empty() {
                     let mut steps: Vec<usize> = self.ui.visual_steps.iter().copied().collect();
                     steps.sort();
-                    self.state.rotate_steps(self.ui.cursor_track, &steps, -1);
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::RotateSteps { track, steps, direction: -1 });
                 } else if self.ui.selection_anchor.is_some() {
                     self.shift_selection(-1);
                 } else if self.ui.cursor_step > 0 {
@@ -105,7 +107,8 @@ impl App {
                 if !self.ui.visual_steps.is_empty() {
                     let mut steps: Vec<usize> = self.ui.visual_steps.iter().copied().collect();
                     steps.sort();
-                    self.state.rotate_steps(self.ui.cursor_track, &steps, 1);
+                    let track = self.ui.cursor_track;
+                    apply_command(self, AppCommand::RotateSteps { track, steps, direction: 1 });
                 } else if self.ui.selection_anchor.is_some() {
                     self.shift_selection(1);
                 } else {
@@ -155,7 +158,7 @@ impl App {
                 if !self.tracks.is_empty() {
                     let track = self.ui.cursor_track;
                     for step in self.selected_steps() {
-                        self.state.toggle_step_and_clear_plocks(track, step);
+                        apply_command(self, AppCommand::ToggleStep { track, step });
                     }
                 }
             }
@@ -165,22 +168,27 @@ impl App {
                     let track = self.ui.cursor_track;
                     if self.has_selection() {
                         // With selection: clear all selected steps completely (including plocks)
-                        for step in self.selected_steps() {
-                            self.state.clear_step_payload(track, step);
-                        }
+                        let steps = self.selected_steps();
+                        apply_command(self, AppCommand::ClearSteps { track, steps });
                         self.ui.selection_anchor = None;
                         self.ui.visual_steps.clear();
                     } else {
                         // No selection: just deactivate cursor step, no plock clear
-                        self.state.pattern.patterns[track].clear_step(self.ui.cursor_step);
+                        apply_command(self, AppCommand::SetStepActive {
+                            track,
+                            step: self.ui.cursor_step,
+                            active: false,
+                        });
                     }
                 }
             }
 
             KeyCode::Char('+') => {
                 if !self.tracks.is_empty() {
+                    let track = self.ui.cursor_track;
                     let old_len = self.num_steps();
-                    let new_len = self.state.duplicate_track_pattern(self.ui.cursor_track);
+                    apply_command(self, AppCommand::DuplicateTrackPattern { track });
+                    let new_len = self.num_steps();
                     if new_len == old_len {
                         self.editor.status_message = Some((
                             format!("Already at max ({} steps)", new_len),
@@ -197,8 +205,10 @@ impl App {
             }
             KeyCode::Char('_') => {
                 if !self.tracks.is_empty() {
+                    let track = self.ui.cursor_track;
                     let old_len = self.num_steps();
-                    let new_len = self.state.halve_track_pattern(self.ui.cursor_track);
+                    apply_command(self, AppCommand::HalveTrackPattern { track });
+                    let new_len = self.num_steps();
                     if new_len == old_len {
                         self.editor.status_message =
                             Some(("Already at minimum (1 step)".to_string(), Instant::now()));
