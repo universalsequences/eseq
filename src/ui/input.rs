@@ -583,7 +583,10 @@ impl App {
 
         match self.ui.sidebar_tab {
             SidebarTab::Agent => true,
-            SidebarTab::Sounds => self.effective_sidebar_mode() != SidebarMode::InstrumentPicker,
+            SidebarTab::Sounds => {
+                self.ui.sidebar_search_focused
+                    && self.effective_sidebar_mode() != SidebarMode::InstrumentPicker
+            }
             SidebarTab::Tools => false,
         }
     }
@@ -746,12 +749,16 @@ impl App {
                     if idx < items.len() {
                         self.preset_browser.cursor = idx;
                         self.load_selected_preset_into_track();
+                        self.ui.sidebar_search_focused = false;
                     }
                 }
             } else {
-                // Filter line takes 1 row when focused
+                // First row is the filter/search bar; rows below are list items
                 let list_start_y = l.sidebar_inner.y + 1;
-                if row >= list_start_y {
+                if row < list_start_y {
+                    // Clicked the search bar row — focus it
+                    self.ui.sidebar_search_focused = true;
+                } else {
                     let vi = (row - list_start_y) as usize;
                     let idx = self.browser.scroll_offset + vi;
                     let items = self.browser.visible_items();
@@ -764,6 +771,8 @@ impl App {
                         } else {
                             self.sidebar_select_file(&path);
                         }
+                        // Blur search so computer keyboard is free for armed tracks
+                        self.ui.sidebar_search_focused = false;
                     }
                 }
             }
@@ -1171,6 +1180,7 @@ impl App {
             // Activate the step and set this semitone as the Transpose value
             self.state.pattern.patterns[track].set_step_active(step, true);
             self.state.pattern.step_data[track].set(step, StepParam::Transpose, semitone as f32);
+            self.state.publish_scheduler_snapshot();
             return;
         }
 
@@ -1203,6 +1213,8 @@ impl App {
                 }
             }
         }
+
+        self.state.publish_scheduler_snapshot();
     }
 
     fn handle_mouse_scroll(&mut self, col: u16, row: u16, delta: isize) {
@@ -1514,6 +1526,7 @@ impl App {
                         self.state.pattern.instrument_base_note_offsets[track]
                             .store(store_val.to_bits(), Ordering::Relaxed);
                         self.mark_track_sound_dirty(track);
+                        self.state.publish_scheduler_snapshot();
                     } else {
                         let synth_indices = self.synth_param_indices(track);
                         let Some(&param_idx) =
@@ -1533,6 +1546,7 @@ impl App {
                             for step in self.selected_steps() {
                                 slot.plocks.set(step, param_idx, store_val);
                             }
+                            self.state.publish_scheduler_snapshot();
                         } else {
                             self.set_instrument_param_or_plock(track, param_idx, store_val);
                         }

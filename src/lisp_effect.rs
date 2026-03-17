@@ -15,8 +15,12 @@ use eseqlisp::vm::Value as EValue;
 use eseqlisp::{BufferMode, CompileKind, Editor, EditorConfig, HostCommand, HostEvent, Runtime};
 use serde::{Deserialize, Serialize};
 
+use crate::accumulator::ResolvedStep;
 use crate::audiograph::{self, LiveGraph, NodeVTable};
-use crate::effects::EffectDescriptor;
+use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
+use crate::scheduled_event::{
+    ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+};
 use crate::sequencer::{StepParam, StepSnapshot, Timebase};
 
 /// Monotonic counter so each compile produces a unique dylib filename,
@@ -46,7 +50,7 @@ type DGenProcessFn = unsafe extern "C" fn(
 // The process fn pointer is stored here, indexed by slot_id = track * MAX_CUSTOM_FX + offset.
 
 use crate::sequencer::MAX_TRACKS;
-pub const MAX_CUSTOM_FX: usize = 4;
+pub const MAX_CUSTOM_FX: usize = 8;
 const REGISTRY_SIZE: usize = MAX_TRACKS * MAX_CUSTOM_FX;
 static DGEN_PROCESS_FNS: [AtomicUsize; REGISTRY_SIZE] = {
     const INIT: AtomicUsize = AtomicUsize::new(0);
@@ -1021,6 +1025,26 @@ fn sanitize_effect_name(name: &str) -> String {
         .collect()
 }
 
+fn sanitize_symbol_name(name: &str, uppercase: bool) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        let mapped = if ch.is_alphanumeric() {
+            if uppercase {
+                ch.to_ascii_uppercase()
+            } else {
+                ch.to_ascii_lowercase()
+            }
+        } else {
+            '_'
+        };
+        out.push(mapped);
+    }
+    while out.contains("__") {
+        out = out.replace("__", "_");
+    }
+    out.trim_matches('_').to_string()
+}
+
 // ══════════════════════════════════════════════════════════════════
 // Instrument (synth) support — parallel to effect infrastructure
 // ══════════════════════════════════════════════════════════════════
@@ -1411,7 +1435,7 @@ fn default_template_for_kind(kind: &CompileKind) -> &'static str {
 }
 
 #[derive(Clone, Debug, Default)]
-struct SequencerEvalContext {
+pub(crate) struct SequencerEvalContext {
     track: usize,
     cursor_step: usize,
 }
@@ -1419,17 +1443,52 @@ struct SequencerEvalContext {
 type SharedSequencerEvalContext = Arc<Mutex<SequencerEvalContext>>;
 
 #[derive(Clone, Debug, Default)]
-struct SequencerNativeMetadata {
+pub(crate) struct SequencerNativeMetadata {
     effect_descriptors: Vec<Vec<EffectDescriptor>>,
     instrument_descriptors: Vec<EffectDescriptor>,
 }
 
 type SharedSequencerNativeMetadata = Arc<Mutex<SequencerNativeMetadata>>;
 
+#[derive(Clone)]
+pub(crate) struct RegisteredAccumulator {
+    name: String,
+    callback: RegisteredAccumulatorCallback,
+}
+
+#[derive(Clone)]
+enum RegisteredAccumulatorCallback {
+    Source(String),
+    Closure(EValue),
+}
+
+type SharedRegisteredAccumulators = Arc<Mutex<Vec<RegisteredAccumulator>>>;
+
+#[derive(Clone)]
+pub(crate) struct AccumulatorEvalContext {
+    resolved: ResolvedStep,
+    effect_slots: Vec<EffectSlotSnapshot>,
+    instrument_slot: EffectSlotSnapshot,
+    effect_params: Vec<ScheduledEffectParam>,
+    instrument_params: Vec<ScheduledInstrumentParam>,
+}
+
+#[derive(Clone)]
+pub struct AccumulatorEvalOutput {
+    pub resolved: ResolvedStep,
+    pub effect_params: Vec<ScheduledEffectParam>,
+    pub instrument_params: Vec<ScheduledInstrumentParam>,
+}
+
+type SharedAccumulatorEvalContext = Arc<Mutex<Option<AccumulatorEvalContext>>>;
+
 pub struct ScratchControlRuntime {
     runtime: Runtime,
     context: SharedSequencerEvalContext,
     metadata: SharedSequencerNativeMetadata,
+    accumulators: SharedRegisteredAccumulators,
+    accumulator_eval: SharedAccumulatorEvalContext,
+    runtime_globals: Vec<String>,
 }
 
 impl ScratchControlRuntime {
@@ -1445,18 +1504,27 @@ impl ScratchControlRuntime {
             effect_descriptors,
             instrument_descriptors,
         }));
+        let accumulators = Arc::new(Mutex::new(Vec::new()));
+        let accumulator_eval = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::new();
-        register_sequencer_natives(
+        register_sequencer_natives_with_accumulators(
             &mut runtime,
             state,
             Arc::clone(&context),
             Arc::clone(&metadata),
+            Arc::clone(&accumulators),
+            Arc::clone(&accumulator_eval),
         );
-        Self {
+        let mut this = Self {
             runtime,
             context,
             metadata,
-        }
+            accumulators,
+            accumulator_eval,
+            runtime_globals: Vec::new(),
+        };
+        this.refresh_runtime_globals();
+        this
     }
 
     pub fn set_position(&mut self, track: usize, cursor_step: usize) {
@@ -1464,6 +1532,7 @@ impl ScratchControlRuntime {
             ctx.track = track;
             ctx.cursor_step = cursor_step;
         }
+        self.refresh_runtime_globals();
     }
 
     pub fn sync_descriptors(
@@ -1475,6 +1544,7 @@ impl ScratchControlRuntime {
             metadata.effect_descriptors = effect_descriptors;
             metadata.instrument_descriptors = instrument_descriptors;
         }
+        self.refresh_runtime_globals();
     }
 
     pub fn eval(&mut self, code: &str) -> Result<Option<EValue>, String> {
@@ -1489,26 +1559,123 @@ impl ScratchControlRuntime {
         self.runtime.set_global_value(name, value);
     }
 
-    pub fn into_parts(
+    fn refresh_runtime_globals(&mut self) {
+        self.runtime_globals = install_runtime_globals(
+            &mut self.runtime,
+            &self.context,
+            &self.metadata,
+            &self.runtime_globals,
+        );
+    }
+
+    pub fn accumulator_names(&self) -> Vec<String> {
+        self.accumulators
+            .lock()
+            .map(|registry| registry.iter().map(|entry| entry.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn invoke_accumulator(
+        &mut self,
+        registry_index: usize,
+        step: usize,
+        value: f32,
+        resolved: ResolvedStep,
+        effect_slots: Vec<EffectSlotSnapshot>,
+        instrument_slot: EffectSlotSnapshot,
+        effect_params: Vec<ScheduledEffectParam>,
+        instrument_params: Vec<ScheduledInstrumentParam>,
+    ) -> Result<AccumulatorEvalOutput, String> {
+        let callback = self
+            .accumulators
+            .lock()
+            .map_err(|_| "failed to lock accumulator registry".to_string())?
+            .get(registry_index)
+            .map(|entry| entry.callback.clone())
+            .ok_or_else(|| "registered accumulator out of range".to_string())?;
+        {
+            let mut eval_ctx = self
+                .accumulator_eval
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            *eval_ctx = Some(AccumulatorEvalContext {
+                resolved,
+                effect_slots,
+                instrument_slot,
+                effect_params,
+                instrument_params,
+            });
+        }
+        self.runtime
+            .set_global_value("acc-step", EValue::Number(step as f64));
+        self.runtime
+            .set_global_value("acc-value", EValue::Number(value as f64));
+        match callback {
+            RegisteredAccumulatorCallback::Source(source) => {
+                self.runtime
+                    .eval_str(&source)
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+            RegisteredAccumulatorCallback::Closure(callback) => {
+                self.runtime
+                    .set_global_value("__accumulator_callback", callback);
+                self.runtime
+                    .eval_str(&format!(
+                        "(__accumulator_callback {} {})",
+                        step,
+                        value
+                    ))
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+        }
+        let output = self
+            .accumulator_eval
+            .lock()
+            .map_err(|_| "failed to lock accumulator eval context".to_string())?
+            .take()
+            .ok_or_else(|| "accumulator did not produce an evaluation context".to_string())?;
+        Ok(AccumulatorEvalOutput {
+            resolved: output.resolved,
+            effect_params: output.effect_params,
+            instrument_params: output.instrument_params,
+        })
+    }
+
+    pub(crate) fn into_parts(
         self,
     ) -> (
         Runtime,
         SharedSequencerEvalContext,
         SharedSequencerNativeMetadata,
+        SharedRegisteredAccumulators,
+        SharedAccumulatorEvalContext,
     ) {
-        (self.runtime, self.context, self.metadata)
+        (
+            self.runtime,
+            self.context,
+            self.metadata,
+            self.accumulators,
+            self.accumulator_eval,
+        )
     }
 
-    pub fn from_parts(
+    pub(crate) fn from_parts(
         runtime: Runtime,
         context: SharedSequencerEvalContext,
         metadata: SharedSequencerNativeMetadata,
+        accumulators: SharedRegisteredAccumulators,
+        accumulator_eval: SharedAccumulatorEvalContext,
     ) -> Self {
-        Self {
+        let mut this = Self {
             runtime,
             context,
             metadata,
-        }
+            accumulators,
+            accumulator_eval,
+            runtime_globals: Vec::new(),
+        };
+        this.refresh_runtime_globals();
+        this
     }
 }
 
@@ -1518,21 +1685,440 @@ fn register_sequencer_natives(
     context: SharedSequencerEvalContext,
     metadata: SharedSequencerNativeMetadata,
 ) {
+    register_sequencer_natives_with_accumulators(
+        runtime,
+        state,
+        context,
+        metadata,
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(None)),
+    );
+}
+
+fn register_sequencer_natives_with_accumulators(
+    runtime: &mut Runtime,
+    state: Arc<crate::sequencer::SequencerState>,
+    context: SharedSequencerEvalContext,
+    metadata: SharedSequencerNativeMetadata,
+    accumulators: SharedRegisteredAccumulators,
+    accumulator_eval: SharedAccumulatorEvalContext,
+) {
     let current_track =
         |ctx: &SharedSequencerEvalContext| ctx.lock().map(|guard| guard.track).unwrap_or(0);
     let current_step =
         |ctx: &SharedSequencerEvalContext| ctx.lock().map(|guard| guard.cursor_step).unwrap_or(0);
 
+    let _ = install_runtime_globals(runtime, &context, &metadata, &[]);
+
+    let accumulators_for_register = Arc::clone(&accumulators);
+    runtime.register_native_with_docs(
+        "def-accumulator",
+        "(def-accumulator name callback-or-form)",
+        "Register a named scratch accumulator callback for scheduler-side trigger mutation. Accepts either a closure or a source form/string.",
+        move |args, ctx| {
+            let Some(name) = args.first() else {
+                return Err("expected accumulator name".to_string());
+            };
+            let name = match name {
+                EValue::String(name) => name.clone(),
+                _ => return Err("expected accumulator name string".to_string()),
+            };
+            let Some(callback) = args.get(1) else {
+                return Err("expected accumulator callback".to_string());
+            };
+            let callback = match callback {
+                EValue::Closure(_, _) => RegisteredAccumulatorCallback::Closure(callback.clone()),
+                EValue::String(source) => RegisteredAccumulatorCallback::Source(source.clone()),
+                other => RegisteredAccumulatorCallback::Source(eseqlisp::vm::format_lisp_source(other)),
+            };
+            let mut registry = accumulators_for_register
+                .lock()
+                .map_err(|_| "failed to lock accumulator registry".to_string())?;
+            if let Some(existing) = registry.iter_mut().find(|entry| entry.name == name) {
+                existing.callback = callback.clone();
+            } else {
+                registry.push(RegisteredAccumulator {
+                    name: name.clone(),
+                    callback: callback.clone(),
+                });
+            }
+            ctx.set_status(format!("registered accumulator '{name}'"));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_reset_acc = Arc::clone(&state);
+    let context_for_reset_acc = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "reset-acc",
+        "(reset-acc) | (reset-acc track) | (reset-acc :all)",
+        "Reset scheduler accumulator state for the current track, a specific 0-based track, or all tracks.",
+        move |args, ctx| {
+            if args.is_empty() {
+                let track_idx = current_track(&context_for_reset_acc);
+                state_for_reset_acc.request_accumulator_reset(track_idx);
+                ctx.set_status(format!("reset accumulator for track {track_idx}"));
+                return Ok(EValue::Bool(true));
+            }
+            match &args[0] {
+                EValue::Keyword(name) if name == "all" => {
+                    state_for_reset_acc.request_all_accumulator_resets();
+                    ctx.set_status("reset accumulators for all tracks");
+                    Ok(EValue::Bool(true))
+                }
+                EValue::Number(track) if *track >= 0.0 => {
+                    let track_idx = *track as usize;
+                    state_for_reset_acc.request_accumulator_reset(track_idx);
+                    ctx.set_status(format!("reset accumulator for track {track_idx}"));
+                    Ok(EValue::Bool(true))
+                }
+                _ => Err("reset-acc expects no args, a 0-based track index, or :all".to_string()),
+            }
+        },
+    );
+
+    let acc_eval_for_set_step = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-set-step-param",
+        "(acc-set-step-param :param value)",
+        "Set a resolved step parameter for the current accumulator trigger only.",
+        move |args, _ctx| {
+            let param = parse_step_param_arg(&args, 0)?;
+            let value = parse_value_arg(&args, 1, "step param")?;
+            let mut guard = acc_eval_for_set_step
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            apply_step_param_set(&mut eval.resolved, param, value);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_add_step = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-add-step-param",
+        "(acc-add-step-param :param delta)",
+        "Add a delta to a resolved step parameter for the current accumulator trigger only.",
+        move |args, _ctx| {
+            let param = parse_step_param_arg(&args, 0)?;
+            let delta = parse_value_arg(&args, 1, "step param delta")?;
+            let mut guard = acc_eval_for_add_step
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            apply_step_param_add(&mut eval.resolved, param, delta);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_scale_step = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-scale-step-param",
+        "(acc-scale-step-param :param factor)",
+        "Scale a resolved step parameter for the current accumulator trigger only.",
+        move |args, _ctx| {
+            let param = parse_step_param_arg(&args, 0)?;
+            let factor = parse_value_arg(&args, 1, "step param factor")?;
+            let mut guard = acc_eval_for_scale_step
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            apply_step_param_scale(&mut eval.resolved, param, factor);
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_effect = Arc::clone(&accumulator_eval);
+    let metadata_for_acc_effect = Arc::clone(&metadata);
+    let context_for_acc_effect = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-set-effect-param",
+        "(acc-set-effect-param ref normalized) | (acc-set-effect-param slot param-index normalized)",
+        "Set an effect parameter for the current accumulator trigger using a normalized 0.0..1.0 value.",
+        move |args, _ctx| {
+            let (slot_idx, param_idx, value_idx) = parse_effect_param_target_arg(&args, 0)?;
+            let normalized = parse_normalized_arg(&args, value_idx, "effect param")?;
+            let mut guard = acc_eval_for_effect
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_acc_effect);
+            let param_desc = accumulator_effect_param_desc(
+                &metadata_for_acc_effect,
+                track_idx,
+                slot_idx,
+                param_idx,
+            )?;
+            set_effect_param_normalized(eval, slot_idx, param_idx, normalized, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_add_effect = Arc::clone(&accumulator_eval);
+    let metadata_for_add_acc_effect = Arc::clone(&metadata);
+    let context_for_add_acc_effect = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-add-effect-param",
+        "(acc-add-effect-param ref normalized-delta) | (acc-add-effect-param slot param-index normalized-delta)",
+        "Add a normalized delta to the current resolved effect parameter for this accumulator trigger.",
+        move |args, _ctx| {
+            let (slot_idx, param_idx, value_idx) = parse_effect_param_target_arg(&args, 0)?;
+            let normalized_delta = parse_value_arg(&args, value_idx, "effect param delta")?;
+            let mut guard = acc_eval_for_add_effect
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_add_acc_effect);
+            let param_desc = accumulator_effect_param_desc(
+                &metadata_for_add_acc_effect,
+                track_idx,
+                slot_idx,
+                param_idx,
+            )?;
+            add_effect_param_normalized(
+                eval,
+                slot_idx,
+                param_idx,
+                normalized_delta,
+                &param_desc,
+            )?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_effect_raw = Arc::clone(&accumulator_eval);
+    let metadata_for_acc_effect_raw = Arc::clone(&metadata);
+    let context_for_acc_effect_raw = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-set-effect-param-raw",
+        "(acc-set-effect-param-raw ref value) | (acc-set-effect-param-raw slot param-index value)",
+        "Set an effect parameter for the current accumulator trigger using a raw stored value.",
+        move |args, _ctx| {
+            let (slot_idx, param_idx, value_idx) = parse_effect_param_target_arg(&args, 0)?;
+            let value = parse_value_arg(&args, value_idx, "effect param")?;
+            let mut guard = acc_eval_for_effect_raw
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_acc_effect_raw);
+            let param_desc = accumulator_effect_param_desc(
+                &metadata_for_acc_effect_raw,
+                track_idx,
+                slot_idx,
+                param_idx,
+            )?;
+            set_effect_param_raw(eval, slot_idx, param_idx, value, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_add_effect_raw = Arc::clone(&accumulator_eval);
+    let metadata_for_add_acc_effect_raw = Arc::clone(&metadata);
+    let context_for_add_acc_effect_raw = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-add-effect-param-raw",
+        "(acc-add-effect-param-raw ref delta) | (acc-add-effect-param-raw slot param-index delta)",
+        "Add a raw delta to the current resolved effect parameter for this accumulator trigger.",
+        move |args, _ctx| {
+            let (slot_idx, param_idx, value_idx) = parse_effect_param_target_arg(&args, 0)?;
+            let delta = parse_value_arg(&args, value_idx, "effect param delta")?;
+            let mut guard = acc_eval_for_add_effect_raw
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_add_acc_effect_raw);
+            let param_desc = accumulator_effect_param_desc(
+                &metadata_for_add_acc_effect_raw,
+                track_idx,
+                slot_idx,
+                param_idx,
+            )?;
+            add_effect_param_raw(eval, slot_idx, param_idx, delta, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_effect_alias = Arc::clone(&accumulator_eval);
+    let metadata_for_acc_effect_alias = Arc::clone(&metadata);
+    let context_for_acc_effect_alias = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-plock-effect",
+        "(acc-plock-effect ref normalized) | (acc-plock-effect slot param-index normalized)",
+        "Alias for acc-set-effect-param using normalized values.",
+        move |args, _ctx| {
+            let (slot_idx, param_idx, value_idx) = parse_effect_param_target_arg(&args, 0)?;
+            let normalized = parse_normalized_arg(&args, value_idx, "effect param")?;
+            let mut guard = acc_eval_for_effect_alias
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_acc_effect_alias);
+            let param_desc = accumulator_effect_param_desc(
+                &metadata_for_acc_effect_alias,
+                track_idx,
+                slot_idx,
+                param_idx,
+            )?;
+            set_effect_param_normalized(eval, slot_idx, param_idx, normalized, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_effect_alias_raw = Arc::clone(&accumulator_eval);
+    let metadata_for_acc_effect_alias_raw = Arc::clone(&metadata);
+    let context_for_acc_effect_alias_raw = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-plock-effect-raw",
+        "(acc-plock-effect-raw ref value) | (acc-plock-effect-raw slot param-index value)",
+        "Alias for acc-set-effect-param-raw.",
+        move |args, _ctx| {
+            let (slot_idx, param_idx, value_idx) = parse_effect_param_target_arg(&args, 0)?;
+            let value = parse_value_arg(&args, value_idx, "effect param")?;
+            let mut guard = acc_eval_for_effect_alias_raw
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_acc_effect_alias_raw);
+            let param_desc = accumulator_effect_param_desc(
+                &metadata_for_acc_effect_alias_raw,
+                track_idx,
+                slot_idx,
+                param_idx,
+            )?;
+            set_effect_param_raw(eval, slot_idx, param_idx, value, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_instrument = Arc::clone(&accumulator_eval);
+    let metadata_for_acc_instrument = Arc::clone(&metadata);
+    let context_for_acc_instrument = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-set-instrument-param",
+        "(acc-set-instrument-param ref normalized) | (acc-set-instrument-param param-index normalized)",
+        "Set an instrument parameter for the current accumulator trigger using a normalized 0.0..1.0 value.",
+        move |args, _ctx| {
+            let (param_idx, value_idx) = parse_instrument_param_target_arg(&args, 0)?;
+            let normalized = parse_normalized_arg(&args, value_idx, "instrument param")?;
+            let mut guard = acc_eval_for_instrument
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_acc_instrument);
+            let param_desc =
+                accumulator_instrument_param_desc(&metadata_for_acc_instrument, track_idx, param_idx)?;
+            set_instrument_param_normalized(eval, param_idx, normalized, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_add_instrument = Arc::clone(&accumulator_eval);
+    let metadata_for_add_acc_instrument = Arc::clone(&metadata);
+    let context_for_add_acc_instrument = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-add-instrument-param",
+        "(acc-add-instrument-param ref normalized-delta) | (acc-add-instrument-param param-index normalized-delta)",
+        "Add a normalized delta to the current resolved instrument parameter for this accumulator trigger.",
+        move |args, _ctx| {
+            let (param_idx, value_idx) = parse_instrument_param_target_arg(&args, 0)?;
+            let normalized_delta = parse_value_arg(&args, value_idx, "instrument param delta")?;
+            let mut guard = acc_eval_for_add_instrument
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_add_acc_instrument);
+            let param_desc = accumulator_instrument_param_desc(
+                &metadata_for_add_acc_instrument,
+                track_idx,
+                param_idx,
+            )?;
+            add_instrument_param_normalized(eval, param_idx, normalized_delta, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_instrument_raw = Arc::clone(&accumulator_eval);
+    let metadata_for_acc_instrument_raw = Arc::clone(&metadata);
+    let context_for_acc_instrument_raw = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-set-instrument-param-raw",
+        "(acc-set-instrument-param-raw ref value) | (acc-set-instrument-param-raw param-index value)",
+        "Set an instrument parameter for the current accumulator trigger using a raw stored value.",
+        move |args, _ctx| {
+            let (param_idx, value_idx) = parse_instrument_param_target_arg(&args, 0)?;
+            let value = parse_value_arg(&args, value_idx, "instrument param")?;
+            let mut guard = acc_eval_for_instrument_raw
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_acc_instrument_raw);
+            let param_desc = accumulator_instrument_param_desc(
+                &metadata_for_acc_instrument_raw,
+                track_idx,
+                param_idx,
+            )?;
+            set_instrument_param_raw(eval, param_idx, value, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_add_instrument_raw = Arc::clone(&accumulator_eval);
+    let metadata_for_add_acc_instrument_raw = Arc::clone(&metadata);
+    let context_for_add_acc_instrument_raw = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "acc-add-instrument-param-raw",
+        "(acc-add-instrument-param-raw ref delta) | (acc-add-instrument-param-raw param-index delta)",
+        "Add a raw delta to the current resolved instrument parameter for this accumulator trigger.",
+        move |args, _ctx| {
+            let (param_idx, value_idx) = parse_instrument_param_target_arg(&args, 0)?;
+            let delta = parse_value_arg(&args, value_idx, "instrument param delta")?;
+            let mut guard = acc_eval_for_add_instrument_raw
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let track_idx = current_track(&context_for_add_acc_instrument_raw);
+            let param_desc = accumulator_instrument_param_desc(
+                &metadata_for_add_acc_instrument_raw,
+                track_idx,
+                param_idx,
+            )?;
+            add_instrument_param_raw(eval, param_idx, delta, &param_desc)?;
+            Ok(EValue::Bool(true))
+        },
+    );
+
     let context_for_track = Arc::clone(&context);
     runtime.register_native_with_docs(
         "seq-current-track",
         "(seq-current-track)",
-        "Return the current 1-based track index for the scratch context.",
-        move |_args, _ctx| {
-            Ok(EValue::Number(
-                (current_track(&context_for_track) + 1) as f64,
-            ))
-        },
+        "Return the current 0-based track index for the scratch context.",
+        move |_args, _ctx| Ok(EValue::Number(current_track(&context_for_track) as f64)),
     );
 
     let state_for_set_track = Arc::clone(&state);
@@ -1540,20 +2126,20 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-set-current-track",
         "(seq-set-current-track track)",
-        "Set the current 1-based track index for subsequent scratch operations.",
+        "Set the current 0-based track index for subsequent scratch operations.",
         move |args, ctx| {
             let Some(EValue::Number(track)) = args.first() else {
-                return Err("expected 1-based track number".to_string());
+                return Err("expected 0-based track index".to_string());
             };
             let track = *track as isize;
-            if track <= 0 {
-                return Err("tracks are 1-based".to_string());
+            if track < 0 {
+                return Err("track indices must be >= 0".to_string());
             }
             let track_count = state_for_set_track.active_track_count() as isize;
-            if track > track_count {
-                return Err(format!("track out of range (1..={track_count})"));
+            if track >= track_count {
+                return Err(format!("track out of range (0..{})", track_count - 1));
             }
-            let track_idx = (track - 1) as usize;
+            let track_idx = track as usize;
             if let Ok(mut eval_ctx) = context_for_set_track.lock() {
                 eval_ctx.track = track_idx;
             }
@@ -1566,18 +2152,18 @@ fn register_sequencer_natives(
     let context_for_host_set_track = Arc::clone(&context);
     runtime.register_native("__host-set-current-track", move |args, _ctx| {
         let Some(EValue::Number(track)) = args.first() else {
-            return Err("expected 1-based track number".to_string());
+            return Err("expected 0-based track index".to_string());
         };
         let track = *track as isize;
-        if track <= 0 {
-            return Err("tracks are 1-based".to_string());
+        if track < 0 {
+            return Err("track indices must be >= 0".to_string());
         }
         let track_count = state_for_host_set_track.active_track_count() as isize;
-        if track > track_count {
-            return Err(format!("track out of range (1..={track_count})"));
+        if track >= track_count {
+            return Err(format!("track out of range (0..{})", track_count - 1));
         }
         if let Ok(mut eval_ctx) = context_for_host_set_track.lock() {
-            eval_ctx.track = (track - 1) as usize;
+            eval_ctx.track = track as usize;
         }
         Ok(EValue::Number(track as f64))
     });
@@ -1586,21 +2172,21 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-current-step",
         "(seq-current-step)",
-        "Return the current 1-based step index for the scratch context.",
-        move |_args, _ctx| Ok(EValue::Number((current_step(&context_for_step) + 1) as f64)),
+        "Return the current 0-based step index for the scratch context.",
+        move |_args, _ctx| Ok(EValue::Number(current_step(&context_for_step) as f64)),
     );
 
     let context_for_host_set_step = Arc::clone(&context);
     runtime.register_native("__host-set-current-step", move |args, _ctx| {
         let Some(EValue::Number(step)) = args.first() else {
-            return Err("expected 1-based step number".to_string());
+            return Err("expected 0-based step index".to_string());
         };
         let step = *step as isize;
-        if step <= 0 {
-            return Err("steps are 1-based".to_string());
+        if step < 0 {
+            return Err("step indices must be >= 0".to_string());
         }
         if let Ok(mut eval_ctx) = context_for_host_set_step.lock() {
-            eval_ctx.cursor_step = (step - 1) as usize;
+            eval_ctx.cursor_step = step as usize;
         }
         Ok(EValue::Number(step as f64))
     });
@@ -1624,7 +2210,7 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-toggle-step",
         "(seq-toggle-step step)",
-        "Toggle the active state of a 1-based step in the current track.",
+        "Toggle the active state of a 0-based step in the current track.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_toggle);
             let step_idx = parse_step_arg(&args, 0)?;
@@ -1632,8 +2218,8 @@ fn register_sequencer_natives(
             let active = state_for_toggle.pattern.patterns[track_idx].is_active(step_idx);
             ctx.set_status(format!(
                 "track {} step {} {}",
-                track_idx + 1,
-                step_idx + 1,
+                track_idx,
+                step_idx,
                 if active { "on" } else { "off" }
             ));
             Ok(EValue::Bool(active))
@@ -1645,12 +2231,12 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-step-on",
         "(seq-step-on step)",
-        "Ensure a 1-based step is active in the current track.",
+        "Ensure a 0-based step is active in the current track.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_step_on);
             let step_idx = parse_step_arg(&args, 0)?;
             state_for_step_on.pattern.patterns[track_idx].set_step_active(step_idx, true);
-            ctx.set_status(format!("track {} step {} on", track_idx + 1, step_idx + 1));
+            ctx.set_status(format!("track {} step {} on", track_idx, step_idx));
             Ok(EValue::Bool(true))
         },
     );
@@ -1660,12 +2246,12 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-step-off",
         "(seq-step-off step)",
-        "Ensure a 1-based step is inactive in the current track.",
+        "Ensure a 0-based step is inactive in the current track.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_step_off);
             let step_idx = parse_step_arg(&args, 0)?;
             state_for_step_off.clear_step_payload(track_idx, step_idx);
-            ctx.set_status(format!("track {} step {} off", track_idx + 1, step_idx + 1));
+            ctx.set_status(format!("track {} step {} off", track_idx, step_idx));
             Ok(EValue::Bool(true))
         },
     );
@@ -1675,15 +2261,15 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-clear-step",
         "(seq-clear-step step)",
-        "Clear all payload data for a 1-based step in the current track.",
+        "Clear all payload data for a 0-based step in the current track.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_clear_step);
             let step_idx = parse_step_arg(&args, 0)?;
             state_for_clear_step.clear_step_payload(track_idx, step_idx);
             ctx.set_status(format!(
                 "track {} step {} cleared",
-                track_idx + 1,
-                step_idx + 1
+                track_idx,
+                step_idx
             ));
             Ok(EValue::Bool(true))
         },
@@ -1701,7 +2287,7 @@ fn register_sequencer_natives(
             for step in 0..num_steps {
                 state_for_clear_track.clear_step_payload(track_idx, step);
             }
-            ctx.set_status(format!("track {} cleared", track_idx + 1));
+            ctx.set_status(format!("track {} cleared", track_idx));
             Ok(EValue::Bool(true))
         },
     );
@@ -1711,7 +2297,7 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-set-velocity",
         "(seq-set-velocity step value)",
-        "Set the velocity parameter for a 1-based step.",
+        "Set the velocity parameter for a 0-based step.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_velocity);
             let step_idx = parse_step_arg(&args, 0)?;
@@ -1726,8 +2312,8 @@ fn register_sequencer_natives(
             );
             ctx.set_status(format!(
                 "track {} step {} velocity {}",
-                track_idx + 1,
-                step_idx + 1,
+                track_idx,
+                step_idx,
                 value
             ));
             Ok(EValue::Bool(true))
@@ -1739,7 +2325,7 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-set-transpose",
         "(seq-set-transpose step value)",
-        "Set the transpose parameter for a 1-based step.",
+        "Set the transpose parameter for a 0-based step.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_transpose);
             let step_idx = parse_step_arg(&args, 0)?;
@@ -1754,8 +2340,8 @@ fn register_sequencer_natives(
             );
             ctx.set_status(format!(
                 "track {} step {} transpose {}",
-                track_idx + 1,
-                step_idx + 1,
+                track_idx,
+                step_idx,
                 value
             ));
             Ok(EValue::Bool(true))
@@ -1767,7 +2353,7 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-adjust-transpose",
         "(seq-adjust-transpose step delta)",
-        "Adjust the transpose parameter for a 1-based step by a delta.",
+        "Adjust the transpose parameter for a 0-based step by a delta.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_adjust);
             let step_idx = parse_step_arg(&args, 0)?;
@@ -1782,8 +2368,8 @@ fn register_sequencer_natives(
             );
             ctx.set_status(format!(
                 "track {} step {} transpose adjusted by {}",
-                track_idx + 1,
-                step_idx + 1,
+                track_idx,
+                step_idx,
                 value
             ));
             Ok(EValue::Bool(true))
@@ -1795,7 +2381,7 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-step",
         "(seq-step step)",
-        "Return a map snapshot for a 1-based step in the current track.",
+        "Return a map snapshot for a 0-based step in the current track.",
         move |args, _ctx| {
             let track_idx = current_track(&context_for_step_native);
             let step_idx = parse_step_arg(&args, 0)?;
@@ -1842,7 +2428,7 @@ fn register_sequencer_natives(
             state_for_rotate.rotate_steps(track_idx, &steps, *direction as isize);
             ctx.set_status(format!(
                 "track {} rotated by {}",
-                track_idx + 1,
+                track_idx,
                 *direction as isize
             ));
             Ok(EValue::Bool(true))
@@ -1863,8 +2449,8 @@ fn register_sequencer_natives(
             state_for_step_plock.set_step_param(track_idx, step_idx, param, value);
             ctx.set_status(format!(
                 "track {} step {} {} {}",
-                track_idx + 1,
-                step_idx + 1,
+                track_idx,
+                step_idx,
                 param.short_label(),
                 value
             ));
@@ -1877,7 +2463,7 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-plock-timebase",
         "(seq-plock-timebase step :timebase)",
-        "Set a timebase override for a 1-based step.",
+        "Set a timebase override for a 0-based step.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_timebase_plock);
             let step_idx = parse_step_arg(&args, 0)?;
@@ -1886,8 +2472,8 @@ fn register_sequencer_natives(
             state_for_timebase_plock.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} timebase {}",
-                track_idx + 1,
-                step_idx + 1,
+                track_idx,
+                step_idx,
                 timebase.label()
             ));
             Ok(EValue::Bool(true))
@@ -1899,7 +2485,7 @@ fn register_sequencer_natives(
     let metadata_for_effect_plock = Arc::clone(&metadata);
     let context_for_effect_param_name = Arc::clone(&context);
     let metadata_for_effect_name = Arc::clone(&metadata);
-    runtime.register_native_with_docs("seq-effect-param-name", "(seq-effect-param-name slot param-index)", "Return the parameter name for a 1-based effect slot and 0-based parameter index on the current track.", move |args, _ctx| {
+    runtime.register_native_with_docs("seq-effect-param-name", "(seq-effect-param-name slot param-index)", "Return the parameter name for a 0-based effect slot and 0-based parameter index on the current track.", move |args, _ctx| {
         let track_idx = current_track(&context_for_effect_param_name);
         let slot_idx = parse_slot_arg(&args, 0)?;
         let param_idx = parse_param_index_arg(&args, 1)?;
@@ -1920,7 +2506,7 @@ fn register_sequencer_natives(
     runtime.register_native_with_docs(
         "seq-effect-param-names",
         "(seq-effect-param-names slot)",
-        "Return a list of parameter names for a 1-based effect slot on the current track.",
+        "Return a list of parameter names for a 0-based effect slot on the current track.",
         move |args, _ctx| {
             let track_idx = current_track(&context_for_effect_param_names);
             let slot_idx = parse_slot_arg(&args, 0)?;
@@ -1943,14 +2529,13 @@ fn register_sequencer_natives(
 
     runtime.register_native_with_docs(
         "seq-plock-effect",
-        "(seq-plock-effect step slot param-index normalized)",
-        "Set an effect parameter lock for a 1-based step using a normalized 0.0..1.0 value.",
+        "(seq-plock-effect step ref normalized) | (seq-plock-effect step slot param-index normalized)",
+        "Set an effect parameter lock for a 0-based step using a normalized 0.0..1.0 value.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_effect_plock);
             let step_idx = parse_step_arg(&args, 0)?;
-            let slot_idx = parse_slot_arg(&args, 1)?;
-            let param_idx = parse_param_index_arg(&args, 2)?;
-            let normalized = parse_normalized_arg(&args, 3, "effect p-lock")?;
+            let (slot_idx, param_idx, value_idx) = parse_effect_param_target_arg(&args, 1)?;
+            let normalized = parse_normalized_arg(&args, value_idx, "effect p-lock")?;
             let Some(slot) = state_for_effect_plock.pattern.effect_chains[track_idx].get(slot_idx)
             else {
                 return Err("effect slot out of range".to_string());
@@ -1973,9 +2558,9 @@ fn register_sequencer_natives(
             state_for_effect_plock.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} effect {} param {} {}",
-                track_idx + 1,
-                step_idx + 1,
-                slot_idx + 1,
+                track_idx,
+                step_idx,
+                slot_idx,
                 param_idx,
                 value
             ));
@@ -1987,14 +2572,13 @@ fn register_sequencer_natives(
     let context_for_effect_plock_raw = Arc::clone(&context);
     runtime.register_native_with_docs(
         "seq-plock-effect-raw",
-        "(seq-plock-effect-raw step slot param-index value)",
-        "Set an effect parameter lock for a 1-based step using the stored engine value.",
+        "(seq-plock-effect-raw step ref value) | (seq-plock-effect-raw step slot param-index value)",
+        "Set an effect parameter lock for a 0-based step using the stored engine value.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_effect_plock_raw);
             let step_idx = parse_step_arg(&args, 0)?;
-            let slot_idx = parse_slot_arg(&args, 1)?;
-            let param_idx = parse_param_index_arg(&args, 2)?;
-            let value = parse_value_arg(&args, 3, "effect p-lock")?;
+            let (slot_idx, param_idx, value_idx) = parse_effect_param_target_arg(&args, 1)?;
+            let value = parse_value_arg(&args, value_idx, "effect p-lock")?;
             let Some(slot) =
                 state_for_effect_plock_raw.pattern.effect_chains[track_idx].get(slot_idx)
             else {
@@ -2008,9 +2592,9 @@ fn register_sequencer_natives(
             state_for_effect_plock_raw.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} effect {} param {} {}",
-                track_idx + 1,
-                step_idx + 1,
-                slot_idx + 1,
+                track_idx,
+                step_idx,
+                slot_idx,
                 param_idx,
                 value
             ));
@@ -2068,13 +2652,13 @@ fn register_sequencer_natives(
 
     runtime.register_native_with_docs(
         "seq-plock-instrument",
-        "(seq-plock-instrument step param-index normalized)",
-        "Set an instrument parameter lock for a 1-based step using a normalized 0.0..1.0 value.",
+        "(seq-plock-instrument step ref normalized) | (seq-plock-instrument step param-index normalized)",
+        "Set an instrument parameter lock for a 0-based step using a normalized 0.0..1.0 value.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_instrument_plock);
             let step_idx = parse_step_arg(&args, 0)?;
-            let param_idx = parse_param_index_arg(&args, 1)?;
-            let normalized = parse_normalized_arg(&args, 2, "instrument p-lock")?;
+            let (param_idx, value_idx) = parse_instrument_param_target_arg(&args, 1)?;
+            let normalized = parse_normalized_arg(&args, value_idx, "instrument p-lock")?;
             let slot = &state_for_instrument_plock.pattern.instrument_slots[track_idx];
             let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
             if param_idx >= num_params {
@@ -2093,8 +2677,8 @@ fn register_sequencer_natives(
             state_for_instrument_plock.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} instrument param {} {}",
-                track_idx + 1,
-                step_idx + 1,
+                track_idx,
+                step_idx,
                 param_idx,
                 value
             ));
@@ -2106,13 +2690,13 @@ fn register_sequencer_natives(
     let context_for_instrument_plock_raw = Arc::clone(&context);
     runtime.register_native_with_docs(
         "seq-plock-instrument-raw",
-        "(seq-plock-instrument-raw step param-index value)",
-        "Set an instrument parameter lock for a 1-based step using the stored engine value.",
+        "(seq-plock-instrument-raw step ref value) | (seq-plock-instrument-raw step param-index value)",
+        "Set an instrument parameter lock for a 0-based step using the stored engine value.",
         move |args, ctx| {
             let track_idx = current_track(&context_for_instrument_plock_raw);
             let step_idx = parse_step_arg(&args, 0)?;
-            let param_idx = parse_param_index_arg(&args, 1)?;
-            let value = parse_value_arg(&args, 2, "instrument p-lock")?;
+            let (param_idx, value_idx) = parse_instrument_param_target_arg(&args, 1)?;
+            let value = parse_value_arg(&args, value_idx, "instrument p-lock")?;
             let slot = &state_for_instrument_plock_raw.pattern.instrument_slots[track_idx];
             let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
             if param_idx >= num_params {
@@ -2122,8 +2706,8 @@ fn register_sequencer_natives(
             state_for_instrument_plock_raw.publish_scheduler_snapshot();
             ctx.set_status(format!(
                 "track {} step {} instrument param {} {}",
-                track_idx + 1,
-                step_idx + 1,
+                track_idx,
+                step_idx,
                 param_idx,
                 value
             ));
@@ -2154,26 +2738,92 @@ fn shared_native_metadata(
     }))
 }
 
+fn install_runtime_globals(
+    runtime: &mut Runtime,
+    context: &SharedSequencerEvalContext,
+    metadata: &SharedSequencerNativeMetadata,
+    previous_globals: &[String],
+) -> Vec<String> {
+    for name in previous_globals {
+        runtime.set_global_value(name, EValue::Nil);
+    }
+
+    let track = context.lock().map(|ctx| ctx.track).unwrap_or(0);
+    let (effect_descriptors, instrument_descriptor) = metadata
+        .lock()
+        .ok()
+        .map(|metadata| {
+            (
+                metadata.effect_descriptors.get(track).cloned().unwrap_or_default(),
+                metadata.instrument_descriptors.get(track).cloned(),
+            )
+        })
+        .unwrap_or_default();
+
+    let mut installed = Vec::new();
+    for (slot_idx, desc) in effect_descriptors.iter().enumerate() {
+        let global_name = sanitize_symbol_name(&desc.name, true);
+        if global_name.is_empty() {
+            continue;
+        }
+        let mut fields: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
+        for (param_idx, param) in desc.params.iter().enumerate() {
+            let field_name = sanitize_symbol_name(&param.name, false);
+            if field_name.is_empty() {
+                continue;
+            }
+            fields.insert(
+                field_name,
+                lisp_value(lisp_list(vec![
+                    EValue::Number(slot_idx as f64),
+                    EValue::Number(param_idx as f64),
+                ])),
+            );
+        }
+        runtime.set_global_value(&global_name, EValue::Map(fields));
+        installed.push(global_name);
+    }
+
+    if let Some(desc) = instrument_descriptor {
+        let global_name = sanitize_symbol_name(&desc.name, true);
+        if !global_name.is_empty() {
+            let mut fields: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
+            for (param_idx, param) in desc.params.iter().enumerate() {
+                let field_name = sanitize_symbol_name(&param.name, false);
+                if field_name.is_empty() {
+                    continue;
+                }
+                fields.insert(
+                    field_name,
+                    lisp_value(lisp_list(vec![EValue::Number(param_idx as f64)])),
+                );
+            }
+            runtime.set_global_value(&global_name, EValue::Map(fields));
+            installed.push(global_name);
+        }
+    }
+
+    installed
+}
+
 fn parse_step_arg(args: &[EValue], idx: usize) -> Result<usize, String> {
     let Some(EValue::Number(step)) = args.get(idx) else {
-        return Err("expected 1-based step number".to_string());
+        return Err("expected 0-based step index".to_string());
     };
-    let step = *step as isize;
-    if step <= 0 {
-        return Err("steps are 1-based".to_string());
+    if *step < 0.0 {
+        return Err("step index must be >= 0".to_string());
     }
-    Ok((step - 1) as usize)
+    Ok(*step as usize)
 }
 
 fn parse_slot_arg(args: &[EValue], idx: usize) -> Result<usize, String> {
     let Some(EValue::Number(slot)) = args.get(idx) else {
-        return Err("expected 1-based slot number".to_string());
+        return Err("expected 0-based slot index".to_string());
     };
-    let slot = *slot as isize;
-    if slot <= 0 {
-        return Err("slots are 1-based".to_string());
+    if *slot < 0.0 {
+        return Err("slot index must be >= 0".to_string());
     }
-    Ok((slot - 1) as usize)
+    Ok(*slot as usize)
 }
 
 fn parse_param_index_arg(args: &[EValue], idx: usize) -> Result<usize, String> {
@@ -2184,6 +2834,63 @@ fn parse_param_index_arg(args: &[EValue], idx: usize) -> Result<usize, String> {
         return Err("parameter index must be >= 0".to_string());
     }
     Ok(*param_idx as usize)
+}
+
+fn parse_effect_param_ref_arg(value: &EValue) -> Result<(usize, usize), String> {
+    let EValue::List(items) = value else {
+        return Err("expected effect param ref or slot/param indices".to_string());
+    };
+    if items.len() != 2 {
+        return Err("effect param ref must be a 2-item list".to_string());
+    }
+    let slot_idx = match &*items[0].borrow() {
+        EValue::Number(slot_idx) if *slot_idx >= 0.0 => *slot_idx as usize,
+        _ => return Err("effect param ref slot index must be >= 0".to_string()),
+    };
+    let param_idx = match &*items[1].borrow() {
+        EValue::Number(param_idx) if *param_idx >= 0.0 => *param_idx as usize,
+        _ => return Err("effect param ref param index must be >= 0".to_string()),
+    };
+    Ok((slot_idx, param_idx))
+}
+
+fn parse_effect_param_target_arg(
+    args: &[EValue],
+    idx: usize,
+) -> Result<(usize, usize, usize), String> {
+    if let Some(value) = args.get(idx) {
+        if matches!(value, EValue::List(_)) {
+            let (slot_idx, param_idx) = parse_effect_param_ref_arg(value)?;
+            return Ok((slot_idx, param_idx, idx + 1));
+        }
+    }
+    Ok((
+        parse_slot_arg(args, idx)?,
+        parse_param_index_arg(args, idx + 1)?,
+        idx + 2,
+    ))
+}
+
+fn parse_instrument_param_ref_arg(value: &EValue) -> Result<usize, String> {
+    let EValue::List(items) = value else {
+        return Err("expected instrument param ref or parameter index".to_string());
+    };
+    if items.len() != 1 {
+        return Err("instrument param ref must be a 1-item list".to_string());
+    }
+    match &*items[0].borrow() {
+        EValue::Number(param_idx) if *param_idx >= 0.0 => Ok(*param_idx as usize),
+        _ => Err("instrument param ref index must be >= 0".to_string()),
+    }
+}
+
+fn parse_instrument_param_target_arg(args: &[EValue], idx: usize) -> Result<(usize, usize), String> {
+    if let Some(value) = args.get(idx) {
+        if matches!(value, EValue::List(_)) {
+            return Ok((parse_instrument_param_ref_arg(value)?, idx + 1));
+        }
+    }
+    Ok((parse_param_index_arg(args, idx)?, idx + 1))
 }
 
 fn parse_value_arg(args: &[EValue], idx: usize, label: &str) -> Result<f32, String> {
@@ -2197,12 +2904,372 @@ fn parse_normalized_arg(args: &[EValue], idx: usize, label: &str) -> Result<f32,
     Ok(parse_value_arg(args, idx, label)?.clamp(0.0, 1.0))
 }
 
+fn apply_step_param_set(resolved: &mut ResolvedStep, param: StepParam, value: f32) {
+    match param {
+        StepParam::Duration => resolved.duration = value.max(0.0),
+        StepParam::Velocity => resolved.velocity = value.clamp(0.0, 1.0),
+        StepParam::Speed => resolved.speed = value.max(0.0),
+        StepParam::AuxA | StepParam::AuxB | StepParam::Sync => {}
+        StepParam::Transpose => resolved.transpose = value,
+        StepParam::Pan => resolved.pan = value.clamp(-1.0, 1.0),
+        StepParam::Chop => resolved.chop = value.max(1.0),
+    }
+}
+
+fn apply_step_param_add(resolved: &mut ResolvedStep, param: StepParam, delta: f32) {
+    match param {
+        StepParam::Duration => resolved.duration = (resolved.duration + delta).max(0.0),
+        StepParam::Velocity => resolved.velocity = (resolved.velocity + delta).clamp(0.0, 1.0),
+        StepParam::Speed => resolved.speed = (resolved.speed + delta).max(0.0),
+        StepParam::AuxA | StepParam::AuxB | StepParam::Sync => {}
+        StepParam::Transpose => resolved.transpose += delta,
+        StepParam::Pan => resolved.pan = (resolved.pan + delta).clamp(-1.0, 1.0),
+        StepParam::Chop => resolved.chop = (resolved.chop + delta).max(1.0),
+    }
+}
+
+fn apply_step_param_scale(resolved: &mut ResolvedStep, param: StepParam, factor: f32) {
+    match param {
+        StepParam::Duration => resolved.duration = (resolved.duration * factor).max(0.0),
+        StepParam::Velocity => resolved.velocity = (resolved.velocity * factor).clamp(0.0, 1.0),
+        StepParam::Speed => resolved.speed = (resolved.speed * factor).max(0.0),
+        StepParam::AuxA | StepParam::AuxB | StepParam::Sync => {}
+        StepParam::Transpose => resolved.transpose *= factor,
+        StepParam::Pan => resolved.pan = (resolved.pan * factor).clamp(-1.0, 1.0),
+        StepParam::Chop => resolved.chop = (resolved.chop * factor).max(1.0),
+    }
+}
+
+fn accumulator_effect_param_desc(
+    metadata: &SharedSequencerNativeMetadata,
+    track_idx: usize,
+    slot_idx: usize,
+    param_idx: usize,
+) -> Result<EffectDescriptorParamSnapshot, String> {
+    metadata
+        .lock()
+        .ok()
+        .and_then(|metadata| metadata.effect_descriptors.get(track_idx).cloned())
+        .as_ref()
+        .and_then(|slots| slots.get(slot_idx))
+        .and_then(|desc| desc.params.get(param_idx))
+        .cloned()
+        .map(EffectDescriptorParamSnapshot::from)
+        .ok_or_else(|| "effect descriptor missing for parameter".to_string())
+}
+
+fn accumulator_instrument_param_desc(
+    metadata: &SharedSequencerNativeMetadata,
+    track_idx: usize,
+    param_idx: usize,
+) -> Result<EffectDescriptorParamSnapshot, String> {
+    metadata
+        .lock()
+        .ok()
+        .and_then(|metadata| metadata.instrument_descriptors.get(track_idx).cloned())
+        .as_ref()
+        .and_then(|desc| desc.params.get(param_idx))
+        .cloned()
+        .map(EffectDescriptorParamSnapshot::from)
+        .ok_or_else(|| "instrument descriptor missing for parameter".to_string())
+}
+
+#[derive(Clone)]
+struct EffectDescriptorParamSnapshot {
+    min: f32,
+    max: f32,
+    default: f32,
+    kind: crate::effects::ParamKind,
+    scaling: crate::effects::ParamScaling,
+}
+
+impl From<crate::effects::ParamDescriptor> for EffectDescriptorParamSnapshot {
+    fn from(value: crate::effects::ParamDescriptor) -> Self {
+        Self {
+            min: value.min,
+            max: value.max,
+            default: value.default,
+            kind: value.kind,
+            scaling: value.scaling,
+        }
+    }
+}
+
+impl EffectDescriptorParamSnapshot {
+    fn clamp(&self, value: f32) -> f32 {
+        value.clamp(self.min, self.max)
+    }
+
+    fn normalize(&self, value: f32) -> f32 {
+        let value = self.clamp(value);
+        let range = self.max - self.min;
+        if range <= 0.0 {
+            return 0.0;
+        }
+        match self.scaling {
+            crate::effects::ParamScaling::Linear => ((value - self.min) / range).clamp(0.0, 1.0),
+            crate::effects::ParamScaling::Exponential => {
+                if self.min <= 0.0 || self.max <= 0.0 {
+                    ((value - self.min) / range).clamp(0.0, 1.0)
+                } else {
+                    let log_min = self.min.ln();
+                    let log_max = self.max.ln();
+                    let log_range = log_max - log_min;
+                    if log_range <= 0.0 {
+                        0.0
+                    } else {
+                        ((value.max(self.min).ln() - log_min) / log_range).clamp(0.0, 1.0)
+                    }
+                }
+            }
+        }
+    }
+
+    fn denormalize(&self, normalized: f32) -> f32 {
+        let normalized = normalized.clamp(0.0, 1.0);
+        match &self.kind {
+            crate::effects::ParamKind::Boolean => {
+                if normalized >= 0.5 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            crate::effects::ParamKind::Enum { .. } => {
+                let range = self.max - self.min;
+                if range <= 0.0 {
+                    self.min
+                } else {
+                    (self.min + normalized * range).round().clamp(self.min, self.max)
+                }
+            }
+            crate::effects::ParamKind::Continuous { .. } => match self.scaling {
+                crate::effects::ParamScaling::Linear => self.min + normalized * (self.max - self.min),
+                crate::effects::ParamScaling::Exponential => {
+                    if self.min <= 0.0 || self.max <= 0.0 {
+                        self.min + normalized * (self.max - self.min)
+                    } else {
+                        let log_min = self.min.ln();
+                        let log_max = self.max.ln();
+                        (log_min + normalized * (log_max - log_min)).exp()
+                    }
+                }
+            },
+        }
+    }
+}
+
+fn effect_param_ids(
+    eval: &mut AccumulatorEvalContext,
+    slot_idx: usize,
+    param_idx: usize,
+) -> Result<(u64, u64), String> {
+    let slot = eval
+        .effect_slots
+        .get(slot_idx)
+        .ok_or_else(|| "effect slot out of range".to_string())?;
+    if slot.node_id == 0 {
+        return Err("effect slot is empty".to_string());
+    }
+    let num_params = slot.num_params as usize;
+    if param_idx >= num_params {
+        return Err("effect param index out of range".to_string());
+    }
+    let idx = slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()
+        .unwrap_or(param_idx as u32) as u64;
+    if idx == u32::MAX as u64 {
+        return Err("effect param index unresolved".to_string());
+    }
+    Ok((slot.node_id as u64, idx))
+}
+
+fn current_effect_param_raw(
+    eval: &AccumulatorEvalContext,
+    slot_idx: usize,
+    param_idx: usize,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<f32, String> {
+    let slot = eval
+        .effect_slots
+        .get(slot_idx)
+        .ok_or_else(|| "effect slot out of range".to_string())?;
+    if slot.node_id == 0 {
+        return Err("effect slot is empty".to_string());
+    }
+    let num_params = slot.num_params as usize;
+    if param_idx >= num_params {
+        return Err("effect param index out of range".to_string());
+    }
+    Ok(eval
+        .effect_params
+        .iter()
+        .find(|param| {
+            param.logical_id == slot.node_id as u64
+                && param.idx
+                    == slot
+                        .param_node_indices
+                        .get(param_idx)
+                        .copied()
+                        .unwrap_or(param_idx as u32) as u64
+        })
+        .map(|param| param.value)
+        .unwrap_or(desc.default))
+}
+
+fn set_effect_param_raw(
+    eval: &mut AccumulatorEvalContext,
+    slot_idx: usize,
+    param_idx: usize,
+    value: f32,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<(), String> {
+    let (logical_id, idx) = effect_param_ids(eval, slot_idx, param_idx)?;
+    let value = desc.clamp(value);
+    if let Some(existing) = eval
+        .effect_params
+        .iter_mut()
+        .find(|param| param.logical_id == logical_id && param.idx == idx)
+    {
+        existing.value = value;
+    } else {
+        eval.effect_params.push(ScheduledEffectParam {
+            logical_id,
+            idx,
+            value,
+        });
+    }
+    Ok(())
+}
+
+fn set_effect_param_normalized(
+    eval: &mut AccumulatorEvalContext,
+    slot_idx: usize,
+    param_idx: usize,
+    normalized: f32,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<(), String> {
+    set_effect_param_raw(eval, slot_idx, param_idx, desc.denormalize(normalized), desc)
+}
+
+fn add_effect_param_raw(
+    eval: &mut AccumulatorEvalContext,
+    slot_idx: usize,
+    param_idx: usize,
+    delta: f32,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<(), String> {
+    let current = current_effect_param_raw(eval, slot_idx, param_idx, desc)?;
+    set_effect_param_raw(eval, slot_idx, param_idx, current + delta, desc)
+}
+
+fn add_effect_param_normalized(
+    eval: &mut AccumulatorEvalContext,
+    slot_idx: usize,
+    param_idx: usize,
+    normalized_delta: f32,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<(), String> {
+    let current = current_effect_param_raw(eval, slot_idx, param_idx, desc)?;
+    let next = (desc.normalize(current) + normalized_delta).clamp(0.0, 1.0);
+    set_effect_param_normalized(eval, slot_idx, param_idx, next, desc)
+}
+
+fn instrument_param_target_and_idx(
+    slot: &EffectSlotSnapshot,
+    param_idx: usize,
+) -> Result<(ScheduledInstrumentParamTarget, u64), String> {
+    let num_params = slot.num_params as usize;
+    if param_idx >= num_params {
+        return Err("instrument param index out of range".to_string());
+    }
+    let raw_idx = slot
+        .param_node_indices
+        .get(param_idx)
+        .copied()
+        .unwrap_or(param_idx as u32);
+    Ok(if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+        (
+            ScheduledInstrumentParamTarget::Modulator,
+            (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+        )
+    } else {
+        (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
+    })
+}
+
+fn current_instrument_param_raw(
+    eval: &AccumulatorEvalContext,
+    param_idx: usize,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<f32, String> {
+    let (target, idx) = instrument_param_target_and_idx(&eval.instrument_slot, param_idx)?;
+    Ok(eval
+        .instrument_params
+        .iter()
+        .find(|param| param.target == target && param.idx == idx)
+        .map(|param| param.value)
+        .unwrap_or(desc.default))
+}
+
+fn set_instrument_param_raw(
+    eval: &mut AccumulatorEvalContext,
+    param_idx: usize,
+    value: f32,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<(), String> {
+    let (target, idx) = instrument_param_target_and_idx(&eval.instrument_slot, param_idx)?;
+    let value = desc.clamp(value);
+    if let Some(existing) = eval
+        .instrument_params
+        .iter_mut()
+        .find(|param| param.target == target && param.idx == idx)
+    {
+        existing.value = value;
+    } else {
+        eval.instrument_params.push(ScheduledInstrumentParam { target, idx, value });
+    }
+    Ok(())
+}
+
+fn set_instrument_param_normalized(
+    eval: &mut AccumulatorEvalContext,
+    param_idx: usize,
+    normalized: f32,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<(), String> {
+    set_instrument_param_raw(eval, param_idx, desc.denormalize(normalized), desc)
+}
+
+fn add_instrument_param_raw(
+    eval: &mut AccumulatorEvalContext,
+    param_idx: usize,
+    delta: f32,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<(), String> {
+    let current = current_instrument_param_raw(eval, param_idx, desc)?;
+    set_instrument_param_raw(eval, param_idx, current + delta, desc)
+}
+
+fn add_instrument_param_normalized(
+    eval: &mut AccumulatorEvalContext,
+    param_idx: usize,
+    normalized_delta: f32,
+    desc: &EffectDescriptorParamSnapshot,
+) -> Result<(), String> {
+    let current = current_instrument_param_raw(eval, param_idx, desc)?;
+    let next = (desc.normalize(current) + normalized_delta).clamp(0.0, 1.0);
+    set_instrument_param_normalized(eval, param_idx, next, desc)
+}
+
 fn parse_step_param_arg(args: &[EValue], idx: usize) -> Result<StepParam, String> {
     let Some(value) = args.get(idx) else {
         return Err("expected step param".to_string());
     };
     match value {
-        EValue::Keyword(name) | EValue::String(name) => {
+        EValue::Keyword(name) | EValue::String(name) | EValue::Symbol(name) => {
             let normalized = name.to_ascii_lowercase();
             match normalized.as_str() {
                 "duration" | "dur" => Ok(StepParam::Duration),
@@ -2288,7 +3355,7 @@ fn lisp_list(items: Vec<EValue>) -> EValue {
 
 fn step_snapshot_to_value(step: usize, snapshot: StepSnapshot) -> EValue {
     let mut map: HashMap<String, Rc<RefCell<EValue>>> = HashMap::new();
-    map.insert("step".to_string(), lisp_number((step + 1) as f64));
+    map.insert("step".to_string(), lisp_number(step as f64));
     map.insert("active".to_string(), lisp_bool(snapshot.active));
     map.insert(
         "duration".to_string(),
@@ -2331,7 +3398,7 @@ fn scratch_buffer_template() -> String {
 ; Examples:
 ;   (seq-track-steps)
 ;   (for-each |n| (seq-toggle-step n) (list 1 5 9 13))
-;   (every :bar 2 '(seq-toggle-step 1))
+;   (every :bar 2 '(seq-toggle-step 0))
 ;   (clear-hooks)
 
 (seq-track-steps)
@@ -2514,7 +3581,9 @@ where
                     });
                 }
                 HostCommand::Custom { name, payload } => {
-                    if name == "compile-current" {
+                    if name == "sync-current-buffer" {
+                        continue;
+                    } else if name == "compile-current" {
                         let source = editor.active_buffer().text();
                         let save_path = editor
                             .active_buffer()
@@ -2785,7 +3854,8 @@ pub fn run_embedded_scratch_flow(
     mut on_loop_event: impl FnMut(&mut Editor, Option<(&str, &EValue)>) -> Option<String>,
 ) -> Option<(String, (usize, usize), ScratchControlRuntime)> {
     control_runtime.set_position(track, cursor_step);
-    let (runtime, context, metadata) = control_runtime.into_parts();
+    let (runtime, context, metadata, accumulators, accumulator_eval) =
+        control_runtime.into_parts();
     let init_src = std::fs::read_to_string("../eseqlisp/init.lisp")
         .or_else(|_| std::fs::read_to_string("init.lisp"))
         .unwrap_or_default();
@@ -2827,6 +3897,10 @@ pub fn run_embedded_scratch_flow(
 
         for command in editor.drain_host_commands() {
             if let HostCommand::Custom { name, payload } = command {
+                if name == "sync-current-buffer" {
+                    let _ = on_loop_event(&mut editor, Some((&name, &payload)));
+                    continue;
+                }
                 if let Some(status) = on_loop_event(&mut editor, Some((&name, &payload))) {
                     editor.handle_host_event(HostEvent::Status(status));
                 } else {
@@ -2854,11 +3928,43 @@ pub fn run_embedded_scratch_flow(
             return Some((
                 buffer.text(),
                 buffer.cursor,
-                ScratchControlRuntime::from_parts(editor.into_runtime(), context, metadata),
+                ScratchControlRuntime::from_parts(
+                    editor.into_runtime(),
+                    context,
+                    metadata,
+                    accumulators,
+                    accumulator_eval,
+                ),
             ));
         }
     }
     None
+}
+
+pub fn scratch_runtime_with_fallbacks(
+    state: Arc<crate::sequencer::SequencerState>,
+    track: usize,
+    cursor_step: usize,
+) -> ScratchControlRuntime {
+    let track_count = state.active_track_count().max(1);
+    let (effect_descriptors, instrument_descriptors) = state.scratch_runtime_descriptors();
+    let effect_descriptors = if effect_descriptors.is_empty() {
+        fallback_effect_descriptors(track_count)
+    } else {
+        effect_descriptors
+    };
+    let instrument_descriptors = if instrument_descriptors.is_empty() {
+        fallback_instrument_descriptors(track_count)
+    } else {
+        instrument_descriptors
+    };
+    ScratchControlRuntime::new(
+        state,
+        effect_descriptors,
+        instrument_descriptors,
+        track,
+        cursor_step,
+    )
 }
 
 pub fn eval_sequencer_control(
@@ -3054,9 +4160,14 @@ pub fn run_instrument_editor_flow(
 mod tests {
     use super::{
         fallback_effect_descriptors, fallback_instrument_descriptors, new_eval_context,
-        register_sequencer_natives, shared_native_metadata, ScratchControlRuntime,
+        register_sequencer_natives, scratch_runtime_with_fallbacks, shared_native_metadata,
+        DGenParam, ScratchControlRuntime, HEADER_SLOTS,
     };
-    use crate::effects::EffectDescriptor;
+    use crate::accumulator::ResolvedStep;
+    use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
+    use crate::scheduled_event::{
+        ScheduledEffectParam, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+    };
     use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::vm::Value;
@@ -3077,7 +4188,7 @@ mod tests {
             ),
         );
 
-        let result = runtime.eval_str("(seq-step 1)").unwrap();
+        let result = runtime.eval_str("(seq-step 0)").unwrap();
         assert!(matches!(result, Some(Value::Map(_))));
     }
 
@@ -3116,13 +4227,13 @@ mod tests {
             ),
         );
 
-        let result = runtime.eval_str("(seq-set-current-track 2)").unwrap();
-        assert_eq!(result, Some(Value::Number(2.0)));
+        let result = runtime.eval_str("(seq-set-current-track 1)").unwrap();
+        assert_eq!(result, Some(Value::Number(1.0)));
 
         let result = runtime.eval_str("(seq-current-track)").unwrap();
-        assert_eq!(result, Some(Value::Number(2.0)));
+        assert_eq!(result, Some(Value::Number(1.0)));
 
-        let result = runtime.eval_str("(seq-toggle-step 1)").unwrap();
+        let result = runtime.eval_str("(seq-toggle-step 0)").unwrap();
         assert_eq!(result, Some(Value::Bool(true)));
         assert!(state.pattern.patterns[1].is_active(0));
         assert!(!state.pattern.patterns[0].is_active(0));
@@ -3142,7 +4253,7 @@ mod tests {
             ),
         );
 
-        let result = runtime.eval_str("(seq-step-on 3)").unwrap();
+        let result = runtime.eval_str("(seq-step-on 2)").unwrap();
 
         assert_eq!(result, Some(Value::Bool(true)));
         assert!(state.pattern.patterns[0].is_active(2));
@@ -3166,7 +4277,7 @@ mod tests {
             ),
         );
 
-        let result = runtime.eval_str("(seq-step-off 3)").unwrap();
+        let result = runtime.eval_str("(seq-step-off 2)").unwrap();
 
         assert_eq!(result, Some(Value::Bool(true)));
         assert!(!state.pattern.patterns[0].is_active(2));
@@ -3211,7 +4322,7 @@ mod tests {
         );
 
         let result = runtime
-            .eval_str("(seq-plock-step 2 :velocity 0.7)")
+            .eval_str("(seq-plock-step 1 :velocity 0.7)")
             .unwrap();
 
         assert_eq!(result, Some(Value::Bool(true)));
@@ -3232,7 +4343,7 @@ mod tests {
             ),
         );
 
-        let result = runtime.eval_str("(seq-plock-timebase 3 :8t)").unwrap();
+        let result = runtime.eval_str("(seq-plock-timebase 2 :8t)").unwrap();
 
         assert_eq!(result, Some(Value::Bool(true)));
         assert_eq!(
@@ -3254,7 +4365,7 @@ mod tests {
             shared_native_metadata(effect_descriptors, fallback_instrument_descriptors(1)),
         );
 
-        let result = runtime.eval_str("(seq-plock-effect 1 1 2 0.5)").unwrap();
+        let result = runtime.eval_str("(seq-plock-effect 0 FILTER.cutoff 0.5)").unwrap();
 
         assert_eq!(result, Some(Value::Bool(true)));
         assert_eq!(
@@ -3278,7 +4389,7 @@ mod tests {
         );
 
         let result = runtime
-            .eval_str("(seq-plock-effect-raw 1 1 2 440.0)")
+            .eval_str("(seq-plock-effect-raw 0 0 2 440.0)")
             .unwrap();
 
         assert_eq!(result, Some(Value::Bool(true)));
@@ -3302,7 +4413,7 @@ mod tests {
             ),
         );
 
-        let result = runtime.eval_str("(seq-effect-param-name 1 2)").unwrap();
+        let result = runtime.eval_str("(seq-effect-param-name 0 2)").unwrap();
 
         assert_eq!(result, Some(Value::String("cutoff".to_string())));
     }
@@ -3321,7 +4432,7 @@ mod tests {
             ),
         );
 
-        let result = runtime.eval_str("(seq-effect-param-names 1)").unwrap();
+        let result = runtime.eval_str("(seq-effect-param-names 0)").unwrap();
 
         match result {
             Some(Value::List(items)) => {
@@ -3339,11 +4450,142 @@ mod tests {
     }
 
     #[test]
+    fn seq_effect_globals_expose_slot_and_param_refs() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = Runtime::new();
+        register_sequencer_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            new_eval_context(0, 0),
+            shared_native_metadata(
+                fallback_effect_descriptors(1),
+                fallback_instrument_descriptors(1),
+            ),
+        );
+
+        let result = runtime.eval_str("FILTER.cutoff").unwrap();
+
+        match result {
+            Some(Value::List(items)) => {
+                let values: Vec<f64> = items
+                    .iter()
+                    .map(|item| match &*item.borrow() {
+                        Value::Number(value) => *value,
+                        other => panic!("expected numeric ref component, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(values, vec![0.0, 2.0]);
+            }
+            other => panic!("expected ref list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seq_instrument_globals_expose_param_refs() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let custom_desc = EffectDescriptor::from_lisp_manifest(
+            "MINIMOOG",
+            &[DGenParam {
+                name: "cutoff".to_string(),
+                cell_id: 0,
+                default: 0.5,
+                min: 0.0,
+                max: 1.0,
+                unit: None,
+                hidden: false,
+            }],
+            0,
+            0,
+        );
+        let mut runtime = Runtime::new();
+        register_sequencer_natives(
+            &mut runtime,
+            Arc::clone(&state),
+            new_eval_context(0, 0),
+            shared_native_metadata(fallback_effect_descriptors(1), vec![custom_desc]),
+        );
+
+        let result = runtime.eval_str("MINIMOOG.cutoff").unwrap();
+
+        match result {
+            Some(Value::List(items)) => {
+                let values: Vec<f64> = items
+                    .iter()
+                    .map(|item| match &*item.borrow() {
+                        Value::Number(value) => *value,
+                        other => panic!("expected numeric ref component, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(values, vec![0.0]);
+            }
+            other => panic!("expected ref list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scratch_runtime_with_fallbacks_uses_state_published_descriptors() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut custom_desc = EffectDescriptor::from_lisp_manifest(
+            "MODUM_DELAY",
+            &[DGenParam {
+                name: "max1".to_string(),
+                cell_id: 0,
+                default: 0.0,
+                min: 0.0,
+                max: 1.0,
+                unit: None,
+                hidden: false,
+            }],
+            2,
+            2,
+        );
+        for param in &mut custom_desc.params {
+            param.node_param_idx += HEADER_SLOTS as u32;
+        }
+        let mut effect_descriptors = fallback_effect_descriptors(1);
+        effect_descriptors[0][0] = custom_desc;
+        state.set_scratch_runtime_descriptors(
+            effect_descriptors,
+            fallback_instrument_descriptors(1),
+        );
+
+        let mut runtime = scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+        let result = runtime.eval("MODUM_DELAY.max1").unwrap();
+
+        match result {
+            Some(Value::List(items)) => {
+                let values: Vec<f64> = items
+                    .iter()
+                    .map(|item| match &*item.borrow() {
+                        Value::Number(value) => *value,
+                        other => panic!("expected numeric ref component, got {other:?}"),
+                    })
+                    .collect();
+                assert_eq!(values, vec![0.0, 0.0]);
+            }
+            other => panic!("expected ref list, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn seq_plock_instrument_normalizes_slot_param_override() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let instrument_desc = EffectDescriptor::builtin_delay();
+        let instrument_desc = EffectDescriptor::from_lisp_manifest(
+            "MINIMOOG",
+            &[DGenParam {
+                name: "cutoff".to_string(),
+                cell_id: 0,
+                default: 0.5,
+                min: 0.0,
+                max: 1.0,
+                unit: None,
+                hidden: false,
+            }],
+            0,
+            0,
+        );
         state.pattern.instrument_slots[0].apply_descriptor(&instrument_desc, 0);
-        let expected = instrument_desc.params[2].denormalize(0.25);
+        let expected = instrument_desc.params[0].denormalize(0.25);
 
         let mut runtime = Runtime::new();
         register_sequencer_natives(
@@ -3353,11 +4595,13 @@ mod tests {
             shared_native_metadata(fallback_effect_descriptors(1), vec![instrument_desc]),
         );
 
-        let result = runtime.eval_str("(seq-plock-instrument 1 2 0.25)").unwrap();
+        let result = runtime
+            .eval_str("(seq-plock-instrument 0 MINIMOOG.cutoff 0.25)")
+            .unwrap();
 
         assert_eq!(result, Some(Value::Bool(true)));
         assert_eq!(
-            state.pattern.instrument_slots[0].plocks.get(0, 2),
+            state.pattern.instrument_slots[0].plocks.get(0, 0),
             Some(expected)
         );
     }
@@ -3437,8 +4681,8 @@ mod tests {
                 init_source: Some(init_src),
             },
         );
-        editor.open_scratch_buffer_with_mode("*scratch*", "(seq-step 1)", BufferMode::ESeqLisp);
-        editor.active_buffer_mut().cursor = (0, "(seq-step 1)".len());
+        editor.open_scratch_buffer_with_mode("*scratch*", "(seq-step 0)", BufferMode::ESeqLisp);
+        editor.active_buffer_mut().cursor = (0, "(seq-step 0)".len());
 
         editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         editor.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
@@ -3459,7 +4703,7 @@ mod tests {
         );
 
         let callback = runtime
-            .eval("(lambda () (seq-toggle-step 1))")
+            .eval("(lambda () (seq-toggle-step 0))")
             .unwrap()
             .unwrap();
         runtime.set_global_value("__hook_test", callback);
@@ -3484,11 +4728,233 @@ mod tests {
         );
 
         runtime.set_position(1, 0);
-        let result = runtime.eval("(seq-toggle-step 1)").unwrap().unwrap();
+        let result = runtime.eval("(seq-toggle-step 0)").unwrap().unwrap();
 
         assert_eq!(result, Value::Bool(true));
         assert!(state.pattern.patterns[1].is_active(0));
         assert!(!state.pattern.patterns[0].is_active(0));
+    }
+
+    #[test]
+    fn scratch_control_runtime_registers_and_invokes_accumulator_callbacks() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-accumulator "test-acc"
+                  "(do
+                     (acc-add-step-param :transpose acc-value)
+                     (acc-scale-step-param :velocity 0.5)
+                     (acc-set-step-param :pan 0.25)
+                     (acc-add-effect-param FILTER.cutoff 0.25)
+                     (acc-add-instrument-param 0 0.25))")
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(runtime.accumulator_names(), vec!["test-acc".to_string()]);
+
+        let effect_desc = EffectDescriptor::builtin_filter();
+        let effect_initial = effect_desc.params[2].denormalize(0.5);
+        let effect_expected = effect_desc.params[2].denormalize(0.75);
+        let instrument_desc = fallback_instrument_descriptors(1)[0].clone();
+        let instrument_initial = instrument_desc.params[0].denormalize(0.5);
+        let instrument_expected = instrument_desc.params[0].denormalize(0.75);
+
+        let output = runtime
+            .invoke_accumulator(
+                0,
+                3,
+                3.0,
+                ResolvedStep {
+                    duration: 1.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 2.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![EffectSlotSnapshot::new_default(&EffectDescriptor::builtin_filter(), 42)],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                vec![ScheduledEffectParam {
+                    logical_id: 42,
+                    idx: 2,
+                    value: effect_initial,
+                }],
+                vec![ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: 0,
+                    value: instrument_initial,
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(output.resolved.transpose, 5.0);
+        assert_eq!(output.resolved.velocity, 0.5);
+        assert_eq!(output.resolved.pan, 0.25);
+        assert!(
+            output
+                .effect_params
+                .iter()
+                .any(|param| {
+                    param.logical_id == 42
+                        && param.idx == 2
+                        && (param.value - effect_expected).abs() < 0.001
+                })
+        );
+        assert!(
+            output
+                .instrument_params
+                .iter()
+                .any(|param| param.target == ScheduledInstrumentParamTarget::Synth
+                    && param.idx == 0
+                    && (param.value - instrument_expected).abs() < 0.001)
+        );
+    }
+
+    #[test]
+    fn scratch_control_runtime_clamps_normalized_accumulator_param_adds() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-accumulator "clip-acc"
+                  "(do
+                     (acc-add-effect-param FILTER.cutoff 0.75)
+                     (acc-add-instrument-param 0 0.75))")
+                "#,
+            )
+            .unwrap();
+
+        let effect_desc = EffectDescriptor::builtin_filter();
+        let effect_initial = effect_desc.params[2].denormalize(0.5);
+        let effect_expected = effect_desc.params[2].denormalize(1.0);
+        let instrument_desc = fallback_instrument_descriptors(1)[0].clone();
+        let instrument_initial = instrument_desc.params[0].denormalize(0.5);
+        let instrument_expected = instrument_desc.params[0].denormalize(1.0);
+
+        let output = runtime
+            .invoke_accumulator(
+                0,
+                0,
+                1.0,
+                ResolvedStep {
+                    duration: 1.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![EffectSlotSnapshot::new_default(&effect_desc, 42)],
+                EffectSlotSnapshot::new_default(&instrument_desc, 7),
+                vec![ScheduledEffectParam {
+                    logical_id: 42,
+                    idx: 2,
+                    value: effect_initial,
+                }],
+                vec![ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: 0,
+                    value: instrument_initial,
+                }],
+            )
+            .unwrap();
+
+        assert!(output.effect_params.iter().any(|param| {
+            param.logical_id == 42 && param.idx == 2 && (param.value - effect_expected).abs() < 0.001
+        }));
+        assert!(output.instrument_params.iter().any(|param| {
+            param.target == ScheduledInstrumentParamTarget::Synth
+                && param.idx == 0
+                && (param.value - instrument_expected).abs() < 0.001
+        }));
+    }
+
+    #[test]
+    #[ignore = "documents current closure-based def-accumulator failure"]
+    fn scratch_control_runtime_closure_accumulator_regression() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        let result = runtime
+            .eval(
+                r#"
+                (def-accumulator "closure-acc"
+                  (lambda (step value)
+                    (do
+                      (acc-add-step-param :transpose value)
+                      (acc-scale-step-param :velocity 0.5)
+                      (acc-set-step-param :pan 0.25)
+                      (acc-set-effect-param 0 1 value)
+                      (acc-set-instrument-param 0 0.75))))
+                "#,
+            )
+            .unwrap();
+        let status = runtime.take_status_message();
+
+        assert_eq!(result, Some(Value::Bool(true)), "status: {status:?}");
+        assert_eq!(
+            runtime.accumulator_names(),
+            vec!["closure-acc".to_string()],
+            "status: {status:?}"
+        );
+
+        runtime
+            .invoke_accumulator(
+                0,
+                3,
+                3.0,
+                ResolvedStep {
+                    duration: 1.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 2.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![EffectSlotSnapshot::new_default(&EffectDescriptor::builtin_filter(), 42)],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                vec![ScheduledEffectParam {
+                    logical_id: 42,
+                    idx: 1,
+                    value: 0.0,
+                }],
+                vec![ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: 0,
+                    value: 0.1,
+                }],
+            )
+            .unwrap();
     }
 
     #[test]

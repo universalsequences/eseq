@@ -88,7 +88,7 @@ impl AgentNetworkClient {
                 "tools": tools,
                 "tool_choice": "auto"
             });
-            let response: OpenAiChatCompletionResponse = self
+            let response = self
                 .http
                 .post(OPENAI_CHAT_COMPLETIONS_URL)
                 .header(AUTHORIZATION, format!("Bearer {api_key}"))
@@ -98,12 +98,18 @@ impl AgentNetworkClient {
                 .map_err(|error| AgentTurnError {
                     message: format!("OpenAI request failed: {error}"),
                     tool_outcomes: tool_outcomes.clone(),
-                })?
-                .error_for_status()
-                .map_err(|error| AgentTurnError {
-                    message: format!("OpenAI request failed: {error}"),
+                })?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response
+                    .text()
+                    .unwrap_or_else(|_| "<failed to read response body>".to_string());
+                return Err(AgentTurnError {
+                    message: format!("OpenAI request failed: HTTP {status} body: {body}"),
                     tool_outcomes: tool_outcomes.clone(),
-                })?
+                });
+            }
+            let response: OpenAiChatCompletionResponse = response
                 .json()
                 .map_err(|error| AgentTurnError {
                     message: format!("Failed to decode OpenAI response: {error}"),
@@ -140,7 +146,7 @@ impl AgentNetworkClient {
                 messages.push(json!({
                     "role": "assistant",
                     "content": assistant_content,
-                    "tool_calls": tool_calls,
+                    "tool_calls": tool_calls.iter().map(openai_tool_call_json).collect::<Vec<_>>(),
                 }));
 
                 let mut round_outcomes = Vec::new();
@@ -405,22 +411,21 @@ fn openai_messages(request: &AgentTurnRequest) -> Vec<Value> {
         "content": request.system_prompt,
     })];
     for message in &request.messages {
+        if matches!(message.role, AgentMessageRole::Tool) {
+            // Tool outputs recorded in the UI transcript do not retain the original
+            // tool_call_id linkage required by OpenAI across later turns.
+            continue;
+        }
         let role = match message.role {
             AgentMessageRole::System => "system",
             AgentMessageRole::User => "user",
             AgentMessageRole::Assistant => "assistant",
-            AgentMessageRole::Tool => "tool",
+            AgentMessageRole::Tool => unreachable!("tool messages are filtered above"),
         };
-        let mut object = json!({
+        let object = json!({
             "role": role,
             "content": message.content,
         });
-        if matches!(message.role, AgentMessageRole::Tool) {
-            object["name"] = match &message.tool_name {
-                Some(name) => json!(name),
-                None => Value::Null,
-            };
-        }
         messages.push(object);
     }
     messages
@@ -435,12 +440,53 @@ fn openai_tools(specs: &[ToolSpec]) -> Vec<Value> {
                 "function": {
                     "name": spec.name,
                     "description": spec.description,
-                    "parameters": spec.input_schema,
-                    "strict": true
+                    "parameters": sanitize_openai_schema(&spec.input_schema)
                 }
             })
         })
         .collect()
+}
+
+fn openai_tool_call_json(tool_call: &OpenAiToolCall) -> Value {
+    json!({
+        "id": tool_call.id,
+        "type": "function",
+        "function": {
+            "name": tool_call.function.name,
+            "arguments": tool_call.function.arguments,
+        }
+    })
+}
+
+fn sanitize_openai_schema(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, child) in map {
+                if key == "properties" {
+                    if let Value::Object(properties) = child {
+                        let mut sanitized_properties = serde_json::Map::new();
+                        for (prop_name, prop_schema) in properties {
+                            sanitized_properties
+                                .insert(prop_name.clone(), sanitize_openai_schema(prop_schema));
+                        }
+                        out.insert(key.clone(), Value::Object(sanitized_properties));
+                    }
+                    continue;
+                }
+
+                if matches!(
+                    key.as_str(),
+                    "type" | "description" | "required" | "enum" | "items" | "additionalProperties"
+                ) {
+                    out.insert(key.clone(), sanitize_openai_schema(child));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sanitize_openai_schema).collect()),
+        _ => value.clone(),
+    }
 }
 
 fn gemini_contents(request: &AgentTurnRequest) -> Vec<Value> {
@@ -584,6 +630,8 @@ struct OpenAiMessage {
 #[derive(Debug, Deserialize, Clone, serde::Serialize)]
 struct OpenAiToolCall {
     id: String,
+    #[serde(rename = "type", default = "openai_tool_call_type")]
+    call_type: String,
     function: OpenAiToolFunction,
 }
 
@@ -591,6 +639,10 @@ struct OpenAiToolCall {
 struct OpenAiToolFunction {
     name: String,
     arguments: String,
+}
+
+fn openai_tool_call_type() -> String {
+    "function".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -632,9 +684,14 @@ mod tests {
 
     use super::{
         extract_gemini_function_calls, extract_gemini_text, gemini_tool_call_signature,
-        repeated_failure_signature, sanitize_gemini_schema, GeminiFunctionCall, GeminiPart,
+        openai_messages, openai_tool_call_json, openai_tool_call_type, openai_tools,
+        repeated_failure_signature, sanitize_gemini_schema, sanitize_openai_schema,
+        GeminiFunctionCall, GeminiPart, OpenAiToolCall, OpenAiToolFunction,
     };
-    use crate::agent::protocol::ToolCallOutcome;
+    use crate::agent::actions::AgentSessionContext;
+    use crate::agent::protocol::AgentToolRuntime;
+    use crate::agent::protocol::{ToolCallOutcome, ToolSpec};
+    use crate::agent::providers::{AgentMessage, AgentMessageRole, AgentTurnRequest};
 
     #[test]
     fn extract_gemini_parts() {
@@ -677,6 +734,111 @@ mod tests {
         assert!(sanitized["default"].is_null());
         assert!(sanitized["properties"]["limit"]["minimum"].is_null());
         assert!(sanitized["properties"]["limit"]["default"].is_null());
+    }
+
+    #[test]
+    fn sanitize_openai_schema_strips_unsupported_fields() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "search term",
+                    "default": "osc"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1
+                }
+            },
+            "anyOf": [
+                { "required": ["query"] }
+            ]
+        });
+        let sanitized = sanitize_openai_schema(&schema);
+        assert_eq!(sanitized["type"], json!("object"));
+        assert!(sanitized["anyOf"].is_null());
+        assert!(sanitized["properties"]["query"]["default"].is_null());
+        assert!(sanitized["properties"]["limit"]["minimum"].is_null());
+    }
+
+    #[test]
+    fn openai_tools_omit_strict_flag() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let tools = openai_tools(&runtime.specs());
+        assert!(tools.iter().all(|tool| tool["function"]["strict"].is_null()));
+    }
+
+    #[test]
+    fn openai_tool_call_serializes_with_type() {
+        let tool_call = OpenAiToolCall {
+            id: "call_123".to_string(),
+            call_type: openai_tool_call_type(),
+            function: OpenAiToolFunction {
+                name: "lookup_dgen_docs".to_string(),
+                arguments: r#"{"query":"filter"}"#.to_string(),
+            },
+        };
+        let json_value = serde_json::to_value(&tool_call).expect("serialize tool call");
+        assert_eq!(json_value["type"], json!("function"));
+    }
+
+    #[test]
+    fn openai_tool_call_json_includes_type() {
+        let tool_call = OpenAiToolCall {
+            id: "call_123".to_string(),
+            call_type: openai_tool_call_type(),
+            function: OpenAiToolFunction {
+                name: "lookup_dgen_docs".to_string(),
+                arguments: r#"{"query":"filter"}"#.to_string(),
+            },
+        };
+        let json_value = openai_tool_call_json(&tool_call);
+        assert_eq!(json_value["type"], json!("function"));
+        assert_eq!(json_value["function"]["name"], json!("lookup_dgen_docs"));
+    }
+
+    #[test]
+    fn openai_messages_skip_persisted_tool_transcript_entries() {
+        let request = AgentTurnRequest {
+            model: "gpt-5.4".to_string(),
+            system_prompt: "You are helpful.".to_string(),
+            messages: vec![
+                AgentMessage {
+                    role: AgentMessageRole::User,
+                    content: "make a patch".to_string(),
+                    tool_name: None,
+                },
+                AgentMessage {
+                    role: AgentMessageRole::Tool,
+                    content: "lookup_dgen_docs [ok]\noperator saw".to_string(),
+                    tool_name: Some("lookup_dgen_docs".to_string()),
+                },
+                AgentMessage {
+                    role: AgentMessageRole::System,
+                    content: "Applying your last generated change failed.".to_string(),
+                    tool_name: None,
+                },
+            ],
+            tools: Vec::<ToolSpec>::new(),
+            session_context: AgentSessionContext {
+                has_tracks: false,
+                current_track_name: None,
+                current_track_index: None,
+                can_apply_effect_to_current_track: false,
+                current_effect_name: None,
+                current_effect_source: None,
+                current_effect_slot: None,
+                can_update_current_effect: false,
+                current_instrument_name: None,
+                current_instrument_source: None,
+                can_update_current_instrument: false,
+                current_instrument_preset_schema: None,
+            },
+        };
+        let messages = openai_messages(&request);
+        assert_eq!(messages.len(), 3);
+        assert!(messages.iter().all(|msg| msg["role"] != json!("tool")));
     }
 
     #[test]

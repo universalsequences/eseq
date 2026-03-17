@@ -24,6 +24,31 @@ pub(super) enum OverlayPickerKind {
 }
 
 impl App {
+    fn sync_scratch_runtime_descriptors(&self) {
+        self.state.set_scratch_runtime_descriptors(
+            self.graph.effect_descriptors.clone(),
+            self.graph.instrument_descriptors.clone(),
+        );
+    }
+
+    pub(crate) fn rebuild_scratch_runtime_from_buffer(&mut self) -> Result<(), String> {
+        let track = self.ui.cursor_track.min(self.state.active_track_count().saturating_sub(1));
+        let cursor_step = self.ui.cursor_step;
+        self.sync_scratch_runtime_descriptors();
+        let mut runtime = lisp_effect::ScratchControlRuntime::new(
+            Arc::clone(&self.state),
+            self.graph.effect_descriptors.clone(),
+            self.graph.instrument_descriptors.clone(),
+            track,
+            cursor_step,
+        );
+        if !self.editor.scratch_buffer.trim().is_empty() {
+            runtime.eval(&self.editor.scratch_buffer)?;
+        }
+        self.editor.scratch_runtime = Some(runtime);
+        Ok(())
+    }
+
     fn register_hook_from_payload(
         &mut self,
         editor: &mut LispEditor,
@@ -818,6 +843,7 @@ impl App {
         let scratch_cursor = self.editor.scratch_cursor;
         let track = self.ui.cursor_track;
         let cursor_step = self.ui.cursor_step;
+        self.sync_scratch_runtime_descriptors();
         let mut runtime = self.editor.scratch_runtime.take().unwrap_or_else(|| {
             lisp_effect::ScratchControlRuntime::new(
                 Arc::clone(&self.state),
@@ -841,6 +867,13 @@ impl App {
                 Some((name, payload)) => match name {
                     "register-hook" => self.register_hook_from_payload(editor, track, payload),
                     "clear-hooks" => Some(self.clear_control_hooks()),
+                    "sync-current-buffer" => {
+                        self.editor.scratch_buffer = editor.active_buffer().text();
+                        self.editor.scratch_cursor = editor.active_buffer().cursor;
+                        self.sync_scratch_runtime_descriptors();
+                        self.state.set_scratch_source(self.editor.scratch_buffer.clone());
+                        None
+                    }
                     _ => None,
                 },
                 None => {
@@ -851,6 +884,7 @@ impl App {
         ) {
             self.editor.scratch_buffer = text;
             self.editor.scratch_cursor = cursor;
+            self.state.set_scratch_source(self.editor.scratch_buffer.clone());
             self.editor.scratch_runtime = Some(runtime);
         }
     }

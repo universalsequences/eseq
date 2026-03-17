@@ -97,6 +97,8 @@ pub struct ProjectTrackParams {
     pub timebase: u8,
     #[serde(default)]
     pub accumulator_idx: usize,
+    #[serde(default)]
+    pub script_accumulator_name: Option<String>,
     #[serde(default = "default_accum_limit")]
     pub accum_limit: f32,
     #[serde(default)]
@@ -195,6 +197,7 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             polyphonic: value.polyphonic,
             timebase: value.timebase as u8,
             accumulator_idx: value.accumulator_idx,
+            script_accumulator_name: value.script_accumulator_name,
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
@@ -217,6 +220,7 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             polyphonic: value.polyphonic,
             timebase: Timebase::from_index(value.timebase as u32),
             accumulator_idx: value.accumulator_idx,
+            script_accumulator_name: value.script_accumulator_name,
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
@@ -763,6 +767,7 @@ mod tests {
                         polyphonic: true,
                         timebase: Timebase::Sixteenth as u8,
                         accumulator_idx: 1,
+                        script_accumulator_name: None,
                         accum_limit: 24.0,
                         accum_mode: 2,
                         fts_scale: 0,
@@ -780,6 +785,7 @@ mod tests {
                         polyphonic: false,
                         timebase: Timebase::Eighth as u8,
                         accumulator_idx: 0,
+                        script_accumulator_name: None,
                         accum_limit: 48.0,
                         accum_mode: 0,
                         fts_scale: 0,

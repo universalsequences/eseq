@@ -451,6 +451,10 @@ impl App {
             .pattern
             .current_pattern
             .store(current_pattern as u32, Ordering::Relaxed);
+        self.state
+            .transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
         self.state.transport.bpm.store(bpm, Ordering::Relaxed);
         self.state
             .transport
@@ -503,7 +507,12 @@ impl App {
         self.editor.scratch_buffer = scratch.buffer;
         self.editor.scratch_cursor = (scratch.cursor_row, scratch.cursor_col);
         self.editor.scratch_runtime = None;
+        self.state.set_scratch_source(self.editor.scratch_buffer.clone());
         self.clear_control_hooks();
+        if let Err(error) = self.rebuild_scratch_runtime_from_buffer() {
+            self.editor.status_message =
+                Some((format!("Scratch eval error: {error}"), Instant::now()));
+        }
         let status = if pending.fallback_samples > 0 {
             format!(
                 "Opened project '{}' with {} fallback sample{}",
@@ -586,13 +595,27 @@ impl App {
             }
         }
 
+        let crate::project::ProjectPattern {
+            track_bits,
+            step_data,
+            track_params,
+            effect_slots,
+            instrument_slots,
+            instrument_base_note_offsets,
+            track_sound_states,
+            chord_snapshots,
+            timebase_plock_snapshots,
+            instrument_types: _,
+            sample_paths: _,
+            sample_names: _,
+        } = pattern;
+
         Ok((
             PatternSnapshot {
-                track_bits: pattern.track_bits,
-                step_data: pattern.step_data,
-                track_params: pattern.track_params.into_iter().map(Into::into).collect(),
-                effect_slots: pattern
-                    .effect_slots
+                track_bits,
+                step_data,
+                track_params: track_params.into_iter().map(Into::into).collect(),
+                effect_slots: effect_slots
                     .into_iter()
                     .enumerate()
                     .map(|(track_idx, slots)| {
@@ -608,20 +631,35 @@ impl App {
                             .collect()
                     })
                     .collect(),
-                instrument_slots: pattern
-                    .instrument_slots
-                    .into_iter()
-                    .enumerate()
-                    .map(|(track_idx, slot)| {
+                instrument_slots: (0..num_tracks)
+                    .map(|track_idx| {
                         let node_id = self.state.pattern.instrument_slots[track_idx]
                             .node_id
                             .load(Ordering::Relaxed);
-                        slot.into_snapshot_with_node_id(node_id)
+                        if self.is_sampler_track(track_idx) {
+                            crate::effects::EffectSlotSnapshot::new_empty()
+                        } else {
+                            let slot = instrument_slots
+                                .get(track_idx)
+                                .cloned()
+                                .unwrap_or_else(|| crate::project::ProjectEffectSlot {
+                                    num_params: 0,
+                                    defaults: Vec::new(),
+                                    plocks: vec![Vec::new(); MAX_STEPS],
+                                    param_node_indices: Vec::new(),
+                                });
+                            if slot.num_params == 0 {
+                                crate::effects::EffectSlotSnapshot::capture(
+                                    &self.state.pattern.instrument_slots[track_idx],
+                                )
+                            } else {
+                                slot.into_snapshot_with_node_id(node_id)
+                            }
+                        }
                     })
                     .collect(),
-                instrument_base_note_offsets: pattern.instrument_base_note_offsets,
-                track_sound_states: pattern
-                    .track_sound_states
+                instrument_base_note_offsets,
+                track_sound_states: track_sound_states
                     .into_iter()
                     .enumerate()
                     .map(|(track_idx, sound)| {
@@ -634,13 +672,11 @@ impl App {
                     })
                     .collect(),
                 sample_ids,
-                chord_snapshots: pattern
-                    .chord_snapshots
+                chord_snapshots: chord_snapshots
                     .into_iter()
                     .map(chord_snapshot_from_steps)
                     .collect(),
-                timebase_plock_snapshots: pattern
-                    .timebase_plock_snapshots
+                timebase_plock_snapshots: timebase_plock_snapshots
                     .into_iter()
                     .map(|steps| {
                         let mut snapshot = [None; MAX_STEPS];
@@ -650,11 +686,7 @@ impl App {
                         snapshot
                     })
                     .collect(),
-                instrument_types: pattern
-                    .instrument_types
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
+                instrument_types: self.graph.track_instrument_types.clone(),
             },
             fallback_count,
         ))

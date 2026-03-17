@@ -743,18 +743,8 @@ fn draw_bars(frame: &mut Frame, app: &App, area: Rect) {
         let fg = cursor_pulse_fg();
         let bg = cursor_pulse_bg();
         let border_style = Style::default().fg(fg).bg(bg);
-        // Top cap
-        frame.render_widget(
-            Paragraph::new("\u{2594}\u{2594}\u{2594}").style(border_style),
-            Rect::new(col_x, area.y, COL_WIDTH, 1),
-        );
-        // Bottom cap
-        frame.render_widget(
-            Paragraph::new("\u{2581}\u{2581}\u{2581}").style(border_style),
-            Rect::new(col_x, area.y + (BAR_HEIGHT - 1) as u16, COL_WIDTH, 1),
-        );
-        // Left/right │ for middle rows
-        for mid in 1..(BAR_HEIGHT as u16 - 1) {
+        // Side rails keep the cursor visible without stealing height from the bar fill.
+        for mid in 0..BAR_HEIGHT as u16 {
             let y = area.y + mid;
             frame.render_widget(
                 Paragraph::new("\u{2502}").style(border_style),

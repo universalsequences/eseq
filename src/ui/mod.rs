@@ -4,12 +4,15 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::agent::actions::{AgentAppAction, AgentSessionContext};
+use crate::agent::actions::{
+    AgentAppAction, AgentInstrumentParamSchema, AgentInstrumentPresetDraft,
+    AgentInstrumentPresetSchema, AgentSessionContext,
+};
 use crate::agent::network::{AgentTurnError, AgentTurnResult};
 use crate::agent::protocol::{AgentToolRuntime, ToolCallOutcome};
 use crate::agent::providers::{AgentMessage, AgentMessageRole, AgentProviderState};
 use crate::audiograph::LiveGraphPtr;
-use crate::effects::EffectDescriptor;
+use crate::effects::{EffectDescriptor, ParamKind, ParamScaling};
 use crate::lisp_effect::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
@@ -35,6 +38,53 @@ pub use draw::draw;
 
 const BAR_HEIGHT: usize = 8;
 const COL_WIDTH: u16 = 3;
+
+fn param_unit(param: &crate::effects::ParamDescriptor) -> Option<String> {
+    match &param.kind {
+        ParamKind::Continuous { unit } => unit.clone(),
+        _ => None,
+    }
+}
+
+fn param_enum_labels(param: &crate::effects::ParamDescriptor) -> Vec<String> {
+    match &param.kind {
+        ParamKind::Enum { labels } => labels.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn param_scaling(param: &crate::effects::ParamDescriptor) -> String {
+    match param.scaling {
+        ParamScaling::Linear => "linear".to_string(),
+        ParamScaling::Exponential => "exponential".to_string(),
+    }
+}
+
+fn validate_runtime_preset_value(
+    preset_name: &str,
+    param_name: &str,
+    value: f32,
+    param_desc: &crate::effects::ParamDescriptor,
+) -> Result<(), String> {
+    if value < param_desc.min || value > param_desc.max {
+        return Err(format!(
+            "Preset '{}' param '{}'={} is outside the allowed range [{}, {}].",
+            preset_name, param_name, value, param_desc.min, param_desc.max
+        ));
+    }
+    if let ParamKind::Enum { labels } = &param_desc.kind {
+        let rounded = value.round();
+        if (value - rounded).abs() > 0.0001 {
+            return Err(format!(
+                "Preset '{}' param '{}' must be an integer enum index between 0 and {}.",
+                preset_name,
+                param_name,
+                labels.len().saturating_sub(1)
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum EffectTab {
@@ -211,9 +261,10 @@ impl EngineRegistry {
 
 pub struct EngineNodeIds {
     pub synth_ids: Vec<i32>,
+    pub synth_outputs: usize,
     pub gatepitch_ids: Vec<i32>,
     pub modulator_ids: Vec<i32>,
-    pub route_gain_ids: Vec<Vec<i32>>,
+    pub route_gain_ids: Vec<Vec<[i32; 2]>>,
 }
 
 #[derive(Clone, Copy)]
@@ -392,7 +443,8 @@ pub struct LayoutRects {
 #[allow(dead_code)]
 pub struct TrackNodeIds {
     pub sampler_ids: Vec<i32>, // up to MAX_VOICES
-    pub voice_sum_id: i32,     // mono voice sum before panning
+    pub voice_sum_id: i32,
+    pub voice_sum_r_id: i32,
     pub pan_id: i32,
     pub filter_id: i32,
     pub delay_id: i32,
@@ -463,6 +515,9 @@ pub struct UiState {
     /// Step clipboard: list of (relative offset from anchor, snapshot) pairs.
     pub step_clipboard: Option<Vec<(usize, StepSnapshot)>>,
     pub master_recording: bool,
+    /// Whether the sidebar search/filter bar has keyboard focus.
+    /// When false, char keys are not consumed by the filter so armed tracks can play.
+    pub sidebar_search_focused: bool,
 }
 
 pub struct App {
@@ -574,6 +629,7 @@ impl App {
                 param_mouse_drag: None,
                 step_clipboard: None,
                 master_recording: false,
+                sidebar_search_focused: false,
             },
             editor: EditorState {
                 pending_editor: None,
@@ -695,6 +751,7 @@ impl App {
     pub(super) fn focus_sidebar_sounds(&mut self) {
         self.ui.sidebar_tab = SidebarTab::Sounds;
         self.ui.focused_region = Region::Sidebar;
+        self.ui.sidebar_search_focused = true;
     }
 
     pub(super) fn selected_agent_provider(
@@ -783,7 +840,7 @@ impl App {
     }
 
     fn current_agent_system_prompt(&self) -> String {
-        "You help design DGenLisp instruments and effects for this sequencer. Prefer using tools instead of pasting full code into chat. Use create_instrument_track to make new synth/instrument tracks. Use read_current_instrument_source before iterating on an existing custom synth when you need the current code. Use update_current_instrument to replace the current custom instrument track in place. For effects, use apply_effect_to_current_track only when the user wants a brand new effect added to the chain. Use read_current_effect_source and update_current_effect when the user is asking to tweak, refine, or iterate on the currently selected custom effect. If no current track exists for an effect, tell the user to create a track first. Be concise and action-oriented.\n\nDGenLisp instrument rules:\n- Instrument definitions must use the actual local DGenLisp instrument syntax used by examples in this repo.\n- Instrument params must follow the sequencer's modulation metadata rules.\n- Any instrument param that can be modulation-targeted must declare a valid @mod-mode.\n- If the patch declares modulatable params, it must also declare at least one input marked with @modulator, following the style used by local examples.\n- If the instrument does not need modulation inputs, do not mark params as modulation-targetable.\n- When adding or changing params, preserve the modulation annotation style used by existing local instruments.\n- If you are unsure about instrument param/modulation structure or instrument declaration syntax, inspect local examples or the current instrument source first.\n\nDGenLisp effect rules:\n- Effects do not use synth-style modulators.\n- Do not declare @modulator inputs or synth-style modulation metadata in effects.\n- The only modulation-like routing allowed in effects is sidechaining, following the local effect examples and manifest conventions.\n- If the user asks to change an existing effect, prefer replacing the selected custom effect instead of adding a second effect.\n- If generated code fails to compile or reload, revise the code to satisfy the instrument/effect rules instead of asking the user to fix it manually.".to_string()
+        "You help design DGenLisp instruments and effects for this sequencer. Prefer using tools instead of pasting full code into chat. Use create_instrument_track to make new synth/instrument tracks. Use read_current_instrument_source before iterating on an existing custom synth when you need the current code. Use update_current_instrument to replace the current custom instrument track in place. When the user asks for presets, inspect_current_instrument_preset_schema before creating them, then use create_current_instrument_presets to save one or more named presets for the current custom instrument. For effects, use apply_effect_to_current_track only when the user wants a brand new effect added to the chain. Use read_current_effect_source and update_current_effect when the user is asking to tweak, refine, or iterate on the currently selected custom effect. If no current track exists for an effect, tell the user to create a track first. Be concise and action-oriented.\n\nDGenLisp instrument rules:\n- Instrument definitions must use the actual local DGenLisp instrument syntax used by examples in this repo.\n- Instrument params must follow the sequencer's modulation metadata rules.\n- Any instrument param that can be modulation-targeted must declare a valid @mod-mode.\n- If the patch declares modulatable params, it must also declare at least one input marked with @modulator, following the style used by local examples.\n- If the instrument does not need modulation inputs, do not mark params as modulation-targetable.\n- When adding or changing params, preserve the modulation annotation style used by existing local instruments.\n- If you are unsure about instrument param/modulation structure or instrument declaration syntax, inspect local examples or the current instrument source first.\n- For preset generation, use exact runtime parameter names from inspect_current_instrument_preset_schema and stay within the declared ranges.\n\nDGenLisp effect rules:\n- Effects do not use synth-style modulators.\n- Do not declare @modulator inputs or synth-style modulation metadata in effects.\n- The only modulation-like routing allowed in effects is sidechaining, following the local effect examples and manifest conventions.\n- If the user asks to change an existing effect, prefer replacing the selected custom effect instead of adding a second effect.\n- If generated code fails to compile or reload, revise the code to satisfy the instrument/effect rules instead of asking the user to fix it manually.".to_string()
     }
 
     fn current_agent_session_context(&self) -> AgentSessionContext {
@@ -817,6 +874,10 @@ impl App {
         let current_effect_source = current_effect_name
             .as_deref()
             .and_then(|name| crate::lisp_effect::load_effect_source(name).ok());
+        let current_instrument_preset_schema = self.current_agent_instrument_preset_schema(
+            current_track_index,
+            current_instrument_name.as_deref(),
+        );
         AgentSessionContext {
             has_tracks: !self.tracks.is_empty(),
             current_track_name,
@@ -829,6 +890,7 @@ impl App {
             can_update_current_instrument: current_instrument_source.is_some(),
             current_instrument_name,
             current_instrument_source,
+            current_instrument_preset_schema,
         }
     }
 
@@ -1124,7 +1186,137 @@ impl App {
                 }
                 Ok(format!("Updated current instrument track to '{}'.", name))
             }
+            AgentAppAction::SaveCurrentInstrumentPresets {
+                instrument_name,
+                presets,
+            } => self.save_agent_instrument_presets(&instrument_name, &presets),
         }
+    }
+
+    fn current_agent_instrument_preset_schema(
+        &self,
+        current_track_index: Option<usize>,
+        current_instrument_name: Option<&str>,
+    ) -> Option<AgentInstrumentPresetSchema> {
+        let track = current_track_index?;
+        let instrument_name = current_instrument_name?;
+        let desc = self.graph.instrument_descriptors.get(track)?;
+        let slot = self.state.pattern.instrument_slots.get(track)?;
+        let existing_presets = crate::lisp_effect::load_instrument_presets(instrument_name)
+            .map(|presets| presets.into_iter().map(|preset| preset.name).collect())
+            .unwrap_or_default();
+        let synth_indices = self.synth_param_indices(track);
+        let mod_indices = self.mod_param_indices(track);
+        let source_indices = self.source_param_actual_indices(track);
+
+        let mut params = Vec::new();
+        for (group, indices) in [
+            ("synth", synth_indices),
+            ("mod", mod_indices),
+            ("source", source_indices),
+        ] {
+            for idx in indices {
+                let Some(param) = desc.params.get(idx) else {
+                    continue;
+                };
+                params.push(AgentInstrumentParamSchema {
+                    name: param.name.clone(),
+                    group: group.to_string(),
+                    min: param.min,
+                    max: param.max,
+                    default: param.default,
+                    current_value: Some(slot.defaults.get(idx)),
+                    unit: param_unit(param),
+                    enum_labels: param_enum_labels(param),
+                    scaling: param_scaling(param),
+                });
+            }
+        }
+
+        Some(AgentInstrumentPresetSchema {
+            instrument_name: instrument_name.to_string(),
+            source_file: Some(format!("instruments/{instrument_name}.lisp")),
+            base_note_offset: self.instrument_base_note_offset(track),
+            existing_presets,
+            params,
+        })
+    }
+
+    fn save_agent_instrument_presets(
+        &mut self,
+        instrument_name: &str,
+        drafts: &[AgentInstrumentPresetDraft],
+    ) -> Result<String, String> {
+        let current_name = self
+            .current_custom_instrument_name()
+            .ok_or_else(|| "No current custom instrument track is selected.".to_string())?;
+        if current_name != instrument_name {
+            return Err(format!(
+                "Current custom instrument is '{}', but the queued presets target '{}'. Re-select the intended instrument and try again.",
+                current_name, instrument_name
+            ));
+        }
+        let track = self.ui.cursor_track;
+        let desc = self
+            .current_instrument_descriptor()
+            .ok_or_else(|| "No current instrument descriptor is available.".to_string())?;
+        let existing = crate::lisp_effect::load_instrument_presets(instrument_name)
+            .map_err(|error| format!("Failed to load preset bank for '{}': {error}", instrument_name))?;
+        let mut presets_by_name = existing
+            .into_iter()
+            .map(|preset| (preset.name.clone(), preset))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        for draft in drafts {
+            let mut params = std::collections::BTreeMap::new();
+            for (idx, param) in desc.params.iter().enumerate() {
+                params.insert(param.name.clone(), self.state.pattern.instrument_slots[track].defaults.get(idx));
+            }
+            for (param_name, value) in &draft.params {
+                let (idx, param_desc) = desc
+                    .params
+                    .iter()
+                    .enumerate()
+                    .find(|(_, param)| param.name == *param_name)
+                    .ok_or_else(|| {
+                        format!(
+                            "Preset '{}' references unknown parameter '{}'.",
+                            draft.name, param_name
+                        )
+                    })?;
+                validate_runtime_preset_value(&draft.name, param_name, *value, param_desc)?;
+                let _ = idx;
+                params.insert(param_name.clone(), *value);
+            }
+            let preset = crate::lisp_effect::InstrumentPreset {
+                id: draft.name.clone(),
+                name: draft.name.clone(),
+                base_note_offset: draft
+                    .base_note_offset
+                    .unwrap_or_else(|| self.instrument_base_note_offset(track)),
+                params,
+            };
+            presets_by_name.insert(draft.name.clone(), preset);
+        }
+
+        let mut presets = presets_by_name.into_values().collect::<Vec<_>>();
+        presets.sort_by(|a, b| a.name.cmp(&b.name));
+        crate::lisp_effect::save_instrument_presets(instrument_name, &presets).map_err(|error| {
+            format!(
+                "Failed to save preset bank for '{}': {error}",
+                instrument_name
+            )
+        })?;
+        Ok(format!(
+            "Saved {} preset(s) for '{}': {}.",
+            drafts.len(),
+            instrument_name,
+            drafts
+                .iter()
+                .map(|preset| preset.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
     }
 
     fn restore_instrument_source(

@@ -359,6 +359,7 @@ mod tests {
                 current_instrument_name: None,
                 current_instrument_source: None,
                 can_update_current_instrument: false,
+                current_instrument_preset_schema: None,
             },
         };
         let payload = build_openai_responses_payload(&request);
@@ -392,6 +393,7 @@ mod tests {
                 current_instrument_name: None,
                 current_instrument_source: None,
                 can_update_current_instrument: false,
+                current_instrument_preset_schema: None,
             },
         };
         let payload = build_gemini_generate_content_payload(&request);

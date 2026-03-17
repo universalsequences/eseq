@@ -17,6 +17,15 @@ fn gains_for(volume: f32, pan: f32) -> (f32, f32) {
     (volume.max(0.0) * angle.cos(), volume.max(0.0) * angle.sin())
 }
 
+fn balance_gains_for(volume: f32, pan: f32) -> (f32, f32) {
+    let pan = pan.clamp(-1.0, 1.0);
+    if pan >= 0.0 {
+        (volume.max(0.0) * (1.0 - pan), volume.max(0.0))
+    } else {
+        (volume.max(0.0), volume.max(0.0) * (1.0 + pan))
+    }
+}
+
 unsafe extern "C" fn stereo_panner_init(
     state: *mut c_void,
     sample_rate: c_int,
@@ -43,21 +52,22 @@ unsafe extern "C" fn stereo_panner_process(
     let volume = *s.add(STATE_VOLUME);
     let pan = *s.add(STATE_PAN);
     let sample_rate = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
-    let (target_l, target_r) = gains_for(volume, pan);
     let mut smooth_l = *s.add(STATE_SMOOTH_L);
     let mut smooth_r = *s.add(STATE_SMOOTH_R);
     let smooth_coeff = 1.0 - (-2.0 * std::f32::consts::PI * 60.0 / sample_rate).exp();
 
     let in0 = *inp.add(0);
+    let in1 = *inp.add(1);
     let out0 = *out.add(0);
     let out1 = *out.add(1);
+
+    let (target_l, target_r) = balance_gains_for(volume, pan);
 
     for i in 0..nframes as usize {
         smooth_l += smooth_coeff * (target_l - smooth_l);
         smooth_r += smooth_coeff * (target_r - smooth_r);
-        let input = *in0.add(i);
-        *out0.add(i) = input * smooth_l;
-        *out1.add(i) = input * smooth_r;
+        *out0.add(i) = *in0.add(i) * smooth_l;
+        *out1.add(i) = *in1.add(i) * smooth_r;
     }
 
     *s.add(STATE_SMOOTH_L) = smooth_l;

@@ -1,0 +1,33 @@
+
+sequencer caught fatal signal 11 (SIGSEGV)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 11 (SIGSEGV)
+crash log: sequencer-crash.log
+stack trace:
+0   sequencer                           0x0000000100cd11d4 _ZN9sequencer13crash_handler14signal_handler17h072aa4ab799fa53cE + 484
+1   libsystem_platform.dylib            0x0000000192f6b744 _sigtramp + 56
+2   instrument_0.dylib                  0x0000000109e6c0f0 process + 15244
+3   sequencer                           0x0000000100d3013c _ZN9sequencer11lisp_effect35dgenlisp_instrument_wrapper_process17h4b4d655cfc6dedd0E + 1276
+4   sequencer                           0x0000000100edeaa4 bind_and_run_live + 400
+5   sequencer                           0x0000000100edefa0 process_live_block + 1108
+6   sequencer                           0x0000000100edf568 process_next_block + 568
+7   sequencer                           0x0000000100c45cf4 _ZN9sequencer5audio12render_chunk17h50ab132fc138ad4dE + 176
+8   sequencer                           0x0000000100c48ad0 _ZN9sequencer5audio14audio_callback17h8824b5b252a61c21E + 5680
+9   sequencer                           0x0000000100e18de4 _ZN9sequencer5audio19build_output_stream28_$u7b$$u7b$closure$u7d$$u7d$17h6223b177b8272ae7E + 40
+10  sequencer                           0x0000000100cbd67c _ZN4cpal6traits11DeviceTrait19build_output_stream28_$u7b$$u7b$closure$u7d$$u7d$17h1896c5deec8244a1E + 116
+11  sequencer                           0x0000000100cb8690 _ZN4cpal4host9coreaudio5macos6Device23build_output_stream_raw28_$u7b$$u7b$closure$u7d$$u7d$17h3107f4bf3df7f66dE + 740
+12  sequencer                           0x0000000100c3ff60 _ZN9coreaudio10audio_unit15render_callback50_$LT$impl$u20$coreaudio..audio_unit..AudioUnit$GT$19set_render_callback28_$u7b$$u7b$closure$u7d$$u7d$17h4a2e2d0fe5e4c0edE + 356
+13  sequencer                           0x00000001010a7b78 _ZN9coreaudio10audio_unit15render_callback10input_proc17h7169fc033b8d64f3E + 212
+14  CoreAudio                           0x00000001092eb024 CoreAudio + 12324
+15  CoreAudio                           0x00000001092eac60 CoreAudio + 11360
+16  CoreAudio                           0x00000001093f78bc AUNotQuiteSoSimpleTimeFactory + 33488
+17  CoreAudio                           0x00000001092f5da4 AUGenericOutputFactory + 39644
+18  CoreAudio                           0x0000000196278c90 _ZN19HALC_ProxyIOContext10IOWorkLoopEv + 10588
+19  CoreAudio                           0x0000000196275c8c ___ZN19HALC_ProxyIOContextC2Ejj_block_invoke + 172
+20  CoreAudio                           0x0000000196443710 _ZN13HALC_IOThread5EntryEPv + 88
+21  libsystem_pthread.dylib             0x0000000192f61c08 _pthread_start + 136
+22  libsystem_pthread.dylib             0x0000000192f5cba8 thread_start + 8
+
+

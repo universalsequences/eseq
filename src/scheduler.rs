@@ -9,6 +9,7 @@ use crate::accumulator::{
     apply_limit_mode, AccumMode, AccumulatorRuntimeState, ResolvedStep, StepAction,
     ACCUMULATOR_REGISTRY,
 };
+use crate::lisp_effect;
 use crate::scheduled_event::{
     ScheduledChordData, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
@@ -73,6 +74,33 @@ impl SnapshotSequencerClock {
         self.was_playing = false;
         for track in &mut self.track_clocks {
             track.last_local_step = u32::MAX;
+        }
+    }
+
+    fn seek_to_rendered_position(
+        &mut self,
+        snapshot: &SequencerSnapshot,
+        rendered_sample: u64,
+        scheduled_until_sample: u64,
+    ) {
+        let bpm = snapshot.transport.bpm as f64;
+        let beats_per_sample = bpm / (self.sample_rate * 60.0);
+        let ahead_samples = scheduled_until_sample.saturating_sub(rendered_sample) as f64;
+        self.total_beats = (self.total_beats - ahead_samples * beats_per_sample).max(0.0);
+        self.was_playing = snapshot.transport.playing;
+
+        let num_tracks = snapshot.transport.num_tracks;
+        for t in 0..num_tracks {
+            self.precompute_boundaries(snapshot, t);
+            let ns = snapshot.tracks[t].params.num_steps;
+            let tc = &self.track_clocks[t];
+            let pos_in_cycle = self.total_beats % tc.cycle_beats;
+            self.track_clocks[t].last_local_step = Self::derive_local_step(tc, pos_in_cycle, ns)
+                .map(|step| step as u32)
+                .unwrap_or(u32::MAX);
+        }
+        for t in num_tracks..MAX_TRACKS {
+            self.track_clocks[t].last_local_step = u32::MAX;
         }
     }
 
@@ -352,12 +380,33 @@ pub fn spawn_scheduler_thread(
             let mut accumulator_states =
                 [AccumulatorRuntimeState::default(); MAX_TRACKS];
             let mut pending_accum_reset = [false; MAX_TRACKS];
+            let mut scratch_source_version = u64::MAX;
+            let mut scratch_runtime = None;
 
             loop {
                 let snapshot = state.latest_scheduler_snapshot();
                 let playing = snapshot.transport.playing;
                 let pattern = snapshot.transport.current_pattern;
+                let pattern_epoch = snapshot.transport.pattern_epoch;
                 let rendered = rendered_samples.load(Ordering::Acquire);
+                let latest_scratch_source_version = state.scratch_source_version();
+                let (reset_all, reset_tracks) = state.take_accumulator_reset_requests();
+
+                if latest_scratch_source_version != scratch_source_version {
+                    let source = state.scratch_source();
+                    if source.trim().is_empty() {
+                        scratch_runtime = None;
+                    } else {
+                        let mut runtime =
+                            lisp_effect::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
+                        if runtime.eval(&source).is_ok() {
+                            scratch_runtime = Some(runtime);
+                        } else {
+                            scratch_runtime = None;
+                        }
+                    }
+                    scratch_source_version = latest_scratch_source_version;
+                }
 
                 if !playing {
                     queue.clear();
@@ -371,9 +420,53 @@ pub fn spawn_scheduler_thread(
                     continue;
                 }
 
-                if !last_playing || last_pattern != pattern {
+                if reset_all {
+                    for track_idx in 0..MAX_TRACKS {
+                        pending_accum_reset[track_idx] = false;
+                        if let Some(def) = ACCUMULATOR_REGISTRY
+                            .get(snapshot.tracks.get(track_idx).map(|t| t.params.accumulator_idx).unwrap_or(0))
+                        {
+                            accumulator_states[track_idx] = AccumulatorRuntimeState {
+                                value: def.reset_value,
+                                reversed: false,
+                            };
+                        } else {
+                            accumulator_states[track_idx] = AccumulatorRuntimeState::default();
+                        }
+                    }
+                }
+                for track_idx in 0..MAX_TRACKS {
+                    if !reset_tracks[track_idx] {
+                        continue;
+                    }
+                    pending_accum_reset[track_idx] = false;
+                    if let Some(def) = ACCUMULATOR_REGISTRY
+                        .get(snapshot.tracks.get(track_idx).map(|t| t.params.accumulator_idx).unwrap_or(0))
+                    {
+                        accumulator_states[track_idx] = AccumulatorRuntimeState {
+                            value: def.reset_value,
+                            reversed: false,
+                        };
+                    } else {
+                        accumulator_states[track_idx] = AccumulatorRuntimeState::default();
+                    }
+                }
+
+                if !last_playing {
                     queue.clear();
                     clock.reset();
+                    scheduled_until_sample = rendered;
+                    pending_accum_reset = [true; MAX_TRACKS];
+                } else if last_pattern != pattern {
+                    // Pattern switches should replace future scheduled content without
+                    // disturbing the current musical phase.
+                    let previous_scheduled_until = scheduled_until_sample;
+                    queue.clear();
+                    clock.seek_to_rendered_position(
+                        &snapshot,
+                        rendered,
+                        previous_scheduled_until,
+                    );
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                 }
@@ -418,7 +511,7 @@ pub fn spawn_scheduler_thread(
                         }
 
                         let step_snapshot = &track.steps[trigger.step];
-                        let resolved = ResolvedStep {
+                        let mut resolved = ResolvedStep {
                             duration: step_snapshot.params[StepParam::Duration.index()],
                             velocity: step_snapshot.params[StepParam::Velocity.index()],
                             speed: step_snapshot.params[StepParam::Speed.index()],
@@ -429,6 +522,7 @@ pub fn spawn_scheduler_thread(
                             chop: step_snapshot.params[StepParam::Chop.index()],
                         };
                         let rs = &mut accumulator_states[trigger.track];
+                        let builtin_count = ACCUMULATOR_REGISTRY.len();
                         let actions = if let Some(def) =
                             ACCUMULATOR_REGISTRY.get(track.params.accumulator_idx)
                         {
@@ -441,6 +535,112 @@ pub fn spawn_scheduler_thread(
                                 &mut rs.reversed,
                             );
                             actions
+                        } else if track.params.accumulator_idx >= builtin_count {
+                            let delta = if rs.reversed {
+                                -resolved.aux_a
+                            } else {
+                                resolved.aux_a
+                            };
+                            let raw_new = rs.value + delta;
+                            rs.value = apply_limit_mode(
+                                raw_new,
+                                track.params.accum_limit,
+                                AccumMode::from_u32(track.params.accum_mode),
+                                &mut rs.reversed,
+                            );
+                            let effect_params =
+                                resolve_effect_params(&snapshot, trigger.track, trigger.step);
+                            let instrument_params =
+                                resolve_instrument_params(&snapshot, trigger.track, trigger.step);
+                            let script_idx = if let Some(runtime) = scratch_runtime.as_ref() {
+                                if let Some(name) = track.params.script_accumulator_name.as_ref() {
+                                    runtime
+                                        .accumulator_names()
+                                        .iter()
+                                        .position(|entry| entry == name)
+                                } else {
+                                    track.params.accumulator_idx.checked_sub(builtin_count)
+                                }
+                            } else {
+                                None
+                            };
+                            if let (Some(runtime), Some(script_idx)) =
+                                (scratch_runtime.as_mut(), script_idx)
+                            {
+                                runtime.set_position(trigger.track, trigger.step);
+                                if let Ok(output) = runtime.invoke_accumulator(
+                                    script_idx,
+                                    trigger.step,
+                                    rs.value,
+                                    resolved,
+                                    track.effect_slots.clone(),
+                                    track.instrument_slot.clone(),
+                                    effect_params,
+                                    instrument_params,
+                                ) {
+                                    resolved = output.resolved;
+                                    let actions = crate::accumulator::ActionBuffer::just(
+                                        StepAction::Play(resolved),
+                                    );
+                                    // Stash script-mutated params in the resolved event path below.
+                                    let script_effect_params = output.effect_params;
+                                    let script_instrument_params = output.instrument_params;
+                                    for action in actions.iter() {
+                                        let (target_track, resolved) = match *action {
+                                            StepAction::Play(resolved) => (trigger.track, resolved),
+                                            StepAction::SendToTrack { track, resolved } => {
+                                                (track, resolved)
+                                            }
+                                            StepAction::Silence => continue,
+                                        };
+                                        if target_track >= snapshot.tracks.len() {
+                                            continue;
+                                        }
+                                        let target_step = &snapshot.tracks[target_track].steps[trigger.step];
+                                        let instrument_fingerprint = instrument_sound_fingerprint(
+                                            &snapshot,
+                                            target_track,
+                                            &script_instrument_params,
+                                        );
+                                        let mut chord = ScheduledChordData {
+                                            count: target_step.chord.len().min(MAX_VOICES),
+                                            notes: [0.0; MAX_VOICES],
+                                            step_transpose: target_step.params
+                                                [StepParam::Transpose.index()],
+                                        };
+                                        for (idx, note) in
+                                            target_step.chord.iter().take(MAX_VOICES).enumerate()
+                                        {
+                                            chord.notes[idx] = *note;
+                                        }
+                                        if queue
+                                            .push(ScheduledEvent {
+                                                pattern_epoch,
+                                                sample_time,
+                                                kind: ScheduledEventKind::ResolvedTrigger {
+                                                    track: target_track,
+                                                    step: trigger.step,
+                                                    samples_per_step: trigger.samples_per_step,
+                                                    resolved,
+                                                    chord,
+                                                    effect_params: script_effect_params.clone(),
+                                                    instrument_params: script_instrument_params
+                                                        .clone(),
+                                                    instrument_fingerprint,
+                                                },
+                                            })
+                                            .is_err()
+                                        {
+                                            chunk_enqueued = false;
+                                        }
+                                    }
+                                    if !chunk_enqueued {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            }
+                            crate::accumulator::ActionBuffer::just(StepAction::Play(resolved))
                         } else {
                             crate::accumulator::ActionBuffer::just(StepAction::Play(resolved))
                         };
@@ -475,6 +675,7 @@ pub fn spawn_scheduler_thread(
 
                             if queue
                                 .push(ScheduledEvent {
+                                    pattern_epoch,
                                     sample_time,
                                     kind: ScheduledEventKind::ResolvedTrigger {
                                         track: target_track,

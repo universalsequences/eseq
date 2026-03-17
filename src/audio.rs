@@ -1,6 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
+use std::cmp::Reverse;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BinaryHeap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -16,11 +18,9 @@ use crate::sampler::{
 };
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
-    ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, TimedEvent,
 };
-use crate::sequencer::{
-    KeyboardTrigger, SequencerState, StepParam, SwingResolution, MAX_TRACKS,
-};
+use crate::sequencer::{KeyboardTrigger, SequencerState, StepParam, SwingResolution, MAX_TRACKS};
 use crate::voice::{VoicePool, MAX_VOICES};
 
 /// Per-track chop re-trigger state.
@@ -136,6 +136,8 @@ struct AudioCallbackData {
     rendered_samples: Arc<AtomicU64>,
     dropped_scheduled_events: u64,
     late_scheduled_events: u64,
+    events_heap: BinaryHeap<Reverse<TimedEvent>>,
+    event_seq: u64,
 }
 
 struct CustomVoiceSlot {
@@ -263,6 +265,12 @@ impl CustomEnginePool {
                 self.voices[i].active = false;
                 return;
             }
+        }
+    }
+
+    fn invalidate_sound_cache(&mut self) {
+        for i in 0..self.num_voices {
+            self.voices[i].fingerprint = 0;
         }
     }
 }
@@ -642,18 +650,32 @@ unsafe fn route_custom_voice_to_track(
 ) {
     let num_tracks = state.active_track_count();
     for t in 0..num_tracks {
-        let lid = state.runtime.engine_route_lids[engine_id][voice_idx][t].load(Ordering::Relaxed);
-        if lid == 0 {
+        let lid_l = state.runtime.engine_route_lids[engine_id][voice_idx][t].load(Ordering::Relaxed);
+        let lid_r = state.runtime.engine_route_lids_r[engine_id][voice_idx][t].load(Ordering::Relaxed);
+        if lid_l == 0 && lid_r == 0 {
             continue;
         }
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx: 0,
-                logical_id: lid,
-                fvalue: if t == track_idx { 1.0 } else { 0.0 },
-            },
-        );
+        let value = if t == track_idx { 1.0 } else { 0.0 };
+        if lid_l != 0 {
+            params_push_wrapper(
+                lg,
+                ParamMsg {
+                    idx: 0,
+                    logical_id: lid_l,
+                    fvalue: value,
+                },
+            );
+        }
+        if lid_r != 0 {
+            params_push_wrapper(
+                lg,
+                ParamMsg {
+                    idx: 0,
+                    logical_id: lid_r,
+                    fvalue: value,
+                },
+            );
+        }
     }
 }
 
@@ -854,11 +876,7 @@ fn fire_resolved(
     if chord_count > 0 {
         for n in 0..chord_count {
             // Apply accumulator offset using pre-FTS transpose, then FTS-quantize each note.
-            let raw = resolved_chord_transpose(
-                chord.notes[n],
-                step_transpose,
-                pre_fts_transpose,
-            );
+            let raw = resolved_chord_transpose(chord.notes[n], step_transpose, pre_fts_transpose);
             let transpose = if fts > 0 {
                 crate::scale::quantize_transpose(raw, fts)
             } else {
@@ -1281,13 +1299,16 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         let playing = data.state.transport.playing.load(Ordering::Relaxed);
         let pattern = data.state.pattern.current_pattern.load(Ordering::Relaxed);
         if (!data.last_playing && playing) || data.last_pattern != pattern {
+            // Pattern changes and fresh playback should always reapply custom instrument params
+            // even if a voice slot is being reused from an older sound state.
+            for pool in &mut data.custom_engine_pools {
+                pool.invalidate_sound_cache();
+            }
             data.pending_accum_reset = [true; MAX_TRACKS];
-        }
-        if data.last_pattern != pattern {
-            data.scheduled_events.clear();
         }
         if !playing && data.last_playing {
             data.scheduled_events.clear();
+            data.events_heap.clear();
         }
         data.last_playing = playing;
         data.last_pattern = pattern;
@@ -1418,22 +1439,40 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let mut rendered_frames = 0usize;
     while rendered_frames < nframes {
         let current_sample = block_start_sample + rendered_frames as u64;
+        let current_pattern_epoch = data.state.transport.pattern_epoch.load(Ordering::Relaxed);
 
-        while let Some(event_sample_time) = data.scheduled_events.peek_sample_time() {
-            if event_sample_time > current_sample {
+        // drain queue and add to binary heap (to sort events)
+        while let Some(event) = data.scheduled_events.pop() {
+            if event.pattern_epoch != current_pattern_epoch {
+                continue;
+            }
+            data.events_heap.push(std::cmp::Reverse(TimedEvent {
+                seq: data.event_seq,
+                sample_time: event.sample_time,
+                event,
+            }));
+            data.event_seq += 1;
+        }
+
+        while let Some(std::cmp::Reverse(event)) = data.events_heap.peek() {
+            if event.event.pattern_epoch != current_pattern_epoch {
+                let _ = data.events_heap.pop();
+                continue;
+            }
+            if event.sample_time > current_sample {
                 break;
             }
-            let event = data.scheduled_events.pop().unwrap();
+            let event = data.events_heap.pop().unwrap().0;
             if event.sample_time < current_sample {
                 data.late_scheduled_events += 1;
             }
-            dispatch_scheduled_event(data, event);
+            dispatch_scheduled_event(data, event.event);
         }
 
         let next_sample = data
-            .scheduled_events
-            .peek_sample_time()
-            .map(|sample_time| sample_time.min(block_end_sample))
+            .events_heap
+            .peek()
+            .map(|rev| rev.0.sample_time.min(block_end_sample))
             .unwrap_or(block_end_sample);
         let chunk_frames = (next_sample.saturating_sub(current_sample)) as usize;
         if chunk_frames == 0 {
@@ -1445,7 +1484,8 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         render_chunk(data, &mut output[start..end]);
         rendered_frames += chunk_frames;
     }
-    data.rendered_samples.store(block_end_sample, Ordering::Release);
+    data.rendered_samples
+        .store(block_end_sample, Ordering::Release);
 
     data.master_recorder.capture(output);
 
@@ -1569,6 +1609,8 @@ pub fn build_output_stream(
         rendered_samples: Arc::clone(&rendered_samples),
         dropped_scheduled_events: 0,
         late_scheduled_events: 0,
+        events_heap: BinaryHeap::new(),
+        event_seq: 0,
     };
     crate::scheduler::spawn_scheduler_thread(
         Arc::clone(&cb_data.state),
@@ -1740,6 +1782,20 @@ mod tests {
         let changed = instrument_sound_fingerprint(&state, 0, 5, None);
 
         assert_ne!(base, changed);
+    }
+
+    #[test]
+    fn invalidating_custom_voice_cache_clears_all_fingerprints() {
+        let mut pool = CustomEnginePool::new();
+        pool.add_voice(10);
+        pool.add_voice(20);
+        pool.voices[0].fingerprint = 123;
+        pool.voices[1].fingerprint = 456;
+
+        pool.invalidate_sound_cache();
+
+        assert_eq!(pool.voices[0].fingerprint, 0);
+        assert_eq!(pool.voices[1].fingerprint, 0);
     }
 
     #[test]

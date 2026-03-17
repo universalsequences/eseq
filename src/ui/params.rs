@@ -28,6 +28,34 @@ pub(super) enum ToolRow {
 // ── App impl: params input ──
 
 impl App {
+    fn accumulator_names(&self) -> Vec<String> {
+        let mut names = ACCUMULATOR_REGISTRY
+            .iter()
+            .map(|def| def.name.to_string())
+            .collect::<Vec<_>>();
+        if let Some(runtime) = self.editor.scratch_runtime.as_ref() {
+            names.extend(runtime.accumulator_names());
+        }
+        names
+    }
+
+    fn selected_accumulator_dropdown_index(&self, track: usize) -> usize {
+        let tp = &self.state.pattern.track_params[track];
+        if let Some(name) = tp.script_accumulator_name() {
+            let builtin_count = ACCUMULATOR_REGISTRY.len();
+            if let Some(runtime) = self.editor.scratch_runtime.as_ref() {
+                if let Some(script_idx) = runtime
+                    .accumulator_names()
+                    .iter()
+                    .position(|entry| entry == &name)
+                {
+                    return builtin_count + script_idx;
+                }
+            }
+        }
+        tp.get_accumulator_idx()
+    }
+
     pub(super) fn for_each_selected_track<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut Self, usize),
@@ -105,7 +133,8 @@ impl App {
                 ToolRow::Accum(AC_FN) => {
                     self.ui.dropdown_open = true;
                     self.ui.track_param_dropdown = true;
-                    self.ui.dropdown_cursor = tp.get_accumulator_idx();
+                    self.ui.dropdown_cursor =
+                        self.selected_accumulator_dropdown_index(self.ui.cursor_track);
                     self.ui.input_mode = InputMode::Dropdown;
                 }
                 ToolRow::Accum(AC_MODE) => {
@@ -379,7 +408,7 @@ impl App {
     fn dropdown_max_items(&self) -> usize {
         if self.ui.track_param_dropdown {
             match self.active_tool_row() {
-                ToolRow::Accum(AC_FN) => return ACCUMULATOR_REGISTRY.len(),
+                ToolRow::Accum(AC_FN) => return self.accumulator_names().len(),
                 ToolRow::Accum(AC_MODE) => return AccumMode::COUNT,
                 ToolRow::Track(TP_FTS) => {
                     return crate::scale::SCALES.len();
@@ -507,6 +536,22 @@ impl App {
                         match row {
                             AC_FN => {
                                 tp.set_accumulator_idx(app.ui.dropdown_cursor);
+                                let builtin_count = ACCUMULATOR_REGISTRY.len();
+                                if app.ui.dropdown_cursor < builtin_count {
+                                    tp.set_script_accumulator_name(None);
+                                } else {
+                                    let script_name = app
+                                        .editor
+                                        .scratch_runtime
+                                        .as_ref()
+                                        .and_then(|runtime| {
+                                            runtime
+                                                .accumulator_names()
+                                                .get(app.ui.dropdown_cursor - builtin_count)
+                                                .cloned()
+                                        });
+                                    tp.set_script_accumulator_name(script_name);
+                                }
                                 if let Some(def) = ACCUMULATOR_REGISTRY.get(app.ui.dropdown_cursor)
                                 {
                                     tp.set_accum_limit(def.default_limit);
@@ -730,16 +775,17 @@ fn draw_tools_list(frame: &mut Frame, app: &App, area: Rect, col_focused: bool) 
             None,
         ),
     ];
-    let accum_idx = tp.get_accumulator_idx();
-    let accum_name = ACCUMULATOR_REGISTRY
+    let accum_idx = app.selected_accumulator_dropdown_index(app.ui.cursor_track);
+    let accum_name = app
+        .accumulator_names()
         .get(accum_idx)
-        .map(|d| d.name)
-        .unwrap_or("Off");
+        .cloned()
+        .unwrap_or_else(|| "Off".to_string());
     let limit = tp.get_accum_limit();
     let mode = AccumMode::from_u32(tp.get_accum_mode());
 
     params.extend_from_slice(&[
-        ("acc fn", accum_name.to_string(), None),
+        ("acc fn", accum_name, None),
         ("acc lim", format!("{:.0}", limit), Some(limit / 127.0)),
         ("acc mode", mode.label().to_string(), None),
     ]);
@@ -938,7 +984,8 @@ pub(super) fn draw_track_param_dropdown(frame: &mut Frame, app: &App, area: Rect
         .saturating_sub(app.ui.tools_scroll_offset) as u16;
     match app.active_tool_row() {
         ToolRow::Accum(AC_FN) => {
-            let names: Vec<&str> = ACCUMULATOR_REGISTRY.iter().map(|d| d.name).collect();
+            let owned_names = app.accumulator_names();
+            let names: Vec<&str> = owned_names.iter().map(|name| name.as_str()).collect();
             draw_dropdown_items(frame, &names, app.ui.dropdown_cursor, area, anchor);
             return;
         }

@@ -89,6 +89,7 @@ impl PatternSnapshot {
                 polyphonic: tp.is_polyphonic(),
                 timebase: tp.get_timebase(),
                 accumulator_idx: tp.get_accumulator_idx(),
+                script_accumulator_name: tp.script_accumulator_name(),
                 accum_limit: tp.get_accum_limit(),
                 accum_mode: tp.get_accum_mode(),
                 fts_scale: tp.get_fts_scale(),
@@ -175,6 +176,7 @@ impl PatternSnapshot {
             tp.polyphonic.store(snap.polyphonic, Ordering::Relaxed);
             tp.set_timebase(snap.timebase);
             tp.set_accumulator_idx(snap.accumulator_idx);
+            tp.set_script_accumulator_name(snap.script_accumulator_name.clone());
             tp.set_accum_limit(snap.accum_limit);
             tp.set_accum_mode(snap.accum_mode);
             tp.set_fts_scale(snap.fts_scale);
@@ -303,6 +305,22 @@ impl PatternSnapshot {
         }
         self.effect_slots[track][slot_idx].sync_to_descriptor(desc, node_id);
     }
+
+    pub fn sync_instrument_slot(
+        &mut self,
+        track: usize,
+        desc: &EffectDescriptor,
+        node_id: u32,
+        instrument_type: InstrumentType,
+    ) {
+        while self.instrument_slots.len() <= track {
+            self.push_default_track(track, &[]);
+        }
+        self.instrument_slots[track].sync_to_descriptor(desc, node_id);
+        if track < self.instrument_types.len() {
+            self.instrument_types[track] = instrument_type;
+        }
+    }
 }
 
 pub fn default_empty_effect_chain() -> Vec<EffectSlotState> {
@@ -338,6 +356,7 @@ pub struct TransportState {
     pub playing: AtomicBool,
     pub bpm: AtomicU32,
     pub master_volume: AtomicU32,
+    pub pattern_epoch: AtomicU64,
     pub mod_reset_counter: AtomicU32,
     pub pending_mod_resync: AtomicBool,
     pub peak_l: AtomicU32,
@@ -365,6 +384,7 @@ pub struct RuntimeBindingState {
     pub engine_modulator_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
     pub engine_voice_counts: Vec<AtomicU32>,
     pub engine_route_lids: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
+    pub engine_route_lids_r: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
 }
 
 pub struct SequencerState {
@@ -373,6 +393,12 @@ pub struct SequencerState {
     pub runtime: RuntimeBindingState,
     scheduler_snapshot: Mutex<Arc<SequencerSnapshot>>,
     scheduler_snapshot_version: AtomicU64,
+    scratch_source: Mutex<String>,
+    scratch_source_version: AtomicU64,
+    scratch_effect_descriptors: Mutex<Vec<Vec<EffectDescriptor>>>,
+    scratch_instrument_descriptors: Mutex<Vec<EffectDescriptor>>,
+    pending_accumulator_reset_all: AtomicBool,
+    pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
 }
 
 impl SequencerState {
@@ -422,6 +448,7 @@ impl SequencerState {
                 playing: AtomicBool::new(false),
                 bpm: AtomicU32::new(DEFAULT_BPM),
                 master_volume: AtomicU32::new(1.0_f32.to_bits()),
+                pattern_epoch: AtomicU64::new(0),
                 mod_reset_counter: AtomicU32::new(0),
                 pending_mod_resync: AtomicBool::new(false),
                 peak_l: AtomicU32::new(0.0_f32.to_bits()),
@@ -460,9 +487,18 @@ impl SequencerState {
                 engine_route_lids: (0..MAX_TRACKS)
                     .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
                     .collect(),
+                engine_route_lids_r: (0..MAX_TRACKS)
+                    .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
+                    .collect(),
             },
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
+            scratch_source: Mutex::new(String::new()),
+            scratch_source_version: AtomicU64::new(0),
+            scratch_effect_descriptors: Mutex::new(Vec::new()),
+            scratch_instrument_descriptors: Mutex::new(Vec::new()),
+            pending_accumulator_reset_all: AtomicBool::new(false),
+            pending_accumulator_reset_tracks: std::array::from_fn(|_| AtomicBool::new(false)),
         };
         state.publish_scheduler_snapshot();
         state
@@ -486,6 +522,46 @@ impl SequencerState {
         self.scheduler_snapshot_version.fetch_add(1, Ordering::AcqRel);
         snapshot
     }
+    pub fn scratch_source(&self) -> String {
+        self.scratch_source.lock().unwrap().clone()
+    }
+    pub fn scratch_source_version(&self) -> u64 {
+        self.scratch_source_version.load(Ordering::Acquire)
+    }
+    pub fn set_scratch_source(&self, source: impl Into<String>) {
+        *self.scratch_source.lock().unwrap() = source.into();
+        self.scratch_source_version.fetch_add(1, Ordering::AcqRel);
+    }
+    pub fn scratch_runtime_descriptors(&self) -> (Vec<Vec<EffectDescriptor>>, Vec<EffectDescriptor>) {
+        (
+            self.scratch_effect_descriptors.lock().unwrap().clone(),
+            self.scratch_instrument_descriptors.lock().unwrap().clone(),
+        )
+    }
+    pub fn set_scratch_runtime_descriptors(
+        &self,
+        effect_descriptors: Vec<Vec<EffectDescriptor>>,
+        instrument_descriptors: Vec<EffectDescriptor>,
+    ) {
+        *self.scratch_effect_descriptors.lock().unwrap() = effect_descriptors;
+        *self.scratch_instrument_descriptors.lock().unwrap() = instrument_descriptors;
+    }
+    pub fn request_accumulator_reset(&self, track: usize) {
+        if track < MAX_TRACKS {
+            self.pending_accumulator_reset_tracks[track].store(true, Ordering::Release);
+        }
+    }
+    pub fn request_all_accumulator_resets(&self) {
+        self.pending_accumulator_reset_all.store(true, Ordering::Release);
+    }
+    pub fn take_accumulator_reset_requests(&self) -> (bool, [bool; MAX_TRACKS]) {
+        let all = self.pending_accumulator_reset_all.swap(false, Ordering::AcqRel);
+        let mut tracks = [false; MAX_TRACKS];
+        for (idx, flag) in tracks.iter_mut().enumerate() {
+            *flag = self.pending_accumulator_reset_tracks[idx].swap(false, Ordering::AcqRel);
+        }
+        (all, tracks)
+    }
     pub fn current_step(&self) -> usize {
         self.transport.playhead.load(Ordering::Relaxed) as usize
     }
@@ -497,6 +573,7 @@ impl SequencerState {
     }
     pub fn toggle_play(&self) {
         self.transport.playing.fetch_xor(true, Ordering::Relaxed);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
     }
     pub fn schedule_mod_resync(&self) {
@@ -529,6 +606,7 @@ impl SequencerState {
         self.pattern
             .current_pattern
             .store(new_idx as u32, Ordering::Relaxed);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.schedule_mod_resync();
         self.publish_scheduler_snapshot();
         Some(bank[new_idx].sample_ids.clone())
@@ -553,6 +631,7 @@ impl SequencerState {
         self.pattern
             .num_patterns
             .store(bank.len() as u32, Ordering::Relaxed);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
         new_idx
     }
@@ -579,6 +658,7 @@ impl SequencerState {
         self.pattern
             .num_patterns
             .store(bank.len() as u32, Ordering::Relaxed);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.schedule_mod_resync();
         self.publish_scheduler_snapshot();
         Some(bank[new_idx].sample_ids.clone())
@@ -1325,5 +1405,21 @@ mod tests {
 
         let snapshot = state.latest_scheduler_snapshot();
         assert_eq!(snapshot.transport.bpm, 172);
+    }
+
+    #[test]
+    fn accumulator_reset_requests_are_consumed_once() {
+        let state = SequencerState::new(2, vec![default_empty_effect_chain(), default_empty_effect_chain()]);
+
+        state.request_accumulator_reset(1);
+        state.request_all_accumulator_resets();
+
+        let (all, tracks) = state.take_accumulator_reset_requests();
+        assert!(all);
+        assert!(tracks[1]);
+
+        let (all_again, tracks_again) = state.take_accumulator_reset_requests();
+        assert!(!all_again);
+        assert!(!tracks_again[1]);
     }
 }

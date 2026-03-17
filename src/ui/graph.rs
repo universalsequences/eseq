@@ -12,6 +12,7 @@ use super::{App, EngineNodeIds, TrackNodeIds};
 
 struct TrackShell {
     voice_sum_id: i32,
+    voice_sum_r_id: i32,
     pan_id: i32,
     filter_id: i32,
     delay_id: i32,
@@ -79,7 +80,12 @@ impl GraphController<'_> {
         let (buffer_id, track_name) =
             crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         let shell = self.create_track_shell(&track_name);
-        let voices = self.build_sampler_voices(&track_name, buffer_id, shell.voice_sum_id)?;
+        let voices = self.build_sampler_voices(
+            &track_name,
+            buffer_id,
+            shell.voice_sum_id,
+            shell.voice_sum_r_id,
+        )?;
         self.finish_track_registration(TrackRegistration {
             idx,
             track_name,
@@ -112,7 +118,7 @@ impl GraphController<'_> {
 
         let shell = self.create_track_shell(name);
         self.ensure_custom_engine_runtime(engine_id, name, manifest, lib)?;
-        self.connect_engine_to_track(engine_id, idx, name, shell.voice_sum_id)?;
+        self.connect_engine_to_track(engine_id, idx, name, shell.voice_sum_id, shell.voice_sum_r_id)?;
         self.finish_track_registration(TrackRegistration {
             idx,
             track_name: name.to_string(),
@@ -219,9 +225,14 @@ impl GraphController<'_> {
 
         for engine in self.app.graph.engine_node_ids.iter_mut().flatten() {
             for routes in &engine.route_gain_ids {
-                for &route_id in routes {
-                    unsafe {
-                        crate::audiograph::delete_node(self.app.graph.lg.0, route_id);
+                for route_pair in routes {
+                    for &route_id in route_pair {
+                        if route_id <= 0 {
+                            continue;
+                        }
+                        unsafe {
+                            crate::audiograph::delete_node(self.app.graph.lg.0, route_id);
+                        }
                     }
                 }
             }
@@ -253,6 +264,7 @@ impl GraphController<'_> {
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.pan_id);
+                crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_r_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_id);
             }
         }
@@ -342,9 +354,13 @@ impl GraphController<'_> {
     }
 
     fn create_track_shell(&mut self, name: &str) -> TrackShell {
-        let sum_name = CString::new(format!("{}_sum", name)).unwrap();
+        let sum_name = CString::new(format!("{}_sum_l", name)).unwrap();
         let voice_sum_id = unsafe {
             crate::audiograph::live_add_gain(self.app.graph.lg.0, 1.0, sum_name.as_ptr())
+        };
+        let sum_r_name = CString::new(format!("{}_sum_r", name)).unwrap();
+        let voice_sum_r_id = unsafe {
+            crate::audiograph::live_add_gain(self.app.graph.lg.0, 1.0, sum_r_name.as_ptr())
         };
 
         let pan_name = CString::new(format!("{}_pan", name)).unwrap();
@@ -354,7 +370,7 @@ impl GraphController<'_> {
                 crate::stereo_panner::stereo_panner_vtable(),
                 crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
                 pan_name.as_ptr(),
-                1,
+                2,
                 2,
                 std::ptr::null(),
                 0,
@@ -396,6 +412,7 @@ impl GraphController<'_> {
 
         unsafe {
             crate::audiograph::graph_connect(self.app.graph.lg.0, voice_sum_id, 0, pan_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, voice_sum_r_id, 0, pan_id, 1);
             crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 0, filter_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 1, filter_id, 1);
             crate::audiograph::graph_connect(self.app.graph.lg.0, filter_id, 0, delay_id, 0);
@@ -427,6 +444,7 @@ impl GraphController<'_> {
 
         TrackShell {
             voice_sum_id,
+            voice_sum_r_id,
             pan_id,
             filter_id,
             delay_id,
@@ -439,6 +457,7 @@ impl GraphController<'_> {
         track_name: &str,
         buffer_id: i32,
         voice_sum_id: i32,
+        voice_sum_r_id: i32,
     ) -> Result<SamplerVoiceSetup, String> {
         let mut sampler_ids = Vec::with_capacity(MAX_VOICES);
         let mut voice_lids = Vec::with_capacity(MAX_VOICES);
@@ -453,6 +472,13 @@ impl GraphController<'_> {
                     st.node_id,
                     0,
                     voice_sum_id,
+                    0,
+                );
+                crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    st.node_id,
+                    1,
+                    voice_sum_r_id,
                     0,
                 );
             }
@@ -572,7 +598,7 @@ impl GraphController<'_> {
                     state_size,
                     synth_name.as_ptr(),
                     manifest.n_inputs as i32,
-                    1,
+                    manifest.n_outputs.max(1) as i32,
                     init_msg.as_ptr() as *const c_void,
                     init_msg_size,
                 )
@@ -661,6 +687,7 @@ impl GraphController<'_> {
 
         self.app.graph.engine_node_ids[engine_id] = Some(EngineNodeIds {
             synth_ids,
+            synth_outputs: manifest.n_outputs.max(1),
             gatepitch_ids,
             modulator_ids,
             route_gain_ids: (0..MAX_TRACKS).map(|_| Vec::new()).collect(),
@@ -690,6 +717,7 @@ impl GraphController<'_> {
         track_idx: usize,
         track_name: &str,
         voice_sum_id: i32,
+        voice_sum_r_id: i32,
     ) -> Result<(), String> {
         self.ensure_engine_slot(engine_id);
         let Some(existing_engine) = self.app.graph.engine_node_ids[engine_id].as_ref() else {
@@ -702,43 +730,87 @@ impl GraphController<'_> {
             return Ok(());
         }
         let synth_ids = existing_engine.synth_ids.clone();
+        let synth_outputs = existing_engine.synth_outputs.max(1);
 
         let mut route_ids = Vec::with_capacity(MAX_VOICES);
         for v in 0..MAX_VOICES {
-            let route_name =
-                CString::new(format!("{}_eng{}_route_{}", track_name, engine_id, v)).unwrap();
-            let route_id = unsafe {
-                crate::audiograph::live_add_gain(self.app.graph.lg.0, 0.0, route_name.as_ptr())
+            let route_l_name =
+                CString::new(format!("{}_eng{}_route_{}_l", track_name, engine_id, v)).unwrap();
+            let route_l_id = unsafe {
+                crate::audiograph::live_add_gain(self.app.graph.lg.0, 0.0, route_l_name.as_ptr())
             };
-            if route_id < 0 {
+            if route_l_id < 0 {
                 return Err(format!(
-                    "connect_engine_to_track: failed to add route gain for engine {} track {} voice {}",
+                    "connect_engine_to_track: failed to add left route gain for engine {} track {} voice {}",
                     engine_id, track_idx, v
                 ));
             }
             self.graph_connect_checked(
                 synth_ids[v],
                 0,
-                route_id,
+                route_l_id,
                 0,
                 &format!(
-                    "connect_engine_to_track engine {} track {} voice {}",
+                    "connect_engine_to_track left engine {} track {} voice {}",
                     engine_id, track_idx, v
                 ),
             )?;
             self.graph_connect_checked(
-                route_id,
+                route_l_id,
                 0,
                 voice_sum_id,
                 0,
                 &format!(
-                    "connect_engine_to_track engine {} track {} voice {}",
+                    "connect_engine_to_track left engine {} track {} voice {}",
                     engine_id, track_idx, v
                 ),
             )?;
+
+            let mut route_pair = [route_l_id, 0];
             self.app.state.runtime.engine_route_lids[engine_id][v][track_idx]
-                .store(route_id as u64, Ordering::Release);
-            route_ids.push(route_id);
+                .store(route_l_id as u64, Ordering::Release);
+
+            if synth_outputs > 1 {
+                let route_r_name =
+                    CString::new(format!("{}_eng{}_route_{}_r", track_name, engine_id, v)).unwrap();
+                let route_r_id = unsafe {
+                    crate::audiograph::live_add_gain(self.app.graph.lg.0, 0.0, route_r_name.as_ptr())
+                };
+                if route_r_id < 0 {
+                    return Err(format!(
+                        "connect_engine_to_track: failed to add right route gain for engine {} track {} voice {}",
+                        engine_id, track_idx, v
+                    ));
+                }
+                self.graph_connect_checked(
+                    synth_ids[v],
+                    1,
+                    route_r_id,
+                    0,
+                    &format!(
+                        "connect_engine_to_track right engine {} track {} voice {}",
+                        engine_id, track_idx, v
+                    ),
+                )?;
+                self.graph_connect_checked(
+                    route_r_id,
+                    0,
+                    voice_sum_r_id,
+                    0,
+                    &format!(
+                        "connect_engine_to_track right engine {} track {} voice {}",
+                        engine_id, track_idx, v
+                    ),
+                )?;
+                self.app.state.runtime.engine_route_lids_r[engine_id][v][track_idx]
+                    .store(route_r_id as u64, Ordering::Release);
+                route_pair[1] = route_r_id;
+            } else {
+                self.app.state.runtime.engine_route_lids_r[engine_id][v][track_idx]
+                    .store(0, Ordering::Release);
+            }
+
+            route_ids.push(route_pair);
         }
 
         let Some(engine) = self.app.graph.engine_node_ids[engine_id].as_mut() else {
@@ -781,18 +853,19 @@ impl GraphController<'_> {
                         4 + mod_out as i32,
                     );
                 }
-                for &route_id in engine
-                    .route_gain_ids
-                    .iter()
-                    .flat_map(|routes| routes.iter())
-                {
-                    crate::audiograph::graph_disconnect(
-                        self.app.graph.lg.0,
-                        old_synth,
-                        0,
-                        route_id,
-                        0,
-                    );
+                for route_pair in engine.route_gain_ids.iter().flat_map(|routes| routes.iter()) {
+                    for (out_idx, &route_id) in route_pair.iter().enumerate() {
+                        if route_id <= 0 {
+                            continue;
+                        }
+                        crate::audiograph::graph_disconnect(
+                            self.app.graph.lg.0,
+                            old_synth,
+                            out_idx as i32,
+                            route_id,
+                            0,
+                        );
+                    }
                 }
                 crate::audiograph::delete_node(self.app.graph.lg.0, old_synth);
             }
@@ -811,7 +884,7 @@ impl GraphController<'_> {
                     state_size,
                     synth_name.as_ptr(),
                     manifest.n_inputs as i32,
-                    1,
+                    manifest.n_outputs.max(1) as i32,
                     init_msg.as_ptr() as *const c_void,
                     init_msg_size,
                 )
@@ -851,22 +924,23 @@ impl GraphController<'_> {
                     )?;
                 }
             }
-            for &route_id in engine
-                .route_gain_ids
-                .iter()
-                .flat_map(|routes| routes.iter())
-            {
-                self.graph_connect_checked(
-                    synth_id,
-                    0,
-                    route_id,
-                    0,
-                    &format!(
-                        "rebuild_custom_engine_runtime engine {} voice {} route {}",
-                        engine_id, v, route_id
-                    ),
-                )?;
-            }
+                for route_pair in engine.route_gain_ids.iter().flat_map(|routes| routes.iter()) {
+                    for (out_idx, &route_id) in route_pair.iter().enumerate() {
+                        if route_id <= 0 || out_idx >= manifest.n_outputs.max(1) {
+                            continue;
+                        }
+                        self.graph_connect_checked(
+                            synth_id,
+                            out_idx as i32,
+                            route_id,
+                            0,
+                            &format!(
+                                "rebuild_custom_engine_runtime engine {} voice {} route {}:{}",
+                                engine_id, v, route_id, out_idx
+                            ),
+                        )?;
+                    }
+                }
 
             new_synth_ids.push(synth_id);
             self.app.state.runtime.engine_synth_node_ids[engine_id][v]
@@ -945,6 +1019,7 @@ impl GraphController<'_> {
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids,
                     voice_sum_id: shell.voice_sum_id,
+                    voice_sum_r_id: shell.voice_sum_r_id,
                     pan_id: shell.pan_id,
                     filter_id: shell.filter_id,
                     delay_id: shell.delay_id,
@@ -979,6 +1054,7 @@ impl GraphController<'_> {
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids: Vec::new(),
                     voice_sum_id: shell.voice_sum_id,
+                    voice_sum_r_id: shell.voice_sum_r_id,
                     pan_id: shell.pan_id,
                     filter_id: shell.filter_id,
                     delay_id: shell.delay_id,
@@ -1003,6 +1079,13 @@ impl GraphController<'_> {
         let mut bank = self.app.state.pattern.pattern_bank.lock().unwrap();
         for snap in bank.iter_mut() {
             snap.extend_to_tracks(idx + 1, &self.app.graph.effect_descriptors);
+            if instrument_type == InstrumentType::Custom {
+                let desc = self.app.graph.instrument_descriptors[idx].clone();
+                let node_id = self.app.state.pattern.instrument_slots[idx]
+                    .node_id
+                    .load(Ordering::Relaxed);
+                snap.sync_instrument_slot(idx, &desc, node_id, InstrumentType::Custom);
+            }
         }
         drop(bank);
         self.app.refresh_effect_sidechain_labels();

@@ -1005,6 +1005,7 @@ impl App {
                 let new_val = param_desc.clamp(current + direction * inc);
                 slot.plocks.set(step, param_idx, new_val);
             }
+            self.state.publish_scheduler_snapshot();
         } else {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
@@ -1037,6 +1038,7 @@ impl App {
                 let new_val = param_desc.clamp(current + direction * inc);
                 slot.plocks.set(step, param_idx, new_val);
             }
+            self.state.publish_scheduler_snapshot();
         } else {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
@@ -1069,6 +1071,7 @@ impl App {
                 let new_val = param_desc.clamp(current + direction * inc);
                 slot.plocks.set(step, param_idx, new_val);
             }
+            self.state.publish_scheduler_snapshot();
         } else {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
@@ -1165,6 +1168,7 @@ impl App {
                 let new_val = if current > 0.5 { 0.0 } else { 1.0 };
                 slot.plocks.set(step, param_idx, new_val);
             }
+            self.state.publish_scheduler_snapshot();
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
@@ -1188,6 +1192,7 @@ impl App {
                 let new_val = if current > 0.5 { 0.0 } else { 1.0 };
                 slot.plocks.set(step, param_idx, new_val);
             }
+            self.state.publish_scheduler_snapshot();
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
@@ -1211,6 +1216,7 @@ impl App {
                 let new_val = if current > 0.5 { 0.0 } else { 1.0 };
                 slot.plocks.set(step, param_idx, new_val);
             }
+            self.state.publish_scheduler_snapshot();
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };

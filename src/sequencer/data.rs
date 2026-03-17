@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use crate::voice::MAX_VOICES;
 
@@ -501,6 +502,7 @@ pub struct TrackParams {
     pub polyphonic: AtomicBool,
     pub timebase: AtomicU32,
     pub accumulator_idx: AtomicU32,
+    pub script_accumulator_name: Mutex<Option<String>>,
     pub accum_limit: AtomicU32,
     pub accum_mode: AtomicU32,
     pub fts_scale: AtomicU32,
@@ -521,6 +523,7 @@ impl TrackParams {
             polyphonic: AtomicBool::new(true),
             timebase: AtomicU32::new(Timebase::Sixteenth as u32),
             accumulator_idx: AtomicU32::new(0),
+            script_accumulator_name: Mutex::new(None),
             accum_limit: AtomicU32::new(48.0_f32.to_bits()),
             accum_mode: AtomicU32::new(0),
             fts_scale: AtomicU32::new(0),
@@ -627,6 +630,12 @@ impl TrackParams {
     pub fn set_accumulator_idx(&self, idx: usize) {
         self.accumulator_idx.store(idx as u32, Ordering::Relaxed);
     }
+    pub fn script_accumulator_name(&self) -> Option<String> {
+        self.script_accumulator_name.lock().unwrap().clone()
+    }
+    pub fn set_script_accumulator_name(&self, name: Option<String>) {
+        *self.script_accumulator_name.lock().unwrap() = name;
+    }
     pub fn get_accum_limit(&self) -> f32 {
         f32::from_bits(self.accum_limit.load(Ordering::Relaxed))
     }
@@ -662,6 +671,7 @@ pub struct TrackParamsSnapshot {
     pub polyphonic: bool,
     pub timebase: Timebase,
     pub accumulator_idx: usize,
+    pub script_accumulator_name: Option<String>,
     pub accum_limit: f32,
     pub accum_mode: u32,
     pub fts_scale: usize,
@@ -682,6 +692,7 @@ impl Default for TrackParamsSnapshot {
             polyphonic: false,
             timebase: Timebase::Sixteenth,
             accumulator_idx: 0,
+            script_accumulator_name: None,
             accum_limit: 48.0,
             accum_mode: 0,
             fts_scale: 0,

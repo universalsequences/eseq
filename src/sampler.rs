@@ -121,11 +121,14 @@ unsafe extern "C" fn sampler_process(
     let sample_len = desc.size as usize;
 
     let out0 = *out.add(0);
+    let out1 = *out.add(1);
     let nf = nframes as usize;
+    let channel_count = desc.channel_count.max(1) as usize;
 
     if playing <= 0.0 || sample_data.is_null() || sample_len == 0 {
         for i in 0..nf {
             *out0.add(i) = 0.0;
+            *out1.add(i) = 0.0;
         }
         return;
     }
@@ -167,11 +170,13 @@ unsafe extern "C" fn sampler_process(
         // Past end of sample data: stop
         if playhead >= sample_len as f32 || playhead < 0.0 {
             *out0.add(i) = 0.0;
+            *out1.add(i) = 0.0;
             env_phase = ENV_IDLE;
             env_level = 0.0;
             *s.add(STATE_PLAYING) = 0.0;
             for j in (i + 1)..nf {
                 *out0.add(j) = 0.0;
+                *out1.add(j) = 0.0;
             }
             break;
         }
@@ -239,8 +244,10 @@ unsafe extern "C" fn sampler_process(
                 env_phase = ENV_IDLE;
                 *s.add(STATE_PLAYING) = 0.0;
                 *out0.add(i) = 0.0;
+                *out1.add(i) = 0.0;
                 for j in (i + 1)..nf {
                     *out0.add(j) = 0.0;
+                    *out1.add(j) = 0.0;
                 }
                 break;
             }
@@ -250,19 +257,34 @@ unsafe extern "C" fn sampler_process(
 
         let idx = playhead as usize;
         let frac = playhead - idx as f32;
-        let s0 = if idx < sample_len {
-            *sample_data.add(idx)
+        let sample_index = idx * channel_count;
+        let next_sample_index = (idx + 1) * channel_count;
+        let s0_l = if idx < sample_len {
+            *sample_data.add(sample_index)
         } else {
             0.0
         };
-        let s1 = if idx + 1 < sample_len {
-            *sample_data.add(idx + 1)
+        let s1_l = if idx + 1 < sample_len {
+            *sample_data.add(next_sample_index)
         } else {
             0.0
         };
-        let sample = s0 + frac * (s1 - s0);
+        let s0_r = if channel_count > 1 && idx < sample_len {
+            *sample_data.add(sample_index + 1)
+        } else {
+            s0_l
+        };
+        let s1_r = if channel_count > 1 && idx + 1 < sample_len {
+            *sample_data.add(next_sample_index + 1)
+        } else {
+            s1_l
+        };
+        let sample_l = s0_l + frac * (s1_l - s0_l);
+        let sample_r = s0_r + frac * (s1_r - s0_r);
+        let env_amp = amplitude * env_level;
 
-        *out0.add(i) = sample * amplitude * env_level;
+        *out0.add(i) = sample_l * env_amp;
+        *out1.add(i) = sample_r * env_amp;
 
         playhead += effective_rate;
         gate_counter += 1.0; // real-time counter (1 per sample, independent of transpose/speed)
@@ -308,13 +330,28 @@ pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<(i32, Stri
             .collect(),
     };
 
-    let mono: Vec<f32> = if channels > 1 {
+    let stereo: Vec<f32> = if channels == 1 {
         samples_f32
-            .chunks(channels)
-            .map(|ch| ch.iter().sum::<f32>() / channels as f32)
+            .iter()
+            .flat_map(|&sample| [sample, sample])
             .collect()
+    } else if channels == 2 {
+        samples_f32
     } else {
         samples_f32
+            .chunks(channels)
+            .flat_map(|ch| {
+                let left = ch.iter().step_by(2).copied().sum::<f32>() / ch.iter().step_by(2).count() as f32;
+                let right = ch
+                    .iter()
+                    .skip(1)
+                    .step_by(2)
+                    .copied()
+                    .sum::<f32>()
+                    / ch.iter().skip(1).step_by(2).count().max(1) as f32;
+                [left, right]
+            })
+            .collect()
     };
 
     // Skip leading silence: scan with 64-sample RMS windows, threshold -60dB (~0.001)
@@ -323,18 +360,19 @@ pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<(i32, Stri
         const THRESHOLD: f32 = 0.001;
         let thresh_sq = THRESHOLD * THRESHOLD;
         let mut start = 0usize;
-        for chunk in mono.chunks(WINDOW) {
+        for chunk in stereo.chunks(WINDOW * 2) {
+            let frames = chunk.len() / 2;
             let sum_sq: f32 = chunk.iter().map(|s| s * s).sum();
-            if sum_sq / chunk.len() as f32 > thresh_sq {
+            if frames > 0 && sum_sq / (frames * 2) as f32 > thresh_sq {
                 break;
             }
-            start += chunk.len();
+            start += frames;
         }
-        start.min(mono.len())
+        start.min(stereo.len() / 2)
     };
-    let trimmed = &mono[skip..];
+    let trimmed = &stereo[skip * 2..];
 
-    let buffer_id = unsafe { create_buffer(lg, trimmed.len() as c_int, 1, trimmed.as_ptr()) };
+    let buffer_id = unsafe { create_buffer(lg, (trimmed.len() / 2) as c_int, 2, trimmed.as_ptr()) };
     if buffer_id < 0 {
         return Err("Failed to create buffer".to_string());
     }
@@ -364,7 +402,7 @@ pub fn create_sampler_node(
             SAMPLER_STATE_SIZE * std::mem::size_of::<f32>(),
             c_name.as_ptr(),
             0,
-            1,
+            2,
             initial_state.as_ptr() as *const c_void,
             initial_state.len() * std::mem::size_of::<f32>(),
         )

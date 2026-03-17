@@ -367,12 +367,12 @@ impl BrowserState {
         if app.effective_sidebar_mode() == SidebarMode::Presets {
             app.clamp_preset_browser();
             match code {
-                KeyCode::Char(c) => {
+                KeyCode::Char(c) if app.ui.sidebar_search_focused => {
                     app.preset_browser.filter.push(c);
                     app.preset_browser.cursor = 0;
                     app.preset_browser.scroll_offset = 0;
                 }
-                KeyCode::Backspace => {
+                KeyCode::Backspace if app.ui.sidebar_search_focused => {
                     app.preset_browser.filter.pop();
                     app.preset_browser.cursor = 0;
                     app.preset_browser.scroll_offset = 0;
@@ -390,11 +390,15 @@ impl BrowserState {
                     }
                     app.clamp_preset_browser();
                 }
-                KeyCode::Enter => app.load_selected_preset_into_track(),
+                KeyCode::Enter => {
+                    app.load_selected_preset_into_track();
+                    app.ui.sidebar_search_focused = false;
+                }
                 KeyCode::Esc => {
                     app.preset_browser.filter.clear();
                     app.preset_browser.cursor = 0;
                     app.preset_browser.scroll_offset = 0;
+                    app.ui.sidebar_search_focused = false;
                     if !app.tracks.is_empty() {
                         app.ui.sidebar_tab = SidebarTab::Tools;
                     } else {
@@ -407,12 +411,12 @@ impl BrowserState {
         }
 
         match code {
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if app.ui.sidebar_search_focused => {
                 app.browser.filter.push(c);
                 app.browser.cursor = 0;
                 app.browser.scroll_offset = 0;
             }
-            KeyCode::Backspace => {
+            KeyCode::Backspace if app.ui.sidebar_search_focused => {
                 app.browser.filter.pop();
                 app.browser.cursor = 0;
                 app.browser.scroll_offset = 0;
@@ -464,6 +468,7 @@ impl BrowserState {
                         BrowserNode::toggle_expanded(&mut app.browser.tree, &path);
                     } else {
                         app.sidebar_select_file(&path);
+                        app.ui.sidebar_search_focused = false;
                     }
                 }
             }
@@ -471,6 +476,7 @@ impl BrowserState {
                 app.browser.filter.clear();
                 app.browser.cursor = 0;
                 app.browser.scroll_offset = 0;
+                app.ui.sidebar_search_focused = false;
                 if !app.tracks.is_empty() {
                     app.ui.sidebar_tab = SidebarTab::Tools;
                     app.ui.sidebar_mode = SidebarMode::Audition;
@@ -501,6 +507,7 @@ impl BrowserState {
                     app.browser.filter.clear();
                     app.browser.scroll_offset = 0;
                     app.ui.sidebar_mode = SidebarMode::AddTrack;
+                    app.ui.sidebar_search_focused = true;
                 }
                 InstrumentType::Custom => {
                     app.editor.picker_cursor = 0;
@@ -537,7 +544,7 @@ impl BrowserState {
 }
 
 impl App {
-    fn current_custom_instrument_name(&self) -> Option<&str> {
+    pub(super) fn current_custom_instrument_name(&self) -> Option<&str> {
         if self.tracks.is_empty() || self.is_sampler_track(self.ui.cursor_track) {
             None
         } else if let Some(Some(engine_id)) = self.graph.track_engine_ids.get(self.ui.cursor_track)
@@ -1043,7 +1050,7 @@ pub(super) fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     let items = app.browser.visible_items();
     let max_visible = (inner.height as usize).saturating_sub(1); // 1 row for filter
 
-    let filter_text = if focused {
+    let filter_text = if app.ui.sidebar_search_focused {
         format!("> {}\u{2588}", app.browser.filter)
     } else {
         format!("> {}", app.browser.filter)

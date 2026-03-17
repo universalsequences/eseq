@@ -1,6 +1,36 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentInstrumentParamSchema {
+    pub name: String,
+    pub group: String,
+    pub min: f32,
+    pub max: f32,
+    pub default: f32,
+    pub current_value: Option<f32>,
+    pub unit: Option<String>,
+    pub enum_labels: Vec<String>,
+    pub scaling: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentInstrumentPresetSchema {
+    pub instrument_name: String,
+    pub source_file: Option<String>,
+    pub base_note_offset: f32,
+    pub existing_presets: Vec<String>,
+    pub params: Vec<AgentInstrumentParamSchema>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AgentInstrumentPresetDraft {
+    pub name: String,
+    pub base_note_offset: Option<f32>,
+    pub params: BTreeMap<String, f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentSessionContext {
     pub has_tracks: bool,
     pub current_track_name: Option<String>,
@@ -13,6 +43,7 @@ pub struct AgentSessionContext {
     pub current_instrument_name: Option<String>,
     pub current_instrument_source: Option<String>,
     pub can_update_current_instrument: bool,
+    pub current_instrument_preset_schema: Option<AgentInstrumentPresetSchema>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +52,10 @@ pub enum AgentAppAction {
     ApplyEffectToCurrentTrack { name: String, source: String },
     UpdateCurrentEffect { name: String, source: String },
     UpdateCurrentInstrument { name: String, source: String },
+    SaveCurrentInstrumentPresets {
+        instrument_name: String,
+        presets: Vec<AgentInstrumentPresetDraft>,
+    },
 }
 
 pub fn normalize_patch_name(raw: &str, fallback: &str) -> String {
