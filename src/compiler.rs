@@ -6,6 +6,7 @@ pub struct Chunk {
     pub constants: Vec<f64>,
     pub strings: Vec<String>, // string constants pool
     pub symbols: Vec<String>,
+    pub upvalues: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -55,7 +56,7 @@ pub enum OpCode {
     Call(usize),
     MakeFunc(usize),
     MakeClosure(usize, usize),
-    Eval,              // pop a string, eval it in the current VM context, push result
+    Eval,               // pop a string, eval it in the current VM context, push result
     PushKeyword(usize), // push Value::Keyword from strings pool
     PushSymbol(usize),  // push Value::Symbol from strings pool (quoted symbol)
     GetField(usize),    // pop a map, push map[strings[idx]]
@@ -85,11 +86,11 @@ fn extract_function_definition(
         ) if s == "def" && list.len() >= 4 => {
             Some((Some(name.to_string()), args.clone(), list[3..].to_vec()))
         }
-        (
-            Some(Expression::Symbol(s)),
-            Some(Expression::List(args)),
-            _,
-        ) if s == "lambda" && list.len() >= 3 => Some((None, args.clone(), list[2..].to_vec())),
+        (Some(Expression::Symbol(s)), Some(Expression::List(args)), _)
+            if s == "lambda" && list.len() >= 3 =>
+        {
+            Some((None, args.clone(), list[2..].to_vec()))
+        }
         _ => None,
     }
 }
@@ -287,10 +288,14 @@ impl Compiler {
             constants: vec![],
             strings: vec![],
             symbols,
+            upvalues: vec![],
         });
         self.compile_block(&body)?;
 
         let scope = self.scopes.pop().unwrap();
+        if let Some(chunk) = self.chunks.get_mut(new_chunk_idx) {
+            chunk.upvalues = scope.upvalues.clone();
+        }
         self.emit(OpCode::Return);
         self.current_chunk = previous_chunk_idx;
 
@@ -396,12 +401,13 @@ impl Compiler {
         }
 
         // (eval expr) — compile expr to produce a string, then evaluate it at runtime
-        if let (Some(Expression::Symbol(s)), Some(expr), 2) = (list.first(), list.get(1), list.len()) {
-            if s == "eval" {
-                self.compile_expression(expr)?;
-                self.emit(OpCode::Eval);
-                return Ok(());
-            }
+        if let (Some(Expression::Symbol(s)), Some(expr), 2) =
+            (list.first(), list.get(1), list.len())
+            && s == "eval"
+        {
+            self.compile_expression(expr)?;
+            self.emit(OpCode::Eval);
+            return Ok(());
         }
 
         if let Some(Expression::Symbol(s)) = list.first() {
@@ -544,6 +550,7 @@ impl Compiler {
             constants: vec![],
             strings: vec![],
             symbols: vec![],
+            upvalues: vec![],
         });
         let expressions = std::mem::take(&mut self.expressions);
         for expression in &expressions {

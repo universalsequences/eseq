@@ -7,10 +7,14 @@
   (let ((form (s-expression-at-cursor)))
     (if (= form "")
       (status "No s-expression at cursor")
-      (eval form))))
+      (let ((result (eval form)))
+        (host-command "sync-current-buffer" true)
+        result))))
 
 (def eval-buffer-command ()
-  (eval (current-buffer-text)))
+  (let ((result (eval (current-buffer-text))))
+    (host-command "sync-current-buffer" true)
+    result))
 
 (def save-current-buffer ()
   (save-buffer))

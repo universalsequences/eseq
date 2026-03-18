@@ -13,7 +13,7 @@ pub enum VMError {
     UnknownOpcode,
     StackUnderflow,
     IncorrectType,
-    UnknownVariable,
+    UnknownVariable(String),
     ExpectedFunction,
     ArityMismatch,
     ParseError,
@@ -451,6 +451,14 @@ impl VM {
         &self.global_names
     }
 
+    pub fn global_value(&self, name: &str) -> Option<Value> {
+        let idx = self.global_names.iter().position(|global| global == name)?;
+        self.globals
+            .get(idx)
+            .and_then(|value| value.as_ref())
+            .map(|value| value.borrow().clone())
+    }
+
     fn execute_from(&mut self, entry_chunk: usize) -> Result<Option<Value>, VMError> {
         self.current_chunk = entry_chunk;
         self.execute()
@@ -467,6 +475,35 @@ impl VM {
             pc: 0,
             chunk_idx: self.current_chunk,
         }
+    }
+
+    fn unknown_local(&self, frame: &Frame, idx: usize) -> VMError {
+        let name = self
+            .chunks
+            .get(frame.chunk_idx)
+            .and_then(|chunk| chunk.symbols.get(idx))
+            .cloned()
+            .unwrap_or_else(|| format!("<local:{idx}>"));
+        VMError::UnknownVariable(name)
+    }
+
+    fn unknown_upvalue(&self, frame: &Frame, idx: usize) -> VMError {
+        let name = self
+            .chunks
+            .get(frame.chunk_idx)
+            .and_then(|chunk| chunk.upvalues.get(idx))
+            .cloned()
+            .unwrap_or_else(|| format!("<upvalue:{idx}>"));
+        VMError::UnknownVariable(name)
+    }
+
+    fn unknown_global(&self, idx: usize) -> VMError {
+        let name = self
+            .global_names
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| format!("<global:{idx}>"));
+        VMError::UnknownVariable(name)
     }
 
     pub fn execute(&mut self) -> Result<Option<Value>, VMError> {
@@ -695,7 +732,7 @@ impl VM {
                             stack.push(Rc::clone(val));
                             frame.pc += 1;
                         } else {
-                            return Err(VMError::UnknownVariable);
+                            return Err(self.unknown_local(frame, idx));
                         }
                     }
                 }
@@ -711,7 +748,7 @@ impl VM {
                             stack.push(Rc::clone(val));
                             frame.pc += 1;
                         } else {
-                            return Err(VMError::UnknownVariable);
+                            return Err(self.unknown_upvalue(frame, idx));
                         }
                     }
                 }
@@ -727,7 +764,8 @@ impl VM {
                             stack.push(Rc::clone(val));
                             frame.pc += 1;
                         } else {
-                            return Err(VMError::UnknownVariable);
+                            let _ = frame;
+                            return Err(self.unknown_global(idx));
                         }
                     }
                 }

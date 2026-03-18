@@ -146,7 +146,7 @@ impl Editor {
     }
 
     pub fn active_highlight_spans(&self) -> Vec<Vec<TokenSpan>> {
-        let symbols = self.runtime.global_names().to_vec();
+        let symbols = self.runtime.completion_symbols();
         self.active_buffer()
             .lines
             .iter()
@@ -695,8 +695,8 @@ impl Editor {
             self.completion = None;
             return;
         }
-        let symbols = self.runtime.global_names().to_vec();
-        let metadata = self.runtime.symbol_metadata().clone();
+        let symbols = self.runtime.completion_symbols();
+        let metadata = self.runtime.completion_metadata();
         let previous = self
             .completion
             .as_ref()
@@ -1374,6 +1374,26 @@ mod tests {
         let completion = editor.completion_state().unwrap();
         assert_eq!(completion.selected, 8);
         assert_eq!(completion.scroll, 1);
+    }
+
+    #[test]
+    fn tab_accepts_dotted_completion_from_runtime_maps() {
+        let mut runtime = Runtime::new();
+        let mut fields = HashMap::new();
+        fields.insert(
+            "feedback".to_string(),
+            Rc::new(RefCell::new(Value::Number(0.0))),
+        );
+        runtime.set_global_value("MODUM_DELAY", Value::Map(fields));
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(MODUM_DELAY.");
+        editor.active_buffer_mut().cursor = (0, "(MODUM_DELAY.".len());
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "(MODUM_DELAY.feedback");
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event};
+use eseqlisp::frame;
 use eseqlisp::tui;
 use eseqlisp::vm::Value;
 use eseqlisp::{CompileKind, Editor, EditorConfig, HostCommand, HostEvent, Runtime};
@@ -52,7 +53,12 @@ fn main() -> std::io::Result<()> {
         process_pending_jobs(&mut editor, &host);
 
         if editor.needs_redraw() {
-            terminal.draw(|frame| tui::render(frame, &mut editor))?;
+            terminal.draw(|f| {
+                let (_, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let viewport_height = (rows as usize).saturating_sub(3);
+                let render_frame = frame::build_render_frame(&mut editor, viewport_height);
+                tui::render(f, &render_frame);
+            })?;
             editor.clear_needs_redraw();
         }
 

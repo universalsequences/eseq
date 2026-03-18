@@ -169,6 +169,38 @@ impl Runtime {
         &self.symbol_metadata
     }
 
+    pub fn completion_symbols(&self) -> Vec<String> {
+        let mut symbols = self.vm.global_names().to_vec();
+        for global in self.vm.global_names() {
+            if let Some(Value::Map(map)) = self.vm.global_value(global) {
+                let mut keys = map.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                symbols.extend(keys.into_iter().map(|key| format!("{global}.{key}")));
+            }
+        }
+        symbols.sort();
+        symbols.dedup();
+        symbols
+    }
+
+    pub fn completion_metadata(&self) -> HashMap<String, SymbolMetadata> {
+        let mut metadata = self.symbol_metadata.clone();
+        for global in self.vm.global_names() {
+            if let Some(Value::Map(map)) = self.vm.global_value(global) {
+                let mut keys = map.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                for key in keys {
+                    let label = format!("{global}.{key}");
+                    metadata.entry(label).or_insert_with(|| SymbolMetadata {
+                        signature: format!("{global}.{key}"),
+                        docs: format!("Field '{key}' on runtime map '{global}'."),
+                    });
+                }
+            }
+        }
+        metadata
+    }
+
     pub fn take_status_message(&mut self) -> Option<String> {
         self.shared.borrow_mut().status_message.take()
     }

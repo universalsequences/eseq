@@ -157,7 +157,10 @@ pub fn completion_match(
     let mut seen = HashSet::new();
     let mut items = completion_candidates(mode, runtime_symbols, buffer)
         .into_iter()
-        .filter(|item| item.label.starts_with(&prefix_lower) && item.label != prefix_lower)
+        .filter(|item| {
+            let label_lower = item.label.to_ascii_lowercase();
+            label_lower.starts_with(&prefix_lower) && label_lower != prefix_lower
+        })
         .filter(|item| seen.insert(item.label.clone()))
         .collect::<Vec<_>>();
     for item in &mut items {
@@ -417,5 +420,19 @@ mod tests {
         let item = result.items.iter().find(|item| item.label == "seq-step").unwrap();
         assert_eq!(item.signature.as_deref(), Some("(seq-step step)"));
         assert_eq!(item.docs.as_deref(), Some("Return a step snapshot."));
+    }
+
+    #[test]
+    fn completion_matches_runtime_symbols_case_insensitively() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(MODU");
+        buffer.cursor = (0, 5);
+        let result = completion_match(
+            BufferMode::ESeqLisp,
+            &buffer,
+            &[String::from("MODUM_DELAY")],
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(result.items.iter().any(|item| item.label == "MODUM_DELAY"));
     }
 }
