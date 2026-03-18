@@ -6,3 +6,31 @@ edition = "2024"
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = { version = "0.3", features = [
+    "MTLDevice",
+    "MTLCommandQueue",
+    "MTLCommandBuffer",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLTexture",
+    "MTLDrawable",
+    "MTLLibrary",
+    "MTLRenderPipeline",
+    "MTLBuffer",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
+objc2-app-kit = { version = "0.3", features = ["NSView"] }
+objc2-core-foundation = "0.3"
+objc2-core-text = { version = "0.3", features = ["CTFont", "CTFontDescriptor"] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+] }
+winit = "0.29"
+etagere = "0.2"

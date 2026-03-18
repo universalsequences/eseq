@@ -1,0 +1,137 @@
+use std::time::Duration;
+
+use crossterm::event::Event;
+
+// ── Colors ───────────────────────────────────────────────────────────────────
+
+/// Backend-agnostic color in linear RGBA (0.0–1.0).
+///
+/// Metal wants f32 RGBA natively. The ratatui backend converts to u8 on the
+/// way out. Keeping f32 here avoids precision loss when the Metal backend
+/// passes colors directly to the GPU.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Color {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
+
+impl Color {
+    pub const fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
+        Self { r, g, b, a }
+    }
+    pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
+        Self::rgba(r, g, b, 1.0)
+    }
+    pub fn from_rgb_u8(r: u8, g: u8, b: u8) -> Self {
+        Self::rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+    }
+
+    pub const WHITE: Self = Self::rgb(1.0, 1.0, 1.0);
+    pub const BLACK: Self = Self::rgb(0.0, 0.0, 0.0);
+    pub const DARK_GRAY: Self = Self::rgb(0.25, 0.25, 0.25);
+    pub const YELLOW: Self = Self::rgb(1.0, 1.0, 0.0);
+    pub const GREEN: Self = Self::rgb(0.0, 0.8, 0.0);
+    pub const CYAN: Self = Self::rgb(0.0, 0.8, 0.8);
+    pub const MAGENTA: Self = Self::rgb(0.8, 0.0, 0.8);
+    pub const LIGHT_BLUE: Self = Self::rgb(0.6, 0.8, 1.0);
+    pub const GRAY: Self = Self::rgb(0.5, 0.5, 0.5);
+}
+
+// ── Cell styling ─────────────────────────────────────────────────────────────
+
+/// Style applied to a single glyph cell.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CellStyle {
+    pub fg: Color,
+    pub bg: Option<Color>,
+    pub bold: bool,
+}
+
+impl Default for CellStyle {
+    fn default() -> Self {
+        Self {
+            fg: Color::WHITE,
+            bg: None,
+            bold: false,
+        }
+    }
+}
+
+/// One rendered cell: a single character with its visual style.
+///
+/// Both backends operate on this unit — the ratatui backend maps it to a
+/// terminal cell; the Metal backend maps it to a textured quad in the glyph
+/// atlas.
+#[derive(Clone, Debug)]
+pub struct Cell {
+    pub ch: char,
+    pub style: CellStyle,
+}
+
+impl Cell {
+    pub fn plain(ch: char) -> Self {
+        Self {
+            ch,
+            style: CellStyle::default(),
+        }
+    }
+}
+
+// ── Completion popup ──────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct CompletionEntry {
+    pub label: String,
+    pub selected: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompletionFrame {
+    /// Visible completion entries (already sliced to the scrolled window).
+    pub entries: Vec<CompletionEntry>,
+    /// Where to anchor the popup: (row, col) in visible-area coordinates.
+    pub anchor: (usize, usize),
+    /// Optional doc panel: title + body lines.
+    pub doc: Option<(String, Vec<String>)>,
+}
+
+// ── RenderFrame ───────────────────────────────────────────────────────────────
+
+/// A complete snapshot of everything a backend needs to draw one frame.
+///
+/// Built by `crate::tui::build_render_frame` from live `Editor` state and
+/// passed to whichever `Backend` is active. Backends must not mutate editor
+/// state — they only read this frame.
+pub struct RenderFrame {
+    /// Visible lines of styled cells, top-to-bottom, left-to-right.
+    pub lines: Vec<Vec<Cell>>,
+    /// Cursor position as (row, col) in visible-area coordinates, if visible.
+    pub cursor: Option<(usize, usize)>,
+    /// Buffer name shown in the title / window bar.
+    pub buffer_name: String,
+    /// True when the buffer has unsaved changes.
+    pub dirty: bool,
+    /// Status bar / minibuffer text (already formatted).
+    pub status: String,
+    /// Optional completion popup to overlay on top of the text area.
+    pub completion: Option<CompletionFrame>,
+}
+
+// ── Backend trait ─────────────────────────────────────────────────────────────
+pub enum BackendError {
+    EventPollError,
+    MetalError,
+}
+
+// For now use crossterm events — Metal will queue events and expose them via the same poll.
+pub trait Backend {
+    fn initialize(&mut self) -> Result<(), BackendError>;
+    fn teardown(&mut self) -> Result<(), BackendError>;
+    /// Returns the drawable area in (cols, rows) — used by build_render_frame
+    /// to compute the visible line range and adjust scroll.
+    fn viewport_size(&self) -> (usize, usize);
+    fn poll_event(&mut self, timeout: Duration) -> Option<Event>;
+    fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError>;
+}

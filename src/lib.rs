@@ -1,4 +1,8 @@
+pub mod backend;
 pub mod buffer;
+pub mod glyph_atlas;
+pub mod metal_backend;
+pub mod frame;
 pub mod compiler;
 pub mod editor;
 pub mod host;
@@ -47,7 +51,12 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
         }
 
         if editor.needs_redraw() {
-            terminal.draw(|frame| tui::render(frame, &mut editor))?;
+            terminal.draw(|f| {
+                let (_, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let viewport_height = (rows as usize).saturating_sub(3); // borders + status bar
+                let render_frame = frame::build_render_frame(&mut editor, viewport_height);
+                tui::render(f, &render_frame);
+            })?;
             editor.clear_needs_redraw();
         }
 
@@ -56,6 +65,39 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn run_metal() -> Result<(), backend::BackendError> {
+    use metal_backend::MetalBackend;
+    use backend::Backend;
+
+    let init_src = std::fs::read_to_string("init.lisp").unwrap_or_default();
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig { init_source: Some(init_src) });
+    let mut backend = MetalBackend::new()?;
+    backend.initialize()?;
+
+    loop {
+        let (_cols, rows) = backend.viewport_size();
+        match backend.poll_event(Duration::from_millis(16)) {
+            Some(Event::Key(key)) => editor.handle_key(key),
+            Some(Event::Resize(_, _)) => editor.mark_needs_redraw(),
+            _ => {}
+        }
+
+        if editor.needs_redraw() {
+            let render_frame = frame::build_render_frame(&mut editor, rows.saturating_sub(1));
+            backend.render(&render_frame)?;
+            editor.clear_needs_redraw();
+        }
+
+        if editor.should_quit() {
+            break;
+        }
+    }
+
+    backend.teardown()
 }
 
 pub fn run_standalone() -> io::Result<()> {
@@ -73,8 +115,10 @@ pub fn run_standalone() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Value, run_prog};
-    use crate::vm::{format_lisp_source, format_lisp_value};
+    use std::{cell::RefCell, rc::Rc};
+
+    use super::{Runtime, Value, run_prog};
+    use crate::vm::{VMError, format_lisp_source, format_lisp_value};
 
     #[test]
     fn test_basic_sum() {
@@ -117,6 +161,82 @@ mod tests {
                 "(def sq (x) (* x x)) (def make-fn (fn a) (lambda (y) (fn (+ a y)))) ((make-fn sq 2) 10)"
             ),
             Ok(Some(Value::Number(144.0)))
+        );
+    }
+
+    #[test]
+    fn test_stored_zero_arg_closure_can_be_called_across_evals() {
+        let mut runtime = Runtime::new();
+        let closure = runtime.eval_str("(lambda () 42)").unwrap().unwrap();
+        runtime.set_global_value("saved", closure);
+
+        assert_eq!(runtime.eval_str("(saved)"), Ok(Some(Value::Number(42.0))));
+    }
+
+    #[test]
+    fn test_stored_arg_closure_can_be_called_across_evals() {
+        let mut runtime = Runtime::new();
+        let closure = runtime.eval_str("(lambda (x) (+ x 1))").unwrap().unwrap();
+        runtime.set_global_value("saved", closure);
+
+        assert_eq!(runtime.eval_str("(saved 5)"), Ok(Some(Value::Number(6.0))));
+    }
+
+    #[test]
+    fn test_stored_closure_with_body_can_be_called_across_evals() {
+        let mut runtime = Runtime::new();
+        let closure = runtime
+            .eval_str("(lambda () (+ 2 3))")
+            .unwrap()
+            .unwrap();
+        runtime.set_global_value("saved", closure);
+
+        assert_eq!(runtime.eval_str("(saved)"), Ok(Some(Value::Number(5.0))));
+    }
+
+    #[test]
+    fn test_stored_closure_can_call_native_across_evals() {
+        let mut runtime = Runtime::new();
+        runtime.register_native("bump", |args, _ctx| match args.first() {
+            Some(Value::Number(n)) => Ok(Value::Number(n + 1.0)),
+            _ => Err("expected number".to_string()),
+        });
+        let closure = runtime
+            .eval_str("(lambda (x) (bump x))")
+            .unwrap()
+            .unwrap();
+        runtime.set_global_value("saved", closure);
+
+        assert_eq!(runtime.eval_str("(saved 5)"), Ok(Some(Value::Number(6.0))));
+    }
+
+    #[test]
+    fn test_closure_round_trips_through_native_storage() {
+        let mut runtime = Runtime::new();
+        let stored: Rc<RefCell<Option<Value>>> = Rc::new(RefCell::new(None));
+        let stored_for_native = Rc::clone(&stored);
+        runtime.register_native("capture", move |args, _ctx| {
+            *stored_for_native.borrow_mut() = args.first().cloned();
+            Ok(Value::Bool(true))
+        });
+
+        assert_eq!(
+            runtime.eval_str("(capture (lambda (x) (+ x 1)))"),
+            Ok(Some(Value::Bool(true)))
+        );
+
+        let closure = stored.borrow().clone().expect("closure should be captured");
+        runtime.set_global_value("saved", closure);
+
+        assert_eq!(runtime.eval_str("(saved 5)"), Ok(Some(Value::Number(6.0))));
+    }
+
+    #[test]
+    fn test_unknown_variable_includes_missing_symbol_name() {
+        let mut runtime = Runtime::new();
+        assert_eq!(
+            runtime.eval_str("missing-name"),
+            Err(VMError::UnknownVariable("missing-name".to_string()))
         );
     }
 
