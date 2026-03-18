@@ -1,4 +1,5 @@
 use crate::parser::Expression;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -59,7 +60,16 @@ pub enum OpCode {
     Eval,               // pop a string, eval it in the current VM context, push result
     PushKeyword(usize), // push Value::Keyword from strings pool
     PushSymbol(usize),  // push Value::Symbol from strings pool (quoted symbol)
+    InitDerived(u32, usize), // node id, chunk idx
+    InitEffect(u32, usize),  // node id, chunk idx
+    LoadDerived(u32),        // load derived node cached value
+    DerivedBegin(u32),
+    DerivedEnd(u32),
+    EffectBegin(u32),
+    EffectEnd(u32),
+    LoadReactive(usize, usize), // namespace idx, field idx
     GetField(usize),    // pop a map, push map[strings[idx]]
+    EmitTree,           // pop widget tree from stack and route it to the runtime
     Return,
     Jump(usize),
     JumpIfFalse(usize),
@@ -73,6 +83,9 @@ pub struct Compiler {
     scopes: Vec<Scope>,
     current_chunk: usize,
     global_symbols: Vec<String>,
+    reactive_namespaces: HashSet<String>,
+    derived_bindings: HashMap<String, u32>,
+    next_node_id: u32,
 }
 
 fn extract_function_definition(
@@ -114,6 +127,9 @@ impl Compiler {
             scopes: vec![],
             current_chunk: 0,
             global_symbols: vec![],
+            reactive_namespaces: HashSet::new(),
+            derived_bindings: HashMap::new(),
+            next_node_id: 0,
         }
     }
 
@@ -123,6 +139,9 @@ impl Compiler {
         expressions: Vec<Expression>,
         existing_chunks: Vec<Chunk>,
         existing_global_names: Vec<String>,
+        reactive_namespaces: HashSet<String>,
+        derived_bindings: HashMap<String, u32>,
+        next_node_id: u32,
     ) -> Self {
         Compiler {
             expressions,
@@ -130,6 +149,9 @@ impl Compiler {
             scopes: vec![],
             current_chunk: 0,
             global_symbols: existing_global_names,
+            reactive_namespaces,
+            derived_bindings,
+            next_node_id,
         }
     }
 
@@ -166,6 +188,94 @@ impl Compiler {
     /// so the VM can sync its own name→index mapping.
     pub fn into_global_names(self) -> Vec<String> {
         self.global_symbols
+    }
+
+    pub fn global_names(&self) -> Vec<String> {
+        self.global_symbols.clone()
+    }
+
+    pub fn into_derived_bindings(self) -> HashMap<String, u32> {
+        self.derived_bindings
+    }
+
+    pub fn derived_bindings(&self) -> HashMap<String, u32> {
+        self.derived_bindings.clone()
+    }
+
+    pub fn next_node_id(&self) -> u32 {
+        self.next_node_id
+    }
+
+    pub fn add_reactive_namespace(&mut self, name: String) {
+        self.reactive_namespaces.insert(name);
+    }
+
+    fn alloc_node_id(&mut self) -> u32 {
+        let id = self.next_node_id;
+        self.next_node_id = self.next_node_id.saturating_add(1);
+        id
+    }
+
+    fn compile_reactive_chunk(
+        &mut self,
+        node_id: u32,
+        body: &[Expression],
+        is_effect: bool,
+    ) -> Result<usize, CompilerError> {
+        let (chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
+            ops: vec![],
+            constants: vec![],
+            strings: vec![],
+            symbols: vec![],
+            upvalues: vec![],
+        });
+
+        if is_effect {
+            self.emit(OpCode::EffectBegin(node_id));
+        } else {
+            self.emit(OpCode::DerivedBegin(node_id));
+        }
+        self.compile_block(body)?;
+        if is_effect {
+            self.emit(OpCode::EmitTree);
+            self.emit(OpCode::EffectEnd(node_id));
+            self.emit(OpCode::PushNil);
+        } else {
+            self.emit(OpCode::DerivedEnd(node_id));
+        }
+        self.emit(OpCode::Return);
+
+        let _ = self.scopes.pop();
+        self.current_chunk = previous_chunk_idx;
+        Ok(chunk_idx)
+    }
+
+    fn compile_named_derived_definition(
+        &mut self,
+        name: &str,
+        body: &[Expression],
+    ) -> Result<(), CompilerError> {
+        let node_id = self.alloc_node_id();
+        let chunk_idx = self.compile_reactive_chunk(node_id, body, false)?;
+        self.derived_bindings.insert(name.to_string(), node_id);
+        self.emit(OpCode::InitDerived(node_id, chunk_idx));
+        self.emit_symbol_store(name);
+        Ok(())
+    }
+
+    fn compile_inline_derived(&mut self, body: &[Expression]) -> Result<(), CompilerError> {
+        let node_id = self.alloc_node_id();
+        let chunk_idx = self.compile_reactive_chunk(node_id, body, false)?;
+        self.emit(OpCode::InitDerived(node_id, chunk_idx));
+        self.emit(OpCode::LoadDerived(node_id));
+        Ok(())
+    }
+
+    fn compile_effect_form(&mut self, body: &[Expression]) -> Result<(), CompilerError> {
+        let node_id = self.alloc_node_id();
+        let chunk_idx = self.compile_reactive_chunk(node_id, body, true)?;
+        self.emit(OpCode::InitEffect(node_id, chunk_idx));
+        Ok(())
     }
 
     fn chunk(&self) -> Option<&Chunk> {
@@ -392,6 +502,14 @@ impl Compiler {
     }
 
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        if let [Expression::Symbol(def), Expression::Symbol(name), Expression::List(derived)] = list
+            && def == "def"
+            && let Some(Expression::Symbol(form)) = derived.first()
+            && form == "derived"
+        {
+            return self.compile_named_derived_definition(name, &derived[1..]);
+        }
+
         if let Some((name, args, body)) = extract_function_definition(list) {
             return self.compile_function(name, args, body);
         }
@@ -413,6 +531,12 @@ impl Compiler {
         if let Some(Expression::Symbol(s)) = list.first() {
             if s == "do" {
                 return self.compile_block(&list[1..]);
+            }
+            if s == "effect" {
+                return self.compile_effect_form(&list[1..]);
+            }
+            if s == "derived" {
+                return self.compile_inline_derived(&list[1..]);
             }
             if s == "let" && list.len() >= 3 {
                 return self.compile_let_statement(&list[1], &list[2..]);
@@ -503,13 +627,25 @@ impl Compiler {
                     self.emit(OpCode::PushNil);
                     return Ok(());
                 }
+                if let Some(node_id) = self.derived_bindings.get(s).copied() {
+                    self.emit(OpCode::LoadDerived(node_id));
+                    return Ok(());
+                }
                 // Dot syntax: person.age  →  load person, GetField("age")
                 // person.address.city  →  load person, GetField("address"), GetField("city")
                 let parts: Vec<&str> = s.splitn(2, '.').collect();
                 if parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty() {
-                    self.emit_symbol_load(parts[0]);
-                    // Chain remaining fields (handles a.b.c via recursion of the rest)
-                    for field in parts[1].split('.') {
+                    let fields = parts[1].split('.').collect::<Vec<_>>();
+                    if self.reactive_namespaces.contains(parts[0]) {
+                        let ns_idx = self.use_string_constant(parts[0]);
+                        let field_idx = self.use_string_constant(fields[0]);
+                        self.emit(OpCode::LoadReactive(ns_idx, field_idx));
+                    } else {
+                        self.emit_symbol_load(parts[0]);
+                        let idx = self.use_string_constant(fields[0]);
+                        self.emit(OpCode::GetField(idx));
+                    }
+                    for field in fields.into_iter().skip(1) {
                         let idx = self.use_string_constant(field);
                         self.emit(OpCode::GetField(idx));
                     }

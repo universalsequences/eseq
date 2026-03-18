@@ -65,6 +65,16 @@ mod inner {
             };
             let font = unsafe { CTFont::with_name(&cf_name, font_size, std::ptr::null()) };
 
+            // Warn if CoreText fell back to a different font (e.g. bad PostScript name).
+            let resolved = unsafe { font.post_script_name() };
+            let resolved_str = resolved.to_string();
+            if resolved_str != font_name {
+                eprintln!(
+                    "[glyph_atlas] font fallback: requested {:?}, got {:?}",
+                    font_name, resolved_str
+                );
+            }
+
             // ── Cell dimensions from font metrics ────────────────────────────────
             let ascent = unsafe { font.ascent() } as f32;
             let descent = unsafe { font.descent() } as f32; // positive value

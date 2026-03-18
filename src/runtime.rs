@@ -4,7 +4,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::host::{BufferId, HostCommand};
+use crate::layout::{LayoutEngine, LayoutNode, format_layout_tree_lines};
+use crate::reactive::ReactiveRegistry;
 use crate::vm::{VM, Value, register_core_natives};
+use crate::widgets::register_widget_natives;
 
 pub type RuntimeError = String;
 pub type NativeResult = Result<Value, RuntimeError>;
@@ -85,6 +88,15 @@ pub struct Runtime {
     vm: VM,
     pub(crate) shared: SharedBridgeState,
     symbol_metadata: HashMap<String, SymbolMetadata>,
+    pub reactive_registry: ReactiveRegistry,
+    rendered_layouts: Vec<Vec<String>>,
+    pub current_layout: Option<LayoutNode>,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Runtime {
@@ -92,10 +104,14 @@ impl Runtime {
         let shared = Rc::new(RefCell::new(RuntimeBridgeState::default()));
         let mut vm = VM::new(vec![]);
         register_core_natives(&mut vm);
+        register_widget_natives(&mut vm);
         Self {
             vm,
             shared,
             symbol_metadata: HashMap::new(),
+            reactive_registry: ReactiveRegistry::new(),
+            rendered_layouts: Vec::new(),
+            current_layout: None,
         }
     }
 
@@ -154,11 +170,36 @@ impl Runtime {
     }
 
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
-        self.vm.eval_str(src)
+        let result = self.vm.eval_str(src);
+        if result.is_ok() {
+            self.flush_widget_trees();
+        }
+        result
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
         self.vm.set_global_value(name, value);
+    }
+
+    pub fn register_reactive(&mut self, name: &str, fields: Vec<(&str, Value)>, writable: bool) {
+        let map = self.reactive_registry.register(name, fields, writable);
+        self.vm.set_global_value(name, map);
+        self.vm.reactive_namespaces.insert(name.to_string());
+    }
+
+    pub fn set_reactive(&mut self, namespace: &str, field: &str, value: Value) {
+        self.reactive_registry.set(namespace, field, value);
+    }
+
+    pub fn run_reactive_cycle(&mut self) {
+        let dirty = self.reactive_registry.drain_dirty();
+        if dirty.is_empty() {
+            return;
+        }
+
+        if self.vm.apply_reactive_changes(dirty).is_ok() {
+            self.flush_widget_trees();
+        }
     }
 
     pub fn global_names(&self) -> &[String] {
@@ -223,5 +264,25 @@ impl Runtime {
 
     pub(crate) fn take_pending_save_as(&mut self) -> Option<PathBuf> {
         self.shared.borrow_mut().pending_save_as.take()
+    }
+
+    pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {
+        std::mem::take(&mut self.rendered_layouts)
+    }
+
+    fn flush_widget_trees(&mut self) {
+        let trees = std::mem::take(&mut self.vm.pending_widget_trees);
+        let engine = LayoutEngine::new(80, 24);
+        for tree in trees {
+            if let Some(layout) = engine.layout(&tree) {
+                let lines = format_layout_tree_lines(&layout, 0);
+                self.rendered_layouts.push(lines.clone());
+                self.current_layout = Some(layout);
+                println!("--- layout ---");
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+        }
     }
 }

@@ -3,15 +3,18 @@ pub mod buffer;
 pub mod glyph_atlas;
 pub mod metal_backend;
 pub mod frame;
+pub mod layout;
 pub mod compiler;
 pub mod editor;
 pub mod host;
 pub mod mode;
 pub mod parser;
+pub mod reactive;
 pub mod runtime;
 pub mod text;
 pub mod tui;
 pub mod vm;
+pub mod widgets;
 
 use std::{io, time::Duration};
 
@@ -118,6 +121,7 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use super::{Runtime, Value, run_prog};
+    use crate::layout::{LayoutEngine, format_layout_tree_lines};
     use crate::vm::{VMError, format_lisp_source, format_lisp_value};
 
     #[test]
@@ -471,5 +475,184 @@ mod tests {
         "#;
         let value = run_prog(program).unwrap().unwrap();
         assert_eq!(format_lisp_value(&value), "((2 3 4) (2 3) 6)");
+    }
+
+    #[test]
+    fn test_widget_native_builds_map_shape() {
+        let value = run_prog("(slider :min 0 :max 100 :value 50)").unwrap().unwrap();
+        let Value::Map(map) = value else {
+            panic!("expected widget map");
+        };
+
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("slider".to_string()))
+        );
+        assert_eq!(
+            map.get("min").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            map.get("max").map(|value| value.borrow().clone()),
+            Some(Value::Number(100.0))
+        );
+        assert_eq!(
+            map.get("value").map(|value| value.borrow().clone()),
+            Some(Value::Number(50.0))
+        );
+    }
+
+    #[test]
+    fn test_effect_layout_matches_phase_one_spec() {
+        let mut runtime = Runtime::new();
+        let value = runtime
+            .eval_str(
+                r#"
+                (effect
+                  (v-stack
+                    (label "Hello World")
+                    (h-stack
+                      (label "X:")
+                      (slider :min 0 :max 100 :value 50))))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(value, Value::Nil);
+
+        let tree = run_prog(
+            r#"
+            (v-stack
+              (label "Hello World")
+              (h-stack
+                (label "X:")
+                (slider :min 0 :max 100 :value 50)))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+
+        assert_eq!(
+            lines,
+            vec![
+                ":v-stack  row=0 col=0 w=80 h=2".to_string(),
+                "  :label  row=0 col=0 w=11 h=1  text=\"Hello World\"".to_string(),
+                "  :h-stack  row=1 col=0 w=80 h=1".to_string(),
+                "    :label  row=1 col=0 w=2 h=1  text=\"X:\"".to_string(),
+                "    :slider  row=1 col=3 w=16 h=1  value=50  min=0  max=100".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_reactive_namespace_reads_transparently() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "APP",
+            vec![
+                ("counter", Value::Number(5.0)),
+                ("label", Value::String("hello".to_string())),
+            ],
+            false,
+        );
+
+        let tree = runtime
+            .eval_str(
+                r#"
+                (v-stack
+                  (label APP.label)
+                  (label (fmt "count: {}" APP.counter)))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+        assert_eq!(
+            lines,
+            vec![
+                ":v-stack  row=0 col=0 w=80 h=2".to_string(),
+                "  :label  row=0 col=0 w=5 h=1  text=\"hello\"".to_string(),
+                "  :label  row=1 col=0 w=8 h=1  text=\"count: 5\"".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_reactive_cycle_updates_registered_state() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "APP",
+            vec![("counter", Value::Number(5.0))],
+            false,
+        );
+
+        let _ = runtime
+            .eval_str(r#"(effect (label (fmt "count: {}" APP.counter)))"#)
+            .unwrap();
+
+        runtime.set_reactive("APP", "counter", Value::Number(42.0));
+        runtime.run_reactive_cycle();
+
+        let updated = runtime
+            .eval_str(r#"(label (fmt "count: {}" APP.counter))"#)
+            .unwrap()
+            .unwrap();
+        let layout = LayoutEngine::new(80, 24).layout(&updated).expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+        assert_eq!(
+            lines,
+            vec![":label  row=0 col=0 w=9 h=1  text=\"count: 42\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_derived_reactive_flow_updates_only_dependent_effects() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("x", Value::Number(3.0))], true);
+
+        let _ = runtime
+            .eval_str(
+                r#"
+                (def doubled (derived (* APP.x 2)))
+                (effect (label (fmt "doubled: {}" doubled)))
+                "#,
+            )
+            .unwrap();
+
+        let initial = runtime.drain_rendered_layouts();
+        assert_eq!(
+            initial,
+            vec![vec![":label  row=0 col=0 w=10 h=1  text=\"doubled: 6\"".to_string()]]
+        );
+
+        runtime.set_reactive("APP", "x", Value::Number(7.0));
+        runtime.run_reactive_cycle();
+
+        let updated = runtime.drain_rendered_layouts();
+        assert_eq!(
+            updated,
+            vec![vec![":label  row=0 col=0 w=11 h=1  text=\"doubled: 14\"".to_string()]]
+        );
+
+        runtime.set_reactive("APP", "y", Value::Number(99.0));
+        runtime.run_reactive_cycle();
+
+        assert!(runtime.drain_rendered_layouts().is_empty());
+
+        let value = runtime
+            .eval_str(r#"(label (fmt "doubled: {}" doubled))"#)
+            .unwrap()
+            .unwrap();
+        let layout = LayoutEngine::new(80, 24).layout(&value).expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+        assert_eq!(
+            lines,
+            vec![":label  row=0 col=0 w=11 h=1  text=\"doubled: 14\"".to_string()]
+        );
     }
 }

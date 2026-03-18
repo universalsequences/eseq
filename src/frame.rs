@@ -2,6 +2,7 @@ use crate::backend::{Cell, CellStyle, Color, CompletionEntry, CompletionFrame, R
 use crate::editor::Editor;
 use crate::mode::{TokenClass, TokenSpan};
 use crate::text::matching_paren;
+use crate::layout::LayoutNode;
 
 // ── Semantic region colors ────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crossterm::event::Event;
+use crate::layout::LayoutNode;
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -117,6 +118,9 @@ pub struct RenderFrame {
     pub status: String,
     /// Optional completion popup to overlay on top of the text area.
     pub completion: Option<CompletionFrame>,
+    /// Reactive UI widget tree to render. Each backend renders this in its own way:
+    /// Ratatui draws characters into the cell buffer; Metal dispatches instanced GPU draw calls.
+    pub widget_layout: Option<LayoutNode>,
 }
 
 // ── Backend trait ─────────────────────────────────────────────────────────────

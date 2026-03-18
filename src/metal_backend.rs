@@ -180,7 +180,7 @@ fragment float4 frag(
                 .as_ref()
                 .map(|w| w.scale_factor())
                 .unwrap_or(1.0);
-            self.atlas = GlyphAtlas::new(&self.device, "Menlo-Regular", 14.0 * scale);
+            self.atlas = GlyphAtlas::new(&self.device, "JetBrainsMono-Regular", 14.0 * scale);
 
             // ── Render pipeline ──────────────────────────────────────────────
             let src = NSString::from_str(SHADER_SRC);
