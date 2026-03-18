@@ -30,6 +30,7 @@ pub(crate) struct RuntimeBridgeState {
     pub lisp_bindings: HashMap<String, String>,
     pub pending_save: bool,
     pub pending_save_as: Option<PathBuf>,
+    pub pending_load: bool,
 }
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
@@ -81,6 +82,10 @@ impl NativeContext {
 
     pub fn request_save_as(&mut self, path: impl Into<PathBuf>) {
         self.shared.borrow_mut().pending_save_as = Some(path.into());
+    }
+
+    pub fn request_load(&mut self) {
+        self.shared.borrow_mut().pending_load = true;
     }
 }
 
@@ -266,6 +271,13 @@ impl Runtime {
         self.shared.borrow_mut().pending_save_as.take()
     }
 
+    pub(crate) fn take_pending_load(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let pending = shared.pending_load;
+        shared.pending_load = false;
+        pending
+    }
+
     pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {
         std::mem::take(&mut self.rendered_layouts)
     }
@@ -276,12 +288,8 @@ impl Runtime {
         for tree in trees {
             if let Some(layout) = engine.layout(&tree) {
                 let lines = format_layout_tree_lines(&layout, 0);
-                self.rendered_layouts.push(lines.clone());
+                self.rendered_layouts.push(lines);
                 self.current_layout = Some(layout);
-                println!("--- layout ---");
-                for line in lines {
-                    println!("{line}");
-                }
             }
         }
     }

@@ -2,7 +2,6 @@ use crate::backend::{Cell, CellStyle, Color, CompletionEntry, CompletionFrame, R
 use crate::editor::Editor;
 use crate::mode::{TokenClass, TokenSpan};
 use crate::text::matching_paren;
-use crate::layout::LayoutNode;
 
 // ── Semantic region colors ────────────────────────────────────────────────────
 
@@ -178,5 +177,6 @@ pub fn build_render_frame(editor: &mut Editor, viewport_height: usize) -> Render
         dirty: buf.dirty,
         status,
         completion,
+        widget_layout: editor.widget_layout(),
     }
 }

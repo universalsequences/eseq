@@ -8,6 +8,8 @@ pub fn register_widget_natives(vm: &mut VM) {
     for widget in [
         "label",
         "slider",
+        "hslider",
+        "vslider",
         "toggle",
         "knob",
         "meter",
@@ -46,10 +48,7 @@ fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     while i < args.len() {
         match args.get(i) {
             Some(Value::Keyword(key)) if i + 1 < args.len() => {
-                map.insert(
-                    key.clone(),
-                    Rc::new(RefCell::new(args[i + 1].clone())),
-                );
+                map.insert(key.clone(), Rc::new(RefCell::new(args[i + 1].clone())));
                 i += 2;
             }
             Some(Value::Map(widget_map)) if widget_map.contains_key("type") => {

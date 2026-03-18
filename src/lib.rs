@@ -1,12 +1,12 @@
 pub mod backend;
 pub mod buffer;
-pub mod glyph_atlas;
-pub mod metal_backend;
-pub mod frame;
-pub mod layout;
 pub mod compiler;
 pub mod editor;
+pub mod frame;
+pub mod glyph_atlas;
 pub mod host;
+pub mod layout;
+pub mod metal_backend;
 pub mod mode;
 pub mod parser;
 pub mod reactive;
@@ -14,6 +14,7 @@ pub mod runtime;
 pub mod text;
 pub mod tui;
 pub mod vm;
+pub mod widget_render;
 pub mod widgets;
 
 use std::{io, time::Duration};
@@ -72,12 +73,17 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn run_metal() -> Result<(), backend::BackendError> {
-    use metal_backend::MetalBackend;
     use backend::Backend;
+    use metal_backend::MetalBackend;
 
     let init_src = std::fs::read_to_string("init.lisp").unwrap_or_default();
     let runtime = Runtime::new();
-    let mut editor = Editor::new(runtime, EditorConfig { init_source: Some(init_src) });
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            init_source: Some(init_src),
+        },
+    );
     let mut backend = MetalBackend::new()?;
     backend.initialize()?;
 
@@ -189,10 +195,7 @@ mod tests {
     #[test]
     fn test_stored_closure_with_body_can_be_called_across_evals() {
         let mut runtime = Runtime::new();
-        let closure = runtime
-            .eval_str("(lambda () (+ 2 3))")
-            .unwrap()
-            .unwrap();
+        let closure = runtime.eval_str("(lambda () (+ 2 3))").unwrap().unwrap();
         runtime.set_global_value("saved", closure);
 
         assert_eq!(runtime.eval_str("(saved)"), Ok(Some(Value::Number(5.0))));
@@ -205,10 +208,7 @@ mod tests {
             Some(Value::Number(n)) => Ok(Value::Number(n + 1.0)),
             _ => Err("expected number".to_string()),
         });
-        let closure = runtime
-            .eval_str("(lambda (x) (bump x))")
-            .unwrap()
-            .unwrap();
+        let closure = runtime.eval_str("(lambda (x) (bump x))").unwrap().unwrap();
         runtime.set_global_value("saved", closure);
 
         assert_eq!(runtime.eval_str("(saved 5)"), Ok(Some(Value::Number(6.0))));
@@ -294,10 +294,7 @@ mod tests {
 
     #[test]
     fn test_do_expression() {
-        assert_eq!(
-            run_prog("(do 1 2 3)"),
-            Ok(Some(Value::Number(3.0)))
-        );
+        assert_eq!(run_prog("(do 1 2 3)"), Ok(Some(Value::Number(3.0))));
     }
 
     #[test]
@@ -319,10 +316,7 @@ mod tests {
     #[test]
     fn test_nil_literal_and_truthiness() {
         assert_eq!(run_prog("nil"), Ok(Some(Value::Nil)));
-        assert_eq!(
-            run_prog("(if nil 10 20)"),
-            Ok(Some(Value::Number(20.0)))
-        );
+        assert_eq!(run_prog("(if nil 10 20)"), Ok(Some(Value::Number(20.0))));
         assert_eq!(run_prog("(not nil)"), Ok(Some(Value::Bool(true))));
     }
 
@@ -479,7 +473,9 @@ mod tests {
 
     #[test]
     fn test_widget_native_builds_map_shape() {
-        let value = run_prog("(slider :min 0 :max 100 :value 50)").unwrap().unwrap();
+        let value = run_prog("(slider :min 0 :max 100 :value 50)")
+            .unwrap()
+            .unwrap();
         let Value::Map(map) = value else {
             panic!("expected widget map");
         };
@@ -585,11 +581,7 @@ mod tests {
     #[test]
     fn test_reactive_cycle_updates_registered_state() {
         let mut runtime = Runtime::new();
-        runtime.register_reactive(
-            "APP",
-            vec![("counter", Value::Number(5.0))],
-            false,
-        );
+        runtime.register_reactive("APP", vec![("counter", Value::Number(5.0))], false);
 
         let _ = runtime
             .eval_str(r#"(effect (label (fmt "count: {}" APP.counter)))"#)
@@ -627,7 +619,9 @@ mod tests {
         let initial = runtime.drain_rendered_layouts();
         assert_eq!(
             initial,
-            vec![vec![":label  row=0 col=0 w=10 h=1  text=\"doubled: 6\"".to_string()]]
+            vec![vec![
+                ":label  row=0 col=0 w=10 h=1  text=\"doubled: 6\"".to_string()
+            ]]
         );
 
         runtime.set_reactive("APP", "x", Value::Number(7.0));
@@ -636,7 +630,9 @@ mod tests {
         let updated = runtime.drain_rendered_layouts();
         assert_eq!(
             updated,
-            vec![vec![":label  row=0 col=0 w=11 h=1  text=\"doubled: 14\"".to_string()]]
+            vec![vec![
+                ":label  row=0 col=0 w=11 h=1  text=\"doubled: 14\"".to_string()
+            ]]
         );
 
         runtime.set_reactive("APP", "y", Value::Number(99.0));

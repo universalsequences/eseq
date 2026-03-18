@@ -78,6 +78,168 @@ fragment float4 frag(
 }
 "#;
 
+    // ── Widget shader source ────────────────────────────────────────────────
+    //
+    // SDF-based rendering for sliders and toggles. Each widget is one instanced
+    // quad (6 vertices from vertex_id). The fragment shader decides color per
+    // pixel using UV coordinates and per-instance data.
+    const WIDGET_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+// Use packed types to match Rust's #[repr(C)] layout exactly (4-byte alignment).
+struct WidgetInstance {
+    packed_float2 ndc_min;       // offset 0
+    packed_float2 ndc_max;       // offset 8
+    float         value_t;       // offset 16
+    float         orientation;   // offset 20
+    packed_float4 color_a;       // offset 24
+    packed_float4 color_b;       // offset 40
+    float         corner_radius; // offset 56
+};
+
+struct WidgetVaryings {
+    float4 position [[position]];
+    float2 uv;
+    float  value_t    [[flat]];
+    float  orientation [[flat]];
+    float4 color_a    [[flat]];
+    float4 color_b    [[flat]];
+    float  aspect     [[flat]];   // width/height in pixels
+};
+
+vertex WidgetVaryings widget_vert(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const WidgetInstance* instances [[buffer(0)]])
+{
+    float2 corners[6] = {
+        float2(0, 0), float2(0, 1), float2(1, 0),
+        float2(1, 0), float2(0, 1), float2(1, 1)
+    };
+    float2 corner = corners[vid];
+    WidgetInstance inst = instances[iid];
+    float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
+
+    // Compute aspect ratio from NDC extents
+    float ndc_w = abs(float(inst.ndc_max[0]) - float(inst.ndc_min[0]));
+    float ndc_h = abs(float(inst.ndc_max[1]) - float(inst.ndc_min[1]));
+    float aspect = (ndc_h > 0.0001) ? (ndc_w / ndc_h) : 1.0;
+
+    WidgetVaryings out;
+    out.position = float4(ndc, 0.0, 1.0);
+    out.uv = corner;
+    out.value_t = inst.value_t;
+    out.orientation = inst.orientation;
+    out.color_a = inst.color_a;
+    out.color_b = inst.color_b;
+    out.aspect = aspect;
+    return out;
+}
+
+// ── SDF utilities ────────────────────────────────────────────────────
+
+float sdf_rounded_rect(float2 p, float2 half_size, float radius) {
+    float2 d = abs(p) - half_size + radius;
+    return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
+}
+
+// Dual-SDF border: zoom-independent crisp borders.
+// borderPixels = width in screen pixels (constant regardless of zoom).
+// Returns borderMask (1=border, 0=interior). outerMask is the shape mask.
+float compute_border_mask(float2 localPos, float2 outerSize, float cornerRadius,
+                          float borderPixels, thread float& outerMask) {
+    float outerDist = sdf_rounded_rect(localPos, outerSize, cornerRadius);
+    float outerDeriv = max(fwidth(outerDist), 0.001);
+
+    float borderThickness = borderPixels * outerDeriv;
+    float2 innerSize = outerSize - float2(borderThickness);
+    float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
+    float innerDeriv = max(fwidth(innerDist), 0.001);
+
+    outerMask = smoothstep(outerDeriv, -outerDeriv, outerDist);
+    float innerMask = smoothstep(innerDeriv, -innerDeriv, innerDist);
+
+    return outerMask * (1.0 - innerMask);
+}
+
+// ── Fragment shader ──────────────────────────────────────────────────
+
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 uv = in.uv;
+    float  value_t = in.value_t;
+    float  orientation = in.orientation;
+    float4 color_a = in.color_a;  // fill color
+    float4 color_b = in.color_b;  // track/background color
+    float  aspect = in.aspect;
+
+    // Aspect-corrected SDF space: UV [0,1] → [-1,1] with aspect scaling
+    float2 localPos = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
+    float2 sdfSize = float2(aspect, 1.0);
+    float minDim = min(aspect, 1.0);
+    float cornerRadius = minDim * 0.3;
+
+    // Border (1.5 screen pixels)
+    float3 borderColor = float3(0.45, 0.45, 0.5);
+    float outerMask;
+    float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
+
+    if (outerMask <= 0.001) {
+        discard_fragment();
+    }
+
+    float4 interior;
+
+    if (orientation < 0.5) {
+        // ── Horizontal slider: fill from left ────────────────────────
+        float fillDist = uv.x - value_t;
+        float fillDeriv = max(fwidth(fillDist), 0.001);
+        float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
+        interior = mix(color_a, color_b, edge);
+
+    } else if (orientation < 1.5) {
+        // ── Vertical slider: fill from bottom ────────────────────────
+        // uv.y=0 is top, uv.y=1 is bottom; threshold = top of fill
+        float threshold = 1.0 - value_t;
+        float fillDist = uv.y - threshold;
+        float fillDeriv = max(fwidth(fillDist), 0.001);
+        // Below threshold (fillDist > 0) = fill region
+        float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
+        interior = mix(color_b, color_a, edge);
+
+    } else {
+        // ── Toggle (pill switch) ─────────────────────────────────────
+        float on = value_t;
+        float4 bg = mix(color_b, color_a, on);
+        float knob_x = mix(0.3, 0.7, on);
+        float2 knob_pos = float2((uv.x - knob_x) * aspect, uv.y - 0.5);
+        float knob_dist = length(knob_pos);
+        float knob_aa = max(fwidth(knob_dist), 0.001);
+        float knob = 1.0 - smoothstep(0.35 - knob_aa, 0.35 + knob_aa, knob_dist);
+        interior = mix(bg, float4(0.95, 0.95, 0.95, 1.0), knob);
+    }
+
+    // Composite: border on top of interior, masked by outer shape
+    float3 final_rgb = mix(interior.rgb, borderColor, borderMask);
+    return float4(final_rgb, outerMask);
+}
+"#;
+
+    /// Per-instance data for widget shader. Must match WidgetInstance in MSL.
+    /// Uses packed_float types in MSL to match Rust's [f32; N] layout.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct WidgetInstance {
+        ndc_min: [f32; 2],  // offset 0
+        ndc_max: [f32; 2],  // offset 8
+        value_t: f32,       // offset 16
+        orientation: f32,   // offset 20
+        color_a: [f32; 4],  // offset 24
+        color_b: [f32; 4],  // offset 40
+        corner_radius: f32, // offset 56 (unused by shader, kept for alignment)
+    }
+
     // ── Vertex type ───────────────────────────────────────────────────────────
 
     /// One vertex of a cell quad.  Two triangles (6 vertices) form each cell.
@@ -113,6 +275,8 @@ fragment float4 frag(
         layer: Retained<CAMetalLayer>,
         // Render pipeline (compiled from SHADER_SRC in initialize())
         pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        // Widget pipeline (compiled from WIDGET_SHADER_SRC in initialize())
+        widget_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         // Glyph atlas (created in initialize())
         atlas: Option<GlyphAtlas>,
         // Winit
@@ -135,6 +299,7 @@ fragment float4 frag(
                 command_queue,
                 layer,
                 pipeline: None,
+                widget_pipeline: None,
                 atlas: None,
                 event_loop: None,
                 window: None,
@@ -207,6 +372,44 @@ fragment float4 frag(
                     .newRenderPipelineStateWithDescriptor_error(&desc)
                     .map_err(|_| BackendError::MetalError)?,
             );
+
+            // ── Widget render pipeline ──────────────────────────────────────
+            let widget_src = NSString::from_str(WIDGET_SHADER_SRC);
+            let widget_lib = self
+                .device
+                .newLibraryWithSource_options_error(&widget_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+
+            let widget_vert = widget_lib
+                .newFunctionWithName(&NSString::from_str("widget_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let widget_frag = widget_lib
+                .newFunctionWithName(&NSString::from_str("widget_frag"))
+                .ok_or(BackendError::MetalError)?;
+
+            let wdesc = MTLRenderPipelineDescriptor::new();
+            wdesc.setVertexFunction(Some(&widget_vert));
+            wdesc.setFragmentFunction(Some(&widget_frag));
+            let wattach = unsafe { wdesc.colorAttachments().objectAtIndexedSubscript(0) };
+            wattach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            // Enable alpha blending for smooth SDF edges
+            wattach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                wattach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                wattach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wattach.setRgbBlendOperation(MTLBlendOperation::Add);
+                wattach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                wattach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                wattach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+
+            self.widget_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&wdesc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
+
             Ok(())
         }
 
@@ -352,6 +555,36 @@ fragment float4 frag(
                 }
             }
 
+            // ── Widget instanced draw ────────────────────────────────────
+            if let (Some(wpipe), Some(layout)) = (&self.widget_pipeline, &frame.widget_layout) {
+                let cell_w = atlas.cell_w as f32;
+                let cell_h = atlas.cell_h as f32;
+                let instances = collect_widget_instances_ndc(layout, cell_w, cell_h, vp_w, vp_h);
+                let instance_count = instances.len();
+                if instance_count > 0 {
+                    let byte_len = instance_count * std::mem::size_of::<WidgetInstance>();
+                    let wbuf = unsafe {
+                        self.device.newBufferWithBytes_length_options(
+                            NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                            byte_len,
+                            MTLResourceOptions(0),
+                        )
+                    };
+                    if let Some(wbuf) = &wbuf {
+                        enc.setRenderPipelineState(wpipe);
+                        unsafe {
+                            enc.setVertexBuffer_offset_atIndex(Some(wbuf), 0, 0);
+                            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                MTLPrimitiveType::Triangle,
+                                0,
+                                6,
+                                instance_count as _,
+                            );
+                        }
+                    }
+                }
+            }
+
             enc.endEncoding();
             buf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
             buf.commit();
@@ -465,10 +698,22 @@ fragment float4 frag(
                     atlas,
                     cell.ch,
                     (col, row),
-                    &CharCtx { cell_w, cell_h, vp_w, vp_h, fg, bg },
+                    &CharCtx {
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                        fg,
+                        bg,
+                    },
                     &mut verts,
                 );
             }
+        }
+
+        // ── Widget labels (glyph atlas path) ─────────────────────────────────
+        if let Some(ref layout) = frame.widget_layout {
+            render_label_quads(layout, atlas, cell_w, cell_h, vp_w, vp_h, &mut verts);
         }
 
         // ── Status bar (bottom row) ───────────────────────────────────────────
@@ -527,7 +772,14 @@ fragment float4 frag(
                         atlas,
                         ch,
                         (ch_col, ch_row),
-                        &CharCtx { cell_w, cell_h, vp_w, vp_h, fg: pop_fg, bg },
+                        &CharCtx {
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            fg: pop_fg,
+                            bg,
+                        },
                         &mut verts,
                     );
                 }
@@ -573,7 +825,14 @@ fragment float4 frag(
                             atlas,
                             ch,
                             (doc_col + j, title_row),
-                            &CharCtx { cell_w, cell_h, vp_w, vp_h, fg: title_fg, bg: doc_bg },
+                            &CharCtx {
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                                fg: title_fg,
+                                bg: doc_bg,
+                            },
                             &mut verts,
                         );
                     }
@@ -593,7 +852,14 @@ fragment float4 frag(
                             atlas,
                             ch,
                             (doc_col + j, doc_row),
-                            &CharCtx { cell_w, cell_h, vp_w, vp_h, fg: doc_fg, bg: doc_bg },
+                            &CharCtx {
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                                fg: doc_fg,
+                                bg: doc_bg,
+                            },
                             &mut verts,
                         );
                     }
@@ -635,12 +901,184 @@ fragment float4 frag(
                 atlas,
                 ch,
                 (col, status_row),
-                &CharCtx { cell_w, cell_h, vp_w, vp_h, fg: status_fg, bg: status_bg },
+                &CharCtx {
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                    fg: status_fg,
+                    bg: status_bg,
+                },
                 &mut verts,
             );
         }
 
         verts
+    }
+
+    // ── Widget rendering helpers ────────────────────────────────────────────
+
+    use crate::layout::LayoutNode;
+    use crate::widget_render::{get_bool_prop, get_f32_prop};
+
+    /// Render label widgets as glyph quads (uses the text atlas, not the widget shader).
+    fn render_label_quads(
+        node: &LayoutNode,
+        atlas: &mut GlyphAtlas,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+        verts: &mut Vec<Vertex>,
+    ) {
+        if node.widget_type == "label" {
+            let text = match node.props.get("text") {
+                Some(crate::vm::Value::String(s)) => s.clone(),
+                _ => return,
+            };
+            let clear_bg = [0.05_f32, 0.05, 0.07, 1.0];
+            let fg = [1.0_f32, 1.0, 1.0, 1.0];
+            for (i, ch) in text.chars().enumerate() {
+                let col = node.rect.col as usize + i;
+                if col >= (node.rect.col + node.rect.width) as usize {
+                    break;
+                }
+                if ch == ' ' {
+                    continue;
+                }
+                rasterize_char(
+                    atlas,
+                    ch,
+                    (col, node.rect.row as usize),
+                    &CharCtx {
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                        fg,
+                        bg: clear_bg,
+                    },
+                    verts,
+                );
+            }
+        }
+        for child in &node.children {
+            render_label_quads(child, atlas, cell_w, cell_h, vp_w, vp_h, verts);
+        }
+    }
+
+    // ── Widget instance collection (for SDF shader pipeline) ─────────────
+
+    /// Walk the layout tree and collect WidgetInstance data for the GPU shader.
+    /// Labels are handled separately via glyph quads in build_quads.
+    fn collect_widget_instances_ndc(
+        node: &LayoutNode,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<WidgetInstance> {
+        let mut instances = Vec::new();
+        collect_instances_recursive(node, cell_w, cell_h, vp_w, vp_h, &mut instances);
+        instances
+    }
+
+    fn collect_instances_recursive(
+        node: &LayoutNode,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+        out: &mut Vec<WidgetInstance>,
+    ) {
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+
+        match node.widget_type.as_str() {
+            "slider" | "hslider" => {
+                let value = get_f32_prop(&node.props, "value", 0.0);
+                let min = get_f32_prop(&node.props, "min", 0.0);
+                let max = get_f32_prop(&node.props, "max", 1.0);
+                let range = max - min;
+                let t = if range > 0.0 {
+                    ((value - min) / range).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+
+                let x0 = ndc_x(node.rect.col as f32 * cell_w);
+                let y0 = ndc_y(node.rect.row as f32 * cell_h);
+                let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
+                let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
+
+                // ndc_min = top-left, ndc_max = bottom-right
+                // y0 > y1 in Metal NDC (Y+ is up), so y0 is top, y1 is bottom
+                out.push(WidgetInstance {
+                    ndc_min: [x0, y0], // top-left  (left X, top Y)
+                    ndc_max: [x1, y1], // bottom-right (right X, bottom Y)
+                    value_t: t,
+                    orientation: 0.0,
+                    color_a: [0.0, 0.85, 0.85, 1.0],
+                    color_b: [0.18, 0.18, 0.22, 1.0],
+                    corner_radius: 0.15,
+                });
+            }
+            "vslider" => {
+                let value = get_f32_prop(&node.props, "value", 0.0);
+                let min = get_f32_prop(&node.props, "min", 0.0);
+                let max = get_f32_prop(&node.props, "max", 1.0);
+                let range = max - min;
+                let t = if range > 0.0 {
+                    ((value - min) / range).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+
+                let x0 = ndc_x(node.rect.col as f32 * cell_w);
+                let y0 = ndc_y(node.rect.row as f32 * cell_h);
+                let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
+                let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
+
+                out.push(WidgetInstance {
+                    ndc_min: [x0, y0],
+                    ndc_max: [x1, y1],
+                    value_t: t,
+                    orientation: 1.0,
+                    color_a: [0.0, 0.85, 0.0, 1.0],
+                    color_b: [0.18, 0.18, 0.22, 1.0],
+                    corner_radius: 0.15,
+                });
+            }
+            "toggle" => {
+                let on = get_bool_prop(&node.props, "value", false);
+
+                let x0 = ndc_x(node.rect.col as f32 * cell_w);
+                let y0 = ndc_y(node.rect.row as f32 * cell_h);
+                let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
+                let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
+
+                // Pack aspect ratio into corner_radius for toggle knob
+                let w_px = node.rect.width as f32 * cell_w;
+                let h_px = node.rect.height as f32 * cell_h;
+                let aspect = if h_px > 0.0 { w_px / h_px } else { 1.0 };
+
+                out.push(WidgetInstance {
+                    ndc_min: [x0, y0],
+                    ndc_max: [x1, y1],
+                    value_t: if on { 1.0 } else { 0.0 },
+                    orientation: 2.0,
+                    color_a: [0.2, 0.78, 0.35, 1.0],
+                    color_b: [0.3, 0.3, 0.35, 1.0],
+                    corner_radius: aspect,
+                });
+            }
+            // Labels handled via glyph atlas in build_quads; containers recurse
+            _ => {}
+        }
+
+        for child in &node.children {
+            collect_instances_recursive(child, cell_w, cell_h, vp_w, vp_h, out);
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

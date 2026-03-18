@@ -1,4 +1,5 @@
 use crate::backend::{Cell, CellStyle, Color, RenderFrame};
+use crate::widget_render;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -67,7 +68,11 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
         .split(area);
 
     // ── Text area ─────────────────────────────────────────────────────────────
-    let text_lines: Vec<Line> = render_frame.lines.iter().map(|row| cells_to_line(row)).collect();
+    let text_lines: Vec<Line> = render_frame
+        .lines
+        .iter()
+        .map(|row| cells_to_line(row))
+        .collect();
 
     let title = if render_frame.dirty {
         format!("**{}**", render_frame.buffer_name)
@@ -75,8 +80,8 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
         render_frame.buffer_name.clone()
     };
 
-    let text_widget = Paragraph::new(text_lines)
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let text_widget =
+        Paragraph::new(text_lines).block(Block::default().borders(Borders::ALL).title(title));
     frame.render_widget(text_widget, chunks[0]);
 
     // ── Cursor ────────────────────────────────────────────────────────────────
@@ -94,6 +99,15 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
     let status_widget = Paragraph::new(render_frame.status.clone())
         .style(Style::default().bg(RColor::DarkGray).fg(RColor::White));
     frame.render_widget(status_widget, chunks[1]);
+
+    // ── Widget overlay ──────────────────────────────────────────────────────
+    if let Some(ref layout) = render_frame.widget_layout {
+        let registry = widget_render::build_registry();
+        let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
+        let mut cell_buf = widget_render::CellBuffer::new(inner.width, inner.height);
+        widget_render::render_widget_tree(layout, &registry, &mut cell_buf);
+        blit_cell_buffer(&cell_buf, frame, inner);
+    }
 
     // ── Completion popup ──────────────────────────────────────────────────────
     if let Some(comp) = &render_frame.completion {
@@ -126,12 +140,16 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                 if entry.selected {
                     Line::from(Span::styled(
                         label,
-                        Style::default().bg(RColor::Rgb(84, 78, 150)).fg(RColor::White),
+                        Style::default()
+                            .bg(RColor::Rgb(84, 78, 150))
+                            .fg(RColor::White),
                     ))
                 } else {
                     Line::from(Span::styled(
                         label,
-                        Style::default().bg(RColor::Rgb(38, 38, 56)).fg(RColor::White),
+                        Style::default()
+                            .bg(RColor::Rgb(38, 38, 56))
+                            .fg(RColor::White),
                     ))
                 }
             })
@@ -164,6 +182,24 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                         .wrap(Wrap { trim: false }),
                     doc_area,
                 );
+            }
+        }
+    }
+}
+
+/// Blit a CellBuffer onto the ratatui frame. Only `Some` cells overwrite.
+fn blit_cell_buffer(cell_buf: &widget_render::CellBuffer, frame: &mut Frame, area: Rect) {
+    let buf = frame.buffer_mut();
+    for (row_idx, row) in cell_buf.cells.iter().enumerate() {
+        for (col_idx, cell_opt) in row.iter().enumerate() {
+            if let Some(cell) = cell_opt {
+                let x = area.x + col_idx as u16;
+                let y = area.y + row_idx as u16;
+                if x < area.right() && y < area.bottom() {
+                    let ratatui_cell = &mut buf[(x, y)];
+                    ratatui_cell.set_char(cell.ch);
+                    ratatui_cell.set_style(cell_style_to_ratatui(cell.style));
+                }
             }
         }
     }

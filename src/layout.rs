@@ -77,9 +77,13 @@ impl LayoutEngine {
                     .unwrap_or(0),
                 height: 1,
             },
-            "slider" => Size {
+            "slider" | "hslider" => Size {
                 width: get_prop_num(node, "width").map(f64_to_u16).unwrap_or(16),
                 height: 1,
+            },
+            "vslider" => Size {
+                width: 2,
+                height: get_prop_num(node, "height").map(f64_to_u16).unwrap_or(8),
             },
             "toggle" => Size {
                 width: 4,
@@ -148,7 +152,11 @@ impl LayoutEngine {
                     .map(|size| size.width)
                     .fold(0_u16, saturating_add)
                     .saturating_add(gap.saturating_mul(child_sizes.len().saturating_sub(1) as u16));
-                let height = child_sizes.iter().map(|size| size.height).max().unwrap_or(0);
+                let height = child_sizes
+                    .iter()
+                    .map(|size| size.height)
+                    .max()
+                    .unwrap_or(0);
                 Size {
                     width: constraints
                         .max_width
@@ -159,7 +167,9 @@ impl LayoutEngine {
             "box" => {
                 let padding = get_prop_num(node, "padding").map(f64_to_u16).unwrap_or(0);
                 let inner = shrink_constraints(constraints, padding);
-                let child_size = children.first().and_then(|child| self.measure(child, inner));
+                let child_size = children
+                    .first()
+                    .and_then(|child| self.measure(child, inner));
                 Size {
                     width: get_prop_num(node, "width")
                         .map(f64_to_u16)
@@ -178,7 +188,10 @@ impl LayoutEngine {
                 }
             }
             "grid" => {
-                let cols = get_prop_num(node, "cols").map(f64_to_u16).unwrap_or(1).max(1);
+                let cols = get_prop_num(node, "cols")
+                    .map(f64_to_u16)
+                    .unwrap_or(1)
+                    .max(1);
                 let measured_children = children
                     .iter()
                     .filter_map(|child| self.measure(child, constraints))
@@ -273,7 +286,7 @@ impl LayoutEngine {
                             row: area.row.saturating_add(padding),
                             col: cursor_col,
                             width: size.width,
-                            height: inner_height,
+                            height: size.height,
                         };
                         cursor_col = cursor_col.saturating_add(size.width).saturating_add(gap);
                         Some(self.build_layout_node(child, rect))
@@ -299,7 +312,10 @@ impl LayoutEngine {
                     .collect()
             }
             "grid" => {
-                let cols = get_prop_num(node, "cols").map(f64_to_u16).unwrap_or(1).max(1);
+                let cols = get_prop_num(node, "cols")
+                    .map(f64_to_u16)
+                    .unwrap_or(1)
+                    .max(1);
                 let col_width = get_prop_num(node, "col-width")
                     .map(f64_to_u16)
                     .unwrap_or_else(|| (area.width / cols).max(1));
@@ -409,9 +425,13 @@ fn clamp_size(size: Size, constraints: Constraints) -> Size {
 fn shrink_constraints(constraints: Constraints, padding: u16) -> Constraints {
     Constraints {
         min_width: 0,
-        max_width: constraints.max_width.saturating_sub(padding.saturating_mul(2)),
+        max_width: constraints
+            .max_width
+            .saturating_sub(padding.saturating_mul(2)),
         min_height: 0,
-        max_height: constraints.max_height.saturating_sub(padding.saturating_mul(2)),
+        max_height: constraints
+            .max_height
+            .saturating_sub(padding.saturating_mul(2)),
     }
 }
 
@@ -452,7 +472,10 @@ fn get_children(v: &Value) -> Vec<Value> {
     };
 
     match map.get("children") {
-        Some(Value::List(children)) => children.iter().map(|child| child.borrow().clone()).collect(),
+        Some(Value::List(children)) => children
+            .iter()
+            .map(|child| child.borrow().clone())
+            .collect(),
         _ => vec![],
     }
 }

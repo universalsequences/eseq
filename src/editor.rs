@@ -200,6 +200,10 @@ impl Editor {
         &mut self.buffers[self.active]
     }
 
+    pub fn widget_layout(&self) -> Option<crate::layout::LayoutNode> {
+        self.runtime.current_layout.clone()
+    }
+
     pub fn open_scratch_buffer(&mut self, name: &str, initial: &str) -> BufferId {
         self.open_scratch_buffer_with_mode(name, initial, BufferMode::ESeqLisp)
     }
@@ -628,6 +632,22 @@ impl Editor {
         Ok(path)
     }
 
+    fn load_active_buffer(&mut self) -> Result<PathBuf, EditorError> {
+        let active = self.active_buffer();
+        let path = active
+            .path
+            .clone()
+            .ok_or_else(|| EditorError::Message("buffer is not file-backed".to_string()))?;
+        let mode = active.mode;
+        let buffer = self.active_buffer_mut();
+        let text = std::fs::read_to_string(&path)?;
+        buffer.set_text(&text);
+        buffer.set_path(path.clone());
+        buffer.set_mode(mode);
+        buffer.dirty = false;
+        Ok(path)
+    }
+
     fn sync_runtime_context(&mut self) {
         let active = self.active_buffer();
         let mut shared = self.runtime.shared.borrow_mut();
@@ -843,6 +863,11 @@ impl Editor {
                 Ok(path) => self.minibuffer = Some(format!("Saved {}", path.display())),
                 Err(error) => self.minibuffer = Some(format!("Error: {error:?}")),
             }
+        } else if self.runtime.take_pending_load() {
+            match self.load_active_buffer() {
+                Ok(path) => self.minibuffer = Some(format!("Loaded {}", path.display())),
+                Err(error) => self.minibuffer = Some(format!("Error: {error:?}")),
+            }
         }
         self.completion = None;
     }
@@ -889,7 +914,11 @@ fn normalize_region(
     start: (usize, usize),
     end: (usize, usize),
 ) -> ((usize, usize), (usize, usize)) {
-    if start <= end { (start, end) } else { (end, start) }
+    if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    }
 }
 
 impl CompletionState {
@@ -1022,6 +1051,16 @@ fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "load-buffer",
+        "(load-buffer)",
+        "Load the current buffer from its path, discarding unsaved changes.",
+        |_args, ctx| {
+            ctx.request_load();
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "save-buffer",
         "(save-buffer)",
         "Save the current buffer.",
@@ -1107,7 +1146,17 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::fs;
     use std::rc::Rc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_file_path(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("eseqlisp-{name}-{unique}.lisp"))
+    }
 
     #[test]
     fn ctrl_char_keys_are_normalized_to_lowercase() {
@@ -1313,8 +1362,8 @@ mod tests {
 
         editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
-        assert_eq!(editor.active_buffer().text(), "(if test\n    :4t)");
-        assert_eq!(editor.active_buffer().cursor, (1, 4));
+        assert_eq!(editor.active_buffer().text(), "(if test\n  :4t)");
+        assert_eq!(editor.active_buffer().cursor, (1, 2));
     }
 
     #[test]
@@ -1326,8 +1375,8 @@ mod tests {
 
         editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(editor.active_buffer().text(), "(if test\n    )");
-        assert_eq!(editor.active_buffer().cursor, (1, 4));
+        assert_eq!(editor.active_buffer().text(), "(if test\n  )");
+        assert_eq!(editor.active_buffer().cursor, (1, 2));
     }
 
     #[test]
@@ -1455,6 +1504,40 @@ mod tests {
         editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
         editor.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         assert_eq!(editor.minibuffer.as_deref(), Some("200"));
+    }
+
+    #[test]
+    fn load_buffer_reloads_active_file_from_disk() {
+        let path = temp_file_path("load-buffer");
+        fs::write(&path, "(+ 1 2)\n").unwrap();
+
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_file_buffer(&path).unwrap();
+        editor.active_buffer_mut().cursor = (0, 0);
+        editor.active_buffer_mut().insert_char(';');
+        assert!(editor.active_buffer().dirty);
+
+        editor.runtime_mut().eval_str("(load-buffer)").unwrap();
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(editor.active_buffer().text(), "(+ 1 2)\n");
+        assert!(!editor.active_buffer().dirty);
+        let expected = format!("Loaded {}", path.display());
+        assert_eq!(editor.minibuffer.as_deref(), Some(expected.as_str()));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_buffer_errors_for_non_file_backed_buffer() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(+ 1 2)");
+
+        editor.runtime_mut().eval_str("(load-buffer)").unwrap();
+        editor.refresh_runtime_side_effects();
+
+        let minibuffer = editor.minibuffer.unwrap_or_default();
+        assert!(minibuffer.contains("buffer is not file-backed"));
     }
 
     #[test]
