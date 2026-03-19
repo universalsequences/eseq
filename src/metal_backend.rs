@@ -685,6 +685,8 @@ vertex WidgetVaryings widget_vert(
             if let Some(layout) = &frame.widget_layout {
                 let cell_w = atlas.cell_w as f32;
                 let cell_h = atlas.cell_h as f32;
+                let wscroll = frame.widget_scroll_top;
+                let wmax = (vp_h / cell_h).floor() as u16 - 1;
                 widget_upload_bytes = self.refresh_widget_instances(
                     layout,
                     frame.widget_layout_cache_key,
@@ -693,6 +695,8 @@ vertex WidgetVaryings widget_vert(
                     cell_h,
                     vp_w,
                     vp_h,
+                    wscroll,
+                    wmax,
                 );
 
                 for (widget_type, batch) in &self.cached_widget_batches {
@@ -789,6 +793,8 @@ vertex WidgetVaryings widget_vert(
             cell_h: f32,
             vp_w: f32,
             vp_h: f32,
+            scroll_top: u16,
+            max_rows: u16,
         ) -> usize {
             let view_metrics = WidgetViewMetrics {
                 cell_w_bits: cell_w.to_bits(),
@@ -828,6 +834,8 @@ vertex WidgetVaryings widget_vert(
                             cell_h,
                             vp_w,
                             vp_h,
+                            scroll_top,
+                            max_rows,
                             &mut self.cached_widget_batches,
                             &mut self.widget_paths,
                             &mut self.widget_locations,
@@ -843,6 +851,8 @@ vertex WidgetVaryings widget_vert(
                     cell_h,
                     vp_w,
                     vp_h,
+                    scroll_top,
+                    max_rows,
                     &mut self.cached_widget_batches,
                     &mut self.widget_paths,
                     &mut self.widget_locations,
@@ -1290,6 +1300,8 @@ vertex WidgetVaryings widget_vert(
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
+        scroll_top: u16,
+        max_rows: u16,
         batches: &mut HashMap<String, WidgetBatch>,
         widget_paths: &mut HashMap<u64, Vec<usize>>,
         widget_locations: &mut HashMap<u64, (String, usize)>,
@@ -1304,6 +1316,8 @@ vertex WidgetVaryings widget_vert(
             cell_h,
             vp_w,
             vp_h,
+            scroll_top,
+            max_rows,
             batches,
             widget_paths,
             widget_locations,
@@ -1328,22 +1342,55 @@ vertex WidgetVaryings widget_vert(
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
+        scroll_top: u16,
+        max_rows: u16,
         out: &mut HashMap<String, WidgetBatch>,
         widget_paths: &mut HashMap<u64, Vec<usize>>,
         widget_locations: &mut HashMap<u64, (String, usize)>,
     ) {
         if let Some(key) = widget_batch_key(node) {
-            let instance = widget_instance_for_node(node, cell_w, cell_h, vp_w, vp_h);
-            let batch = out.entry(key.clone()).or_insert_with(|| WidgetBatch {
-                instances: Vec::new(),
-                buffer: None,
-                slot_by_widget_id: HashMap::new(),
-            });
-            let slot = batch.instances.len();
-            batch.instances.push(instance);
-            batch.slot_by_widget_id.insert(node.widget_id, slot);
-            widget_paths.insert(node.widget_id, path.to_vec());
-            widget_locations.insert(node.widget_id, (key, slot));
+            // Apply scroll: skip nodes outside viewport
+            let vis_row = node.rect.row as i32 - scroll_top as i32;
+            let vis_bottom = vis_row + node.rect.height as i32;
+            if vis_bottom <= 0 || vis_row >= max_rows as i32 {
+                // Entirely outside viewport — create a zero-size instance
+                // so widget_id tracking stays consistent
+                let instance = WidgetInstance {
+                    ndc_min: [0.0, 0.0],
+                    ndc_max: [0.0, 0.0],
+                    value_t: 0.0,
+                    orientation: 0.0,
+                    color_a: [0.0; 4],
+                    color_b: [0.0; 4],
+                    corner_radius: 0.0,
+                    pixel_aspect: 1.0,
+                };
+                let batch = out.entry(key.clone()).or_insert_with(|| WidgetBatch {
+                    instances: Vec::new(),
+                    buffer: None,
+                    slot_by_widget_id: HashMap::new(),
+                });
+                let slot = batch.instances.len();
+                batch.instances.push(instance);
+                batch.slot_by_widget_id.insert(node.widget_id, slot);
+                widget_paths.insert(node.widget_id, path.to_vec());
+                widget_locations.insert(node.widget_id, (key, slot));
+            } else {
+                // Create a scroll-adjusted node for NDC computation
+                let mut scrolled_node = node.clone();
+                scrolled_node.rect.row = vis_row.max(0) as u16;
+                let instance = widget_instance_for_node(&scrolled_node, cell_w, cell_h, vp_w, vp_h);
+                let batch = out.entry(key.clone()).or_insert_with(|| WidgetBatch {
+                    instances: Vec::new(),
+                    buffer: None,
+                    slot_by_widget_id: HashMap::new(),
+                });
+                let slot = batch.instances.len();
+                batch.instances.push(instance);
+                batch.slot_by_widget_id.insert(node.widget_id, slot);
+                widget_paths.insert(node.widget_id, path.to_vec());
+                widget_locations.insert(node.widget_id, (key, slot));
+            }
         }
 
         for (idx, child) in node.children.iter().enumerate() {
@@ -1356,6 +1403,8 @@ vertex WidgetVaryings widget_vert(
                 cell_h,
                 vp_w,
                 vp_h,
+                scroll_top,
+                max_rows,
                 out,
                 widget_paths,
                 widget_locations,

@@ -601,6 +601,12 @@ impl Editor {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_mouse_precise = Some((precise_col, precise_row));
+                // Try click-to-activate on focusable widgets first
+                if self.try_click_focusable_widget(
+                    mouse, content_col, content_row,
+                ) {
+                    return;
+                }
                 if self.try_handle_widget_mouse_precise(
                     mouse,
                     content_col,
@@ -633,6 +639,33 @@ impl Editor {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.last_mouse_precise = None;
+            }
+            MouseEventKind::ScrollUp => {
+                if self.has_focusable_widgets() {
+                    self.navigate_focus(KeyCode::Up);
+                } else {
+                    let buffer = self.active_buffer_mut();
+                    if buffer.scroll_top > 0 {
+                        buffer.scroll_top = buffer.scroll_top.saturating_sub(3);
+                        buffer.cursor.0 = buffer.cursor.0.min(
+                            buffer.scroll_top + content_height.saturating_sub(1) as usize,
+                        );
+                    }
+                    self.mark_needs_redraw();
+                }
+            }
+            MouseEventKind::ScrollDown => {
+                if self.has_focusable_widgets() {
+                    self.navigate_focus(KeyCode::Down);
+                } else {
+                    let buffer = self.active_buffer_mut();
+                    let max_scroll = buffer.lines.len().saturating_sub(1);
+                    buffer.scroll_top = (buffer.scroll_top + 3).min(max_scroll);
+                    if buffer.cursor.0 < buffer.scroll_top {
+                        buffer.cursor.0 = buffer.scroll_top;
+                    }
+                    self.mark_needs_redraw();
+                }
             }
             _ => {}
         }
@@ -1143,6 +1176,44 @@ impl Editor {
         self.mark_needs_redraw();
         self.sync_runtime_context();
         true
+    }
+
+    fn try_click_focusable_widget(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+    ) -> bool {
+        if !self.has_focusable_widgets() {
+            return false;
+        }
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return false;
+        };
+        if mouse.column < content_col || mouse.row < content_row {
+            return false;
+        }
+        let local_row = (mouse.row - content_row) + self.widget_scroll_top;
+        let local_col = mouse.column - content_col;
+
+        // Find the focusable widget at this position
+        let mut focusable_nodes: Vec<(u64, u16, u16, u16, u16)> = Vec::new();
+        collect_focusable_rects(&layout, &mut focusable_nodes);
+
+        for (id, row, col, width, height) in &focusable_nodes {
+            if local_row >= *row
+                && local_row < row + height
+                && local_col >= *col
+                && local_col < col + width
+            {
+                self.focused_widget_id = Some(*id);
+                self.adjust_widget_scroll(*row);
+                self.mark_needs_redraw();
+                self.activate_focused();
+                return true;
+            }
+        }
+        false
     }
 
     fn has_focusable_widgets(&self) -> bool {
@@ -1866,6 +1937,24 @@ fn has_focusable_node(node: &crate::layout::LayoutNode) -> bool {
         return true;
     }
     node.children.iter().any(has_focusable_node)
+}
+
+fn collect_focusable_rects(
+    node: &crate::layout::LayoutNode,
+    result: &mut Vec<(u64, u16, u16, u16, u16)>,
+) {
+    if node.focusable {
+        result.push((
+            node.widget_id,
+            node.rect.row,
+            node.rect.col,
+            node.rect.width,
+            node.rect.height,
+        ));
+    }
+    for child in &node.children {
+        collect_focusable_rects(child, result);
+    }
 }
 
 fn collect_focusable_nodes(
