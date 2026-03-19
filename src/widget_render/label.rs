@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use super::{CellBuffer, WidgetDefinition, styled_cell};
+use crate::backend::Color;
 use crate::theme;
 use crate::layout::{
     Constraints, Rect, Size, f64_to_u16, get_prop_num, get_prop_str, saturating_usize_to_u16,
@@ -11,19 +12,43 @@ pub struct LabelWidget;
 
 pub static LABEL_WIDGET: LabelWidget = LabelWidget;
 
-/// TUI render for label: write each character with white foreground.
+fn resolve_color(props: &HashMap<String, Value>) -> Color {
+    match props.get("color") {
+        Some(Value::String(name)) | Some(Value::Keyword(name)) => match name.as_str() {
+            "red" => theme::RED,
+            "green" | "cyan" => theme::GREEN,
+            "yellow" | "orange" => theme::YELLOW,
+            "blue" | "purple" => theme::BLUE,
+            "magenta" => theme::MAGENTA,
+            "white" => theme::WHITE,
+            "gray" | "grey" | "dim" => theme::BRIGHT_BLACK,
+            _ => theme::WIDGET_LABEL_FG,
+        },
+        _ => theme::WIDGET_LABEL_FG,
+    }
+}
+
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let text = match props.get("text") {
         Some(Value::String(s)) => s.clone(),
         _ => return,
     };
 
+    let fg = resolve_color(props);
+
+    // If label has a width wider than text, fill with spaces for background
     for (i, ch) in text.chars().enumerate() {
         let col = rect.col + i as u16;
         if col >= rect.col + rect.width {
             break;
         }
-        buf.set(rect.row, col, styled_cell(ch, theme::WIDGET_LABEL_FG, None));
+        buf.set(rect.row, col, styled_cell(ch, fg, None));
+    }
+    // Fill remaining width with spaces (needed for focus highlight to look clean)
+    let text_len = text.chars().count() as u16;
+    for i in text_len..rect.width {
+        let col = rect.col + i;
+        buf.set(rect.row, col, styled_cell(' ', fg, None));
     }
 }
 

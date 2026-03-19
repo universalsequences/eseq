@@ -115,25 +115,21 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
         if let Some(node) = find_focused_node(layout, focused_id) {
             let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
             let focus_style = Style::default()
-                .fg(to_rcolor(crate::theme::FG))
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED);
-            // Draw bracket indicators at corners
-            let x = inner.x + node.rect.col;
-            let y = inner.y + node.rect.row;
-            let right = x + node.rect.width.saturating_sub(1);
-            let bottom = y + node.rect.height.saturating_sub(1);
+                .add_modifier(Modifier::REVERSED);
             let buf = frame.buffer_mut();
-            if x < inner.right() && y < inner.bottom() {
-                buf[(x, y)].set_style(focus_style);
-            }
-            if right < inner.right() && y < inner.bottom() {
-                buf[(right, y)].set_style(focus_style);
-            }
-            if x < inner.right() && bottom < inner.bottom() {
-                buf[(x, bottom)].set_style(focus_style);
-            }
-            if right < inner.right() && bottom < inner.bottom() {
-                buf[(right, bottom)].set_style(focus_style);
+            // Highlight the entire widget rect
+            for row in node.rect.row..node.rect.row + node.rect.height {
+                let y = inner.y + row;
+                if y >= inner.bottom() {
+                    break;
+                }
+                for col in node.rect.col..node.rect.col + node.rect.width {
+                    let x = inner.x + col;
+                    if x >= inner.right() {
+                        break;
+                    }
+                    buf[(x, y)].set_style(focus_style);
+                }
             }
         }
     }

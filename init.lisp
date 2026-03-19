@@ -88,67 +88,57 @@
 (def dired-entries '())
 
 (define-mode "dired-mode" :read-only true)
-(mode-bind-key "dired-mode" "RET" "dired-open-at-cursor")
 (mode-bind-key "dired-mode" "g" "dired-refresh")
 (mode-bind-key "dired-mode" "q" "dired-quit")
 (mode-bind-key "dired-mode" "-" "dired-up")
 
-;; Format a single directory entry for display
-(def dired-format-size (size)
-  (if (> size 1048576)
-    (fmt "{:.1}M" (/ size 1048576))
-    (if (> size 1024)
-      (fmt "{:.0}K" (/ size 1024))
-      (fmt "{}" size))))
-
-(def dired-format-entry (entry)
+;; Build the action callback for a directory entry
+(def dired-entry-action (entry)
   (let ((name (get entry :name))
-        (is-dir (get entry :directory))
-        (size (get entry :size)))
+        (is-dir (get entry :directory)))
     (if is-dir
-      (str "  d  " name "/")
-      (str "     " name))))
+      (lambda ()
+        (set! dired-current-dir (path-join dired-current-dir name))
+        (dired-refresh))
+      (lambda ()
+        (open-file (path-join dired-current-dir name))))))
 
-;; Refresh the *dired* buffer with the contents of dired-current-dir
+;; Build a single label widget for a dired entry
+(def dired-entry-widget (entry)
+  (let ((name (get entry :name))
+        (is-dir (get entry :directory)))
+    (if is-dir
+      (label (str "  d  " name "/")
+        :width 80
+        :color :cyan
+        :focusable true
+        :on-enter (dired-entry-action entry))
+      (label (str "     " name)
+        :width 80
+        :focusable true
+        :on-enter (dired-entry-action entry)))))
+
+;; Refresh the *dired* buffer with a widget-based directory listing
 (def dired-refresh ()
   (let ((entries (list-directory dired-current-dir))
         (dirs (filter |e| (get e :directory) entries))
         (files (filter |e| (not (get e :directory)) entries)))
-    ;; Store entries for cursor-based lookup (line 1 = header, line 2 = ..)
-    (set! dired-entries
-      (append
-        (map |e| (merge e :display-name (str (get e :name) "/")) dirs)
-        (map |e| (merge e :display-name (get e :name)) files)))
-    ;; Build display lines
-    (let ((header (str "  " dired-current-dir ":"))
-          (parent "  d  ../")
-          (dir-lines (map dired-format-entry dirs))
-          (file-lines (map dired-format-entry files)))
-      (set-buffer-lines
-        (cons header
-          (cons parent
-            (append dir-lines file-lines))))
-      (goto-line 2)
+    (set! dired-entries (append dirs files))
+    (let ((header (label (str dired-current-dir ":")
+                    :color :dim
+                    :width 80))
+          (parent (label "  d  ../"
+                    :width 80
+                    :color :purple
+                    :focusable true
+                    :on-enter (lambda () (dired-up))))
+          (dir-widgets (map dired-entry-widget dirs))
+          (file-widgets (map dired-entry-widget files))
+          (all-widgets (cons header
+                         (cons parent
+                           (append dir-widgets file-widgets)))))
+      (render-widget (v-stack all-widgets))
       (status (fmt "{} entries" (len dired-entries))))))
-
-;; Open the file or directory under the cursor
-(def dired-open-at-cursor ()
-  (let ((l (current-line-number)))
-    (if (= l 1)
-      (status "Header line")
-      (if (= l 2)
-        (dired-up)
-        (if (>= (- l 3) (len dired-entries))
-          (status "No entry at cursor")
-          (let ((entry (nth dired-entries (- l 3))))
-            (let ((name (get entry :name))
-                  (is-dir (get entry :directory))
-                  (full-path (path-join dired-current-dir (get entry :name))))
-              (if is-dir
-                (do
-                  (set! dired-current-dir full-path)
-                  (dired-refresh))
-                (open-file full-path)))))))))
 
 ;; Navigate to parent directory
 (def dired-up ()
@@ -161,6 +151,7 @@
 
 ;; Close dired and switch to previous buffer
 (def dired-quit ()
+  (render-widget nil)
   (let ((bufs (buffer-list)))
     (if (> (len bufs) 1)
       (switch-to-buffer (nth bufs 0))
@@ -173,3 +164,5 @@
     (create-buffer "*dired*")
     (set-buffer-mode "dired-mode")
     (dired-refresh)))
+
+;; dired-open-at-cursor is no longer needed — Enter triggers :on-enter on focused widget

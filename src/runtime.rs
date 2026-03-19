@@ -41,6 +41,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_mode_bindings: Vec<(String, String, String)>,    // (mode, key, handler)
     pub pending_set_mode: Option<String>,
     pub pending_open_file: Option<String>,
+    pub pending_widget_tree: Option<Value>,
     pub pending_create_buffer: Option<String>,
     pub pending_switch_buffer: Option<String>,
     pub pending_set_text: Option<String>,
@@ -154,6 +155,13 @@ impl NativeContext {
 
     pub fn set_buffer_lines(&mut self, lines: Vec<String>) {
         self.shared.borrow_mut().pending_set_lines = Some(lines);
+    }
+
+    pub fn render_widget(&mut self, tree: Value) {
+        self.shared
+            .borrow_mut()
+            .pending_widget_tree
+            .replace(tree);
     }
 
     pub fn goto_line(&mut self, line: usize) {
@@ -453,6 +461,10 @@ impl Runtime {
         self.shared.borrow_mut().pending_set_mode.take()
     }
 
+    pub(crate) fn take_pending_widget_tree(&mut self) -> Option<Value> {
+        self.shared.borrow_mut().pending_widget_tree.take()
+    }
+
     pub(crate) fn take_pending_open_file(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_open_file.take()
     }
@@ -479,6 +491,12 @@ impl Runtime {
 
     pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {
         std::mem::take(&mut self.rendered_layouts)
+    }
+
+    pub fn set_widget_tree(&mut self, tree: Value) {
+        self.clear_layout_effects();
+        self.current_widget_tree = Some(tree);
+        self.relayout_current_tree();
     }
 
     pub fn clear_layout_effects(&mut self) {

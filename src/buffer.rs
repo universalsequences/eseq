@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::host::BufferId;
 use crate::mode::BufferMode;
 use crate::text::sexp_range_at_cursor;
+use crate::vm::Value;
 
 pub struct Buffer {
     pub id: BufferId,
@@ -19,6 +20,8 @@ pub struct Buffer {
     /// First visible line index (for scrolling).
     pub scroll_top: usize,
     pub revision: u64,
+    /// Per-buffer widget tree (for modes that render widgets).
+    pub widget_tree: Option<Value>,
 }
 
 impl Buffer {
@@ -34,6 +37,7 @@ impl Buffer {
             read_only: false,
             scroll_top: 0,
             revision: 0,
+            widget_tree: None,
         }
     }
 

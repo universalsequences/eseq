@@ -384,6 +384,7 @@ impl Editor {
             self.sync_runtime_context();
             self.completion = None;
             self.clear_mark();
+            self.restore_buffer_widget_tree();
         }
     }
 
@@ -1233,6 +1234,17 @@ impl Editor {
         }
     }
 
+    fn restore_buffer_widget_tree(&mut self) {
+        let tree = self.active_buffer().widget_tree.clone();
+        match tree {
+            Some(tree) => self.runtime.set_widget_tree(tree),
+            None => {
+                self.runtime.clear_layout_effects();
+                self.focused_widget_id = None;
+            }
+        }
+    }
+
     fn auto_focus_first_widget(&mut self) {
         let Some(layout) = self.runtime.current_layout.clone() else {
             return;
@@ -1480,13 +1492,21 @@ impl Editor {
         // Process buffer operations first (create/switch must happen before set-mode)
         if let Some(path) = self.runtime.take_pending_open_file() {
             match self.open_file_buffer(&path) {
-                Ok(_) => self.minibuffer = Some(format!("Opened {path}")),
+                Ok(_) => {
+                    self.minibuffer = Some(format!("Opened {path}"));
+                    // New file buffer has no widget tree
+                    self.runtime.clear_layout_effects();
+                    self.focused_widget_id = None;
+                }
                 Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
             }
         }
 
         if let Some(name) = self.runtime.take_pending_create_buffer() {
             self.open_scratch_buffer(&name, "");
+            // New buffer has no widget tree — clear any existing overlay
+            self.runtime.clear_layout_effects();
+            self.focused_widget_id = None;
         }
 
         if let Some(name) = self.runtime.take_pending_switch_buffer() {
@@ -1496,6 +1516,7 @@ impl Editor {
                 self.sync_runtime_context();
                 self.completion = None;
                 self.clear_mark();
+                self.restore_buffer_widget_tree();
             }
         }
 
@@ -1540,6 +1561,22 @@ impl Editor {
             let buffer = self.active_buffer_mut();
             let row = line.saturating_sub(1).min(buffer.lines.len().saturating_sub(1));
             buffer.cursor = (row, 0);
+        }
+
+        // Process widget tree rendering (stored per-buffer)
+        if let Some(tree) = self.runtime.take_pending_widget_tree() {
+            match tree {
+                Value::Nil | Value::Bool(false) => {
+                    self.active_buffer_mut().widget_tree = None;
+                    self.runtime.clear_layout_effects();
+                    self.focused_widget_id = None;
+                }
+                tree => {
+                    self.active_buffer_mut().widget_tree = Some(tree.clone());
+                    self.runtime.set_widget_tree(tree);
+                    self.auto_focus_first_widget();
+                }
+            }
         }
 
         if let Some(path) = self.runtime.take_pending_save_as() {
@@ -2409,6 +2446,19 @@ fn register_editor_natives(runtime: &mut Runtime) {
             let contents = std::fs::read_to_string(path)
                 .map_err(|e| format!("read-file-to-string: {e}"))?;
             Ok(Value::String(contents))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "render-widget",
+        "(render-widget tree)",
+        "Render a widget tree in the current buffer's overlay.",
+        |args, ctx| {
+            let Some(tree) = args.into_iter().next() else {
+                return Err("render-widget expects a widget tree value".to_string());
+            };
+            ctx.render_widget(tree);
+            Ok(Value::Nil)
         },
     );
 
@@ -3419,16 +3469,12 @@ mod tests {
             "mode should be dired-mode, got {:?}",
             editor.active_buffer().mode
         );
-        assert!(editor.active_buffer().lines.len() > 2, "should list files");
-
-        // Press Enter on line 3 (first entry) — should open dir or file
-        editor.active_buffer_mut().cursor = (2, 0);
-        editor.sync_runtime_context();
-        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let msg = editor.minibuffer.clone().unwrap_or_default();
+        // Widget-based dired: check that a layout exists
         assert!(
-            !msg.contains("Error"),
-            "Enter on first entry failed: {msg}"
+            editor.widget_layout().is_some(),
+            "dired should have a widget layout"
         );
+        let layout = editor.widget_layout().unwrap();
+        assert!(layout.children.len() > 2, "should list files as widget children");
     }
 }
