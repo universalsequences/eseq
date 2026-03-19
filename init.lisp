@@ -74,6 +74,14 @@
       (fn (first xs))
       (for-each fn (rest xs)))))
 
+;; Switch to a buffer by name, creating it if it doesn't exist
+(def switch-or-create-buffer (name)
+  (let ((bufs (buffer-list))
+        (exists (reduce |acc b| (if (= b name) true acc) false bufs)))
+    (if exists
+      (switch-to-buffer name)
+      (create-buffer name))))
+
 (bind-key "C-x C-e" "eval-sexp")
 (bind-key "C-x C-b" "eval-buffer-command")
 (bind-key "C-x C-s" "save-current-buffer")
@@ -151,7 +159,6 @@
 
 ;; Close dired and switch to previous buffer
 (def dired-quit ()
-  (render-widget nil)
   (let ((bufs (buffer-list)))
     (if (> (len bufs) 1)
       (switch-to-buffer (nth bufs 0))
@@ -161,8 +168,54 @@
 (def dired-here ()
   (let ((dir (current-directory)))
     (set! dired-current-dir dir)
-    (create-buffer "*dired*")
+    (switch-or-create-buffer "*dired*")
     (set-buffer-mode "dired-mode")
     (dired-refresh)))
+
+;; ── Buffer List mode ────────────────────────────────────────────────────────
+;; Shows all open buffers and lets you switch between them.
+
+(def buflist-source-buffer "")
+
+(define-mode "buffer-list-mode" :read-only true)
+(mode-bind-key "buffer-list-mode" "q" "buflist-quit")
+(mode-bind-key "buffer-list-mode" "g" "buflist-refresh")
+
+(def buflist-make-entry (name)
+  (let ((is-current (= name buflist-source-buffer))
+        (prefix (if is-current " > " "   "))
+        (color (if is-current :yellow :white)))
+    (label (str prefix name)
+      :width 80
+      :color color
+      :focusable true
+      :on-enter (lambda ()
+                  (switch-to-buffer name)))))
+
+(def buflist-refresh ()
+  (let ((bufs (buffer-list))
+        (header (label "  Buffers:"
+                  :color :dim
+                  :width 80))
+        (entries (map buflist-make-entry bufs))
+        (all-widgets (cons header entries)))
+    (render-widget (v-stack all-widgets))
+    (status (fmt "{} buffers" (len bufs)))))
+
+(def buflist-quit ()
+  (if (not (= buflist-source-buffer ""))
+    (switch-to-buffer buflist-source-buffer)
+    (let ((bufs (buffer-list)))
+      (if (> (len bufs) 1)
+        (switch-to-buffer (nth bufs 0))
+        (status "No other buffer")))))
+
+(def buffer-list-here ()
+  (set! buflist-source-buffer (current-buffer-name))
+  (switch-or-create-buffer "*buffers*")
+  (set-buffer-mode "buffer-list-mode")
+  (buflist-refresh))
+
+(bind-key "C-x b" "buffer-list-here")
 
 ;; dired-open-at-cursor is no longer needed — Enter triggers :on-enter on focused widget

@@ -493,14 +493,31 @@ impl Runtime {
         std::mem::take(&mut self.rendered_layouts)
     }
 
+    pub fn current_widget_tree(&self) -> Option<Value> {
+        self.current_widget_tree.clone()
+    }
+
     pub fn layout_rows(&self) -> u16 {
         self.layout_rows
     }
 
     pub fn set_widget_tree(&mut self, tree: Value) {
-        self.clear_layout_effects();
+        // Replace the visual widget tree without destroying reactive effects.
+        // Effects from other buffers must survive buffer switches.
+        self.current_layout = None;
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+        self.dirty_widget_ids.clear();
         self.current_widget_tree = Some(tree);
         self.relayout_current_tree();
+    }
+
+    /// Restore a previously saved widget tree for display only,
+    /// without clearing reactive effects.
+    pub fn restore_widget_tree(&mut self, tree: Value) {
+        self.current_widget_tree = Some(tree);
+        self.relayout_current_tree();
+        // Force layout revision bump so GPU caches rebuild
+        self.layout_revision = self.layout_revision.wrapping_add(1);
     }
 
     pub fn clear_layout_effects(&mut self) {

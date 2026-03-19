@@ -90,6 +90,7 @@ struct HighlightCache {
 #[derive(Debug, Clone)]
 struct WidgetHitCache {
     layout_revision: u64,
+    scroll_top: u16,
     cols: u16,
     rows: u16,
     cells: Vec<Option<crate::layout::LayoutNode>>,
@@ -283,7 +284,11 @@ impl Editor {
     }
 
     pub fn widget_scroll_top(&self) -> u16 {
-        self.widget_scroll_top
+        if self.has_focusable_widgets() {
+            self.widget_scroll_top
+        } else {
+            self.active_buffer().scroll_top as u16
+        }
     }
 
     pub fn focused_widget_id(&self) -> Option<u64> {
@@ -316,6 +321,7 @@ impl Editor {
         initial: &str,
         mode: BufferMode,
     ) -> BufferId {
+        self.save_current_widget_tree();
         let id = self.alloc_buffer_id();
         let mut buffer = Buffer::from_text(id, name, initial);
         buffer.set_mode(mode);
@@ -324,6 +330,10 @@ impl Editor {
         self.mark_needs_redraw();
         self.sync_runtime_context();
         self.refresh_completion();
+        // New buffer has no widgets — hide layout without destroying effects
+        self.runtime.current_layout = None;
+        self.focused_widget_id = None;
+        self.widget_scroll_top = 0;
         id
     }
 
@@ -336,6 +346,7 @@ impl Editor {
         path: impl Into<PathBuf>,
         mode: BufferMode,
     ) -> Result<BufferId, EditorError> {
+        self.save_current_widget_tree();
         let id = self.alloc_buffer_id();
         let mut buffer = Buffer::from_file(id, path)?;
         buffer.set_mode(mode);
@@ -344,6 +355,9 @@ impl Editor {
         self.mark_needs_redraw();
         self.sync_runtime_context();
         self.refresh_completion();
+        self.runtime.current_layout = None;
+        self.focused_widget_id = None;
+        self.widget_scroll_top = 0;
         Ok(id)
     }
 
@@ -385,6 +399,7 @@ impl Editor {
 
     pub fn set_active_buffer(&mut self, id: BufferId) {
         if let Some(index) = self.buffers.iter().position(|buffer| buffer.id == id) {
+            self.save_current_widget_tree();
             self.active = index;
             self.mark_needs_redraw();
             self.sync_runtime_context();
@@ -641,7 +656,7 @@ impl Editor {
                 self.last_mouse_precise = None;
             }
             MouseEventKind::ScrollUp => {
-                if self.has_focusable_widgets() {
+                if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Up);
                 } else {
                     let buffer = self.active_buffer_mut();
@@ -655,7 +670,7 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollDown => {
-                if self.has_focusable_widgets() {
+                if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Down);
                 } else {
                     let buffer = self.active_buffer_mut();
@@ -1327,15 +1342,22 @@ impl Editor {
         }
     }
 
+    fn save_current_widget_tree(&mut self) {
+        if let Some(tree) = self.runtime.current_widget_tree() {
+            self.active_buffer_mut().widget_tree = Some(tree);
+        }
+    }
+
     fn restore_buffer_widget_tree(&mut self) {
         let tree = self.active_buffer().widget_tree.clone();
         match tree {
             Some(tree) => {
-                self.runtime.set_widget_tree(tree);
+                self.runtime.restore_widget_tree(tree);
                 self.auto_focus_first_widget();
             }
             None => {
-                self.runtime.clear_layout_effects();
+                // Just clear the visual layout, don't destroy reactive effects
+                self.runtime.current_layout = None;
                 self.focused_widget_id = None;
                 self.widget_scroll_top = 0;
             }
@@ -1591,8 +1613,8 @@ impl Editor {
             match self.open_file_buffer(&path) {
                 Ok(_) => {
                     self.minibuffer = Some(format!("Opened {path}"));
-                    // New file buffer has no widget tree
-                    self.runtime.clear_layout_effects();
+                    // New file buffer has no widget tree — hide without destroying effects
+                    self.runtime.current_layout = None;
                     self.focused_widget_id = None;
                 }
                 Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
@@ -1601,13 +1623,12 @@ impl Editor {
 
         if let Some(name) = self.runtime.take_pending_create_buffer() {
             self.open_scratch_buffer(&name, "");
-            // New buffer has no widget tree — clear any existing overlay
-            self.runtime.clear_layout_effects();
             self.focused_widget_id = None;
         }
 
         if let Some(name) = self.runtime.take_pending_switch_buffer() {
             if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                self.save_current_widget_tree();
                 self.active = idx;
                 self.mark_needs_redraw();
                 self.sync_runtime_context();
@@ -1710,10 +1731,9 @@ impl Editor {
         let local_col = precise_col - content_col as f32;
         let local_row = precise_row - content_row as f32;
         let output = {
-            let Some(node) = self.widget_node_at(
-                local_row.floor().max(0.0) as u16,
-                local_col.floor().max(0.0) as u16,
-            ) else {
+            let query_row = local_row.floor().max(0.0) as u16;
+            let query_col = local_col.floor().max(0.0) as u16;
+            let Some(node) = self.widget_node_at(query_row, query_col) else {
                 return false;
             };
             self.dispatch_widget_mouse_event(&node, mouse.kind, content_col, content_row, precise_col, precise_row)
@@ -1744,6 +1764,8 @@ impl Editor {
         if let Some(node) = start_node.as_ref()
             && widget_render::widget_captures_drag(&node.widget_type)
         {
+            let scroll = self.widget_scroll_top() as f32;
+            let screen_row = node.rect.row as f32 - scroll;
             let clamped_col = end
                 .0
                 .clamp(
@@ -1755,9 +1777,9 @@ impl Editor {
             let clamped_row = end
                 .1
                 .clamp(
-                    content_row as f32 + node.rect.row as f32,
+                    content_row as f32 + screen_row,
                     content_row as f32
-                        + node.rect.row as f32
+                        + screen_row
                         + node.rect.height.saturating_sub(1) as f32,
                 );
             let output = self.dispatch_widget_mouse_event(
@@ -1803,29 +1825,36 @@ impl Editor {
 
     fn widget_node_at(&mut self, row: u16, col: u16) -> Option<crate::layout::LayoutNode> {
         let revision = self.runtime.layout_revision();
+        let scroll = self.widget_scroll_top();
         let layout = self.runtime.current_layout.as_ref()?;
         let cols = layout.rect.col.saturating_add(layout.rect.width);
         let rows = layout.rect.row.saturating_add(layout.rect.height);
 
         let needs_rebuild = self.widget_hit_cache.as_ref().is_none_or(|cache| {
-            cache.layout_revision != revision || cache.cols != cols || cache.rows != rows
+            cache.layout_revision != revision
+                || cache.scroll_top != scroll
+                || cache.cols != cols
+                || cache.rows != rows
         });
         if needs_rebuild {
             let mut cells = vec![None; cols as usize * rows as usize];
             fill_widget_hit_cells(layout, cols, rows, &mut cells);
             self.widget_hit_cache = Some(WidgetHitCache {
                 layout_revision: revision,
+                scroll_top: scroll,
                 cols,
                 rows,
                 cells,
             });
         }
 
+        // Offset the query row by scroll to map screen position to layout position
+        let layout_row = row + scroll;
         let cache = self.widget_hit_cache.as_ref()?;
-        if row >= cache.rows || col >= cache.cols {
+        if layout_row >= cache.rows || col >= cache.cols {
             return None;
         }
-        cache.cells[row as usize * cache.cols as usize + col as usize].clone()
+        cache.cells[layout_row as usize * cache.cols as usize + col as usize].clone()
     }
 
     fn handle_text_click(
@@ -1886,7 +1915,7 @@ impl Editor {
         precise_row: f32,
     ) -> Option<crate::widget_render::EventOutput> {
         let local_col = precise_col - content_col as f32;
-        let local_row = precise_row - content_row as f32;
+        let local_row = precise_row - content_row as f32 + self.widget_scroll_top() as f32;
         match map_mouse_event(node, mouse_kind, local_col, local_row) {
             MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
             MouseEventOutcome::Dispatch(widget_event) => handle_event(node, widget_event),
@@ -3595,6 +3624,95 @@ mod tests {
         assert!(
             editor.focused_widget_id().is_some(),
             "should auto-focus first focusable widget"
+        );
+    }
+
+    #[test]
+    fn widget_interaction_survives_buffer_switch() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(20, 6);
+
+        editor.runtime_mut().eval_str(
+            r#"(def level (state 0))
+               (effect (hslider :min 0 :max 100 :value level :on-change |v| (set! level v)))"#,
+        ).unwrap();
+        editor.set_layout_viewport(20, 6);
+        assert!(editor.widget_layout().is_some());
+
+        // Interact before switch — should work
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 16, 1), 1, 1, 20, 6,
+        );
+        let val = editor.runtime_mut().eval_str("level").unwrap().unwrap();
+        eprintln!("before switch: level={val:?}");
+
+        // Switch away
+        editor.open_scratch_buffer("*other*", "hello");
+        assert!(editor.widget_layout().is_none());
+
+        // Switch back
+        let id = editor.buffers.iter().find(|b| b.name == "*scratch*").unwrap().id;
+        editor.set_active_buffer(id);
+        assert!(editor.widget_layout().is_some(), "layout should be restored");
+
+        // Check that the layout has proper nodes
+        let layout = editor.widget_layout().unwrap();
+        eprintln!("restored layout: type={} children={}", layout.widget_type, layout.children.len());
+        eprintln!("restored layout props: {:?}", layout.props.keys().collect::<Vec<_>>());
+
+        // Check hit detection
+        let node = editor.widget_node_at(0, 10);
+        eprintln!("hit test at (0,10): {:?}", node.as_ref().map(|n| (&n.widget_type, n.widget_id)));
+
+        // Try to interact after switch back
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 16, 1), 1, 1, 20, 6,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 16, 1), 1, 1, 20, 6,
+        );
+
+        let val = editor.runtime_mut().eval_str("level").unwrap().unwrap();
+        eprintln!("after switch back: level={val:?}");
+        match val {
+            Value::Number(n) => assert!(n > 0.0, "level should have changed, got {n}"),
+            _ => panic!("expected number"),
+        }
+    }
+
+    #[test]
+    fn widget_tree_survives_buffer_switch() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(20, 6);
+
+        // Create an effect layout in the scratch buffer
+        editor.runtime_mut().eval_str(
+            r#"(def level (state 0))
+               (effect (hslider :min 0 :max 100 :value level :on-change |v| (set! level v)))"#,
+        ).unwrap();
+        editor.set_layout_viewport(20, 6);
+
+        assert!(editor.widget_layout().is_some(), "should have layout before switch");
+        let original_buffer_name = editor.active_buffer().name.clone();
+
+        // Open a new buffer (simulating switch away)
+        editor.open_scratch_buffer("*other*", "hello");
+        assert_eq!(editor.active_buffer().name, "*other*");
+        // Widget should be gone for this buffer
+        assert!(editor.widget_layout().is_none(), "other buffer should have no layout");
+
+        // Switch back
+        let original_id = editor.buffers.iter().find(|b| b.name == original_buffer_name).unwrap().id;
+        editor.set_active_buffer(original_id);
+        assert_eq!(editor.active_buffer().name, original_buffer_name);
+
+        // Widget should be restored
+        assert!(
+            editor.widget_layout().is_some(),
+            "widget layout should be restored after switching back. widget_tree={:?}",
+            editor.active_buffer().widget_tree.is_some()
         );
     }
 }

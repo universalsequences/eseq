@@ -176,6 +176,7 @@ vertex WidgetVaryings widget_vert(
         cell_h_bits: u32,
         vp_w_bits: u32,
         vp_h_bits: u32,
+        scroll_top: u16,
     }
 
     // ── Vertex type ───────────────────────────────────────────────────────────
@@ -237,6 +238,7 @@ vertex WidgetVaryings widget_vert(
         cursor_cell: (u16, u16),
         cursor_pos: (f32, f32),
         last_precise_mouse: Option<(f32, f32)>,
+        scroll_accumulator: f64,
     }
 
     impl MetalBackend {
@@ -273,6 +275,7 @@ vertex WidgetVaryings widget_vert(
                 cursor_cell: (0, 0),
                 cursor_pos: (0.0, 0.0),
                 last_precise_mouse: None,
+                scroll_accumulator: 0.0,
             })
         }
 
@@ -529,6 +532,7 @@ vertex WidgetVaryings widget_vert(
                         }
                     }
                     WindowEvent::MouseWheel { delta, .. } => {
+                        const SCROLL_THRESHOLD: f64 = 40.0;
                         let kind = match delta {
                             MouseScrollDelta::LineDelta(x, y) => {
                                 if y > 0.0 {
@@ -544,14 +548,13 @@ vertex WidgetVaryings widget_vert(
                                 }
                             }
                             MouseScrollDelta::PixelDelta(delta) => {
-                                if delta.y > 0.0 {
+                                self.scroll_accumulator += delta.y;
+                                if self.scroll_accumulator >= SCROLL_THRESHOLD {
+                                    self.scroll_accumulator -= SCROLL_THRESHOLD;
                                     Some(MouseEventKind::ScrollUp)
-                                } else if delta.y < 0.0 {
+                                } else if self.scroll_accumulator <= -SCROLL_THRESHOLD {
+                                    self.scroll_accumulator += SCROLL_THRESHOLD;
                                     Some(MouseEventKind::ScrollDown)
-                                } else if delta.x > 0.0 {
-                                    Some(MouseEventKind::ScrollRight)
-                                } else if delta.x < 0.0 {
-                                    Some(MouseEventKind::ScrollLeft)
                                 } else {
                                     None
                                 }
@@ -801,6 +804,7 @@ vertex WidgetVaryings widget_vert(
                 cell_h_bits: cell_h.to_bits(),
                 vp_w_bits: vp_w.to_bits(),
                 vp_h_bits: vp_h.to_bits(),
+                scroll_top,
             };
             let can_patch = self.cached_widget_layout_key == Some(layout_key)
                 && self.cached_widget_view_metrics == Some(view_metrics);
@@ -823,6 +827,8 @@ vertex WidgetVaryings widget_vert(
                     cell_h,
                     vp_w,
                     vp_h,
+                    scroll_top,
+                    max_rows,
                 ) {
                     Some(bytes) => bytes,
                     None => {
@@ -1351,8 +1357,7 @@ vertex WidgetVaryings widget_vert(
         if let Some(key) = widget_batch_key(node) {
             // Apply scroll: skip nodes outside viewport
             let vis_row = node.rect.row as i32 - scroll_top as i32;
-            let vis_bottom = vis_row + node.rect.height as i32;
-            if vis_bottom <= 0 || vis_row >= max_rows as i32 {
+            if vis_row < 0 || vis_row >= max_rows as i32 {
                 // Entirely outside viewport — create a zero-size instance
                 // so widget_id tracking stays consistent
                 let instance = WidgetInstance {
@@ -1423,6 +1428,8 @@ vertex WidgetVaryings widget_vert(
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
+        scroll_top: u16,
+        max_rows: u16,
     ) -> Option<usize> {
         if dirty_widget_ids.is_empty() {
             eprintln!("[widget-gpu] no dirty widget ids, skipping patch");
@@ -1451,7 +1458,24 @@ vertex WidgetVaryings widget_vert(
                 eprintln!("[widget-gpu] missing slot {} in batch {} for widget_id={widget_id}", slot, batch_key);
                 return None;
             };
-            *instance = widget_instance_for_node(node, cell_w, cell_h, vp_w, vp_h);
+            let vis_row = node.rect.row as i32 - scroll_top as i32;
+            if vis_row < 0 || vis_row >= max_rows as i32 {
+                // Outside viewport — zero-size instance
+                *instance = WidgetInstance {
+                    ndc_min: [0.0, 0.0],
+                    ndc_max: [0.0, 0.0],
+                    value_t: 0.0,
+                    orientation: 0.0,
+                    color_a: [0.0; 4],
+                    color_b: [0.0; 4],
+                    corner_radius: 0.0,
+                    pixel_aspect: 1.0,
+                };
+            } else {
+                let mut scrolled_node = node.clone();
+                scrolled_node.rect.row = vis_row as u16;
+                *instance = widget_instance_for_node(&scrolled_node, cell_w, cell_h, vp_w, vp_h);
+            }
             eprintln!(
                 "[widget-gpu] patch widget_id={} batch={} slot={} value_t={:.4}",
                 widget_id,
