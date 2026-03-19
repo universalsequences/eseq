@@ -100,12 +100,15 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
         .style(Style::default().bg(to_rcolor(crate::theme::STATUS_BG)).fg(to_rcolor(crate::theme::STATUS_FG)));
     frame.render_widget(status_widget, chunks[1]);
 
-    // ── Widget overlay ──────────────────────────────────────────────────────
+    // ── Widget overlay (with scroll offset) ─────────────────────────────────
+    let wscroll = render_frame.widget_scroll_top;
     if let Some(ref layout) = render_frame.widget_layout {
         let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
-        let mut cell_buf = widget_render::CellBuffer::new(inner.width, inner.height);
+        let total_h = layout.rect.row + layout.rect.height;
+        let buf_h = total_h.max(inner.height);
+        let mut cell_buf = widget_render::CellBuffer::new(inner.width, buf_h);
         widget_render::render_widget_tree(layout, &mut cell_buf);
-        blit_cell_buffer(&cell_buf, frame, inner);
+        blit_cell_buffer_scrolled(&cell_buf, frame, inner, wscroll);
     }
 
     // ── Focus highlight ──────────────────────────────────────────────────────
@@ -116,17 +119,15 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
             let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
             let focus_bg = to_rcolor(crate::theme::COMP_SELECTED_BG);
             let buf = frame.buffer_mut();
-            // Highlight the entire widget rect with a visible background
             for row in node.rect.row..node.rect.row + node.rect.height {
-                let y = inner.y + row;
-                if y >= inner.bottom() {
-                    break;
+                let vis_row = row as i32 - wscroll as i32;
+                if vis_row < 0 || vis_row >= inner.height as i32 {
+                    continue;
                 }
+                let y = inner.y + vis_row as u16;
                 for col in node.rect.col..node.rect.col + node.rect.width {
                     let x = inner.x + col;
-                    if x >= inner.right() {
-                        break;
-                    }
+                    if x >= inner.right() { break; }
                     let cell = &mut buf[(x, y)];
                     cell.set_style(
                         Style::default()
@@ -225,6 +226,33 @@ fn blit_cell_buffer(cell_buf: &widget_render::CellBuffer, frame: &mut Frame, are
             if let Some(cell) = cell_opt {
                 let x = area.x + col_idx as u16;
                 let y = area.y + row_idx as u16;
+                if x < area.right() && y < area.bottom() {
+                    let ratatui_cell = &mut buf[(x, y)];
+                    ratatui_cell.set_char(cell.ch);
+                    ratatui_cell.set_style(cell_style_to_ratatui(cell.style));
+                }
+            }
+        }
+    }
+}
+
+/// Blit a CellBuffer onto the ratatui frame with a vertical scroll offset.
+fn blit_cell_buffer_scrolled(
+    cell_buf: &widget_render::CellBuffer,
+    frame: &mut Frame,
+    area: Rect,
+    scroll_top: u16,
+) {
+    let buf = frame.buffer_mut();
+    for (vis_row, src_row) in (scroll_top as usize..).enumerate() {
+        if vis_row >= area.height as usize || src_row >= cell_buf.cells.len() {
+            break;
+        }
+        let row = &cell_buf.cells[src_row];
+        for (col_idx, cell_opt) in row.iter().enumerate() {
+            if let Some(cell) = cell_opt {
+                let x = area.x + col_idx as u16;
+                let y = area.y + vis_row as u16;
                 if x < area.right() && y < area.bottom() {
                     let ratatui_cell = &mut buf[(x, y)];
                     ratatui_cell.set_char(cell.ch);

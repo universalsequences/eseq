@@ -225,5 +225,6 @@ pub fn build_render_frame(
         dirty_widget_ids,
         widget_layout: editor.widget_layout(),
         focused_widget_id: editor.focused_widget_id(),
+        widget_scroll_top: editor.widget_scroll_top(),
     }
 }

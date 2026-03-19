@@ -1187,7 +1187,10 @@ vertex WidgetVaryings widget_vert(
         let cell_h = atlas.cell_h as f32;
         let mut verts = Vec::new();
         let focused_id = frame.focused_widget_id;
-        render_label_quads(layout, atlas, cell_w, cell_h, vp_w, vp_h, focused_id, &mut verts);
+        let scroll_top = frame.widget_scroll_top;
+        // Clip to content area (exclude status bar row)
+        let max_rows = (vp_h / cell_h).floor() as u16 - 1;
+        render_label_quads(layout, atlas, cell_w, cell_h, vp_w, vp_h, focused_id, scroll_top, max_rows, &mut verts);
         verts
     }
 
@@ -1220,6 +1223,8 @@ vertex WidgetVaryings widget_vert(
         vp_w: f32,
         vp_h: f32,
         focused_id: Option<u64>,
+        scroll_top: u16,
+        max_rows: u16,
         verts: &mut Vec<Vertex>,
     ) {
         if node.widget_type == "label" {
@@ -1227,60 +1232,52 @@ vertex WidgetVaryings widget_vert(
                 Some(crate::vm::Value::String(s)) => s.clone(),
                 _ => return,
             };
-            let is_focused = focused_id == Some(node.widget_id) && node.focusable;
-            let bg = if is_focused {
-                [0.33, 0.31, 0.59, 1.0] // purple tint for focus
+
+            // Apply scroll offset — skip nodes outside viewport
+            let vis_row = node.rect.row as i32 - scroll_top as i32;
+            if vis_row < 0 || vis_row >= max_rows as i32 {
+                // Outside viewport, skip
             } else {
-                [0.05, 0.05, 0.07, 1.0]
-            };
-            let fg = resolve_label_color(&node.props);
+                let vis_row = vis_row as usize;
+                let is_focused = focused_id == Some(node.widget_id) && node.focusable;
+                let bg = if is_focused {
+                    [0.33, 0.31, 0.59, 1.0]
+                } else {
+                    [0.05, 0.05, 0.07, 1.0]
+                };
+                let fg = resolve_label_color(&node.props);
 
-            // Render text characters
-            for (i, ch) in text.chars().enumerate() {
-                let col = node.rect.col as usize + i;
-                if col >= (node.rect.col + node.rect.width) as usize {
-                    break;
-                }
-                rasterize_char(
-                    atlas,
-                    ch,
-                    (col, node.rect.row as usize),
-                    &CharCtx {
-                        cell_w,
-                        cell_h,
-                        vp_w,
-                        vp_h,
-                        fg,
-                        bg,
-                    },
-                    verts,
-                );
-            }
-
-            // For focused labels, fill the rest of the width with background
-            if is_focused {
-                let text_len = text.chars().count();
-                for i in text_len..(node.rect.width as usize) {
+                for (i, ch) in text.chars().enumerate() {
                     let col = node.rect.col as usize + i;
+                    if col >= (node.rect.col + node.rect.width) as usize {
+                        break;
+                    }
                     rasterize_char(
                         atlas,
-                        ' ',
-                        (col, node.rect.row as usize),
-                        &CharCtx {
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                            fg,
-                            bg,
-                        },
+                        ch,
+                        (col, vis_row),
+                        &CharCtx { cell_w, cell_h, vp_w, vp_h, fg, bg },
                         verts,
                     );
+                }
+
+                if is_focused {
+                    let text_len = text.chars().count();
+                    for i in text_len..(node.rect.width as usize) {
+                        let col = node.rect.col as usize + i;
+                        rasterize_char(
+                            atlas,
+                            ' ',
+                            (col, vis_row),
+                            &CharCtx { cell_w, cell_h, vp_w, vp_h, fg, bg },
+                            verts,
+                        );
+                    }
                 }
             }
         }
         for child in &node.children {
-            render_label_quads(child, atlas, cell_w, cell_h, vp_w, vp_h, focused_id, verts);
+            render_label_quads(child, atlas, cell_w, cell_h, vp_w, vp_h, focused_id, scroll_top, max_rows, verts);
         }
     }
 

@@ -143,6 +143,8 @@ pub struct RenderFrame {
     pub widget_layout: Option<Arc<LayoutNode>>,
     /// Currently focused widget ID for highlight rendering.
     pub focused_widget_id: Option<u64>,
+    /// Widget scroll offset (rows to skip when rendering widget overlay).
+    pub widget_scroll_top: u16,
 }
 
 // ── Backend trait ─────────────────────────────────────────────────────────────

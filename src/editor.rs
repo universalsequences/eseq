@@ -133,6 +133,7 @@ pub struct Editor {
     minibuffer_input: Option<MinibufferMode>,
     mode_registry: HashMap<String, MajorMode>,
     focused_widget_id: Option<u64>,
+    widget_scroll_top: u16,
 }
 
 impl Editor {
@@ -162,6 +163,7 @@ impl Editor {
             minibuffer_input: None,
             mode_registry: HashMap::new(),
             focused_widget_id: None,
+            widget_scroll_top: 0,
         };
         editor.bind_defaults();
         editor.load_init(config.init_source.as_deref());
@@ -278,6 +280,10 @@ impl Editor {
 
     pub fn active_buffer_mut(&mut self) -> &mut Buffer {
         &mut self.buffers[self.active]
+    }
+
+    pub fn widget_scroll_top(&self) -> u16 {
+        self.widget_scroll_top
     }
 
     pub fn focused_widget_id(&self) -> Option<u64> {
@@ -1207,7 +1213,23 @@ impl Editor {
         };
 
         self.focused_widget_id = Some(focusable_nodes[next_idx].0);
+        self.adjust_widget_scroll(focusable_nodes[next_idx].1);
         self.mark_needs_redraw();
+    }
+
+    fn adjust_widget_scroll(&mut self, focused_row: u16) {
+        let viewport_height = self.runtime.layout_rows();
+        if viewport_height == 0 {
+            return;
+        }
+        // Scroll up if focused row is above viewport
+        if focused_row < self.widget_scroll_top {
+            self.widget_scroll_top = focused_row;
+        }
+        // Scroll down if focused row is below viewport
+        if focused_row >= self.widget_scroll_top + viewport_height {
+            self.widget_scroll_top = focused_row - viewport_height + 1;
+        }
     }
 
     fn activate_focused(&mut self) {
@@ -1237,10 +1259,14 @@ impl Editor {
     fn restore_buffer_widget_tree(&mut self) {
         let tree = self.active_buffer().widget_tree.clone();
         match tree {
-            Some(tree) => self.runtime.set_widget_tree(tree),
+            Some(tree) => {
+                self.runtime.set_widget_tree(tree);
+                self.auto_focus_first_widget();
+            }
             None => {
                 self.runtime.clear_layout_effects();
                 self.focused_widget_id = None;
+                self.widget_scroll_top = 0;
             }
         }
     }

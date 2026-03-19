@@ -493,6 +493,10 @@ impl Runtime {
         std::mem::take(&mut self.rendered_layouts)
     }
 
+    pub fn layout_rows(&self) -> u16 {
+        self.layout_rows
+    }
+
     pub fn set_widget_tree(&mut self, tree: Value) {
         self.clear_layout_effects();
         self.current_widget_tree = Some(tree);
