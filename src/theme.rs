@@ -70,5 +70,5 @@ pub const WIDGET_SLIDER_FILLED: Color = PURPLE;
 pub const WIDGET_SLIDER_TRACK: Color = BRIGHT_BLACK;
 pub const WIDGET_KNOB_FILLED: Color = PURPLE;
 pub const WIDGET_KNOB_TRACK: Color = BRIGHT_BLACK;
-pub const WIDGET_TOGGLE_ON: Color = GREEN;
+pub const WIDGET_TOGGLE_ON: Color = PURPLE;
 pub const WIDGET_TOGGLE_OFF: Color = BRIGHT_BLACK;

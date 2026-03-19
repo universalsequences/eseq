@@ -4,7 +4,7 @@ use crossterm::event::{MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_bool_prop,
-    ndc_bounds, styled_cell,
+    ndc_bounds, resolve_named_color, styled_cell,
 };
 use crate::theme;
 use crate::layout::{Constraints, LayoutNode, Rect, Size};
@@ -14,14 +14,22 @@ pub struct ToggleWidget;
 
 pub static TOGGLE_WIDGET: ToggleWidget = ToggleWidget;
 
+fn on_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "color", theme::WIDGET_TOGGLE_ON)
+}
+
+fn off_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "off-color", theme::WIDGET_TOGGLE_OFF)
+}
+
 /// TUI render for toggle: "[×]" or "[ ]"
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let on = get_bool_prop(props, "value", false);
 
     let (text, fg) = if on {
-        ("[×]", theme::WIDGET_TOGGLE_ON)
+        ("[×]", on_color(props))
     } else {
-        ("[ ]", theme::WIDGET_TOGGLE_OFF)
+        ("[ ]", off_color(props))
     };
 
     for (i, ch) in text.chars().enumerate() {
@@ -140,10 +148,52 @@ impl WidgetDefinition for ToggleWidget {
                 0.0
             },
             orientation: 0.0,
-            color_a: theme::WIDGET_TOGGLE_ON.to_rgba(),
-            color_b: theme::WIDGET_TOGGLE_OFF.to_rgba(),
+            color_a: on_color(&node.props).to_rgba(),
+            color_b: off_color(&node.props).to_rgba(),
             corner_radius: 0.0,
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme;
+    use crate::widget_render::CellBuffer;
+
+    #[test]
+    fn toggle_uses_theme_default_and_color_overrides() {
+        let mut buf = CellBuffer::new(4, 1);
+        let mut props = HashMap::new();
+        props.insert("value".to_string(), Value::Bool(true));
+
+        tui_render(
+            &props,
+            Rect {
+                row: 0,
+                col: 0,
+                width: 4,
+                height: 1,
+            },
+            &mut buf,
+        );
+
+        assert_eq!(buf.get(0, 0).unwrap().style.fg, theme::WIDGET_TOGGLE_ON);
+
+        props.insert("value".to_string(), Value::Bool(false));
+        props.insert("off-color".to_string(), Value::Keyword("red".to_string()));
+        tui_render(
+            &props,
+            Rect {
+                row: 0,
+                col: 0,
+                width: 4,
+                height: 1,
+            },
+            &mut buf,
+        );
+
+        assert_eq!(buf.get(0, 0).unwrap().style.fg, theme::RED);
     }
 }

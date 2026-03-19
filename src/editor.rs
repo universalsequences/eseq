@@ -3297,6 +3297,48 @@ mod tests {
     }
 
     #[test]
+    fn mouse_click_toggle_via_bind_shorthand_round_trips_bool_state() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(8, 4);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def enabled (state true))
+                (effect
+                  (toggle :bind enabled))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(8, 4);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            1,
+            1,
+            8,
+            4,
+        );
+        assert_eq!(
+            editor.runtime.eval_str("enabled").unwrap(),
+            Some(Value::Bool(false))
+        );
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            1,
+            1,
+            8,
+            4,
+        );
+        assert_eq!(
+            editor.runtime.eval_str("enabled").unwrap(),
+            Some(Value::Bool(true))
+        );
+    }
+
+    #[test]
     fn knob_updates_shared_label_state_from_each_binding() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());

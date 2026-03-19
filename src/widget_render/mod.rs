@@ -14,6 +14,7 @@ use crossterm::event::MouseEventKind;
 
 use crate::backend::{Cell, CellStyle, Color};
 use crate::layout::{Constraints, LayoutNode, Rect, Size};
+use crate::theme;
 use crate::vm::Value;
 
 // ── Semantic events (backend-agnostic) ───────────────────────────────────────
@@ -272,6 +273,22 @@ pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> 
 pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -> bool {
     match props.get(key) {
         Some(Value::Bool(b)) => *b,
+        _ => default,
+    }
+}
+
+pub fn resolve_named_color(props: &HashMap<String, Value>, key: &str, default: Color) -> Color {
+    match props.get(key) {
+        Some(Value::String(name)) | Some(Value::Keyword(name)) => match name.as_str() {
+            "red" => theme::RED,
+            "green" | "cyan" => theme::GREEN,
+            "yellow" | "orange" => theme::YELLOW,
+            "blue" | "purple" => theme::BLUE,
+            "magenta" => theme::MAGENTA,
+            "white" => theme::WHITE,
+            "gray" | "grey" | "dim" => theme::BRIGHT_BLACK,
+            _ => default,
+        },
         _ => default,
     }
 }

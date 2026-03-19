@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{CellBuffer, WidgetDefinition, styled_cell};
+use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
 use crate::backend::Color;
 use crate::theme;
 use crate::layout::{
@@ -13,19 +13,7 @@ pub struct LabelWidget;
 pub static LABEL_WIDGET: LabelWidget = LabelWidget;
 
 fn resolve_color(props: &HashMap<String, Value>) -> Color {
-    match props.get("color") {
-        Some(Value::String(name)) | Some(Value::Keyword(name)) => match name.as_str() {
-            "red" => theme::RED,
-            "green" | "cyan" => theme::GREEN,
-            "yellow" | "orange" => theme::YELLOW,
-            "blue" | "purple" => theme::BLUE,
-            "magenta" => theme::MAGENTA,
-            "white" => theme::WHITE,
-            "gray" | "grey" | "dim" => theme::BRIGHT_BLACK,
-            _ => theme::WIDGET_LABEL_FG,
-        },
-        _ => theme::WIDGET_LABEL_FG,
-    }
+    resolve_named_color(props, "color", theme::WIDGET_LABEL_FG)
 }
 
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
