@@ -30,6 +30,14 @@ impl Color {
     pub fn from_rgb_u8(r: u8, g: u8, b: u8) -> Self {
         Self::rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
     }
+    /// Const-friendly conversion from 0–255 RGB components.
+    pub const fn from_hex(r: u8, g: u8, b: u8) -> Self {
+        Self::rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+    }
+    /// Convert to an RGBA f32 array (useful for Metal instance data).
+    pub const fn to_rgba(self) -> [f32; 4] {
+        [self.r, self.g, self.b, self.a]
+    }
 
     pub const WHITE: Self = Self::rgb(1.0, 1.0, 1.0);
     pub const BLACK: Self = Self::rgb(0.0, 0.0, 0.0);

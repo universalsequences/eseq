@@ -2,38 +2,39 @@ use crate::backend::{Cell, CellStyle, Color, CompletionEntry, CompletionFrame, R
 use crate::editor::Editor;
 use crate::mode::{TokenClass, TokenSpan};
 use crate::text::matching_paren;
+use crate::theme;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-// ── Semantic region colors ────────────────────────────────────────────────────
+// ── Semantic region colors (re-exported from theme) ──────────────────────────
 
-pub const BG_REGION: Color = Color::rgba(0.306, 0.306, 0.424, 1.0);
-pub const BG_SEXP: Color = Color::rgba(0.180, 0.173, 0.306, 1.0);
-pub const BG_EVAL_FLASH: Color = Color::rgba(0.416, 0.251, 0.110, 1.0);
-pub const BG_MATCH_PAREN: Color = Color::YELLOW;
-pub const FG_MATCH_PAREN: Color = Color::BLACK;
+pub const BG_REGION: Color = theme::BG_REGION;
+pub const BG_SEXP: Color = theme::BG_SEXP;
+pub const BG_EVAL_FLASH: Color = theme::BG_EVAL_FLASH;
+pub const BG_MATCH_PAREN: Color = theme::BG_MATCH_PAREN;
+pub const FG_MATCH_PAREN: Color = theme::FG_MATCH_PAREN;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Maps a token class to its foreground color.
 pub fn token_color(class: TokenClass) -> Color {
     match class {
-        TokenClass::Comment => Color::DARK_GRAY,
-        TokenClass::String => Color::GREEN,
-        TokenClass::Number => Color::CYAN,
-        TokenClass::Keyword => Color::MAGENTA,
-        TokenClass::Builtin => Color::YELLOW,
-        TokenClass::Special => Color::LIGHT_BLUE,
-        TokenClass::Delimiter => Color::GRAY,
+        TokenClass::Comment => theme::SYN_COMMENT,
+        TokenClass::String => theme::SYN_STRING,
+        TokenClass::Number => theme::SYN_NUMBER,
+        TokenClass::Keyword => theme::SYN_KEYWORD,
+        TokenClass::Builtin => theme::SYN_BUILTIN,
+        TokenClass::Special => theme::SYN_SPECIAL,
+        TokenClass::Delimiter => theme::SYN_DELIMITER,
     }
 }
 
-/// Returns the fg Color for the token covering `col`, or white.
+/// Returns the fg Color for the token covering `col`, or the theme foreground.
 fn token_fg(col: usize, spans: Option<&Vec<TokenSpan>>) -> Color {
     spans
         .and_then(|ss| ss.iter().find(|s| col >= s.start && col < s.end))
         .map(|s| token_color(s.class))
-        .unwrap_or(Color::WHITE)
+        .unwrap_or(theme::FG)
 }
 
 /// Returns true if `(row, col)` falls inside a highlighted range.

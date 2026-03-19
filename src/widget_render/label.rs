@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{CellBuffer, WidgetDefinition, styled_cell};
-use crate::backend::Color;
+use crate::theme;
 use crate::layout::{
     Constraints, Rect, Size, f64_to_u16, get_prop_num, get_prop_str, saturating_usize_to_u16,
 };
@@ -23,7 +23,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
         if col >= rect.col + rect.width {
             break;
         }
-        buf.set(rect.row, col, styled_cell(ch, Color::WHITE, None));
+        buf.set(rect.row, col, styled_cell(ch, theme::WIDGET_LABEL_FG, None));
     }
 }
 

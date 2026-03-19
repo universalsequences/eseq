@@ -6,7 +6,7 @@ use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_bool_prop,
     ndc_bounds, styled_cell,
 };
-use crate::backend::Color;
+use crate::theme;
 use crate::layout::{Constraints, LayoutNode, Rect, Size};
 use crate::vm::Value;
 
@@ -19,9 +19,9 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     let on = get_bool_prop(props, "value", false);
 
     let (text, fg) = if on {
-        ("[×]", Color::GREEN)
+        ("[×]", theme::WIDGET_TOGGLE_ON)
     } else {
-        ("[ ]", Color::DARK_GRAY)
+        ("[ ]", theme::WIDGET_TOGGLE_OFF)
     };
 
     for (i, ch) in text.chars().enumerate() {
@@ -140,8 +140,8 @@ impl WidgetDefinition for ToggleWidget {
                 0.0
             },
             orientation: 0.0,
-            color_a: [0.2, 0.78, 0.35, 1.0],
-            color_b: [0.3, 0.3, 0.35, 1.0],
+            color_a: theme::WIDGET_TOGGLE_ON.to_rgba(),
+            color_b: theme::WIDGET_TOGGLE_OFF.to_rgba(),
             corner_radius: 0.0,
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         })

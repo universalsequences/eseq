@@ -35,6 +35,7 @@ mod inner {
     };
 
     use crate::backend::{Backend, BackendError, Color, RenderFrame};
+    use crate::theme;
     use crate::glyph_atlas::GlyphAtlas;
     use crate::layout::LayoutNode;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
@@ -637,9 +638,9 @@ vertex WidgetVaryings widget_vert(
             attach.setTexture(Some(&texture));
             attach.setLoadAction(MTLLoadAction::Clear);
             attach.setClearColor(MTLClearColor {
-                red: 0.05,
-                green: 0.05,
-                blue: 0.07,
+                red: theme::BG.r as f64,
+                green: theme::BG.g as f64,
+                blue: theme::BG.b as f64,
                 alpha: 1.0,
             });
             attach.setStoreAction(MTLStoreAction::Store);
@@ -926,12 +927,12 @@ vertex WidgetVaryings widget_vert(
                 // Cursor inverts fg/bg; otherwise use cell style.
                 let (fg, bg) = if is_cursor {
                     let cell_fg = cell.style.fg;
-                    let cell_bg = cell.style.bg.unwrap_or(Color::BLACK);
+                    let cell_bg = cell.style.bg.unwrap_or(theme::BG);
                     (to_rgba(cell_bg), to_rgba(cell_fg))
                 } else {
                     (
                         to_rgba(cell.style.fg),
-                        to_rgba(cell.style.bg.unwrap_or(Color::BLACK)),
+                        to_rgba(cell.style.bg.unwrap_or(theme::BG)),
                     )
                 };
 
@@ -976,8 +977,8 @@ vertex WidgetVaryings widget_vert(
         // ── Status bar (bottom row) ───────────────────────────────────────────
         let total_rows = (vp_h / cell_h).floor() as usize;
         let status_row = total_rows.saturating_sub(1);
-        let status_fg = to_rgba(Color::WHITE);
-        let status_bg = to_rgba(Color::rgb(0.25, 0.25, 0.28));
+        let status_fg = to_rgba(theme::STATUS_FG);
+        let status_bg = to_rgba(theme::STATUS_BG);
 
         // ── Completion popup ─────────────────────────────────────────────────
         if let Some(comp) = &frame.completion {
@@ -991,9 +992,9 @@ vertex WidgetVaryings widget_vert(
             let popup_col = comp.anchor.1;
             let popup_row = comp.anchor.0 + 1; // one row below the cursor
 
-            let sel_bg = to_rgba(Color::rgb(0.33, 0.30, 0.59));
-            let unsel_bg = to_rgba(Color::rgb(0.15, 0.15, 0.22));
-            let pop_fg = to_rgba(Color::WHITE);
+            let sel_bg = to_rgba(theme::COMP_SELECTED_BG);
+            let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG);
+            let pop_fg = to_rgba(theme::COMP_FG);
 
             let x0 = ndc_x(popup_col as f32 * cell_w);
             let x1 = ndc_x((popup_col + label_w) as f32 * cell_w);
@@ -1047,9 +1048,9 @@ vertex WidgetVaryings widget_vert(
                 let doc_col = popup_col + label_w + 1;
                 let doc_w: usize = 44;
                 let doc_h = comp.entries.len().max(4);
-                let doc_bg = to_rgba(Color::rgb(0.06, 0.06, 0.09));
-                let doc_fg = to_rgba(Color::WHITE);
-                let title_fg = to_rgba(Color::rgb(0.73, 0.51, 1.0));
+                let doc_bg = to_rgba(theme::COMP_DOC_BG);
+                let doc_fg = to_rgba(theme::COMP_DOC_FG);
+                let title_fg = to_rgba(theme::COMP_DOC_TITLE_FG);
 
                 // Background for the whole panel.
                 let dx0 = ndc_x(doc_col as f32 * cell_w);

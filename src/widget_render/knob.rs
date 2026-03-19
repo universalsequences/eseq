@@ -6,7 +6,7 @@ use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_f32_prop,
     ndc_bounds, styled_cell,
 };
-use crate::backend::Color;
+use crate::theme;
 use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_u16, get_prop_num};
 use crate::vm::Value;
 
@@ -28,7 +28,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float outerRadius = 0.90;
     float ringInnerRadius = 0.85;
-    float fillRadius = mix(0.12, 0.62, in.value_t);
+    float fillRadius = mix(0.12, 0.83, in.value_t);
 
     float outerMask = smoothstep(outerRadius + distDeriv, outerRadius - distDeriv, dist);
     if (outerMask <= 0.001) { discard_fragment(); }
@@ -80,9 +80,9 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             }
 
             let (ch, fg) = if dist <= fill_radius {
-                ('●', Color::CYAN)
+                ('●', theme::WIDGET_KNOB_FILLED)
             } else {
-                ('○', Color::GRAY)
+                ('○', theme::WIDGET_KNOB_TRACK)
             };
             buf.set(rect.row + row_offset, rect.col + col_offset, styled_cell(ch, fg, None));
         }
@@ -171,8 +171,8 @@ impl WidgetDefinition for KnobWidget {
             ndc_max,
             value_t: normalized_value(&node.props),
             orientation: 0.0,
-            color_a: [0.0, 0.85, 0.85, 1.0],
-            color_b: [0.12, 0.12, 0.16, 1.0],
+            color_a: theme::WIDGET_KNOB_FILLED.to_rgba(),
+            color_b: theme::WIDGET_KNOB_TRACK.to_rgba(),
             corner_radius: 0.0,
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         })

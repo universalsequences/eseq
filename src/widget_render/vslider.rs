@@ -6,7 +6,7 @@ use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_f32_prop,
     ndc_bounds, styled_cell,
 };
-use crate::backend::Color;
+use crate::theme;
 use crate::layout::{
     Constraints, LayoutNode, Rect, Size, f64_to_u16, get_prop_num,
 };
@@ -38,9 +38,9 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
         for col_offset in 0..rect.width.min(2) {
             let col = rect.col + col_offset;
             if row_offset >= threshold {
-                buf.set(row, col, styled_cell('\u{2588}', Color::GREEN, None));
+                buf.set(row, col, styled_cell('\u{2588}', theme::WIDGET_SLIDER_FILLED, None));
             } else {
-                buf.set(row, col, styled_cell(' ', Color::DARK_GRAY, None));
+                buf.set(row, col, styled_cell(' ', theme::WIDGET_SLIDER_TRACK, None));
             }
         }
     }
@@ -161,8 +161,8 @@ impl WidgetDefinition for VerticalSliderWidget {
             ndc_max,
             value_t: t,
             orientation: 0.0,
-            color_a: [1.0, 1.0, 1.0, 1.0],
-            color_b: [0.18, 0.18, 0.22, 1.0],
+            color_a: theme::WIDGET_SLIDER_FILLED.to_rgba(),
+            color_b: theme::WIDGET_SLIDER_TRACK.to_rgba(),
             corner_radius: 0.0,
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         })

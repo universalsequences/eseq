@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod theme;
 pub mod buffer;
 pub mod compiler;
 pub mod editor;

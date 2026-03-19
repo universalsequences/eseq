@@ -97,7 +97,7 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
 
     // ── Status bar ────────────────────────────────────────────────────────────
     let status_widget = Paragraph::new(render_frame.status.clone())
-        .style(Style::default().bg(RColor::DarkGray).fg(RColor::White));
+        .style(Style::default().bg(to_rcolor(crate::theme::STATUS_BG)).fg(to_rcolor(crate::theme::STATUS_FG)));
     frame.render_widget(status_widget, chunks[1]);
 
     // ── Widget overlay ──────────────────────────────────────────────────────
@@ -140,15 +140,15 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                     Line::from(Span::styled(
                         label,
                         Style::default()
-                            .bg(RColor::Rgb(84, 78, 150))
-                            .fg(RColor::White),
+                            .bg(to_rcolor(crate::theme::COMP_SELECTED_BG))
+                            .fg(to_rcolor(crate::theme::COMP_FG)),
                     ))
                 } else {
                     Line::from(Span::styled(
                         label,
                         Style::default()
-                            .bg(RColor::Rgb(38, 38, 56))
-                            .fg(RColor::White),
+                            .bg(to_rcolor(crate::theme::COMP_UNSELECTED_BG))
+                            .fg(to_rcolor(crate::theme::COMP_FG)),
                     ))
                 }
             })
@@ -166,7 +166,7 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                 let doc_lines: Vec<Line> = std::iter::once(Line::from(Span::styled(
                     title.clone(),
                     Style::default()
-                        .fg(RColor::Rgb(187, 129, 255))
+                        .fg(to_rcolor(crate::theme::COMP_DOC_TITLE_FG))
                         .add_modifier(Modifier::BOLD),
                 )))
                 .chain(std::iter::once(Line::from("")))
@@ -177,7 +177,7 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                 frame.render_widget(Clear, doc_area);
                 frame.render_widget(
                     Paragraph::new(doc_lines)
-                        .style(Style::default().bg(RColor::Black))
+                        .style(Style::default().bg(to_rcolor(crate::theme::COMP_DOC_BG)).fg(to_rcolor(crate::theme::COMP_DOC_FG)))
                         .wrap(Wrap { trim: false }),
                     doc_area,
                 );
