@@ -171,12 +171,16 @@ impl Parser {
                         tokens.push(self.parse_symbol()?);
                     }
                     _ if next.is_ascii_digit()
-                        || (next == '-' && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit()))
-                        || (next == '.' && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit())) =>
+                        || (next == '-'
+                            && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit()))
+                        || (next == '.'
+                            && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit())) =>
                     {
                         tokens.push(self.parse_number()?);
                     }
-                    _ => { self.next(); } // skip unknown chars (e.g. unicode outside strings)
+                    _ => {
+                        self.next();
+                    } // skip unknown chars (e.g. unicode outside strings)
                 }
             }
         }

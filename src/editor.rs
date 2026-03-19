@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 
 use crate::buffer::Buffer;
 use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
@@ -12,6 +16,7 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::vm::{Value, format_lisp_value};
+use crate::widget_render::{WidgetEvent, handle_event};
 
 #[derive(Default, Clone)]
 pub struct EditorConfig {
@@ -59,6 +64,23 @@ pub struct SExpFlash {
     pub expires_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct HighlightCache {
+    buffer_id: BufferId,
+    buffer_revision: u64,
+    buffer_mode: BufferMode,
+    runtime_symbol_revision: u64,
+    spans: Rc<Vec<Vec<TokenSpan>>>,
+}
+
+#[derive(Debug, Clone)]
+struct WidgetHitCache {
+    layout_revision: u64,
+    cols: u16,
+    rows: u16,
+    cells: Vec<Option<crate::layout::LayoutNode>>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Mark {
     pub buffer_id: BufferId,
@@ -80,6 +102,9 @@ pub struct Editor {
     next_buffer_id: BufferId,
     save_prompt: Option<SavePrompt>,
     completion: Option<CompletionState>,
+    highlight_cache: Option<HighlightCache>,
+    widget_hit_cache: Option<WidgetHitCache>,
+    last_mouse_precise: Option<(f32, f32)>,
     eval_flash: Option<SExpFlash>,
     mark: Option<Mark>,
     kill_ring: Vec<String>,
@@ -103,6 +128,9 @@ impl Editor {
             next_buffer_id: 1,
             save_prompt: None,
             completion: None,
+            highlight_cache: None,
+            widget_hit_cache: None,
+            last_mouse_precise: None,
             eval_flash: None,
             mark: None,
             kill_ring: vec![],
@@ -145,20 +173,44 @@ impl Editor {
         self.completion.as_ref()
     }
 
-    pub fn active_highlight_spans(&self) -> Vec<Vec<TokenSpan>> {
-        let symbols = self.runtime.completion_symbols();
-        self.active_buffer()
-            .lines
-            .iter()
-            .map(|line| {
-                highlight_line(
-                    self.active_buffer().mode,
-                    line,
-                    &symbols,
-                    self.active_buffer(),
-                )
-            })
-            .collect()
+    pub fn active_highlight_spans(&mut self) -> Rc<Vec<Vec<TokenSpan>>> {
+        let buffer = self.active_buffer();
+        let buffer_id = buffer.id;
+        let buffer_revision = buffer.revision;
+        let buffer_mode = buffer.mode;
+        let runtime_symbol_revision = self.runtime.symbol_revision();
+
+        let is_fresh = self.highlight_cache.as_ref().is_some_and(|cache| {
+            cache.buffer_id == buffer_id
+                && cache.buffer_revision == buffer_revision
+                && cache.buffer_mode == buffer_mode
+                && cache.runtime_symbol_revision == runtime_symbol_revision
+        });
+
+        if !is_fresh {
+            let symbols = self.runtime.completion_symbols();
+            let buffer = self.active_buffer();
+            let spans = buffer
+                .lines
+                .iter()
+                .map(|line| highlight_line(buffer.mode, line, &symbols, buffer))
+                .collect();
+            self.highlight_cache = Some(HighlightCache {
+                buffer_id,
+                buffer_revision,
+                buffer_mode,
+                runtime_symbol_revision,
+                spans: Rc::new(spans),
+            });
+        }
+
+        Rc::clone(
+            &self
+                .highlight_cache
+                .as_ref()
+                .expect("highlight cache")
+                .spans,
+        )
     }
 
     pub fn active_sexp_range(&self) -> Option<((usize, usize), (usize, usize))> {
@@ -200,8 +252,16 @@ impl Editor {
         &mut self.buffers[self.active]
     }
 
-    pub fn widget_layout(&self) -> Option<crate::layout::LayoutNode> {
+    pub fn widget_layout(&self) -> Option<Arc<crate::layout::LayoutNode>> {
         self.runtime.current_layout.clone()
+    }
+
+    pub fn widget_layout_revision(&self) -> u64 {
+        self.runtime.layout_revision()
+    }
+
+    pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
+        self.runtime.set_layout_viewport(cols, rows);
     }
 
     pub fn open_scratch_buffer(&mut self, name: &str, initial: &str) -> BufferId {
@@ -364,6 +424,16 @@ impl Editor {
             if event::poll(std::time::Duration::from_millis(16))? {
                 match event::read()? {
                     Event::Key(key) => self.handle_key(key),
+                    Event::Mouse(mouse) => {
+                        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                        self.handle_mouse(
+                            mouse,
+                            1,
+                            1,
+                            cols.saturating_sub(2),
+                            rows.saturating_sub(3),
+                        );
+                    }
                     Event::Resize(_, _) => self.mark_needs_redraw(),
                     _ => {}
                 }
@@ -429,6 +499,67 @@ impl Editor {
         }
     }
 
+    pub fn handle_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        content_width: u16,
+        content_height: u16,
+    ) {
+        self.handle_mouse_precise(
+            mouse,
+            content_col,
+            content_row,
+            content_width,
+            content_height,
+            mouse.column as f32,
+            mouse.row as f32,
+        );
+    }
+
+    pub fn handle_mouse_precise(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        content_width: u16,
+        content_height: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.last_mouse_precise = Some((precise_col, precise_row));
+                if self.try_handle_widget_mouse_precise(mouse, content_col, content_row, precise_col, precise_row) {
+                    return;
+                }
+                self.handle_text_click(
+                    mouse,
+                    content_col,
+                    content_row,
+                    content_width,
+                    content_height,
+                );
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let previous = self.last_mouse_precise.unwrap_or((precise_col, precise_row));
+                self.try_handle_widget_drag_segment(
+                    mouse,
+                    content_col,
+                    content_row,
+                    previous,
+                    (precise_col, precise_row),
+                );
+                self.last_mouse_precise = Some((precise_col, precise_row));
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.last_mouse_precise = None;
+            }
+            _ => {}
+        }
+    }
+
     fn bind_defaults(&mut self) {
         let binds: &[(KeyCode, KeyModifiers, &str)] = &[
             (KeyCode::Char('q'), KeyModifiers::CONTROL, "quit"),
@@ -451,6 +582,8 @@ impl Editor {
             (KeyCode::Tab, KeyModifiers::NONE, "complete"),
             (KeyCode::Left, KeyModifiers::CONTROL, "move-word-left"),
             (KeyCode::Right, KeyModifiers::CONTROL, "move-word-right"),
+            (KeyCode::Left, KeyModifiers::ALT, "move-word-left"),
+            (KeyCode::Right, KeyModifiers::ALT, "move-word-right"),
             (KeyCode::Char('b'), KeyModifiers::ALT, "move-word-left"),
             (KeyCode::Char('f'), KeyModifiers::ALT, "move-word-right"),
             (KeyCode::Left, KeyModifiers::NONE, "move-left"),
@@ -607,13 +740,49 @@ impl Editor {
     }
 
     fn call_lisp_handler(&mut self, fn_name: &str) {
-        if fn_name == "eval-sexp" {
-            self.start_eval_flash();
+        if fn_name == "eval-sexp" || fn_name == "eval-buffer-command" {
+            self.eval_preview_handler(fn_name);
+            return;
         }
         self.sync_runtime_context();
         self.minibuffer = None;
         let code = format!("({fn_name})");
         match self.runtime.eval_str(&code) {
+            Ok(Some(result)) => self.minibuffer = Some(format_value_for_minibuffer(&result)),
+            Ok(None) => self.minibuffer = Some("No result".to_string()),
+            Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
+        }
+        if let Some(status) = self.runtime.take_status_message() {
+            self.minibuffer = Some(status);
+        }
+        self.refresh_runtime_side_effects();
+        self.sync_runtime_context();
+        self.completion = None;
+    }
+
+    fn eval_preview_handler(&mut self, fn_name: &str) {
+        if fn_name == "eval-sexp" {
+            self.start_eval_flash();
+        }
+        self.sync_runtime_context();
+        self.minibuffer = None;
+
+        let source = match fn_name {
+            "eval-sexp" => {
+                let buffer = self.active_buffer();
+                sexp_at_cursor(&buffer.lines, buffer.cursor).unwrap_or_default()
+            }
+            "eval-buffer-command" => self.active_buffer().text(),
+            _ => String::new(),
+        };
+
+        if source.trim().is_empty() {
+            self.minibuffer = Some("No s-expression at cursor".to_string());
+            self.completion = None;
+            return;
+        }
+
+        match self.runtime.eval_str(&source) {
             Ok(Some(result)) => self.minibuffer = Some(format_value_for_minibuffer(&result)),
             Ok(None) => self.minibuffer = Some("No result".to_string()),
             Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
@@ -872,6 +1041,176 @@ impl Editor {
         self.completion = None;
     }
 
+    fn try_handle_widget_mouse_precise(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        if mouse.column < content_col || mouse.row < content_row {
+            return false;
+        }
+
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32;
+        let output = {
+            let Some(node) =
+                self.widget_node_at(local_row.floor().max(0.0) as u16, local_col.floor().max(0.0) as u16)
+            else {
+                return false;
+            };
+
+            let widget_event = match (node.widget_type.as_str(), mouse.kind) {
+                ("slider" | "hslider", MouseEventKind::Down(MouseButton::Left)) => return true,
+                ("slider" | "hslider", MouseEventKind::Drag(MouseButton::Left)) => {
+                    let denom = node.rect.width.saturating_sub(1).max(1) as f32;
+                    let t = ((local_col - node.rect.col as f32) / denom).clamp(0.0, 1.0);
+                    WidgetEvent::SetNormalized(t)
+                }
+                ("vslider", MouseEventKind::Down(MouseButton::Left)) => return true,
+                ("vslider", MouseEventKind::Drag(MouseButton::Left)) => {
+                    let denom = node.rect.height.saturating_sub(1).max(1) as f32;
+                    let offset = (local_row - node.rect.row as f32) / denom;
+                    let t = (1.0 - offset).clamp(0.0, 1.0);
+                    WidgetEvent::SetNormalized(t)
+                }
+                ("toggle", MouseEventKind::Down(MouseButton::Left)) => WidgetEvent::Activate,
+                _ => return true,
+            };
+
+            handle_event(&node, widget_event)
+        };
+
+        let Some(output) = output else {
+            return true;
+        };
+        let result = self.runtime.invoke(output.callback, vec![output.value]);
+        if let Some(status) = self.runtime.take_status_message() {
+            self.minibuffer = Some(status);
+        } else if let Err(error) = result {
+            self.minibuffer = Some(format!("Error: {error:?}"));
+        } else {
+            self.minibuffer = None;
+        }
+        self.refresh_runtime_side_effects();
+        self.completion = None;
+        self.mark_needs_redraw();
+        true
+    }
+
+    fn try_handle_widget_drag_segment(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        start: (f32, f32),
+        end: (f32, f32),
+    ) {
+        let start_local = (start.0 - content_col as f32, start.1 - content_row as f32);
+        let end_local = (end.0 - content_col as f32, end.1 - content_row as f32);
+        let start_node = self.widget_node_at(
+            start_local.1.floor().max(0.0) as u16,
+            start_local.0.floor().max(0.0) as u16,
+        );
+        let end_node = self.widget_node_at(
+            end_local.1.floor().max(0.0) as u16,
+            end_local.0.floor().max(0.0) as u16,
+        );
+
+        if same_widget_hit(start_node.as_ref(), end_node.as_ref()) {
+            let _ =
+                self.try_handle_widget_mouse_precise(mouse, content_col, content_row, end.0, end.1);
+            return;
+        }
+
+        let steps = ((end.0 - start.0).abs().max((end.1 - start.1).abs()) * 2.0)
+            .ceil()
+            .max(1.0) as usize;
+        let mut last_key = None;
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            let col = start.0 + (end.0 - start.0) * t;
+            let row = start.1 + (end.1 - start.1) * t;
+            let local_col = col - content_col as f32;
+            let local_row = row - content_row as f32;
+            let node = self.widget_node_at(
+                local_row.floor().max(0.0) as u16,
+                local_col.floor().max(0.0) as u16,
+            );
+            let key = node.as_ref().map(widget_hit_key);
+            if key.is_some() && key != last_key {
+                let _ = self.try_handle_widget_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    col,
+                    row,
+                );
+            }
+            last_key = key;
+        }
+    }
+
+    fn widget_node_at(&mut self, row: u16, col: u16) -> Option<crate::layout::LayoutNode> {
+        let revision = self.runtime.layout_revision();
+        let layout = self.runtime.current_layout.as_ref()?;
+        let cols = layout.rect.col.saturating_add(layout.rect.width);
+        let rows = layout.rect.row.saturating_add(layout.rect.height);
+
+        let needs_rebuild = self.widget_hit_cache.as_ref().is_none_or(|cache| {
+            cache.layout_revision != revision || cache.cols != cols || cache.rows != rows
+        });
+        if needs_rebuild {
+            let mut cells = vec![None; cols as usize * rows as usize];
+            fill_widget_hit_cells(layout, cols, rows, &mut cells);
+            self.widget_hit_cache = Some(WidgetHitCache {
+                layout_revision: revision,
+                cols,
+                rows,
+                cells,
+            });
+        }
+
+        let cache = self.widget_hit_cache.as_ref()?;
+        if row >= cache.rows || col >= cache.cols {
+            return None;
+        }
+        cache.cells[row as usize * cache.cols as usize + col as usize].clone()
+    }
+
+    fn handle_text_click(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        content_width: u16,
+        content_height: u16,
+    ) {
+        if mouse.column < content_col || mouse.row < content_row {
+            return;
+        }
+        let local_col = mouse.column - content_col;
+        let local_row = mouse.row - content_row;
+        if local_col >= content_width || local_row >= content_height {
+            return;
+        }
+
+        let buffer = self.active_buffer_mut();
+        let absolute_row = buffer
+            .scroll_top
+            .saturating_add(local_row as usize)
+            .min(buffer.lines.len().saturating_sub(1));
+        let absolute_col = (local_col as usize).min(buffer.lines[absolute_row].len());
+        buffer.cursor = (absolute_row, absolute_col);
+        self.completion = None;
+        self.minibuffer = None;
+        self.clear_mark();
+        self.sync_runtime_context();
+        self.mark_needs_redraw();
+    }
+
     fn start_eval_flash(&mut self) {
         let buffer = self.active_buffer();
         let Some(range) = innermost_sexp_range_at_cursor(&buffer.lines, buffer.cursor) else {
@@ -919,6 +1258,53 @@ fn normalize_region(
     } else {
         (end, start)
     }
+}
+
+fn fill_widget_hit_cells(
+    node: &crate::layout::LayoutNode,
+    cols: u16,
+    rows: u16,
+    cells: &mut [Option<crate::layout::LayoutNode>],
+) {
+    for child in &node.children {
+        fill_widget_hit_cells(child, cols, rows, cells);
+    }
+
+    if matches!(
+        node.widget_type.as_str(),
+        "v-stack" | "h-stack" | "box" | "grid"
+    ) {
+        return;
+    }
+
+    let max_row = node.rect.row.saturating_add(node.rect.height).min(rows);
+    let max_col = node.rect.col.saturating_add(node.rect.width).min(cols);
+    for row in node.rect.row..max_row {
+        for col in node.rect.col..max_col {
+            cells[row as usize * cols as usize + col as usize] = Some(node.clone());
+        }
+    }
+}
+
+fn same_widget_hit(
+    left: Option<&crate::layout::LayoutNode>,
+    right: Option<&crate::layout::LayoutNode>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => widget_hit_key(left) == widget_hit_key(right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn widget_hit_key(node: &crate::layout::LayoutNode) -> (String, u16, u16, u16, u16) {
+    (
+        node.widget_type.clone(),
+        node.rect.row,
+        node.rect.col,
+        node.rect.width,
+        node.rect.height,
+    )
 }
 
 impl CompletionState {
@@ -1143,7 +1529,9 @@ mod tests {
     use crate::mode::BufferMode;
     use crate::runtime::Runtime;
     use crate::vm::Value;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::fs;
@@ -1156,6 +1544,15 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("eseqlisp-{name}-{unique}.lisp"))
+    }
+
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
     }
 
     #[test]
@@ -1257,6 +1654,30 @@ mod tests {
         editor.active_buffer_mut().cursor = (0, 0);
 
         editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 3));
+    }
+
+    #[test]
+    fn alt_left_moves_to_previous_word() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "abc def ghi");
+        editor.active_buffer_mut().cursor = (0, 10);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 8));
+    }
+
+    #[test]
+    fn alt_right_moves_to_next_word() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "abc def ghi");
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT));
 
         assert_eq!(editor.active_buffer().cursor, (0, 3));
     }
@@ -1551,5 +1972,298 @@ mod tests {
         editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
         assert_eq!(editor.minibuffer, None);
+    }
+
+    #[test]
+    fn mouse_click_moves_cursor_in_text_view() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha\nbravo");
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 2),
+            1,
+            1,
+            20,
+            10,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (1, 2));
+    }
+
+    #[test]
+    fn mouse_drag_updates_slider_via_on_change_callback() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(20, 6);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def level (state 0))
+                (effect
+                  (hslider
+                    :min 0
+                    :max 100
+                    :value level
+                    :on-change |v| (set! level v)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(20, 6);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 9, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+
+        let value = editor.runtime.eval_str("level").unwrap().unwrap();
+        match value {
+            Value::Number(n) => assert_eq!(n, 0.0),
+            _ => panic!("expected numeric slider state"),
+        }
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 16, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+
+        let value = editor.runtime.eval_str("level").unwrap().unwrap();
+        match value {
+            Value::Number(n) => assert!(n > 90.0),
+            _ => panic!("expected numeric slider state"),
+        }
+    }
+
+    #[test]
+    fn mouse_drag_updates_slider_via_bind_shorthand() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(20, 6);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def level (state 0))
+                (effect
+                  (hslider
+                    :min 0
+                    :max 100
+                    :bind level))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(20, 6);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 16, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 16, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+
+        let value = editor.runtime.eval_str("level").unwrap().unwrap();
+        match value {
+            Value::Number(n) => assert!(n > 90.0),
+            _ => panic!("expected numeric slider state"),
+        }
+    }
+
+    #[test]
+    fn eval_sexp_replaces_previous_preview_effect_layout() {
+        let init = r#"
+            (def eval-sexp ()
+              (let ((form (s-expression-at-cursor)))
+                (if (= form "")
+                  (status "No s-expression at cursor")
+                  (let ((result (eval form)))
+                    result))))
+            (bind-key "C-x C-e" "eval-sexp")
+        "#;
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                init_source: Some(init.to_string()),
+            },
+        );
+        editor.open_scratch_buffer(
+            "*test*",
+            "(effect (h-stack (label \"hello\") (hslider :min 0 :max 100 :bind x)))",
+        );
+        editor.runtime.eval_str("(defstate x 0)").unwrap();
+        editor.active_buffer_mut().cursor = (0, editor.active_buffer().lines[0].len());
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+
+        editor
+            .active_buffer_mut()
+            .set_text("(effect (h-stack (hslider :min 0 :max 100 :bind x)))");
+        editor.active_buffer_mut().cursor = (0, editor.active_buffer().lines[0].len());
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+
+        editor
+            .runtime
+            .set_reactive("APP", "unused", Value::Number(0.0));
+        let layout = editor.runtime.current_layout.as_ref().expect("layout");
+        assert_eq!(layout.widget_type, "h-stack");
+        assert_eq!(layout.children.len(), 1);
+        assert_eq!(layout.children[0].widget_type, "hslider");
+    }
+
+    #[test]
+    fn mouse_drag_updates_bound_step_field_from_each() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(40, 6);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (defstate pattern
+                  (dict :steps
+                    (list
+                      (dict :velocity 20)
+                      (dict :velocity 50))))
+                (effect
+                  (h-stack
+                    (each pattern.steps |step|
+                      (hslider :min 0 :max 100 :bind step.velocity))))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(40, 6);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 1),
+            1,
+            1,
+            40,
+            6,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 10, 1),
+            1,
+            1,
+            40,
+            6,
+        );
+
+        let value = editor.runtime.eval_str("pattern.steps").unwrap().unwrap();
+        let Value::List(items) = value else {
+            panic!("expected steps list");
+        };
+        let first = items[0].borrow().clone();
+        let Value::Map(map) = first else {
+            panic!("expected step map");
+        };
+        let velocity = map.get("velocity").expect("velocity").borrow().clone();
+        match velocity {
+            Value::Number(n) => assert!(n > 50.0),
+            _ => panic!("expected numeric velocity"),
+        }
+    }
+
+    #[test]
+    fn mouse_drag_updates_bound_list_item_from_each() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(40, 12);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (defstate steps '(20 30 40 50 60))
+                (effect
+                  (h-stack
+                    (each steps |step|
+                      (vslider :min 0 :max 100 :bind step))))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(40, 12);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 5),
+            1,
+            1,
+            40,
+            12,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 2),
+            1,
+            1,
+            40,
+            12,
+        );
+
+        let value = editor.runtime.eval_str("steps").unwrap().unwrap();
+        let Value::List(items) = value else {
+            panic!("expected steps list");
+        };
+        match &*items[0].borrow() {
+            Value::Number(n) => assert!(*n > 20.0),
+            _ => panic!("expected numeric step"),
+        }
+    }
+
+    #[test]
+    fn reevaluating_defstate_and_effect_rebuilds_each_layout() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+
+        editor
+            .runtime
+            .eval_str("(defstate steps '(1 2 3 4 5))")
+            .unwrap();
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (effect
+                  (h-stack
+                    (each steps |step|
+                      (vslider :min 0 :max 100 :bind step))))
+                "#,
+            )
+            .unwrap();
+
+        let layout = editor.runtime.current_layout.as_ref().expect("layout");
+        assert_eq!(layout.children.len(), 5);
+
+        editor
+            .runtime
+            .eval_str("(defstate steps '(1 2 3 4 5 6 7 8 9))")
+            .unwrap();
+        let result = editor.runtime.eval_str(
+            r#"
+                (effect
+                  (h-stack
+                    (each steps |step|
+                      (vslider :min 0 :max 100 :bind step))))
+                "#,
+        );
+
+        assert!(result.is_ok(), "effect re-eval failed: {result:?}");
+        let layout = editor.runtime.current_layout.as_ref().expect("layout");
+        assert_eq!(layout.children.len(), 9);
     }
 }

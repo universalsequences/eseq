@@ -56,6 +56,7 @@ pub fn write_gpu_data(
     _viewport: (f32, f32),
     out: &mut Vec<u8>,
 ) {
+    println!("write gpu data vslider called");
     let value = get_f32_prop(props, "value", 0.0);
     let min = get_f32_prop(props, "min", 0.0);
     let max = get_f32_prop(props, "max", 1.0);
@@ -70,7 +71,7 @@ pub fn write_gpu_data(
         pos: [rect.col as f32, rect.row as f32],
         size: [rect.width as f32, rect.height as f32],
         value_t: t.clamp(0.0, 1.0),
-        fill_color: [0.0, 0.8, 0.0, 1.0],     // Green
+        fill_color: [1.0, 1.0, 1.0, 1.0],     // white
         track_color: [0.25, 0.25, 0.25, 1.0], // Dark gray
     };
 

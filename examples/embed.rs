@@ -54,9 +54,11 @@ fn main() -> std::io::Result<()> {
 
         if editor.needs_redraw() {
             terminal.draw(|f| {
-                let (_, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let viewport_width = (cols as usize).saturating_sub(2);
                 let viewport_height = (rows as usize).saturating_sub(3);
-                let render_frame = frame::build_render_frame(&mut editor, viewport_height);
+                let render_frame =
+                    frame::build_render_frame(&mut editor, viewport_width, viewport_height);
                 tui::render(f, &render_frame);
             })?;
             editor.clear_needs_redraw();
@@ -72,9 +74,7 @@ fn main() -> std::io::Result<()> {
 }
 
 fn register_demo_natives(runtime: &mut Runtime, host: Rc<RefCell<DemoHost>>) {
-    runtime.register_native("seq-current-track", |_args, _ctx| {
-        Ok(Value::Number(1.0))
-    });
+    runtime.register_native("seq-current-track", |_args, _ctx| Ok(Value::Number(1.0)));
 
     runtime.register_native("seq-num-steps", {
         let host = host.clone();
@@ -136,7 +136,8 @@ fn process_host_commands(editor: &mut Editor, host: &Rc<RefCell<DemoHost>>) {
                     .clone()
                     .or_else(|| {
                         path.and_then(|path| {
-                            path.file_stem().map(|stem| stem.to_string_lossy().to_string())
+                            path.file_stem()
+                                .map(|stem| stem.to_string_lossy().to_string())
                         })
                     })
                     .unwrap_or_else(|| "untitled".to_string());
@@ -158,7 +159,8 @@ fn process_host_commands(editor: &mut Editor, host: &Rc<RefCell<DemoHost>>) {
                     .clone()
                     .or_else(|| {
                         path.and_then(|path| {
-                            path.file_stem().map(|stem| stem.to_string_lossy().to_string())
+                            path.file_stem()
+                                .map(|stem| stem.to_string_lossy().to_string())
                         })
                     })
                     .unwrap_or_else(|| "untitled".to_string());

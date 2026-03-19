@@ -41,6 +41,8 @@ pub enum OpCode {
     StoreGlobal(usize),
     StoreLocal(usize),
     StoreUpvalue(usize),
+    StoreState(u32),
+    StoreField(usize),
     Store(usize),
     Add(usize),
     Mul(usize),
@@ -57,19 +59,22 @@ pub enum OpCode {
     Call(usize),
     MakeFunc(usize),
     MakeClosure(usize, usize),
-    Eval,               // pop a string, eval it in the current VM context, push result
-    PushKeyword(usize), // push Value::Keyword from strings pool
-    PushSymbol(usize),  // push Value::Symbol from strings pool (quoted symbol)
+    Eval,                    // pop a string, eval it in the current VM context, push result
+    PushKeyword(usize),      // push Value::Keyword from strings pool
+    PushSymbol(usize),       // push Value::Symbol from strings pool (quoted symbol)
     InitDerived(u32, usize), // node id, chunk idx
     InitEffect(u32, usize),  // node id, chunk idx
+    InitState(u32),          // node id
     LoadDerived(u32),        // load derived node cached value
+    LoadState(u32),          // load state node current value
     DerivedBegin(u32),
     DerivedEnd(u32),
     EffectBegin(u32),
     EffectEnd(u32),
-    LoadReactive(usize, usize), // namespace idx, field idx
-    GetField(usize),    // pop a map, push map[strings[idx]]
-    EmitTree,           // pop widget tree from stack and route it to the runtime
+    LoadReactive(usize, usize),  // namespace idx, field idx
+    StoreReactive(usize, usize), // namespace idx, field idx
+    GetField(usize),             // pop a map, push map[strings[idx]]
+    EmitTree,                    // pop widget tree from stack and route it to the runtime
     Return,
     Jump(usize),
     JumpIfFalse(usize),
@@ -85,7 +90,27 @@ pub struct Compiler {
     global_symbols: Vec<String>,
     reactive_namespaces: HashSet<String>,
     derived_bindings: HashMap<String, u32>,
+    state_bindings: HashMap<String, u32>,
     next_node_id: u32,
+}
+
+fn is_widget_name(name: &str) -> bool {
+    matches!(
+        name,
+        "label"
+            | "slider"
+            | "hslider"
+            | "vslider"
+            | "toggle"
+            | "knob"
+            | "meter"
+            | "text-input"
+            | "select"
+            | "v-stack"
+            | "h-stack"
+            | "box"
+            | "grid"
+    )
 }
 
 fn extract_function_definition(
@@ -129,6 +154,7 @@ impl Compiler {
             global_symbols: vec![],
             reactive_namespaces: HashSet::new(),
             derived_bindings: HashMap::new(),
+            state_bindings: HashMap::new(),
             next_node_id: 0,
         }
     }
@@ -141,6 +167,7 @@ impl Compiler {
         existing_global_names: Vec<String>,
         reactive_namespaces: HashSet<String>,
         derived_bindings: HashMap<String, u32>,
+        state_bindings: HashMap<String, u32>,
         next_node_id: u32,
     ) -> Self {
         Compiler {
@@ -151,6 +178,7 @@ impl Compiler {
             global_symbols: existing_global_names,
             reactive_namespaces,
             derived_bindings,
+            state_bindings,
             next_node_id,
         }
     }
@@ -200,6 +228,10 @@ impl Compiler {
 
     pub fn derived_bindings(&self) -> HashMap<String, u32> {
         self.derived_bindings.clone()
+    }
+
+    pub fn state_bindings(&self) -> HashMap<String, u32> {
+        self.state_bindings.clone()
     }
 
     pub fn next_node_id(&self) -> u32 {
@@ -260,6 +292,252 @@ impl Compiler {
         self.derived_bindings.insert(name.to_string(), node_id);
         self.emit(OpCode::InitDerived(node_id, chunk_idx));
         self.emit_symbol_store(name);
+        Ok(())
+    }
+
+    fn compile_named_state_definition(
+        &mut self,
+        name: &str,
+        initial: &Expression,
+    ) -> Result<(), CompilerError> {
+        let node_id = self
+            .state_bindings
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| self.alloc_node_id());
+        self.state_bindings.insert(name.to_string(), node_id);
+        self.compile_expression(initial)?;
+        self.emit(OpCode::InitState(node_id));
+        let global_idx = self.use_global(name);
+        self.emit(OpCode::StoreGlobal(global_idx));
+        Ok(())
+    }
+
+    fn compile_set_statement(
+        &mut self,
+        target: &Expression,
+        value: &Expression,
+    ) -> Result<(), CompilerError> {
+        self.compile_expression(value)?;
+
+        match target {
+            Expression::Symbol(name) => {
+                let parts = name.splitn(2, '.').collect::<Vec<_>>();
+                if parts.len() == 2 && self.reactive_namespaces.contains(parts[0]) {
+                    self.compile_expression(value)?;
+                    if parts[1].contains('.') {
+                        return Err(CompilerError::InvalidArg);
+                    }
+                    let ns_idx = self.use_string_constant(parts[0]);
+                    let field_idx = self.use_string_constant(parts[1]);
+                    self.emit(OpCode::StoreReactive(ns_idx, field_idx));
+                    self.emit(OpCode::LoadReactive(ns_idx, field_idx));
+                    return Ok(());
+                }
+                if parts.len() == 2 {
+                    let fields = parts[1].split('.').collect::<Vec<_>>();
+                    self.emit_symbol_load(parts[0]);
+                    for field in fields.iter().take(fields.len().saturating_sub(1)) {
+                        let idx = self.use_string_constant(field);
+                        self.emit(OpCode::GetField(idx));
+                    }
+                    self.compile_expression(value)?;
+                    let last_idx =
+                        self.use_string_constant(fields.last().copied().unwrap_or_default());
+                    self.emit(OpCode::StoreField(last_idx));
+                    return Ok(());
+                }
+                self.compile_expression(value)?;
+                self.emit_symbol_store(name);
+                self.emit_symbol_load(name);
+                Ok(())
+            }
+            Expression::List(_) => Err(CompilerError::InvalidArg),
+            Expression::Keyword(_) | Expression::String(_) | Expression::Number(_) => {
+                Err(CompilerError::InvalidArg)
+            }
+            Expression::QuoteSymbol(_) | Expression::QuoteList(_) => Err(CompilerError::InvalidArg),
+        }?;
+
+        Ok(())
+    }
+
+    fn compile_each_form(
+        &mut self,
+        source: &Expression,
+        lambda: &Expression,
+    ) -> Result<(), CompilerError> {
+        self.compile_expression(source)?;
+        match source {
+            Expression::Symbol(path) => {
+                let idx = self.use_string_constant(path);
+                self.emit(OpCode::PushStr(idx));
+            }
+            _ => self.emit(OpCode::PushNil),
+        }
+        let lambda = self.rewrite_each_lambda(source, lambda)?;
+        self.compile_expression(&lambda)?;
+        self.emit_symbol_load("each");
+        self.emit(OpCode::Call(3));
+        Ok(())
+    }
+
+    fn rewrite_each_lambda(
+        &self,
+        source: &Expression,
+        lambda: &Expression,
+    ) -> Result<Expression, CompilerError> {
+        let Expression::List(items) = lambda else {
+            return Err(CompilerError::InvalidArg);
+        };
+        let Some((None, args, body)) = extract_function_definition(items) else {
+            return Err(CompilerError::InvalidArg);
+        };
+        if !(1..=2).contains(&args.len()) {
+            return Err(CompilerError::InvalidArg);
+        }
+
+        let Expression::Symbol(item_name) = &args[0] else {
+            return Err(CompilerError::InvalidArg);
+        };
+        let index_name = if args.len() == 2 {
+            match &args[1] {
+                Expression::Symbol(name) => name.clone(),
+                _ => return Err(CompilerError::InvalidArg),
+            }
+        } else {
+            "__each_index".to_string()
+        };
+
+        let rewritten_body = body
+            .iter()
+            .map(|expr| self.rewrite_each_bind_expr(expr, source, item_name, &index_name))
+            .collect::<Vec<_>>();
+
+        let mut lambda_args = args;
+        if lambda_args.len() == 1 {
+            lambda_args.push(Expression::Symbol(index_name));
+        }
+
+        Ok(Expression::List(
+            std::iter::once(Expression::Symbol("lambda".to_string()))
+                .chain(std::iter::once(Expression::List(lambda_args)))
+                .chain(rewritten_body)
+                .collect(),
+        ))
+    }
+
+    fn rewrite_each_bind_expr(
+        &self,
+        expr: &Expression,
+        source: &Expression,
+        item_name: &str,
+        index_name: &str,
+    ) -> Expression {
+        let Expression::List(items) = expr else {
+            return expr.clone();
+        };
+
+        if let Some(Expression::Symbol(name)) = items.first()
+            && is_widget_name(name)
+        {
+            return self.rewrite_each_widget_bind(items, source, item_name, index_name);
+        }
+
+        Expression::List(
+            items.iter()
+                .map(|item| self.rewrite_each_bind_expr(item, source, item_name, index_name))
+                .collect(),
+        )
+    }
+
+    fn rewrite_each_widget_bind(
+        &self,
+        items: &[Expression],
+        source: &Expression,
+        item_name: &str,
+        index_name: &str,
+    ) -> Expression {
+        let mut out = Vec::with_capacity(items.len() + 4);
+        let mut idx = 0;
+        while idx < items.len() {
+            match (items.get(idx), items.get(idx + 1)) {
+                (
+                    Some(Expression::Keyword(key)),
+                    Some(Expression::Symbol(target)),
+                ) if key == "bind" && target == item_name => {
+                    out.push(Expression::Keyword("value".to_string()));
+                    out.push(Expression::Symbol(target.clone()));
+                    out.push(Expression::Keyword("on-change".to_string()));
+                    out.push(Expression::List(vec![
+                        Expression::Symbol("lambda".to_string()),
+                        Expression::List(vec![Expression::Symbol("v".to_string())]),
+                        Expression::List(vec![
+                            Expression::Symbol("set!".to_string()),
+                            source.clone(),
+                            Expression::List(vec![
+                                Expression::Symbol("set-nth".to_string()),
+                                source.clone(),
+                                Expression::Symbol(index_name.to_string()),
+                                Expression::Symbol("v".to_string()),
+                            ]),
+                        ]),
+                    ]));
+                    idx += 2;
+                }
+                (Some(item), _) => {
+                    out.push(self.rewrite_each_bind_expr(item, source, item_name, index_name));
+                    idx += 1;
+                }
+                _ => break,
+            }
+        }
+        Expression::List(out)
+    }
+
+    fn compile_widget_call(&mut self, widget_name: &str, list: &[Expression]) -> Result<(), CompilerError> {
+        let mut idx = 1;
+        let mut arity = 0;
+        while idx < list.len() {
+            match list.get(idx) {
+                Some(Expression::Keyword(key)) if key == "bind" => {
+                    let Some(Expression::Symbol(target)) = list.get(idx + 1) else {
+                        return Err(CompilerError::InvalidArg);
+                    };
+
+                    let value_kw = self.use_string_constant("value");
+                    self.emit(OpCode::PushKeyword(value_kw));
+                    arity += 1;
+                    self.compile_expression(&Expression::Symbol(target.clone()))?;
+                    arity += 1;
+
+                    let on_change_kw = self.use_string_constant("on-change");
+                    self.emit(OpCode::PushKeyword(on_change_kw));
+                    arity += 1;
+                    let setter = Expression::List(vec![
+                        Expression::Symbol("lambda".to_string()),
+                        Expression::List(vec![Expression::Symbol("v".to_string())]),
+                        Expression::List(vec![
+                            Expression::Symbol("set!".to_string()),
+                            Expression::Symbol(target.clone()),
+                            Expression::Symbol("v".to_string()),
+                        ]),
+                    ]);
+                    self.compile_expression(&setter)?;
+                    arity += 1;
+                    idx += 2;
+                }
+                Some(expr) => {
+                    self.compile_expression(expr)?;
+                    arity += 1;
+                    idx += 1;
+                }
+                None => break,
+            }
+        }
+
+        self.compile_expression(&Expression::Symbol(widget_name.to_string()))?;
+        self.emit(OpCode::Call(arity));
         Ok(())
     }
 
@@ -363,6 +641,9 @@ impl Compiler {
 
     fn emit_symbol_load(&mut self, name: &str) {
         match self.resolve_symbol(name) {
+            SymbolResolution::Global(_) if self.state_bindings.contains_key(name) => {
+                self.emit(OpCode::LoadState(self.state_bindings[name]))
+            }
             SymbolResolution::Local(idx) => self.emit(OpCode::LoadLocal(idx)),
             SymbolResolution::Global(idx) => self.emit(OpCode::LoadGlobal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::LoadUpvalue(idx)),
@@ -371,6 +652,9 @@ impl Compiler {
 
     fn emit_symbol_store(&mut self, name: &str) {
         match self.resolve_symbol(name) {
+            SymbolResolution::Global(_) if self.state_bindings.contains_key(name) => {
+                self.emit(OpCode::StoreState(self.state_bindings[name]))
+            }
             SymbolResolution::Local(idx) => self.emit(OpCode::StoreLocal(idx)),
             SymbolResolution::Global(idx) => self.emit(OpCode::StoreGlobal(idx)),
             SymbolResolution::Upvalue(idx) => self.emit(OpCode::StoreUpvalue(idx)),
@@ -502,7 +786,37 @@ impl Compiler {
     }
 
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
-        if let [Expression::Symbol(def), Expression::Symbol(name), Expression::List(derived)] = list
+        if let Some(Expression::Symbol(widget_name)) = list.first()
+            && is_widget_name(widget_name)
+            && list.iter().any(|expr| matches!(expr, Expression::Keyword(key) if key == "bind"))
+        {
+            return self.compile_widget_call(widget_name, list);
+        }
+
+        if let [Expression::Symbol(each), source, lambda] = list
+            && each == "each"
+        {
+            return self.compile_each_form(source, lambda);
+        }
+
+        if let [
+            Expression::Symbol(def),
+            Expression::Symbol(name),
+            Expression::List(state),
+        ] = list
+            && def == "def"
+            && let Some(Expression::Symbol(form)) = state.first()
+            && form == "state"
+            && state.len() == 2
+        {
+            return self.compile_named_state_definition(name, &state[1]);
+        }
+
+        if let [
+            Expression::Symbol(def),
+            Expression::Symbol(name),
+            Expression::List(derived),
+        ] = list
             && def == "def"
             && let Some(Expression::Symbol(form)) = derived.first()
             && form == "derived"
@@ -532,11 +846,23 @@ impl Compiler {
             if s == "do" {
                 return self.compile_block(&list[1..]);
             }
+            if s == "set!" && list.len() == 3 {
+                return self.compile_set_statement(&list[1], &list[2]);
+            }
+            if s == "defstate" && list.len() == 3 {
+                let Expression::Symbol(name) = &list[1] else {
+                    return Err(CompilerError::InvalidArg);
+                };
+                return self.compile_named_state_definition(name, &list[2]);
+            }
             if s == "effect" {
                 return self.compile_effect_form(&list[1..]);
             }
             if s == "derived" {
                 return self.compile_inline_derived(&list[1..]);
+            }
+            if s == "state" {
+                return Err(CompilerError::InvalidArg);
             }
             if s == "let" && list.len() >= 3 {
                 return self.compile_let_statement(&list[1], &list[2..]);

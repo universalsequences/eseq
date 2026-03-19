@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use std::time::Duration;
 
-use crossterm::event::Event;
 use crate::layout::LayoutNode;
+use crossterm::event::Event;
 
 // ── Colors ───────────────────────────────────────────────────────────────────
 
@@ -118,9 +120,16 @@ pub struct RenderFrame {
     pub status: String,
     /// Optional completion popup to overlay on top of the text area.
     pub completion: Option<CompletionFrame>,
+    /// Revision token for the text/editor portion of the frame. Backends can
+    /// use this to cache expensive text-layer work across layout-only redraws.
+    pub text_cache_key: u64,
+    /// Revision token for widget layout geometry. This only changes when the
+    /// widget rect tree changes, not when render-only props like slider values
+    /// update.
+    pub widget_layout_cache_key: u64,
     /// Reactive UI widget tree to render. Each backend renders this in its own way:
     /// Ratatui draws characters into the cell buffer; Metal dispatches instanced GPU draw calls.
-    pub widget_layout: Option<LayoutNode>,
+    pub widget_layout: Option<Arc<LayoutNode>>,
 }
 
 // ── Backend trait ─────────────────────────────────────────────────────────────

@@ -2,6 +2,8 @@ use crate::backend::{Cell, CellStyle, Color, CompletionEntry, CompletionFrame, R
 use crate::editor::Editor;
 use crate::mode::{TokenClass, TokenSpan};
 use crate::text::matching_paren;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 // ── Semantic region colors ────────────────────────────────────────────────────
 
@@ -59,7 +61,12 @@ fn in_range(
 /// `viewport_height` is the number of text lines the backend can display
 /// (excluding borders / status bar). The backend provides this via
 /// `Backend::viewport_size()`.
-pub fn build_render_frame(editor: &mut Editor, viewport_height: usize) -> RenderFrame {
+pub fn build_render_frame(
+    editor: &mut Editor,
+    viewport_width: usize,
+    viewport_height: usize,
+) -> RenderFrame {
+    editor.set_layout_viewport(viewport_width as u16, viewport_height as u16);
     editor.active_buffer_mut().adjust_scroll(viewport_height);
 
     let region_range = editor.active_region_range();
@@ -169,6 +176,36 @@ pub fn build_render_frame(editor: &mut Editor, viewport_height: usize) -> Render
         }
     });
 
+    let text_cache_key = {
+        let mut hasher = DefaultHasher::new();
+        editor.active_buffer().id.hash(&mut hasher);
+        editor.active_buffer().revision.hash(&mut hasher);
+        editor.active_buffer().mode.hash(&mut hasher);
+        viewport_width.hash(&mut hasher);
+        viewport_height.hash(&mut hasher);
+        scroll_top.hash(&mut hasher);
+        cursor_row.hash(&mut hasher);
+        cursor_col.hash(&mut hasher);
+        region_range.hash(&mut hasher);
+        sexp_range.hash(&mut hasher);
+        eval_flash_range.hash(&mut hasher);
+        status.hash(&mut hasher);
+        completion
+            .as_ref()
+            .map(|comp| {
+                (
+                    comp.anchor,
+                    comp.entries
+                        .iter()
+                        .map(|e| (&e.label, e.selected))
+                        .collect::<Vec<_>>(),
+                    comp.doc.as_ref().map(|(title, body)| (title, body)),
+                )
+            })
+            .hash(&mut hasher);
+        hasher.finish()
+    };
+
     let buf = editor.active_buffer();
     RenderFrame {
         lines,
@@ -177,6 +214,8 @@ pub fn build_render_frame(editor: &mut Editor, viewport_height: usize) -> Render
         dirty: buf.dirty,
         status,
         completion,
+        text_cache_key,
+        widget_layout_cache_key: editor.widget_layout_revision(),
         widget_layout: editor.widget_layout(),
     }
 }

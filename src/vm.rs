@@ -14,14 +14,21 @@ pub enum VMError {
     StackUnderflow,
     IncorrectType,
     UnknownVariable(String),
+    ReadonlyReactive(String),
     ExpectedFunction,
     ArityMismatch,
     ParseError,
     CompileError,
 }
 
-pub type NativeFn = Rc<dyn Fn(Vec<Value>) -> Value>;
+pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
 pub type NodeId = u32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReactiveSource {
+    NamespaceField { namespace: String, field: String },
+    LocalState { name: String },
+}
 
 pub enum Value {
     Number(f64),
@@ -41,8 +48,7 @@ pub enum Value {
 pub enum ReactiveNode {
     Source {
         id: NodeId,
-        namespace: String,
-        field: String,
+        source: ReactiveSource,
         value: Value,
         dependents: HashSet<NodeId>,
     },
@@ -214,7 +220,11 @@ pub struct VM {
     pub dag: ReactiveDag,
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
+    pub writable_reactive_namespaces: HashSet<String>,
     pub derived_bindings: HashMap<String, NodeId>,
+    pub state_bindings: HashMap<String, NodeId>,
+    execution_depth: usize,
+    processing_reactive: bool,
 }
 
 /// Register built-in functions available in all contexts.
@@ -327,6 +337,54 @@ pub fn register_core_natives(vm: &mut VM) {
                 .map(|value| Rc::new(RefCell::new(value)))
                 .collect(),
         )
+    });
+
+    vm.register_native("set-nth", |args| {
+        let (Some(Value::List(items)), Some(Value::Number(idx)), Some(value)) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Value::Nil;
+        };
+
+        if *idx < 0.0 {
+            return Value::List(items.clone());
+        }
+
+        let mut out = items.clone();
+        let index = *idx as usize;
+        if index < out.len() {
+            out[index] = Rc::new(RefCell::new(value.clone()));
+        }
+        Value::List(out)
+    });
+
+    vm.register_native_with_vm("each", |args, vm| {
+        let (Some(Value::List(items)), owner_path, Some(callback)) =
+            (args.first(), args.get(1), args.get(2).cloned())
+        else {
+            return Value::List(vec![]);
+        };
+
+        let owner = match owner_path {
+            Some(Value::String(path)) => Some(path.clone()),
+            _ => None,
+        };
+
+        let mut out = Vec::with_capacity(items.len());
+        for (idx, item) in items.iter().enumerate() {
+            let mut value = item.borrow().clone();
+            if let (Some(owner), Value::Map(map)) = (owner.clone(), &mut value) {
+                map.insert(
+                    "__eseq_owner".to_string(),
+                    Rc::new(RefCell::new(Value::String(owner))),
+                );
+            }
+            let result = vm
+                .invoke(callback.clone(), vec![value, Value::Number(idx as f64)])
+                .unwrap_or(Some(Value::Nil));
+            out.push(Rc::new(RefCell::new(result.unwrap_or(Value::Nil))));
+        }
+        Value::List(out)
     });
 
     // (nth list idx) -> value or nil; idx is 0-based
@@ -601,13 +659,11 @@ impl ReactiveDag {
         }
     }
 
-    pub fn find_source_node(&self, namespace: &str, field: &str) -> Option<NodeId> {
+    pub fn find_source_node(&self, source: &ReactiveSource) -> Option<NodeId> {
         self.nodes.iter().find_map(|(id, node)| match node {
             ReactiveNode::Source {
-                namespace: ns,
-                field: f,
-                ..
-            } if ns == namespace && f == field => Some(*id),
+                source: current, ..
+            } if current == source => Some(*id),
             _ => None,
         })
     }
@@ -634,6 +690,13 @@ impl ReactiveDag {
             ReactiveNode::Source { .. } => false,
         })
     }
+
+    pub fn effect_ids(&self) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter_map(|(id, node)| matches!(node, ReactiveNode::Effect { .. }).then_some(*id))
+            .collect()
+    }
 }
 
 impl VM {
@@ -647,12 +710,24 @@ impl VM {
             dag: ReactiveDag::new(),
             tracking_stack: Vec::new(),
             reactive_namespaces: HashSet::new(),
+            writable_reactive_namespaces: HashSet::new(),
             derived_bindings: HashMap::new(),
+            state_bindings: HashMap::new(),
+            execution_depth: 0,
+            processing_reactive: false,
         }
     }
 
     /// Register a Rust function as a named global callable from Lisp.
     pub fn register_native(&mut self, name: &str, f: impl Fn(Vec<Value>) -> Value + 'static) {
+        self.register_native_with_vm(name, move |args, _vm| f(args));
+    }
+
+    pub fn register_native_with_vm(
+        &mut self,
+        name: &str,
+        f: impl Fn(Vec<Value>, &mut VM) -> Value + 'static,
+    ) {
         let idx = self.ensure_global(name);
         self.globals[idx] = Some(Rc::new(RefCell::new(Value::NativeFunction(Rc::new(f)))));
     }
@@ -671,6 +746,7 @@ impl VM {
         let names = self.global_names.clone();
         let reactive_namespaces = self.reactive_namespaces.clone();
         let derived_bindings = self.derived_bindings.clone();
+        let state_bindings = self.state_bindings.clone();
         let next_node_id = self.dag.next_id;
 
         let mut compiler = Compiler::new_repl(
@@ -679,6 +755,7 @@ impl VM {
             names,
             reactive_namespaces,
             derived_bindings,
+            state_bindings,
             next_node_id,
         );
         match compiler.compile() {
@@ -686,6 +763,7 @@ impl VM {
                 self.chunks = chunks;
                 self.global_names = compiler.global_names();
                 self.derived_bindings = compiler.derived_bindings();
+                self.state_bindings = compiler.state_bindings();
                 self.dag.next_id = compiler.next_node_id();
                 self.execute_from(entry_idx)
             }
@@ -722,9 +800,69 @@ impl VM {
             .map(|value| value.borrow().clone())
     }
 
+    pub fn clear_effects(&mut self) {
+        for id in self.dag.effect_ids() {
+            self.dag.remove_node(id);
+        }
+        self.pending_widget_trees.clear();
+    }
+
     fn execute_from(&mut self, entry_chunk: usize) -> Result<Option<Value>, VMError> {
+        self.execution_depth = self.execution_depth.saturating_add(1);
         self.current_chunk = entry_chunk;
-        self.execute()
+        let result = self.execute();
+        self.execution_depth = self.execution_depth.saturating_sub(1);
+        if result.is_ok() && self.execution_depth == 0 && !self.processing_reactive {
+            self.process_dirty_reactive()?;
+        }
+        result
+    }
+
+    pub fn invoke(&mut self, callable: Value, args: Vec<Value>) -> Result<Option<Value>, VMError> {
+        match callable {
+            Value::Closure(chunk_idx, upvalues) => {
+                self.execution_depth = self.execution_depth.saturating_add(1);
+                let current_chunk = self.current_chunk;
+                let result = self.execute_callable_chunk(chunk_idx, upvalues, args);
+                self.current_chunk = current_chunk;
+                self.execution_depth = self.execution_depth.saturating_sub(1);
+                if result.is_ok() && self.execution_depth == 0 && !self.processing_reactive {
+                    self.process_dirty_reactive()?;
+                }
+                result
+            }
+            Value::NativeFunction(f) => {
+                let result = f(args, self);
+                if !self.processing_reactive {
+                    self.process_dirty_reactive()?;
+                }
+                Ok(Some(result))
+            }
+            _ => Err(VMError::ExpectedFunction),
+        }
+    }
+
+    fn execute_callable_chunk(
+        &mut self,
+        chunk_idx: usize,
+        upvalues: Vec<Rc<RefCell<Value>>>,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, VMError> {
+        let previous_chunk = self.current_chunk;
+        self.current_chunk = chunk_idx;
+        let mut frame = self.new_frame();
+        frame.upvalues = upvalues;
+        if args.len() > frame.locals.len() {
+            self.current_chunk = previous_chunk;
+            return Err(VMError::ArityMismatch);
+        }
+        for (idx, arg) in args.into_iter().enumerate() {
+            frame.locals[idx] = Some(Rc::new(RefCell::new(arg)));
+        }
+
+        let result = self.execute_with_frames(vec![frame]);
+        self.current_chunk = previous_chunk;
+        result
     }
 
     pub fn update_reactive_global(&mut self, namespace: &str, field: &str, value: Value) {
@@ -767,7 +905,11 @@ impl VM {
     }
 
     fn get_or_create_source_node(&mut self, namespace: &str, field: &str) -> NodeId {
-        if let Some(id) = self.dag.find_source_node(namespace, field) {
+        let source = ReactiveSource::NamespaceField {
+            namespace: namespace.to_string(),
+            field: field.to_string(),
+        };
+        if let Some(id) = self.dag.find_source_node(&source) {
             return id;
         }
 
@@ -775,12 +917,109 @@ impl VM {
         let value = self.current_reactive_value(namespace, field);
         self.dag.add_node(ReactiveNode::Source {
             id,
-            namespace: namespace.to_string(),
-            field: field.to_string(),
+            source,
             value,
             dependents: HashSet::new(),
         });
         id
+    }
+
+    fn get_or_create_local_state_node(
+        &mut self,
+        node_id: NodeId,
+        name: &str,
+        initial: Value,
+    ) -> NodeId {
+        let source = ReactiveSource::LocalState {
+            name: name.to_string(),
+        };
+        if let Some(id) = self.dag.find_source_node(&source) {
+            self.mark_source_dependents_dirty(id, initial);
+            return id;
+        }
+
+        self.dag.add_node(ReactiveNode::Source {
+            id: node_id,
+            source,
+            value: initial,
+            dependents: HashSet::new(),
+        });
+        node_id
+    }
+
+    fn mark_source_dependents_dirty(&mut self, source_id: NodeId, value: Value) {
+        if let Some(ReactiveNode::Source {
+            value: current_value,
+            dependents,
+            ..
+        }) = self.dag.nodes.get_mut(&source_id)
+        {
+            *current_value = value;
+            let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
+            for dependent in dependents {
+                self.dag.mark_dirty(dependent);
+            }
+        }
+    }
+
+    fn mark_owner_path_dirty(&mut self, owner_path: &str) {
+        let parts = owner_path.splitn(2, '.').collect::<Vec<_>>();
+        if parts.len() == 1 {
+            if let Some(node_id) = self.state_bindings.get(parts[0]).copied() {
+                let current = self
+                    .dag
+                    .nodes
+                    .get(&node_id)
+                    .and_then(|node| match node {
+                        ReactiveNode::Source { value, .. } => Some(value.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or(Value::Nil);
+                self.mark_source_dependents_dirty(node_id, current);
+            }
+            return;
+        }
+
+        let namespace = parts[0];
+        let field = parts[1];
+        let current = self.current_reactive_value(namespace, field);
+        let source_id = self.get_or_create_source_node(namespace, field);
+        self.mark_source_dependents_dirty(source_id, current);
+    }
+
+    fn process_dirty_reactive(&mut self) -> Result<(), VMError> {
+        if self.processing_reactive {
+            return Ok(());
+        }
+
+        self.processing_reactive = true;
+        let result = (|| -> Result<(), VMError> {
+            loop {
+                let sorted = self.dag.topo_sort_dirty();
+                if sorted.is_empty() {
+                    break;
+                }
+
+                let mut progressed = false;
+                for node_id in sorted {
+                    if !self.dag.is_dirty(node_id) {
+                        continue;
+                    }
+                    let Some(chunk_idx) = self.dag.chunk_idx(node_id) else {
+                        continue;
+                    };
+                    progressed = true;
+                    self.execute_from(chunk_idx)?;
+                }
+
+                if !progressed {
+                    break;
+                }
+            }
+            Ok(())
+        })();
+        self.processing_reactive = false;
+        result
     }
 
     pub fn apply_reactive_changes(
@@ -794,44 +1033,9 @@ impl VM {
         for (namespace, field, value) in changes {
             self.update_reactive_global(&namespace, &field, value.clone());
             let source_id = self.get_or_create_source_node(&namespace, &field);
-            if let Some(ReactiveNode::Source {
-                value: current_value,
-                dependents,
-                ..
-            }) = self.dag.nodes.get_mut(&source_id)
-            {
-                *current_value = value;
-                let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
-                for dependent in dependents {
-                    self.dag.mark_dirty(dependent);
-                }
-            }
+            self.mark_source_dependents_dirty(source_id, value);
         }
-
-        loop {
-            let sorted = self.dag.topo_sort_dirty();
-            if sorted.is_empty() {
-                break;
-            }
-
-            let mut progressed = false;
-            for node_id in sorted {
-                if !self.dag.is_dirty(node_id) {
-                    continue;
-                }
-                let Some(chunk_idx) = self.dag.chunk_idx(node_id) else {
-                    continue;
-                };
-                progressed = true;
-                self.execute_from(chunk_idx)?;
-            }
-
-            if !progressed {
-                break;
-            }
-        }
-
-        Ok(())
+        self.process_dirty_reactive()
     }
 
     fn chunk(&self) -> &Chunk {
@@ -877,8 +1081,11 @@ impl VM {
     }
 
     pub fn execute(&mut self) -> Result<Option<Value>, VMError> {
+        self.execute_with_frames(vec![self.new_frame()])
+    }
+
+    fn execute_with_frames(&mut self, mut frames: Vec<Frame>) -> Result<Option<Value>, VMError> {
         let mut stack: Vec<Rc<RefCell<Value>>> = vec![];
-        let mut frames: Vec<Frame> = vec![self.new_frame()];
 
         while frames.last().unwrap().pc < self.chunks[self.current_chunk].ops.len() {
             let op = self.chunks[self.current_chunk].ops[frames.last().unwrap().pc].clone();
@@ -1112,6 +1319,55 @@ impl VM {
                         frame.pc += 1;
                     }
                 }
+                OpCode::StoreState(node_id) => {
+                    let Some(value) = stack.pop() else {
+                        return Err(VMError::StackUnderflow);
+                    };
+                    let new_value = value.borrow().clone();
+                    self.mark_source_dependents_dirty(node_id, new_value);
+                    if let Some(frame) = frames.last_mut() {
+                        frame.pc += 1;
+                    }
+                }
+                OpCode::StoreField(field_idx) => {
+                    let Some(value) = stack.pop() else {
+                        return Err(VMError::StackUnderflow);
+                    };
+                    let Some(target) = stack.pop() else {
+                        return Err(VMError::StackUnderflow);
+                    };
+                    let field = self.chunks[self.current_chunk].strings[field_idx].clone();
+                    let new_value = value.borrow().clone();
+                    let owner_path = match &*target.borrow() {
+                        Value::Map(map) => map
+                            .get("__eseq_owner")
+                            .and_then(|entry| match &*entry.borrow() {
+                                Value::String(path) => Some(path.clone()),
+                                _ => None,
+                            }),
+                        _ => None,
+                    };
+                    match &mut *target.borrow_mut() {
+                        Value::Map(map) => {
+                            if let Some(slot) = map.get(&field) {
+                                *slot.borrow_mut() = new_value.clone();
+                            } else {
+                                map.insert(
+                                    field.clone(),
+                                    Rc::new(RefCell::new(new_value.clone())),
+                                );
+                            }
+                        }
+                        _ => return Err(VMError::IncorrectType),
+                    }
+                    if let Some(owner) = owner_path {
+                        self.mark_owner_path_dirty(&owner);
+                    }
+                    stack.push(Rc::new(RefCell::new(new_value)));
+                    if let Some(frame) = frames.last_mut() {
+                        frame.pc += 1;
+                    }
+                }
                 OpCode::LoadUpvalue(idx) => {
                     if let Some(frame) = frames.last_mut() {
                         if let Some(val) = frame.upvalues.get(idx) {
@@ -1157,6 +1413,20 @@ impl VM {
                     stack.push(Rc::new(RefCell::new(Value::NodeRef(node_id))));
                     frames.last_mut().unwrap().pc += 1;
                 }
+                OpCode::InitState(node_id) => {
+                    let Some(initial) = stack.pop() else {
+                        return Err(VMError::StackUnderflow);
+                    };
+                    let initial_value = initial.borrow().clone();
+                    let name = self
+                        .state_bindings
+                        .iter()
+                        .find_map(|(name, id)| (*id == node_id).then_some(name.clone()))
+                        .unwrap_or_else(|| format!("state:{node_id}"));
+                    self.get_or_create_local_state_node(node_id, &name, initial_value);
+                    stack.push(Rc::new(RefCell::new(Value::NodeRef(node_id))));
+                    frames.last_mut().unwrap().pc += 1;
+                }
                 OpCode::InitEffect(node_id, chunk_idx) => {
                     if !self.dag.nodes.contains_key(&node_id) {
                         self.dag.add_node(ReactiveNode::Effect {
@@ -1175,6 +1445,22 @@ impl VM {
                 }
                 OpCode::LoadDerived(node_id) => {
                     let value = self.dag.derived_value(node_id).unwrap_or(Value::Nil);
+                    if let Some(ctx_id) = self.tracking_stack.last().copied() {
+                        self.dag.add_edge(node_id, ctx_id);
+                    }
+                    stack.push(Rc::new(RefCell::new(value)));
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::LoadState(node_id) => {
+                    let value = self
+                        .dag
+                        .nodes
+                        .get(&node_id)
+                        .and_then(|node| match node {
+                            ReactiveNode::Source { value, .. } => Some(value.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or(Value::Nil);
                     if let Some(ctx_id) = self.tracking_stack.last().copied() {
                         self.dag.add_edge(node_id, ctx_id);
                     }
@@ -1255,6 +1541,21 @@ impl VM {
                     stack.push(result);
                     frames.last_mut().unwrap().pc += 1;
                 }
+                OpCode::StoreReactive(ns_idx, field_idx) => {
+                    let Some(value) = stack.pop() else {
+                        return Err(VMError::StackUnderflow);
+                    };
+                    let namespace = self.chunks[self.current_chunk].strings[ns_idx].clone();
+                    let field = self.chunks[self.current_chunk].strings[field_idx].clone();
+                    if !self.writable_reactive_namespaces.contains(&namespace) {
+                        return Err(VMError::ReadonlyReactive(namespace));
+                    }
+                    let new_value = value.borrow().clone();
+                    self.update_reactive_global(&namespace, &field, new_value.clone());
+                    let source_id = self.get_or_create_source_node(&namespace, &field);
+                    self.mark_source_dependents_dirty(source_id, new_value);
+                    frames.last_mut().unwrap().pc += 1;
+                }
                 OpCode::MakeClosure(chunk_idx, num_upvalues) => {
                     if let Some(frame) = frames.last_mut() {
                         let mut upvalues = vec![];
@@ -1302,7 +1603,7 @@ impl VM {
                                     .map(|v| v.borrow().clone())
                                     .collect();
                                 args.reverse();
-                                let result = f(args);
+                                let result = f(args, self);
                                 stack.push(Rc::new(RefCell::new(result)));
                                 frames.last_mut().unwrap().pc += 1;
                             }

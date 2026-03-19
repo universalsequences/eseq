@@ -22,7 +22,7 @@ pub enum WidgetEvent {
 }
 
 pub struct EventOutput {
-    pub callback: &'static str,
+    pub callback: Value,
     pub value: Value,
 }
 
@@ -274,4 +274,53 @@ pub fn styled_cell(ch: char, fg: Color, bg: Option<Color>) -> Cell {
             bold: false,
         },
     }
+}
+
+pub fn handle_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+    match node.widget_type.as_str() {
+        "slider" | "hslider" => slider_event(node, event),
+        "vslider" => vslider_event(node, event),
+        "toggle" => toggle_event(node, event),
+        _ => None,
+    }
+}
+
+fn slider_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+    let WidgetEvent::SetNormalized(t) = event else {
+        return None;
+    };
+    let callback = node.props.get("on-change")?.clone();
+    let min = get_f32_prop(&node.props, "min", 0.0);
+    let max = get_f32_prop(&node.props, "max", 1.0);
+    let value = min + (max - min) * t.clamp(0.0, 1.0);
+    Some(EventOutput {
+        callback,
+        value: Value::Number(value as f64),
+    })
+}
+
+fn vslider_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+    let WidgetEvent::SetNormalized(t) = event else {
+        return None;
+    };
+    let callback = node.props.get("on-change")?.clone();
+    let min = get_f32_prop(&node.props, "min", 0.0);
+    let max = get_f32_prop(&node.props, "max", 1.0);
+    let value = min + (max - min) * t.clamp(0.0, 1.0);
+    Some(EventOutput {
+        callback,
+        value: Value::Number(value as f64),
+    })
+}
+
+fn toggle_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+    let WidgetEvent::Activate = event else {
+        return None;
+    };
+    let callback = node.props.get("on-change")?.clone();
+    let current = get_bool_prop(&node.props, "value", false);
+    Some(EventOutput {
+        callback,
+        value: Value::Bool(!current),
+    })
 }

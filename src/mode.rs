@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::buffer::Buffer;
 use crate::runtime::SymbolMetadata;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BufferMode {
     ESeqLisp,
     DGenLisp,
@@ -50,71 +50,207 @@ pub struct CompletionItem {
 const ESEQLISP_SPECIALS: &[(&str, &str, &str)] = &[
     ("def", "(def name value)", "Bind a global name."),
     ("fn", "(fn args...)", "Reference a function value."),
-    ("lambda", "(lambda (args...) body...)", "Create an anonymous function."),
+    (
+        "lambda",
+        "(lambda (args...) body...)",
+        "Create an anonymous function.",
+    ),
     ("if", "(if cond then else)", "Conditional expression."),
-    ("let", "(let ((name value) ...) body...)", "Lexical bindings for body expressions."),
-    ("do", "(do expr...)", "Evaluate expressions in sequence and return the last."),
-    ("eval", "(eval source)", "Compile and run a Lisp source string."),
+    (
+        "let",
+        "(let ((name value) ...) body...)",
+        "Lexical bindings for body expressions.",
+    ),
+    (
+        "do",
+        "(do expr...)",
+        "Evaluate expressions in sequence and return the last.",
+    ),
+    (
+        "eval",
+        "(eval source)",
+        "Compile and run a Lisp source string.",
+    ),
 ];
 
 const ESEQLISP_BUILTINS: &[(&str, &str, &str)] = &[
     ("append", "(append list ...)", "Concatenate lists."),
-    ("clear-hooks", "(clear-hooks)", "Remove all registered sequencer hook callbacks."),
+    (
+        "clear-hooks",
+        "(clear-hooks)",
+        "Remove all registered sequencer hook callbacks.",
+    ),
     ("cons", "(cons value list)", "Prepend a value to a list."),
-    ("compile-current", "(compile-current)", "Ask the host to compile the current buffer."),
-    ("dict", "(dict :key value ...)", "Create a map from keyword/value pairs."),
+    (
+        "compile-current",
+        "(compile-current)",
+        "Ask the host to compile the current buffer.",
+    ),
+    (
+        "dict",
+        "(dict :key value ...)",
+        "Create a map from keyword/value pairs.",
+    ),
     ("empty?", "(empty? xs)", "Return true when a list is empty."),
-    ("eval-buffer-command", "(eval-buffer-command)", "Evaluate the entire current buffer."),
-    ("eval-sexp", "(eval-sexp)", "Evaluate the s-expression at the cursor."),
-    ("every", "(every unit interval form)", "Register a repeating hook that runs a quoted form on the host schedule."),
-    ("filter", "(filter fn xs)", "Return a list of items where fn returns truthy."),
+    (
+        "eval-buffer-command",
+        "(eval-buffer-command)",
+        "Evaluate the entire current buffer.",
+    ),
+    (
+        "eval-sexp",
+        "(eval-sexp)",
+        "Evaluate the s-expression at the cursor.",
+    ),
+    (
+        "every",
+        "(every unit interval form)",
+        "Register a repeating hook that runs a quoted form on the host schedule.",
+    ),
+    (
+        "filter",
+        "(filter fn xs)",
+        "Return a list of items where fn returns truthy.",
+    ),
     ("first", "(first list)", "Return the first item in a list."),
-    ("for-each", "(for-each fn xs)", "Call fn for each item in a list, for side effects."),
+    (
+        "for-each",
+        "(for-each fn xs)",
+        "Call fn for each item in a list, for side effects.",
+    ),
     ("get", "(get map :key)", "Lookup a keyword in a map."),
     ("keys", "(keys map)", "Return map keys as keywords."),
     ("len", "(len value)", "Length of a list or string."),
     ("list", "(list item ...)", "Create a list."),
-    ("map", "(map fn xs)", "Return a list produced by applying fn to each item."),
-    ("max", "(max a b ...)", "Return the largest numeric argument."),
-    ("merge", "(merge map :key value ...)", "Return a new map with overrides."),
-    ("min", "(min a b ...)", "Return the smallest numeric argument."),
+    (
+        "map",
+        "(map fn xs)",
+        "Return a list produced by applying fn to each item.",
+    ),
+    (
+        "max",
+        "(max a b ...)",
+        "Return the largest numeric argument.",
+    ),
+    (
+        "merge",
+        "(merge map :key value ...)",
+        "Return a new map with overrides.",
+    ),
+    (
+        "min",
+        "(min a b ...)",
+        "Return the smallest numeric argument.",
+    ),
     ("not", "(not value)", "Logical negation."),
-    ("nth", "(nth list idx)", "Return the 0-based item from a list."),
-    ("rand-int", "(rand-int end) or (rand-int start end)", "Pseudo-random integer."),
-    ("range", "(range end) or (range start end)", "Build a numeric range list."),
-    ("reduce", "(reduce fn acc xs)", "Fold a list left-to-right, carrying an accumulator."),
-    ("rest", "(rest list)", "Return a list without its first item."),
+    (
+        "nth",
+        "(nth list idx)",
+        "Return the 0-based item from a list.",
+    ),
+    (
+        "rand-int",
+        "(rand-int end) or (rand-int start end)",
+        "Pseudo-random integer.",
+    ),
+    (
+        "range",
+        "(range end) or (range start end)",
+        "Build a numeric range list.",
+    ),
+    (
+        "reduce",
+        "(reduce fn acc xs)",
+        "Fold a list left-to-right, carrying an accumulator.",
+    ),
+    (
+        "rest",
+        "(rest list)",
+        "Return a list without its first item.",
+    ),
     ("reverse", "(reverse list)", "Reverse a list."),
-    ("save-current-buffer", "(save-current-buffer)", "Save the current buffer through the editor."),
-    ("source", "(source value ...)", "Render evaluable Lisp source."),
+    (
+        "save-current-buffer",
+        "(save-current-buffer)",
+        "Save the current buffer through the editor.",
+    ),
+    (
+        "source",
+        "(source value ...)",
+        "Render evaluable Lisp source.",
+    ),
     ("str", "(str value ...)", "Render values to a string."),
 ];
 
 const DGENLISP_SPECIALS: &[(&str, &str, &str)] = &[
     ("def", "(def name expr)", "Bind a DSP symbol."),
-    ("defmacro", "(defmacro name (args...) body...)", "Define a reusable macro."),
-    ("param", "(param name @default v @min v @max v ...)", "Declare a host-controllable parameter."),
-    ("in", "(in channel @name label ...)", "Read an input channel."),
-    ("out", "(out expr channel @name label)", "Write an output channel."),
-    ("make-history", "(make-history name)", "Create a feedback cell."),
-    ("read-history", "(read-history name)", "Read a feedback cell from the previous frame."),
-    ("write-history", "(write-history name expr)", "Write a feedback cell for the current frame."),
+    (
+        "defmacro",
+        "(defmacro name (args...) body...)",
+        "Define a reusable macro.",
+    ),
+    (
+        "param",
+        "(param name @default v @min v @max v ...)",
+        "Declare a host-controllable parameter.",
+    ),
+    (
+        "in",
+        "(in channel @name label ...)",
+        "Read an input channel.",
+    ),
+    (
+        "out",
+        "(out expr channel @name label)",
+        "Write an output channel.",
+    ),
+    (
+        "make-history",
+        "(make-history name)",
+        "Create a feedback cell.",
+    ),
+    (
+        "read-history",
+        "(read-history name)",
+        "Read a feedback cell from the previous frame.",
+    ),
+    (
+        "write-history",
+        "(write-history name expr)",
+        "Write a feedback cell for the current frame.",
+    ),
 ];
 
 const DGENLISP_BUILTINS: &[(&str, &str, &str)] = &[
     ("abs", "(abs x)", "Absolute value."),
-    ("accum", "(accum inc [reset min max])", "Stateful accumulator."),
-    ("biquad", "(biquad signal cutoff q gain mode)", "IIR filter."),
+    (
+        "accum",
+        "(accum inc [reset min max])",
+        "Stateful accumulator.",
+    ),
+    (
+        "biquad",
+        "(biquad signal cutoff q gain mode)",
+        "IIR filter.",
+    ),
     ("ceil", "(ceil x)", "Round upward."),
     ("click", "(click)", "Impulse generator."),
     ("clip", "(clip sig min max)", "Clamp to range."),
-    ("compressor", "(compressor signal ratio threshold knee attack release)", "Dynamics processor."),
+    (
+        "compressor",
+        "(compressor signal ratio threshold knee attack release)",
+        "Dynamics processor.",
+    ),
     ("cos", "(cos x)", "Cosine."),
     ("delay", "(delay signal time-in-samples)", "Delay line."),
     ("eq", "(eq a b)", "Equality comparison."),
     ("exp", "(exp x)", "Exponential."),
     ("floor", "(floor x)", "Round downward."),
-    ("gswitch", "(gswitch cond a b)", "Conditional signal switch."),
+    (
+        "gswitch",
+        "(gswitch cond a b)",
+        "Conditional signal switch.",
+    ),
     ("gte", "(gte a b)", "Greater-than-or-equal comparison."),
     ("gt", "(gt a b)", "Greater-than comparison."),
     ("latch", "(latch value trigger)", "Sample and hold."),
@@ -124,23 +260,43 @@ const DGENLISP_BUILTINS: &[(&str, &str, &str)] = &[
     ("max", "(max a b ...)", "Maximum value."),
     ("min", "(min a b ...)", "Minimum value."),
     ("mix", "(mix a b t)", "Linear interpolation."),
-    ("mod", "(mod param-name)", "Read the modulated value for a modulatable param."),
+    (
+        "mod",
+        "(mod param-name)",
+        "Read the modulated value for a modulatable param.",
+    ),
     ("mse", "(mse prediction target)", "Mean squared error."),
     ("noise", "(noise)", "White noise source."),
     ("phasor", "(phasor freq [reset])", "Ramp oscillator."),
     ("pow", "(pow base exponent)", "Exponentiation."),
     ("relu", "(relu x)", "Rectified linear unit."),
     ("round", "(round x)", "Round to nearest integer."),
-    ("scale", "(scale sig in-min in-max out-min out-max)", "Linear remap."),
-    ("selector", "(selector mode option1 option2 ...)", "1-based selector."),
+    (
+        "scale",
+        "(scale sig in-min in-max out-min out-max)",
+        "Linear remap.",
+    ),
+    (
+        "selector",
+        "(selector mode option1 option2 ...)",
+        "1-based selector.",
+    ),
     ("sigmoid", "(sigmoid x)", "Sigmoid curve."),
     ("sign", "(sign x)", "Sign function."),
     ("sin", "(sin x)", "Sine."),
     ("sqrt", "(sqrt x)", "Square root."),
-    ("stateful-phasor", "(stateful-phasor freq)", "Forced-state phasor."),
+    (
+        "stateful-phasor",
+        "(stateful-phasor freq)",
+        "Forced-state phasor.",
+    ),
     ("tan", "(tan x)", "Tangent."),
     ("tanh", "(tanh x)", "Hyperbolic tangent."),
-    ("triangle", "(triangle phase)", "Triangle waveform from phasor phase."),
+    (
+        "triangle",
+        "(triangle phase)",
+        "Triangle waveform from phasor phase.",
+    ),
     ("wrap", "(wrap sig min max)", "Wrap into range."),
 ];
 
@@ -256,11 +412,7 @@ pub fn highlight_line(
     spans
 }
 
-fn classify_token(
-    mode: BufferMode,
-    token: &str,
-    known: &HashSet<String>,
-) -> Option<TokenClass> {
+fn classify_token(mode: BufferMode, token: &str, known: &HashSet<String>) -> Option<TokenClass> {
     if token.is_empty() {
         return None;
     }
@@ -270,7 +422,10 @@ fn classify_token(
     if token.parse::<f64>().is_ok() {
         return Some(TokenClass::Number);
     }
-    if special_forms(mode).iter().any(|(label, _, _)| *label == token) {
+    if special_forms(mode)
+        .iter()
+        .any(|(label, _, _)| *label == token)
+    {
         return Some(TokenClass::Special);
     }
     if known.contains(token) {
@@ -365,7 +520,11 @@ fn symbol_prefix(line: &str, cursor_col: usize) -> Option<(usize, String)> {
 
 fn is_symbol_byte(byte: u8) -> bool {
     let ch = byte as char;
-    !ch.is_whitespace() && !matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | ';' | '#')
+    !ch.is_whitespace()
+        && !matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | ';' | '#'
+        )
 }
 
 #[cfg(test)]
@@ -394,8 +553,16 @@ mod tests {
     fn dgenlisp_highlights_param_keywords() {
         let buffer = Buffer::from_text(0, "*test*", "(param freq @default 440)");
         let spans = highlight_line(BufferMode::DGenLisp, &buffer.lines[0], &[], &buffer);
-        assert!(spans.iter().any(|span| span.class == super::TokenClass::Keyword));
-        assert!(spans.iter().any(|span| span.class == super::TokenClass::Special));
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.class == super::TokenClass::Keyword)
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.class == super::TokenClass::Special)
+        );
     }
 
     #[test]
@@ -417,7 +584,11 @@ mod tests {
             &metadata,
         )
         .unwrap();
-        let item = result.items.iter().find(|item| item.label == "seq-step").unwrap();
+        let item = result
+            .items
+            .iter()
+            .find(|item| item.label == "seq-step")
+            .unwrap();
         assert_eq!(item.signature.as_deref(), Some("(seq-step step)"));
         assert_eq!(item.docs.as_deref(), Some("Return a step snapshot."));
     }

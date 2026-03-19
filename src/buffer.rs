@@ -1,8 +1,9 @@
-use std::path::PathBuf;
 use std::cmp::Ordering;
+use std::path::PathBuf;
 
 use crate::host::BufferId;
 use crate::mode::BufferMode;
+use crate::text::sexp_range_at_cursor;
 
 pub struct Buffer {
     pub id: BufferId,
@@ -16,6 +17,7 @@ pub struct Buffer {
     pub dirty: bool,
     /// First visible line index (for scrolling).
     pub scroll_top: usize,
+    pub revision: u64,
 }
 
 impl Buffer {
@@ -29,6 +31,7 @@ impl Buffer {
             cursor: (0, 0),
             dirty: false,
             scroll_top: 0,
+            revision: 0,
         }
     }
 
@@ -65,6 +68,7 @@ impl Buffer {
         }
         self.cursor = (0, 0);
         self.scroll_top = 0;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn text(&self) -> String {
@@ -115,7 +119,6 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, c: char) {
-        self.dirty = true;
         match c {
             '\n' => {
                 let new_line = self.lines[self.cursor.0].split_off(self.cursor.1);
@@ -132,6 +135,7 @@ impl Buffer {
                 self.cursor.1 += 1;
             }
         }
+        self.touch();
     }
 
     pub fn insert_newline_with_indent(&mut self) {
@@ -143,10 +147,15 @@ impl Buffer {
         self.lines
             .insert(row + 1, format!("{}{}", " ".repeat(indent), new_line));
         self.cursor = (row + 1, indent);
-        self.dirty = true;
+        self.reindent_enclosing_sexp();
+        self.touch();
     }
 
     pub fn indent_current_line(&mut self) {
+        if self.reindent_enclosing_sexp() {
+            return;
+        }
+
         let row = self.cursor.0;
         let desired_indent = lisp_indent_for_position(&self.lines, row, 0);
         let current_line = self.lines[row].clone();
@@ -162,20 +171,58 @@ impl Buffer {
         } else {
             desired_indent + (self.cursor.1 - current_indent)
         };
-        self.dirty = true;
+        self.touch();
+    }
+
+    fn reindent_enclosing_sexp(&mut self) -> bool {
+        let Some(((start_row, _), (end_row, _))) = enclosing_sexp_range(&self.lines, self.cursor)
+        else {
+            return false;
+        };
+
+        let mut changed = false;
+        let cursor_row = self.cursor.0;
+        let cursor_col = self.cursor.1;
+
+        for row in (start_row + 1)..=end_row {
+            let current_line = self.lines[row].clone();
+            let current_indent = current_line.chars().take_while(|ch| *ch == ' ').count();
+            let desired_indent = lisp_indent_for_position(&self.lines, row, 0);
+            if current_indent == desired_indent {
+                continue;
+            }
+
+            let trimmed = current_line.trim_start_matches(' ').to_string();
+            self.lines[row] = format!("{}{}", " ".repeat(desired_indent), trimmed);
+
+            if row == cursor_row {
+                self.cursor.1 = if cursor_col <= current_indent {
+                    desired_indent
+                } else {
+                    desired_indent + (cursor_col - current_indent)
+                };
+            }
+
+            changed = true;
+        }
+
+        if changed {
+            self.touch();
+        }
+        changed
     }
 
     pub fn delete_char_before(&mut self) {
         if self.cursor.1 > 0 {
             self.lines[self.cursor.0].remove(self.cursor.1 - 1);
             self.cursor.1 -= 1;
-            self.dirty = true;
+            self.touch();
         } else if self.cursor.0 > 0 {
             let line = self.lines.remove(self.cursor.0);
             let prev_len = self.lines[self.cursor.0 - 1].len();
             self.lines[self.cursor.0 - 1].push_str(&line);
             self.cursor = (self.cursor.0 - 1, prev_len);
-            self.dirty = true;
+            self.touch();
         }
     }
 
@@ -207,7 +254,7 @@ impl Buffer {
             self.lines.drain((start_row + 1)..=end_row);
         }
         self.cursor = (start_row, start_col);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn insert_str(&mut self, text: &str) {
@@ -232,7 +279,7 @@ impl Buffer {
             self.lines[last_row].push_str(&suffix);
             self.cursor = (last_row, parts.last().map(|part| part.len()).unwrap_or(0));
         }
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn delete_word_before(&mut self) {
@@ -246,7 +293,7 @@ impl Buffer {
             let prev_len = self.lines[prev_row].len();
             self.lines[prev_row].push_str(&line);
             self.cursor = (prev_row, prev_len);
-            self.dirty = true;
+            self.touch();
             return;
         }
 
@@ -265,7 +312,7 @@ impl Buffer {
         if delete_start == 0 {
             self.lines[original.0].drain(0..original.1);
             self.cursor = (original.0, 0);
-            self.dirty = true;
+            self.touch();
             return;
         }
 
@@ -284,7 +331,7 @@ impl Buffer {
 
         self.lines[original.0].drain(delete_start..original.1);
         self.cursor = (original.0, delete_start);
-        self.dirty = true;
+        self.touch();
     }
 
     pub fn delete_to_line_end(&mut self) {
@@ -292,12 +339,17 @@ impl Buffer {
         let col = self.cursor.1;
         if col < self.lines[row].len() {
             self.lines[row].truncate(col);
-            self.dirty = true;
+            self.touch();
         } else if row + 1 < self.lines.len() {
             let next = self.lines.remove(row + 1);
             self.lines[row].push_str(&next);
-            self.dirty = true;
+            self.touch();
         }
+    }
+
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn move_left(&mut self) {
@@ -399,10 +451,7 @@ impl Buffer {
     }
 }
 
-fn normalize_range(
-    start: (usize, usize),
-    end: (usize, usize),
-) -> ((usize, usize), (usize, usize)) {
+fn normalize_range(start: (usize, usize), end: (usize, usize)) -> ((usize, usize), (usize, usize)) {
     match compare_pos(start, end) {
         Ordering::Greater => (end, start),
         _ => (start, end),
@@ -522,30 +571,57 @@ mod tests {
     }
 
     #[test]
-    fn insert_newline_with_indent_aligns_under_first_argument() {
+    fn insert_newline_with_indent_uses_two_spaces_per_enclosing_form() {
         let mut buffer = Buffer::from_text(0, "*test*", "(if (< (rand-int 8) 4) :4t)");
         buffer.cursor = (0, 22);
         buffer.insert_newline_with_indent();
-        assert_eq!(buffer.text(), "(if (< (rand-int 8) 4)\n    :4t)");
-        assert_eq!(buffer.cursor, (1, 4));
+        assert_eq!(buffer.text(), "(if (< (rand-int 8) 4)\n  :4t)");
+        assert_eq!(buffer.cursor, (1, 2));
     }
 
     #[test]
-    fn insert_newline_mid_symbol_indents_from_left_fragment() {
+    fn insert_newline_mid_symbol_uses_enclosing_form_depth() {
         let mut buffer = Buffer::from_text(0, "*test*", "(biquadinput)");
         buffer.cursor = (0, 7);
         buffer.insert_newline_with_indent();
-        assert_eq!(buffer.text(), "(biquad\n        input)");
-        assert_eq!(buffer.cursor, (1, 8));
+        assert_eq!(buffer.text(), "(biquad\n  input)");
+        assert_eq!(buffer.cursor, (1, 2));
     }
 
     #[test]
-    fn indent_current_line_uses_enclosing_form() {
+    fn indent_current_line_uses_two_spaces_per_enclosing_form() {
         let mut buffer = Buffer::from_text(0, "*test*", "(if test\n:4t\n  :32)");
         buffer.cursor = (1, 0);
         buffer.indent_current_line();
-        assert_eq!(buffer.text(), "(if test\n    :4t\n  :32)");
-        assert_eq!(buffer.cursor, (1, 4));
+        assert_eq!(buffer.text(), "(if test\n  :4t\n  :32)");
+        assert_eq!(buffer.cursor, (1, 2));
+    }
+
+    #[test]
+    fn indent_current_line_scales_with_nested_forms() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(outer\n  (inner\nvalue))");
+        buffer.cursor = (2, 0);
+        buffer.indent_current_line();
+        assert_eq!(buffer.text(), "(outer\n  (inner\n    value))");
+        assert_eq!(buffer.cursor, (2, 4));
+    }
+
+    #[test]
+    fn indent_current_line_reindents_whole_enclosing_sexp() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(outer\n(inner\nvalue))");
+        buffer.cursor = (1, 0);
+        buffer.indent_current_line();
+        assert_eq!(buffer.text(), "(outer\n  (inner\n    value))");
+        assert_eq!(buffer.cursor, (1, 2));
+    }
+
+    #[test]
+    fn insert_newline_with_indent_reindents_following_lines_in_enclosing_sexp() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(outer (inner value))");
+        buffer.cursor = (0, 6);
+        buffer.insert_newline_with_indent();
+        assert_eq!(buffer.text(), "(outer\n  (inner value))");
+        assert_eq!(buffer.cursor, (1, 2));
     }
 
     #[test]
@@ -580,7 +656,7 @@ fn is_lisp_delimiter(ch: char) -> bool {
 }
 
 fn lisp_indent_for_position(lines: &[String], row: usize, col: usize) -> usize {
-    let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut depth = 0usize;
 
     for (line_idx, line) in lines.iter().enumerate().take(row + 1) {
         let limit = if line_idx == row {
@@ -610,9 +686,9 @@ fn lisp_indent_for_position(lines: &[String], row: usize, col: usize) -> usize {
             match ch {
                 ';' | '#' => break,
                 '"' => in_string = true,
-                '(' => stack.push((line_idx, idx)),
+                '(' => depth += 1,
                 ')' => {
-                    stack.pop();
+                    depth = depth.saturating_sub(1);
                 }
                 _ => {}
             }
@@ -620,36 +696,20 @@ fn lisp_indent_for_position(lines: &[String], row: usize, col: usize) -> usize {
         }
     }
 
-    let Some((open_row, open_col)) = stack.last().copied() else {
-        return 0;
-    };
-    let line_limit = if open_row == row {
-        col.min(lines[open_row].len())
-    } else {
-        lines[open_row].len()
-    };
-    align_after_open(&lines[open_row], open_col, line_limit)
+    depth * 2
 }
 
-fn align_after_open(line: &str, open_col: usize, limit: usize) -> usize {
-    let bytes = line.as_bytes();
-    let limit = limit.min(bytes.len());
-    let mut idx = open_col + 1;
-    while idx < limit && (bytes[idx] as char).is_whitespace() {
-        idx += 1;
-    }
-    if idx >= limit {
-        return open_col + 1;
-    }
-    if is_lisp_delimiter(bytes[idx] as char) {
-        return open_col + 1;
-    }
-    while idx < limit {
-        let ch = bytes[idx] as char;
-        if ch.is_whitespace() || is_lisp_delimiter(ch) {
-            break;
+fn enclosing_sexp_range(
+    lines: &[String],
+    cursor: (usize, usize),
+) -> Option<((usize, usize), (usize, usize))> {
+    if let Some(range) = sexp_range_at_cursor(lines, cursor) {
+        let line = lines.get(cursor.0)?;
+        if cursor.1 < line.len() && line.as_bytes()[cursor.1] as char == '(' {
+            let inner_cursor = (cursor.0, cursor.1 + 1);
+            return sexp_range_at_cursor(lines, inner_cursor).or(Some(range));
         }
-        idx += 1;
+        return Some(range);
     }
-    idx + 1
+    None
 }

@@ -133,9 +133,7 @@ impl LayoutEngine {
                     .fold(0_u16, saturating_add)
                     .saturating_add(gap.saturating_mul(child_sizes.len().saturating_sub(1) as u16));
                 Size {
-                    width: constraints
-                        .max_width
-                        .max(width.saturating_add(padding.saturating_mul(2))),
+                    width: width.saturating_add(padding.saturating_mul(2)),
                     height: height.saturating_add(padding.saturating_mul(2)),
                 }
             }
@@ -158,9 +156,7 @@ impl LayoutEngine {
                     .max()
                     .unwrap_or(0);
                 Size {
-                    width: constraints
-                        .max_width
-                        .max(width.saturating_add(padding.saturating_mul(2))),
+                    width: width.saturating_add(padding.saturating_mul(2)),
                     height: height.saturating_add(padding.saturating_mul(2)),
                 }
             }
@@ -356,6 +352,132 @@ impl LayoutEngine {
             }
             _ => vec![],
         }
+    }
+}
+
+pub fn hit_test_layout(node: &LayoutNode, row: u16, col: u16) -> Option<&LayoutNode> {
+    if !rect_contains(node.rect, row, col) {
+        return None;
+    }
+
+    for child in node.children.iter().rev() {
+        if let Some(hit) = hit_test_layout(child, row, col) {
+            return Some(hit);
+        }
+    }
+
+    match node.widget_type.as_str() {
+        "v-stack" | "h-stack" | "box" | "grid" => None,
+        _ => Some(node),
+    }
+}
+
+pub fn reuse_layout_node(existing: &LayoutNode, tree: &Value) -> Option<LayoutNode> {
+    let widget_type = get_widget_type(tree)?;
+    if widget_type != existing.widget_type {
+        return None;
+    }
+
+    let children_values = get_children(tree);
+    if children_values.len() != existing.children.len() {
+        return None;
+    }
+
+    let new_props = collect_props(tree);
+    if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
+        return None;
+    }
+
+    let children = existing
+        .children
+        .iter()
+        .zip(children_values.iter())
+        .map(|(child_layout, child_tree)| reuse_layout_node(child_layout, child_tree))
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(LayoutNode {
+        widget_type,
+        rect: existing.rect,
+        props: new_props,
+        children,
+    })
+}
+
+pub fn same_layout_geometry(left: &LayoutNode, right: &LayoutNode) -> bool {
+    left.widget_type == right.widget_type
+        && left.rect == right.rect
+        && left.children.len() == right.children.len()
+        && left
+            .children
+            .iter()
+            .zip(right.children.iter())
+            .all(|(left_child, right_child)| same_layout_geometry(left_child, right_child))
+}
+
+fn rect_contains(rect: Rect, row: u16, col: u16) -> bool {
+    row >= rect.row
+        && col >= rect.col
+        && row < rect.row.saturating_add(rect.height)
+        && col < rect.col.saturating_add(rect.width)
+}
+
+fn size_affecting_props_equal(
+    widget_type: &str,
+    old_props: &HashMap<String, Value>,
+    new_props: &HashMap<String, Value>,
+) -> bool {
+    let keys: &[&str] = match widget_type {
+        "label" => &["text"],
+        "slider" | "hslider" => &["width"],
+        "vslider" => &["height"],
+        "toggle" => &[],
+        "knob" => &[],
+        "meter" => &[],
+        "text-input" => &["width"],
+        "select" => &["options"],
+        "v-stack" | "h-stack" => &["padding", "gap"],
+        "box" => &["padding", "width", "height"],
+        "grid" => &["cols", "col-width", "row-height"],
+        _ => return false,
+    };
+
+    keys.iter()
+        .all(|key| value_option_eq(old_props.get(*key), new_props.get(*key)))
+}
+
+fn value_option_eq(left: Option<&Value>, right: Option<&Value>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => value_eq(left, right),
+        _ => false,
+    }
+}
+
+fn value_eq(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(a), Value::Number(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Nil, Value::Nil) => true,
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Symbol(a), Value::Symbol(b)) => a == b,
+        (Value::Keyword(a), Value::Keyword(b)) => a == b,
+        (Value::List(a), Value::List(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| value_eq(&x.borrow(), &y.borrow()))
+        }
+        (Value::Map(a), Value::Map(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(key, left_value)| match b.get(key) {
+                    Some(right_value) => value_eq(&left_value.borrow(), &right_value.borrow()),
+                    None => false,
+                })
+        }
+        (Value::Closure(a, _), Value::Closure(b, _)) => a == b,
+        (Value::Function(a), Value::Function(b)) => a == b,
+        (Value::NodeRef(a), Value::NodeRef(b)) => a == b,
+        _ => false,
     }
 }
 

@@ -55,6 +55,16 @@ fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
                 children.push(Rc::new(RefCell::new(args[i].clone())));
                 i += 1;
             }
+            Some(Value::List(items)) => {
+                for item in items {
+                    if let Value::Map(widget_map) = &*item.borrow()
+                        && widget_map.contains_key("type")
+                    {
+                        children.push(Rc::new(RefCell::new(item.borrow().clone())));
+                    }
+                }
+                i += 1;
+            }
             _ => {
                 i += 1;
             }

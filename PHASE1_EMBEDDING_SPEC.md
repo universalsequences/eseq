@@ -268,6 +268,7 @@ Examples:
 
 - `(current-buffer-text)`
 - `(current-buffer-path)`
+- `(load-buffer)`
 - `(save-buffer)`
 - `(status "Compiling...")`
 - `(seq-current-track)`
@@ -306,12 +307,14 @@ Phase 1 must include built-ins or equivalents for:
 - `current-buffer-name`
 - `current-buffer-path`
 - `save-buffer`
+- `load-buffer`
 - `save-buffer-as`
 - `status`
 
 Behavior requirements:
 
 - `save-buffer` writes the active file-backed buffer immediately
+- `load-buffer` reloads the active file-backed buffer from disk and discards unsaved changes
 - `save-buffer-as` changes the buffer path and writes it
 - `status` updates the minibuffer/status line
 

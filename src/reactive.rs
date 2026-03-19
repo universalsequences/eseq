@@ -27,12 +27,7 @@ impl ReactiveRegistry {
         }
     }
 
-    pub fn register(
-        &mut self,
-        name: &str,
-        fields: Vec<(&str, Value)>,
-        writable: bool,
-    ) -> Value {
+    pub fn register(&mut self, name: &str, fields: Vec<(&str, Value)>, writable: bool) -> Value {
         let mut stored_fields = HashMap::new();
         let mut map = HashMap::new();
 

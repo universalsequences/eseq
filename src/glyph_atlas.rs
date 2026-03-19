@@ -19,8 +19,7 @@ mod inner {
     use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph};
     use objc2_core_text::{CTFont, CTFontOrientation};
     use objc2_metal::{
-        MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLTexture,
-        MTLTextureDescriptor,
+        MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLTexture, MTLTextureDescriptor,
     };
 
     const ATLAS_SIZE: usize = 1024;
@@ -92,7 +91,10 @@ mod inner {
                         1,
                     );
                 }
-                let mut adv = CGSize { width: 0.0, height: 0.0 };
+                let mut adv = CGSize {
+                    width: 0.0,
+                    height: 0.0,
+                };
                 unsafe {
                     font.advances_for_glyphs(
                         CTFontOrientation::Default,
@@ -172,7 +174,7 @@ mod inner {
                         8,      // bits per component
                         cell_w, // bytes per row (no padding)
                         Some(&gray),
-                        0,      // kCGImageAlphaNone | kCGBitmapByteOrderDefault
+                        0, // kCGImageAlphaNone | kCGBitmapByteOrderDefault
                     )
                 }?;
 
@@ -182,7 +184,10 @@ mod inner {
 
                 // Draw glyph at the baseline.
                 // CoreText Y-up: baseline is `descent` pixels from the bottom.
-                let pos = CGPoint { x: 0.0, y: self.descent as f64 };
+                let pos = CGPoint {
+                    x: 0.0,
+                    y: self.descent as f64,
+                };
                 unsafe {
                     self.font.draw_glyphs(
                         NonNull::new(glyph.as_mut_ptr()).unwrap(),
@@ -203,15 +208,20 @@ mod inner {
 
             // ── Upload to GPU ─────────────────────────────────────────────────────
             unsafe {
-                self.texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
-                    MTLRegion {
-                        origin: MTLOrigin { x: ax, y: ay, z: 0 },
-                        size: MTLSize { width: cell_w, height: cell_h, depth: 1 },
-                    },
-                    0,
-                    NonNull::new(pixels.as_ptr() as *mut core::ffi::c_void).unwrap(),
-                    cell_w,
-                );
+                self.texture
+                    .replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                        MTLRegion {
+                            origin: MTLOrigin { x: ax, y: ay, z: 0 },
+                            size: MTLSize {
+                                width: cell_w,
+                                height: cell_h,
+                                depth: 1,
+                            },
+                        },
+                        0,
+                        NonNull::new(pixels.as_ptr() as *mut core::ffi::c_void).unwrap(),
+                        cell_w,
+                    );
             }
 
             // ── Record UVs ───────────────────────────────────────────────────────

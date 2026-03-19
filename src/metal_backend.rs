@@ -1,18 +1,20 @@
 /// Metal GPU backend for eseqlisp.
 #[cfg(target_os = "macos")]
 mod inner {
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
     use std::ptr::NonNull;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
     use objc2_app_kit::NSView;
     use objc2_core_foundation::CGSize;
     use objc2_foundation::NSString;
     use objc2_metal::{
-        MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+        MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
         MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat,
         MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
         MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLStoreAction,
@@ -21,9 +23,12 @@ mod inner {
     use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
     use winit::{
         dpi::PhysicalSize,
-        event::{ElementState, Event as WEvent, WindowEvent},
+        event::{
+            ElementState, Event as WEvent, MouseButton as WMouseButton, MouseScrollDelta,
+            WindowEvent,
+        },
         event_loop::{ControlFlow, EventLoop},
-        keyboard::{Key, NamedKey},
+        keyboard::{Key, KeyCode as WinitKeyCode, NamedKey, PhysicalKey},
         platform::pump_events::EventLoopExtPumpEvents,
         raw_window_handle::{HasWindowHandle, RawWindowHandle},
         window::Window,
@@ -31,6 +36,7 @@ mod inner {
 
     use crate::backend::{Backend, BackendError, Color, RenderFrame};
     use crate::glyph_atlas::GlyphAtlas;
+    use crate::layout::LayoutNode;
 
     // ── Shader source ─────────────────────────────────────────────────────────
     //
@@ -83,29 +89,30 @@ fragment float4 frag(
     // SDF-based rendering for sliders and toggles. Each widget is one instanced
     // quad (6 vertices from vertex_id). The fragment shader decides color per
     // pixel using UV coordinates and per-instance data.
-    const WIDGET_SHADER_SRC: &str = r#"
+    // ── Shared shader preamble (instance struct, vertex shader, SDF utils) ──
+
+    const WIDGET_SHADER_PREAMBLE: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
 
-// Use packed types to match Rust's #[repr(C)] layout exactly (4-byte alignment).
+// Packed types match Rust's #[repr(C)] layout (4-byte alignment).
 struct WidgetInstance {
-    packed_float2 ndc_min;       // offset 0
-    packed_float2 ndc_max;       // offset 8
-    float         value_t;       // offset 16
-    float         orientation;   // offset 20
-    packed_float4 color_a;       // offset 24
-    packed_float4 color_b;       // offset 40
-    float         corner_radius; // offset 56
+    packed_float2 ndc_min;
+    packed_float2 ndc_max;
+    float         value_t;
+    float         orientation;
+    packed_float4 color_a;
+    packed_float4 color_b;
+    float         corner_radius;
 };
 
 struct WidgetVaryings {
     float4 position [[position]];
     float2 uv;
     float  value_t    [[flat]];
-    float  orientation [[flat]];
     float4 color_a    [[flat]];
     float4 color_b    [[flat]];
-    float  aspect     [[flat]];   // width/height in pixels
+    float  aspect     [[flat]];
 };
 
 vertex WidgetVaryings widget_vert(
@@ -121,7 +128,6 @@ vertex WidgetVaryings widget_vert(
     WidgetInstance inst = instances[iid];
     float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
 
-    // Compute aspect ratio from NDC extents
     float ndc_w = abs(float(inst.ndc_max[0]) - float(inst.ndc_min[0]));
     float ndc_h = abs(float(inst.ndc_max[1]) - float(inst.ndc_min[1]));
     float aspect = (ndc_h > 0.0001) ? (ndc_w / ndc_h) : 1.0;
@@ -130,101 +136,124 @@ vertex WidgetVaryings widget_vert(
     out.position = float4(ndc, 0.0, 1.0);
     out.uv = corner;
     out.value_t = inst.value_t;
-    out.orientation = inst.orientation;
     out.color_a = inst.color_a;
     out.color_b = inst.color_b;
     out.aspect = aspect;
     return out;
 }
 
-// ── SDF utilities ────────────────────────────────────────────────────
-
 float sdf_rounded_rect(float2 p, float2 half_size, float radius) {
     float2 d = abs(p) - half_size + radius;
     return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - radius;
 }
 
-// Dual-SDF border: zoom-independent crisp borders.
-// borderPixels = width in screen pixels (constant regardless of zoom).
-// Returns borderMask (1=border, 0=interior). outerMask is the shape mask.
 float compute_border_mask(float2 localPos, float2 outerSize, float cornerRadius,
                           float borderPixels, thread float& outerMask) {
     float outerDist = sdf_rounded_rect(localPos, outerSize, cornerRadius);
     float outerDeriv = max(fwidth(outerDist), 0.001);
-
     float borderThickness = borderPixels * outerDeriv;
     float2 innerSize = outerSize - float2(borderThickness);
     float innerDist = sdf_rounded_rect(localPos, innerSize, max(cornerRadius - borderThickness, 0.0));
     float innerDeriv = max(fwidth(innerDist), 0.001);
-
     outerMask = smoothstep(outerDeriv, -outerDeriv, outerDist);
     float innerMask = smoothstep(innerDeriv, -innerDeriv, innerDist);
-
     return outerMask * (1.0 - innerMask);
 }
+"#;
 
-// ── Fragment shader ──────────────────────────────────────────────────
+    // ── Per-widget fragment shaders ──────────────────────────────────────
 
+    const HSLIDER_FRAG: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
-    float  value_t = in.value_t;
-    float  orientation = in.orientation;
-    float4 color_a = in.color_a;  // fill color
-    float4 color_b = in.color_b;  // track/background color
-    float  aspect = in.aspect;
+    float aspect = in.aspect;
 
-    // Aspect-corrected SDF space: UV [0,1] → [-1,1] with aspect scaling
     float2 localPos = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
     float2 sdfSize = float2(aspect, 1.0);
-    float minDim = min(aspect, 1.0);
-    float cornerRadius = minDim * 0.3;
+    float cornerRadius = min(aspect, 1.0);
 
-    // Border (1.5 screen pixels)
     float3 borderColor = float3(0.45, 0.45, 0.5);
     float outerMask;
     float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
+    if (outerMask <= 0.001) { discard_fragment(); }
 
-    if (outerMask <= 0.001) {
-        discard_fragment();
-    }
+    float fillDist = uv.x - in.value_t;
+    float fillDeriv = max(fwidth(fillDist), 0.001);
+    float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
+    float4 interior = mix(in.color_a, in.color_b, edge);
 
-    float4 interior;
-
-    if (orientation < 0.5) {
-        // ── Horizontal slider: fill from left ────────────────────────
-        float fillDist = uv.x - value_t;
-        float fillDeriv = max(fwidth(fillDist), 0.001);
-        float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
-        interior = mix(color_a, color_b, edge);
-
-    } else if (orientation < 1.5) {
-        // ── Vertical slider: fill from bottom ────────────────────────
-        // uv.y=0 is top, uv.y=1 is bottom; threshold = top of fill
-        float threshold = 1.0 - value_t;
-        float fillDist = uv.y - threshold;
-        float fillDeriv = max(fwidth(fillDist), 0.001);
-        // Below threshold (fillDist > 0) = fill region
-        float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
-        interior = mix(color_b, color_a, edge);
-
-    } else {
-        // ── Toggle (pill switch) ─────────────────────────────────────
-        float on = value_t;
-        float4 bg = mix(color_b, color_a, on);
-        float knob_x = mix(0.3, 0.7, on);
-        float2 knob_pos = float2((uv.x - knob_x) * aspect, uv.y - 0.5);
-        float knob_dist = length(knob_pos);
-        float knob_aa = max(fwidth(knob_dist), 0.001);
-        float knob = 1.0 - smoothstep(0.35 - knob_aa, 0.35 + knob_aa, knob_dist);
-        interior = mix(bg, float4(0.95, 0.95, 0.95, 1.0), knob);
-    }
-
-    // Composite: border on top of interior, masked by outer shape
     float3 final_rgb = mix(interior.rgb, borderColor, borderMask);
     return float4(final_rgb, outerMask);
 }
 "#;
+
+    const VSLIDER_FRAG: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 uv = in.uv;
+    float aspect = in.aspect;
+
+    float2 localPos = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
+    float2 sdfSize = float2(aspect, 1.0);
+    float cornerRadius = min(aspect, 1.0);
+
+    float3 borderColor = float3(0.45, 0.45, 0.5);
+    float outerMask;
+    float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
+    if (outerMask <= 0.001) { discard_fragment(); }
+
+    // Fill from bottom: uv.y=0 is top, uv.y=1 is bottom
+    float threshold = 1.0 - in.value_t;
+    float fillDist = uv.y - threshold;
+    float fillDeriv = max(fwidth(fillDist), 0.001);
+    float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
+    float4 interior = mix(in.color_b, in.color_a, edge);
+
+    float3 final_rgb = mix(interior.rgb, borderColor, borderMask);
+    return float4(final_rgb, outerMask);
+}
+"#;
+
+    const TOGGLE_FRAG: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 uv = in.uv;
+    float aspect = in.aspect;
+
+    float2 localPos = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
+    float2 sdfSize = float2(aspect, 1.0);
+    // Full pill shape: corner radius = half the shorter dimension
+    float cornerRadius = 1.0;
+
+    float3 borderColor = float3(0.5, 0.5, 0.55);
+    float outerMask;
+    float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
+    if (outerMask <= 0.001) { discard_fragment(); }
+
+    float on = in.value_t;
+    float4 bg = mix(in.color_b, in.color_a, on);
+
+    // Knob: circular, slides left-right
+    float knob_x = mix(0.3, 0.7, on);
+    float2 knob_pos = float2((uv.x - knob_x) * aspect, uv.y - 0.5);
+    float knob_dist = length(knob_pos);
+    float knob_aa = max(fwidth(knob_dist), 0.001);
+    float knob = 1.0 - smoothstep(0.35 - knob_aa, 0.35 + knob_aa, knob_dist);
+    float4 interior = mix(bg, float4(0.95, 0.95, 0.95, 1.0), knob);
+
+    float3 final_rgb = mix(interior.rgb, borderColor, borderMask);
+    return float4(final_rgb, outerMask);
+}
+"#;
+
+    /// Widget types that have custom GPU shaders.
+    const WIDGET_SHADER_TYPES: &[(&str, &str)] = &[
+        ("hslider", HSLIDER_FRAG),
+        ("slider", HSLIDER_FRAG),
+        ("vslider", VSLIDER_FRAG),
+        ("toggle", TOGGLE_FRAG),
+    ];
 
     /// Per-instance data for widget shader. Must match WidgetInstance in MSL.
     /// Uses packed_float types in MSL to match Rust's [f32; N] layout.
@@ -273,17 +302,29 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         device: Retained<ProtocolObject<dyn MTLDevice>>,
         command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
         layer: Retained<CAMetalLayer>,
-        // Render pipeline (compiled from SHADER_SRC in initialize())
+        // Text render pipeline (compiled from SHADER_SRC)
         pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
-        // Widget pipeline (compiled from WIDGET_SHADER_SRC in initialize())
-        widget_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
-        // Glyph atlas (created in initialize())
+        // Per-widget-type GPU pipelines (hslider, vslider, toggle)
+        widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        // Glyph atlas
         atlas: Option<GlyphAtlas>,
+        cached_text_key: Option<u64>,
+        cached_text_quads: Vec<Vertex>,
+        cached_text_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+        cached_text_vertex_count: usize,
+        cached_widget_layout_key: Option<u64>,
+        cached_widget_instances: HashMap<String, Vec<WidgetInstance>>,
+        stats: RenderStats,
         // Winit
         event_loop: Option<EventLoop<()>>,
         window: Option<Window>,
         pending: VecDeque<Event>,
+        pending_drag: Option<Event>,
         modifiers: KeyModifiers,
+        pressed_mouse_button: Option<MouseButton>,
+        cursor_cell: (u16, u16),
+        cursor_pos: (f32, f32),
+        last_precise_mouse: Option<(f32, f32)>,
     }
 
     impl MetalBackend {
@@ -299,13 +340,29 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 command_queue,
                 layer,
                 pipeline: None,
-                widget_pipeline: None,
+                widget_pipelines: HashMap::new(),
                 atlas: None,
+                cached_text_key: None,
+                cached_text_quads: Vec::new(),
+                cached_text_buffer: None,
+                cached_text_vertex_count: 0,
+                cached_widget_layout_key: None,
+                cached_widget_instances: HashMap::new(),
+                stats: RenderStats::new(),
                 event_loop: None,
                 window: None,
                 pending: VecDeque::new(),
+                pending_drag: None,
                 modifiers: KeyModifiers::NONE,
+                pressed_mouse_button: None,
+                cursor_cell: (0, 0),
+                cursor_pos: (0.0, 0.0),
+                last_precise_mouse: None,
             })
+        }
+
+        pub fn take_last_precise_mouse(&mut self) -> Option<(f32, f32)> {
+            self.last_precise_mouse.take()
         }
     }
 
@@ -373,42 +430,47 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                     .map_err(|_| BackendError::MetalError)?,
             );
 
-            // ── Widget render pipeline ──────────────────────────────────────
-            let widget_src = NSString::from_str(WIDGET_SHADER_SRC);
-            let widget_lib = self
-                .device
-                .newLibraryWithSource_options_error(&widget_src, None)
-                .map_err(|_| BackendError::MetalError)?;
+            // ── Widget render pipelines (one per widget type) ────────────────
+            // Each widget gets its own fragment shader but shares the vertex
+            // shader and SDF utilities from the preamble.
+            for &(widget_type, frag_src) in WIDGET_SHADER_TYPES {
+                let full_src = format!("{}{}", WIDGET_SHADER_PREAMBLE, frag_src);
+                let src_ns = NSString::from_str(&full_src);
+                let wlib = self
+                    .device
+                    .newLibraryWithSource_options_error(&src_ns, None)
+                    .map_err(|_| BackendError::MetalError)?;
 
-            let widget_vert = widget_lib
-                .newFunctionWithName(&NSString::from_str("widget_vert"))
-                .ok_or(BackendError::MetalError)?;
-            let widget_frag = widget_lib
-                .newFunctionWithName(&NSString::from_str("widget_frag"))
-                .ok_or(BackendError::MetalError)?;
+                let wvert = wlib
+                    .newFunctionWithName(&NSString::from_str("widget_vert"))
+                    .ok_or(BackendError::MetalError)?;
+                let wfrag = wlib
+                    .newFunctionWithName(&NSString::from_str("widget_frag"))
+                    .ok_or(BackendError::MetalError)?;
 
-            let wdesc = MTLRenderPipelineDescriptor::new();
-            wdesc.setVertexFunction(Some(&widget_vert));
-            wdesc.setFragmentFunction(Some(&widget_frag));
-            let wattach = unsafe { wdesc.colorAttachments().objectAtIndexedSubscript(0) };
-            wattach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
-            // Enable alpha blending for smooth SDF edges
-            wattach.setBlendingEnabled(true);
-            {
-                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
-                wattach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                wattach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                wattach.setRgbBlendOperation(MTLBlendOperation::Add);
-                wattach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                wattach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
-                wattach.setAlphaBlendOperation(MTLBlendOperation::Add);
-            }
+                let wdesc = MTLRenderPipelineDescriptor::new();
+                wdesc.setVertexFunction(Some(&wvert));
+                wdesc.setFragmentFunction(Some(&wfrag));
+                let wattach = unsafe { wdesc.colorAttachments().objectAtIndexedSubscript(0) };
+                wattach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                wattach.setBlendingEnabled(true);
+                {
+                    use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                    wattach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                    wattach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                    wattach.setRgbBlendOperation(MTLBlendOperation::Add);
+                    wattach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                    wattach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                    wattach.setAlphaBlendOperation(MTLBlendOperation::Add);
+                }
 
-            self.widget_pipeline = Some(
-                self.device
+                let pipeline_state = self
+                    .device
                     .newRenderPipelineStateWithDescriptor_error(&wdesc)
-                    .map_err(|_| BackendError::MetalError)?,
-            );
+                    .map_err(|_| BackendError::MetalError)?;
+                self.widget_pipelines
+                    .insert(widget_type.to_string(), pipeline_state);
+            }
 
             Ok(())
         }
@@ -436,17 +498,33 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
         fn poll_event(&mut self, timeout: Duration) -> Option<Event> {
             if let Some(ev) = self.pending.pop_front() {
+                if matches!(ev, Event::Mouse(_)) {
+                    self.last_precise_mouse = Some(self.cursor_pos);
+                }
+                return Some(ev);
+            }
+            if let Some(ev) = self.pending_drag.take() {
+                self.last_precise_mouse = Some(self.cursor_pos);
                 return Some(ev);
             }
             let Some(event_loop) = &mut self.event_loop else {
                 return None;
             };
             let pending = &mut self.pending;
+            let pending_drag = &mut self.pending_drag;
             let modifiers = &mut self.modifiers;
+            let pressed_mouse_button = &mut self.pressed_mouse_button;
+            let cursor_cell = &mut self.cursor_cell;
+            let cursor_pos = &mut self.cursor_pos;
             let layer_ref = &self.layer;
             let window_ref = self.window.as_ref();
+            let cell_size = self
+                .atlas
+                .as_ref()
+                .map(|a| (a.cell_w.max(1) as f64, a.cell_h.max(1) as f64))
+                .unwrap_or((8.0, 16.0));
             event_loop.pump_events(Some(timeout), |event, elwt| {
-                elwt.set_control_flow(ControlFlow::Poll);
+                elwt.set_control_flow(ControlFlow::Wait);
                 let WEvent::WindowEvent { event, .. } = event else {
                     return;
                 };
@@ -481,14 +559,107 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                         if kev.state != ElementState::Pressed {
                             return;
                         }
-                        if let Some(ev) = translate_key(&kev.logical_key, *modifiers) {
+                        if let Some(ev) =
+                            translate_key(&kev.logical_key, &kev.physical_key, *modifiers)
+                        {
                             pending.push_back(ev);
+                        }
+                    }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        let exact_col = (position.x / cell_size.0).max(0.0) as f32;
+                        let exact_row = (position.y / cell_size.1).max(0.0) as f32;
+                        let col = exact_col.floor() as u16;
+                        let row = exact_row.floor() as u16;
+                        *cursor_pos = (exact_col, exact_row);
+                        *cursor_cell = (col, row);
+                        if let Some(button) = pressed_mouse_button {
+                            *pending_drag = Some(Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Drag(*button),
+                                column: col,
+                                row,
+                                modifiers: *modifiers,
+                            }));
+                        }
+                    }
+                    WindowEvent::MouseInput { state, button, .. } => {
+                        let Some(button) = translate_mouse_button(button) else {
+                            return;
+                        };
+                        match state {
+                            ElementState::Pressed => {
+                                *pressed_mouse_button = Some(button);
+                                pending.push_back(Event::Mouse(MouseEvent {
+                                    kind: MouseEventKind::Down(button),
+                                    column: cursor_cell.0,
+                                    row: cursor_cell.1,
+                                    modifiers: *modifiers,
+                                }));
+                            }
+                            ElementState::Released => {
+                                pending.push_back(Event::Mouse(MouseEvent {
+                                    kind: MouseEventKind::Up(button),
+                                    column: cursor_cell.0,
+                                    row: cursor_cell.1,
+                                    modifiers: *modifiers,
+                                }));
+                                if pressed_mouse_button.as_ref() == Some(&button) {
+                                    *pressed_mouse_button = None;
+                                }
+                            }
+                        }
+                    }
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        let kind = match delta {
+                            MouseScrollDelta::LineDelta(x, y) => {
+                                if y > 0.0 {
+                                    Some(MouseEventKind::ScrollUp)
+                                } else if y < 0.0 {
+                                    Some(MouseEventKind::ScrollDown)
+                                } else if x > 0.0 {
+                                    Some(MouseEventKind::ScrollRight)
+                                } else if x < 0.0 {
+                                    Some(MouseEventKind::ScrollLeft)
+                                } else {
+                                    None
+                                }
+                            }
+                            MouseScrollDelta::PixelDelta(delta) => {
+                                if delta.y > 0.0 {
+                                    Some(MouseEventKind::ScrollUp)
+                                } else if delta.y < 0.0 {
+                                    Some(MouseEventKind::ScrollDown)
+                                } else if delta.x > 0.0 {
+                                    Some(MouseEventKind::ScrollRight)
+                                } else if delta.x < 0.0 {
+                                    Some(MouseEventKind::ScrollLeft)
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        if let Some(kind) = kind {
+                            pending.push_back(Event::Mouse(MouseEvent {
+                                kind,
+                                column: cursor_cell.0,
+                                row: cursor_cell.1,
+                                modifiers: *modifiers,
+                            }));
                         }
                     }
                     _ => {}
                 }
             });
-            self.pending.pop_front()
+            if let Some(ev) = self.pending.pop_front() {
+                if matches!(ev, Event::Mouse(_)) {
+                    self.last_precise_mouse = Some(self.cursor_pos);
+                }
+                Some(ev)
+            } else if let Some(ev) = self.pending_drag.take() {
+                self.last_precise_mouse = Some(self.cursor_pos);
+                Some(ev)
+            } else {
+                None
+            }
         }
 
         fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError> {
@@ -505,17 +676,37 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             let vp_w = texture.width() as f32;
             let vp_h = texture.height() as f32;
 
-            // ── Build vertex data ────────────────────────────────────────────
-            let quads = build_quads(frame, atlas, vp_w, vp_h);
+            // ── Build/cached text vertex data ───────────────────────────────
+            let mut text_upload_bytes = 0;
+            if self.cached_text_key != Some(frame.text_cache_key) {
+                self.cached_text_quads = build_text_quads(frame, atlas, vp_w, vp_h);
+                self.cached_text_key = Some(frame.text_cache_key);
+                self.cached_text_vertex_count = self.cached_text_quads.len();
+                self.cached_text_buffer = if self.cached_text_quads.is_empty() {
+                    None
+                } else {
+                    let byte_len = std::mem::size_of_val(self.cached_text_quads.as_slice());
+                    text_upload_bytes = byte_len;
+                    unsafe {
+                        self.device.newBufferWithBytes_length_options(
+                            NonNull::new(self.cached_text_quads.as_ptr() as *mut _).unwrap(),
+                            byte_len,
+                            MTLResourceOptions(0),
+                        )
+                    }
+                };
+            }
+            let label_quads = build_widget_label_quads(frame, atlas, vp_w, vp_h);
 
             // ── Vertex buffer ────────────────────────────────────────────────
-            let vbuf = if quads.is_empty() {
+            let text_vbuf = self.cached_text_buffer.as_ref();
+            let label_vbuf = if label_quads.is_empty() {
                 None
             } else {
-                let byte_len = std::mem::size_of_val(quads.as_slice());
+                let byte_len = std::mem::size_of_val(label_quads.as_slice());
                 unsafe {
                     self.device.newBufferWithBytes_length_options(
-                        NonNull::new(quads.as_ptr() as *mut _).unwrap(),
+                        NonNull::new(label_quads.as_ptr() as *mut _).unwrap(),
                         byte_len,
                         MTLResourceOptions(0),
                     )
@@ -542,7 +733,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 .renderCommandEncoderWithDescriptor(&desc)
                 .ok_or(BackendError::MetalError)?;
 
-            if let Some(vbuf) = &vbuf {
+            if let Some(vbuf) = &text_vbuf {
                 enc.setRenderPipelineState(pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(vbuf), 0, 0);
@@ -550,19 +741,45 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                     enc.drawPrimitives_vertexStart_vertexCount(
                         MTLPrimitiveType::Triangle,
                         0,
-                        quads.len() as _,
+                        self.cached_text_vertex_count as _,
                     );
                 }
             }
 
-            // ── Widget instanced draw ────────────────────────────────────
-            if let (Some(wpipe), Some(layout)) = (&self.widget_pipeline, &frame.widget_layout) {
+            if let Some(vbuf) = &label_vbuf {
+                enc.setRenderPipelineState(pipeline);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(Some(vbuf), 0, 0);
+                    enc.setFragmentTexture_atIndex(Some(&atlas.texture), 0);
+                    enc.drawPrimitives_vertexStart_vertexCount(
+                        MTLPrimitiveType::Triangle,
+                        0,
+                        label_quads.len() as _,
+                    );
+                }
+            }
+
+            // ── Widget instanced draw (one draw call per widget type) ─────
+            if let Some(layout) = &frame.widget_layout {
                 let cell_w = atlas.cell_w as f32;
                 let cell_h = atlas.cell_h as f32;
-                let instances = collect_widget_instances_ndc(layout, cell_w, cell_h, vp_w, vp_h);
-                let instance_count = instances.len();
-                if instance_count > 0 {
-                    let byte_len = instance_count * std::mem::size_of::<WidgetInstance>();
+                self.refresh_widget_instances(
+                    layout,
+                    frame.widget_layout_cache_key,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+
+                for (widget_type, instances) in &self.cached_widget_instances {
+                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                        continue;
+                    };
+                    if instances.is_empty() {
+                        continue;
+                    }
+                    let byte_len = instances.len() * std::mem::size_of::<WidgetInstance>();
                     let wbuf = unsafe {
                         self.device.newBufferWithBytes_length_options(
                             NonNull::new(instances.as_ptr() as *mut _).unwrap(),
@@ -578,17 +795,111 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                                 MTLPrimitiveType::Triangle,
                                 0,
                                 6,
-                                instance_count as _,
+                                instances.len() as _,
                             );
                         }
                     }
                 }
             }
 
+            let text_bytes = text_upload_bytes;
+            let label_bytes = label_quads.len() * std::mem::size_of::<Vertex>();
+            let widget_bytes = self
+                .cached_widget_instances
+                .values()
+                .map(|instances| instances.len() * std::mem::size_of::<WidgetInstance>())
+                .sum::<usize>();
+
             enc.endEncoding();
             buf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
             buf.commit();
+            self.stats.note_frame(text_bytes, label_bytes, widget_bytes);
             Ok(())
+        }
+    }
+
+    struct RenderStats {
+        window_start: Instant,
+        frames: u64,
+        text_bytes: usize,
+        label_bytes: usize,
+        widget_bytes: usize,
+    }
+
+    impl RenderStats {
+        fn new() -> Self {
+            Self {
+                window_start: Instant::now(),
+                frames: 0,
+                text_bytes: 0,
+                label_bytes: 0,
+                widget_bytes: 0,
+            }
+        }
+
+        fn note_frame(&mut self, text_bytes: usize, label_bytes: usize, widget_bytes: usize) {
+            self.frames += 1;
+            self.text_bytes += text_bytes;
+            self.label_bytes += label_bytes;
+            self.widget_bytes += widget_bytes;
+
+            let elapsed = self.window_start.elapsed();
+            if elapsed.as_secs_f64() < 1.0 {
+                return;
+            }
+
+            let secs = elapsed.as_secs_f64();
+            let fps = self.frames as f64 / secs;
+            let total_mb =
+                (self.text_bytes + self.label_bytes + self.widget_bytes) as f64 / (1024.0 * 1024.0);
+            let mbps = total_mb / secs;
+            eprintln!(
+                "[metal-stats] fps={fps:.1} upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s",
+                self.text_bytes as f64 / (1024.0 * 1024.0) / secs,
+                self.label_bytes as f64 / (1024.0 * 1024.0) / secs,
+                self.widget_bytes as f64 / (1024.0 * 1024.0) / secs,
+            );
+
+            self.window_start = Instant::now();
+            self.frames = 0;
+            self.text_bytes = 0;
+            self.label_bytes = 0;
+            self.widget_bytes = 0;
+        }
+    }
+
+    impl MetalBackend {
+        fn refresh_widget_instances(
+            &mut self,
+            layout: &LayoutNode,
+            layout_key: u64,
+            cell_w: f32,
+            cell_h: f32,
+            vp_w: f32,
+            vp_h: f32,
+        ) {
+            let can_patch = self.cached_widget_layout_key == Some(layout_key);
+
+            if can_patch {
+                let mut cursors = HashMap::new();
+                if !update_widget_instances_in_place(
+                    layout,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                    &mut self.cached_widget_instances,
+                    &mut cursors,
+                ) {
+                    self.cached_widget_instances =
+                        collect_widget_instances_grouped(layout, cell_w, cell_h, vp_w, vp_h);
+                }
+            } else {
+                self.cached_widget_instances =
+                    collect_widget_instances_grouped(layout, cell_w, cell_h, vp_w, vp_h);
+            }
+
+            self.cached_widget_layout_key = Some(layout_key);
         }
     }
 
@@ -638,7 +949,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     ///   - Metal NDC: X ∈ [-1, +1] left→right, Y ∈ [-1, +1] bottom→top.
     ///   - Conversion: ndc_x = (px_x / vp_w) * 2 - 1
     ///                 ndc_y = 1 - (px_y / vp_h) * 2
-    fn build_quads(
+    fn build_text_quads(
         frame: &RenderFrame,
         atlas: &mut GlyphAtlas,
         vp_w: f32,
@@ -709,11 +1020,6 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                     &mut verts,
                 );
             }
-        }
-
-        // ── Widget labels (glyph atlas path) ─────────────────────────────────
-        if let Some(ref layout) = frame.widget_layout {
-            render_label_quads(layout, atlas, cell_w, cell_h, vp_w, vp_h, &mut verts);
         }
 
         // ── Status bar (bottom row) ───────────────────────────────────────────
@@ -916,9 +1222,24 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         verts
     }
 
+    fn build_widget_label_quads(
+        frame: &RenderFrame,
+        atlas: &mut GlyphAtlas,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<Vertex> {
+        let Some(layout) = &frame.widget_layout else {
+            return Vec::new();
+        };
+        let cell_w = atlas.cell_w as f32;
+        let cell_h = atlas.cell_h as f32;
+        let mut verts = Vec::new();
+        render_label_quads(layout, atlas, cell_w, cell_h, vp_w, vp_h, &mut verts);
+        verts
+    }
+
     // ── Widget rendering helpers ────────────────────────────────────────────
 
-    use crate::layout::LayoutNode;
     use crate::widget_render::{get_bool_prop, get_f32_prop};
 
     /// Render label widgets as glyph quads (uses the text atlas, not the widget shader).
@@ -967,20 +1288,18 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         }
     }
 
-    // ── Widget instance collection (for SDF shader pipeline) ─────────────
+    // ── Widget instance collection (grouped by type for per-pipeline draw) ──
 
-    /// Walk the layout tree and collect WidgetInstance data for the GPU shader.
-    /// Labels are handled separately via glyph quads in build_quads.
-    fn collect_widget_instances_ndc(
+    fn collect_widget_instances_grouped(
         node: &LayoutNode,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
-    ) -> Vec<WidgetInstance> {
-        let mut instances = Vec::new();
-        collect_instances_recursive(node, cell_w, cell_h, vp_w, vp_h, &mut instances);
-        instances
+    ) -> HashMap<String, Vec<WidgetInstance>> {
+        let mut grouped: HashMap<String, Vec<WidgetInstance>> = HashMap::new();
+        collect_instances_recursive(node, cell_w, cell_h, vp_w, vp_h, &mut grouped);
+        grouped
     }
 
     fn collect_instances_recursive(
@@ -989,7 +1308,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
-        out: &mut Vec<WidgetInstance>,
+        out: &mut HashMap<String, Vec<WidgetInstance>>,
     ) {
         let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
         let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
@@ -1011,17 +1330,17 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
                 let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
 
-                // ndc_min = top-left, ndc_max = bottom-right
-                // y0 > y1 in Metal NDC (Y+ is up), so y0 is top, y1 is bottom
-                out.push(WidgetInstance {
-                    ndc_min: [x0, y0], // top-left  (left X, top Y)
-                    ndc_max: [x1, y1], // bottom-right (right X, bottom Y)
-                    value_t: t,
-                    orientation: 0.0,
-                    color_a: [0.0, 0.85, 0.85, 1.0],
-                    color_b: [0.18, 0.18, 0.22, 1.0],
-                    corner_radius: 0.15,
-                });
+                out.entry(node.widget_type.clone())
+                    .or_default()
+                    .push(WidgetInstance {
+                        ndc_min: [x0, y0],
+                        ndc_max: [x1, y1],
+                        value_t: t,
+                        orientation: 0.0,
+                        color_a: [0.0, 0.85, 0.85, 1.0],
+                        color_b: [0.18, 0.18, 0.22, 1.0],
+                        corner_radius: 0.0,
+                    });
             }
             "vslider" => {
                 let value = get_f32_prop(&node.props, "value", 0.0);
@@ -1039,15 +1358,17 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
                 let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
 
-                out.push(WidgetInstance {
-                    ndc_min: [x0, y0],
-                    ndc_max: [x1, y1],
-                    value_t: t,
-                    orientation: 1.0,
-                    color_a: [0.0, 0.85, 0.0, 1.0],
-                    color_b: [0.18, 0.18, 0.22, 1.0],
-                    corner_radius: 0.15,
-                });
+                out.entry("vslider".to_string())
+                    .or_default()
+                    .push(WidgetInstance {
+                        ndc_min: [x0, y0],
+                        ndc_max: [x1, y1],
+                        value_t: t,
+                        orientation: 0.0,
+                        color_a: [1.0, 1.00, 1.0, 1.0],
+                        color_b: [0.18, 0.18, 0.22, 1.0],
+                        corner_radius: 0.0,
+                    });
             }
             "toggle" => {
                 let on = get_bool_prop(&node.props, "value", false);
@@ -1057,20 +1378,17 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
                 let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
 
-                // Pack aspect ratio into corner_radius for toggle knob
-                let w_px = node.rect.width as f32 * cell_w;
-                let h_px = node.rect.height as f32 * cell_h;
-                let aspect = if h_px > 0.0 { w_px / h_px } else { 1.0 };
-
-                out.push(WidgetInstance {
-                    ndc_min: [x0, y0],
-                    ndc_max: [x1, y1],
-                    value_t: if on { 1.0 } else { 0.0 },
-                    orientation: 2.0,
-                    color_a: [0.2, 0.78, 0.35, 1.0],
-                    color_b: [0.3, 0.3, 0.35, 1.0],
-                    corner_radius: aspect,
-                });
+                out.entry("toggle".to_string())
+                    .or_default()
+                    .push(WidgetInstance {
+                        ndc_min: [x0, y0],
+                        ndc_max: [x1, y1],
+                        value_t: if on { 1.0 } else { 0.0 },
+                        orientation: 0.0,
+                        color_a: [0.2, 0.78, 0.35, 1.0],
+                        color_b: [0.3, 0.3, 0.35, 1.0],
+                        corner_radius: 0.0,
+                    });
             }
             // Labels handled via glyph atlas in build_quads; containers recurse
             _ => {}
@@ -1080,6 +1398,103 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             collect_instances_recursive(child, cell_w, cell_h, vp_w, vp_h, out);
         }
     }
+
+    fn update_widget_instances_in_place(
+        node: &LayoutNode,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+        grouped: &mut HashMap<String, Vec<WidgetInstance>>,
+        cursors: &mut HashMap<String, usize>,
+    ) -> bool {
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+
+        let key = match node.widget_type.as_str() {
+            "slider" | "hslider" => Some(node.widget_type.clone()),
+            "vslider" => Some("vslider".to_string()),
+            "toggle" => Some("toggle".to_string()),
+            _ => None,
+        };
+
+        if let Some(key) = key {
+            let idx = *cursors.get(&key).unwrap_or(&0);
+            let Some(instances) = grouped.get_mut(&key) else {
+                return false;
+            };
+            let Some(instance) = instances.get_mut(idx) else {
+                return false;
+            };
+
+            match node.widget_type.as_str() {
+                "slider" | "hslider" => {
+                    let value = get_f32_prop(&node.props, "value", 0.0);
+                    let min = get_f32_prop(&node.props, "min", 0.0);
+                    let max = get_f32_prop(&node.props, "max", 1.0);
+                    let range = max - min;
+                    instance.value_t = if range > 0.0 {
+                        ((value - min) / range).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    instance.ndc_min = [
+                        ndc_x(node.rect.col as f32 * cell_w),
+                        ndc_y(node.rect.row as f32 * cell_h),
+                    ];
+                    instance.ndc_max = [
+                        ndc_x((node.rect.col + node.rect.width) as f32 * cell_w),
+                        ndc_y((node.rect.row + node.rect.height) as f32 * cell_h),
+                    ];
+                }
+                "vslider" => {
+                    let value = get_f32_prop(&node.props, "value", 0.0);
+                    let min = get_f32_prop(&node.props, "min", 0.0);
+                    let max = get_f32_prop(&node.props, "max", 1.0);
+                    let range = max - min;
+                    instance.value_t = if range > 0.0 {
+                        ((value - min) / range).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    instance.ndc_min = [
+                        ndc_x(node.rect.col as f32 * cell_w),
+                        ndc_y(node.rect.row as f32 * cell_h),
+                    ];
+                    instance.ndc_max = [
+                        ndc_x((node.rect.col + node.rect.width) as f32 * cell_w),
+                        ndc_y((node.rect.row + node.rect.height) as f32 * cell_h),
+                    ];
+                }
+                "toggle" => {
+                    let on = get_bool_prop(&node.props, "value", false);
+                    instance.value_t = if on { 1.0 } else { 0.0 };
+                    instance.ndc_min = [
+                        ndc_x(node.rect.col as f32 * cell_w),
+                        ndc_y(node.rect.row as f32 * cell_h),
+                    ];
+                    instance.ndc_max = [
+                        ndc_x((node.rect.col + node.rect.width) as f32 * cell_w),
+                        ndc_y((node.rect.row + node.rect.height) as f32 * cell_h),
+                    ];
+                }
+                _ => {}
+            }
+
+            cursors.insert(key, idx + 1);
+        }
+
+        for child in &node.children {
+            if !update_widget_instances_in_place(
+                child, cell_w, cell_h, vp_w, vp_h, grouped, cursors,
+            ) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // Remove unused single-collection function
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -1097,7 +1512,16 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         out
     }
 
-    fn translate_key(key: &Key, mods: KeyModifiers) -> Option<Event> {
+    fn translate_key(key: &Key, physical_key: &PhysicalKey, mods: KeyModifiers) -> Option<Event> {
+        let code = if mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
+            translate_physical_shortcut_key(physical_key).or_else(|| translate_logical_key(key))?
+        } else {
+            translate_logical_key(key)?
+        };
+        Some(Event::Key(KeyEvent::new(code, mods)))
+    }
+
+    fn translate_logical_key(key: &Key) -> Option<KeyCode> {
         let code = match key {
             Key::Named(named) => match named {
                 NamedKey::Enter => KeyCode::Enter,
@@ -1119,7 +1543,65 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             Key::Character(s) => KeyCode::Char(s.chars().next()?),
             _ => return None,
         };
-        Some(Event::Key(KeyEvent::new(code, mods)))
+        Some(code)
+    }
+
+    fn translate_physical_shortcut_key(key: &PhysicalKey) -> Option<KeyCode> {
+        let PhysicalKey::Code(code) = key else {
+            return None;
+        };
+        let code = match code {
+            WinitKeyCode::KeyA => KeyCode::Char('a'),
+            WinitKeyCode::KeyB => KeyCode::Char('b'),
+            WinitKeyCode::KeyC => KeyCode::Char('c'),
+            WinitKeyCode::KeyD => KeyCode::Char('d'),
+            WinitKeyCode::KeyE => KeyCode::Char('e'),
+            WinitKeyCode::KeyF => KeyCode::Char('f'),
+            WinitKeyCode::KeyG => KeyCode::Char('g'),
+            WinitKeyCode::KeyH => KeyCode::Char('h'),
+            WinitKeyCode::KeyI => KeyCode::Char('i'),
+            WinitKeyCode::KeyJ => KeyCode::Char('j'),
+            WinitKeyCode::KeyK => KeyCode::Char('k'),
+            WinitKeyCode::KeyL => KeyCode::Char('l'),
+            WinitKeyCode::KeyM => KeyCode::Char('m'),
+            WinitKeyCode::KeyN => KeyCode::Char('n'),
+            WinitKeyCode::KeyO => KeyCode::Char('o'),
+            WinitKeyCode::KeyP => KeyCode::Char('p'),
+            WinitKeyCode::KeyQ => KeyCode::Char('q'),
+            WinitKeyCode::KeyR => KeyCode::Char('r'),
+            WinitKeyCode::KeyS => KeyCode::Char('s'),
+            WinitKeyCode::KeyT => KeyCode::Char('t'),
+            WinitKeyCode::KeyU => KeyCode::Char('u'),
+            WinitKeyCode::KeyV => KeyCode::Char('v'),
+            WinitKeyCode::KeyW => KeyCode::Char('w'),
+            WinitKeyCode::KeyX => KeyCode::Char('x'),
+            WinitKeyCode::KeyY => KeyCode::Char('y'),
+            WinitKeyCode::KeyZ => KeyCode::Char('z'),
+            WinitKeyCode::ArrowUp => KeyCode::Up,
+            WinitKeyCode::ArrowDown => KeyCode::Down,
+            WinitKeyCode::ArrowLeft => KeyCode::Left,
+            WinitKeyCode::ArrowRight => KeyCode::Right,
+            WinitKeyCode::Space => KeyCode::Char(' '),
+            WinitKeyCode::Tab => KeyCode::Tab,
+            WinitKeyCode::Backspace => KeyCode::Backspace,
+            WinitKeyCode::Delete => KeyCode::Delete,
+            WinitKeyCode::Enter => KeyCode::Enter,
+            WinitKeyCode::Home => KeyCode::Home,
+            WinitKeyCode::End => KeyCode::End,
+            WinitKeyCode::PageUp => KeyCode::PageUp,
+            WinitKeyCode::PageDown => KeyCode::PageDown,
+            _ => return None,
+        };
+        Some(code)
+    }
+
+    fn translate_mouse_button(button: WMouseButton) -> Option<MouseButton> {
+        match button {
+            WMouseButton::Left => Some(MouseButton::Left),
+            WMouseButton::Right => Some(MouseButton::Right),
+            WMouseButton::Middle => Some(MouseButton::Middle),
+            _ => None,
+        }
     }
 }
 

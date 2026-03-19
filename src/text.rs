@@ -281,22 +281,31 @@ fn sexp_range_at_cursor_with_selector(
     let pair = if cursor_idx < bytes.len() && bytes[cursor_idx] == b'(' {
         pairs.iter().find(|(open, _)| *open == cursor_idx).copied()
     } else if cursor_idx > 0 && bytes[cursor_idx - 1] == b')' {
-        pairs.iter().find(|(_, close)| *close == cursor_idx - 1).copied()
+        pairs
+            .iter()
+            .find(|(_, close)| *close == cursor_idx - 1)
+            .copied()
     } else {
-        let enclosing = pairs.iter().filter(|(open, close)| *open < cursor_idx && cursor_idx <= *close);
+        let enclosing = pairs
+            .iter()
+            .filter(|(open, close)| *open < cursor_idx && cursor_idx <= *close);
         match selector {
             RangeSelector::Outermost => enclosing.min_by_key(|(open, _)| *open).copied(),
             RangeSelector::Innermost => enclosing.max_by_key(|(open, _)| *open).copied(),
         }
         .or_else(|| {
-            pairs.iter()
+            pairs
+                .iter()
                 .filter(|(_, close)| *close < cursor_idx)
                 .max_by_key(|(_, close)| *close)
                 .copied()
         })
     }?;
 
-    Some((flat_index_to_cursor(&line_starts, pair.0), flat_index_to_cursor(&line_starts, pair.1)))
+    Some((
+        flat_index_to_cursor(&line_starts, pair.0),
+        flat_index_to_cursor(&line_starts, pair.1),
+    ))
 }
 
 fn flat_index_to_cursor(line_starts: &[usize], idx: usize) -> (usize, usize) {
@@ -308,7 +317,9 @@ fn flat_index_to_cursor(line_starts: &[usize], idx: usize) -> (usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::{innermost_sexp_range_at_cursor, matching_paren, sexp_at_cursor, sexp_range_at_cursor};
+    use super::{
+        innermost_sexp_range_at_cursor, matching_paren, sexp_at_cursor, sexp_range_at_cursor,
+    };
 
     #[test]
     fn test_sexp_at_cursor() {

@@ -17,9 +17,15 @@ pub mod vm;
 pub mod widget_render;
 pub mod widgets;
 
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
-use crossterm::event::{self, Event};
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
+    execute,
+};
 use ratatui::DefaultTerminal;
 
 use vm::{VMError, Value};
@@ -49,6 +55,16 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) => editor.handle_key(key),
+                Event::Mouse(mouse) => {
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                    editor.handle_mouse(
+                        mouse,
+                        1,
+                        1,
+                        cols.saturating_sub(2),
+                        rows.saturating_sub(3),
+                    );
+                }
                 Event::Resize(_, _) => editor.mark_needs_redraw(),
                 _ => {}
             }
@@ -56,9 +72,11 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
 
         if editor.needs_redraw() {
             terminal.draw(|f| {
-                let (_, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                let viewport_width = (cols as usize).saturating_sub(2);
                 let viewport_height = (rows as usize).saturating_sub(3); // borders + status bar
-                let render_frame = frame::build_render_frame(&mut editor, viewport_height);
+                let render_frame =
+                    frame::build_render_frame(&mut editor, viewport_width, viewport_height);
                 tui::render(f, &render_frame);
             })?;
             editor.clear_needs_redraw();
@@ -86,19 +104,41 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
     );
     let mut backend = MetalBackend::new()?;
     backend.initialize()?;
+    let frame_interval = Duration::from_secs_f64(1.0 / 30.0);
+    let mut last_render_at = Instant::now() - frame_interval;
 
     loop {
-        let (_cols, rows) = backend.viewport_size();
-        match backend.poll_event(Duration::from_millis(16)) {
+        let (cols, rows) = backend.viewport_size();
+        let timeout = if editor.needs_redraw() {
+            frame_interval.saturating_sub(last_render_at.elapsed())
+        } else {
+            Duration::from_millis(16)
+        };
+        match backend.poll_event(timeout) {
             Some(Event::Key(key)) => editor.handle_key(key),
+            Some(Event::Mouse(mouse)) => {
+                let (precise_col, precise_row) = backend
+                    .take_last_precise_mouse()
+                    .unwrap_or((mouse.column as f32, mouse.row as f32));
+                editor.handle_mouse_precise(
+                    mouse,
+                    0,
+                    0,
+                    cols as u16,
+                    rows.saturating_sub(1) as u16,
+                    precise_col,
+                    precise_row,
+                )
+            }
             Some(Event::Resize(_, _)) => editor.mark_needs_redraw(),
             _ => {}
         }
 
-        if editor.needs_redraw() {
-            let render_frame = frame::build_render_frame(&mut editor, rows.saturating_sub(1));
+        if editor.needs_redraw() && last_render_at.elapsed() >= frame_interval {
+            let render_frame = frame::build_render_frame(&mut editor, cols, rows.saturating_sub(1));
             backend.render(&render_frame)?;
             editor.clear_needs_redraw();
+            last_render_at = Instant::now();
         }
 
         if editor.should_quit() {
@@ -117,14 +157,16 @@ pub fn run_standalone() -> io::Result<()> {
     }));
 
     let mut terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = run_editor(&mut terminal);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
     use super::{Runtime, Value, run_prog};
     use crate::layout::{LayoutEngine, format_layout_tree_lines};
@@ -534,12 +576,49 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                ":v-stack  row=0 col=0 w=80 h=2".to_string(),
+                ":v-stack  row=0 col=0 w=19 h=2".to_string(),
                 "  :label  row=0 col=0 w=11 h=1  text=\"Hello World\"".to_string(),
-                "  :h-stack  row=1 col=0 w=80 h=1".to_string(),
+                "  :h-stack  row=1 col=0 w=19 h=1".to_string(),
                 "    :label  row=1 col=0 w=2 h=1  text=\"X:\"".to_string(),
                 "    :slider  row=1 col=3 w=16 h=1  value=50  min=0  max=100".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn test_nested_vstack_in_hstack_uses_content_width() {
+        let tree = run_prog(
+            r#"
+            (h-stack
+              (hslider :min 0 :max 100 :value 30)
+              (v-stack
+                (hslider :min 0 :max 100 :value 50)
+                (hslider :min 0 :max 100 :value 20))
+              (vslider :min 0 :max 100 :value 20))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+
+        // The v-stack contains two 16-wide hsliders, so its width should be 16
+        // (content width), NOT 80 (terminal width). The vslider should start
+        // right after: col = 16 (hslider) + 1 (gap) + 16 (v-stack) + 1 (gap) = 34.
+        // h-stack sizes to content: 16 + 1 + 16 + 1 + 2 = 36
+        assert_eq!(lines[0], ":h-stack  row=0 col=0 w=36 h=8");
+        // First hslider at col 0
+        assert_eq!(
+            lines[1],
+            "  :hslider  row=0 col=0 w=16 h=1  value=30  min=0  max=100"
+        );
+        // v-stack should be 16 wide (its content), starting at col 17
+        assert_eq!(lines[2], "  :v-stack  row=0 col=17 w=16 h=2");
+        // vslider should be right after v-stack: col = 17 + 16 + 1 = 34
+        assert_eq!(
+            lines[5],
+            "  :vslider  row=0 col=34 w=2 h=8  value=20  min=0  max=100"
         );
     }
 
@@ -571,7 +650,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                ":v-stack  row=0 col=0 w=80 h=2".to_string(),
+                ":v-stack  row=0 col=0 w=8 h=2".to_string(),
                 "  :label  row=0 col=0 w=5 h=1  text=\"hello\"".to_string(),
                 "  :label  row=1 col=0 w=8 h=1  text=\"count: 5\"".to_string(),
             ]
@@ -650,5 +729,184 @@ mod tests {
             lines,
             vec![":label  row=0 col=0 w=11 h=1  text=\"doubled: 14\"".to_string()]
         );
+    }
+
+    #[test]
+    fn test_lisp_state_binding_reads_like_plain_value() {
+        let mut runtime = Runtime::new();
+        let tree = runtime
+            .eval_str(
+                r#"
+                (def my_state_value (state 33))
+                (hslider :min 0 :max 100 :value my_state_value)
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+        assert_eq!(
+            lines,
+            vec![":hslider  row=0 col=0 w=16 h=1  value=33  min=0  max=100".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_set_bang_updates_lisp_state_and_reruns_effects() {
+        let mut runtime = Runtime::new();
+        let _ = runtime
+            .eval_str(
+                r#"
+                (def my_state_value (state 5))
+                (effect (label (fmt "value: {}" my_state_value)))
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.drain_rendered_layouts(),
+            vec![vec![
+                ":label  row=0 col=0 w=8 h=1  text=\"value: 5\"".to_string()
+            ]]
+        );
+
+        let _ = runtime.eval_str(r#"(set! my_state_value 17)"#).unwrap();
+
+        assert_eq!(
+            runtime.drain_rendered_layouts(),
+            vec![vec![
+                ":label  row=0 col=0 w=9 h=1  text=\"value: 17\"".to_string()
+            ]]
+        );
+        assert_eq!(
+            runtime.eval_str("my_state_value"),
+            Ok(Some(Value::Number(17.0)))
+        );
+    }
+
+    #[test]
+    fn test_set_bang_updates_writable_registered_namespace() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("counter", Value::Number(5.0))], true);
+
+        let _ = runtime
+            .eval_str(r#"(effect (label (fmt "count: {}" APP.counter)))"#)
+            .unwrap();
+        let _ = runtime.drain_rendered_layouts();
+
+        let _ = runtime.eval_str(r#"(set! APP.counter 12)"#).unwrap();
+
+        assert_eq!(
+            runtime.drain_rendered_layouts(),
+            vec![vec![
+                ":label  row=0 col=0 w=9 h=1  text=\"count: 12\"".to_string()
+            ]]
+        );
+        assert_eq!(
+            runtime.eval_str("APP.counter"),
+            Ok(Some(Value::Number(12.0)))
+        );
+    }
+
+    #[test]
+    fn test_set_bang_rejects_readonly_registered_namespace() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("counter", Value::Number(5.0))], false);
+
+        assert_eq!(
+            runtime.eval_str(r#"(set! APP.counter 12)"#),
+            Err(VMError::ReadonlyReactive("APP".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_callback_driven_state_update_preserves_full_effect_layout() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 8);
+        runtime
+            .eval_str(
+                r#"
+                (def x (state 4))
+                (def cb |v| (set! x v))
+                (effect
+                  (h-stack
+                    (label "hello")
+                    (hslider :min 0 :max 100 :value x :on-change cb)))
+                "#,
+            )
+            .unwrap();
+
+        let callback = runtime.eval_str("cb").unwrap().unwrap();
+        runtime.invoke(callback, vec![Value::Number(25.0)]).unwrap();
+
+        let layout = runtime.current_layout.as_ref().expect("layout");
+        assert_eq!(layout.widget_type, "h-stack");
+        assert_eq!(layout.children.len(), 2);
+        assert_eq!(layout.children[0].widget_type, "label");
+        assert_eq!(layout.children[1].widget_type, "hslider");
+        assert_eq!(
+            layout.children[0].props.get("text"),
+            Some(&Value::String("hello".to_string()))
+        );
+        assert_eq!(
+            layout.children[1].props.get("value"),
+            Some(&Value::Number(25.0))
+        );
+    }
+
+    #[test]
+    fn test_re_evaluating_effect_replaces_previous_preview_effect() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("x", Value::Number(1.0))], true);
+
+        runtime
+            .eval_str(r#"(effect (hslider :min 0 :max 100 :value APP.x))"#)
+            .unwrap();
+        runtime
+            .eval_str(r#"(effect (h-stack (label "hello") (hslider :min 0 :max 100 :value APP.x)))"#)
+            .unwrap();
+
+        runtime.set_reactive("APP", "x", Value::Number(12.0));
+        runtime.run_reactive_cycle();
+
+        let layout = runtime.current_layout.as_ref().expect("layout");
+        assert_eq!(layout.widget_type, "h-stack");
+        assert_eq!(layout.children.len(), 2);
+        assert_eq!(layout.children[0].widget_type, "label");
+        assert_eq!(layout.children[1].widget_type, "hslider");
+    }
+
+    #[test]
+    fn test_each_renders_widgets_for_step_list() {
+        let mut runtime = Runtime::new();
+        let steps = Value::List(vec![
+            Rc::new(RefCell::new(Value::Map(HashMap::from([(
+                "velocity".to_string(),
+                Rc::new(RefCell::new(Value::Number(20.0))),
+            )])))),
+            Rc::new(RefCell::new(Value::Map(HashMap::from([(
+                "velocity".to_string(),
+                Rc::new(RefCell::new(Value::Number(50.0))),
+            )])))),
+        ]);
+        runtime.register_reactive("pattern", vec![("steps", steps)], true);
+
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (h-stack
+                    (each pattern.steps |step|
+                      (hslider :min 0 :max 100 :bind step.velocity))))
+                "#,
+            )
+            .unwrap();
+
+        let layout = runtime.current_layout.as_ref().expect("layout");
+        assert_eq!(layout.widget_type, "h-stack");
+        assert_eq!(layout.children.len(), 2);
+        assert_eq!(layout.children[0].props.get("value"), Some(&Value::Number(20.0)));
+        assert_eq!(layout.children[1].props.get("value"), Some(&Value::Number(50.0)));
     }
 }

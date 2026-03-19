@@ -64,11 +64,11 @@ fn main() {
                     WindowEvent::RedrawRequested => {
                         use objc2_quartz_core::CAMetalDrawable;
 
-                        let Some(drawable) = layer.nextDrawable() else { return; };
-                        let desc = MTLRenderPassDescriptor::new();
-                        let attach = unsafe {
-                            desc.colorAttachments().objectAtIndexedSubscript(0)
+                        let Some(drawable) = layer.nextDrawable() else {
+                            return;
                         };
+                        let desc = MTLRenderPassDescriptor::new();
+                        let attach = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
                         let texture = drawable.texture();
                         attach.setTexture(Some(&texture));
                         attach.setLoadAction(MTLLoadAction::Clear);
@@ -83,9 +83,7 @@ fn main() {
                         let buf = command_queue.commandBuffer().unwrap();
                         let enc = buf.renderCommandEncoderWithDescriptor(&desc).unwrap();
                         enc.endEncoding();
-                        buf.presentDrawable(
-                            objc2::runtime::ProtocolObject::from_ref(&*drawable),
-                        );
+                        buf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
                         buf.commit();
                     }
 

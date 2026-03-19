@@ -53,4 +53,3 @@ pub enum HostEvent {
         path: PathBuf,
     },
 }
-

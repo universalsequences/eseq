@@ -2,9 +2,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::host::{BufferId, HostCommand};
-use crate::layout::{LayoutEngine, LayoutNode, format_layout_tree_lines};
+use crate::layout::{
+    LayoutEngine, LayoutNode, format_layout_tree_lines, reuse_layout_node, same_layout_geometry,
+};
 use crate::reactive::ReactiveRegistry;
 use crate::vm::{VM, Value, register_core_natives};
 use crate::widgets::register_widget_natives;
@@ -93,9 +96,16 @@ pub struct Runtime {
     vm: VM,
     pub(crate) shared: SharedBridgeState,
     symbol_metadata: HashMap<String, SymbolMetadata>,
+    symbol_revision: u64,
+    cached_completion_symbols: Option<Vec<String>>,
+    cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
     pub reactive_registry: ReactiveRegistry,
     rendered_layouts: Vec<Vec<String>>,
-    pub current_layout: Option<LayoutNode>,
+    pub current_layout: Option<Arc<LayoutNode>>,
+    layout_revision: u64,
+    current_widget_tree: Option<Value>,
+    layout_cols: u16,
+    layout_rows: u16,
 }
 
 impl Default for Runtime {
@@ -114,9 +124,16 @@ impl Runtime {
             vm,
             shared,
             symbol_metadata: HashMap::new(),
+            symbol_revision: 0,
+            cached_completion_symbols: None,
+            cached_completion_metadata: None,
             reactive_registry: ReactiveRegistry::new(),
             rendered_layouts: Vec::new(),
             current_layout: None,
+            layout_revision: 0,
+            current_widget_tree: None,
+            layout_cols: 80,
+            layout_rows: 24,
         }
     }
 
@@ -172,11 +189,16 @@ impl Runtime {
             self.symbol_metadata
                 .insert(name.to_string(), SymbolMetadata { signature, docs });
         }
+        self.invalidate_symbol_cache();
     }
 
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
+        if src.contains("(effect") {
+            self.clear_layout_effects();
+        }
         let result = self.vm.eval_str(src);
         if result.is_ok() {
+            self.invalidate_symbol_cache();
             self.flush_widget_trees();
         }
         result
@@ -184,16 +206,43 @@ impl Runtime {
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
         self.vm.set_global_value(name, value);
+        self.invalidate_symbol_cache();
     }
 
     pub fn register_reactive(&mut self, name: &str, fields: Vec<(&str, Value)>, writable: bool) {
         let map = self.reactive_registry.register(name, fields, writable);
         self.vm.set_global_value(name, map);
         self.vm.reactive_namespaces.insert(name.to_string());
+        if writable {
+            self.vm
+                .writable_reactive_namespaces
+                .insert(name.to_string());
+        } else {
+            self.vm.writable_reactive_namespaces.remove(name);
+        }
+        self.invalidate_symbol_cache();
     }
 
     pub fn set_reactive(&mut self, namespace: &str, field: &str, value: Value) {
         self.reactive_registry.set(namespace, field, value);
+    }
+
+    pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
+        self.layout_cols = cols.max(1);
+        self.layout_rows = rows.max(1);
+        self.relayout_current_tree();
+    }
+
+    pub fn invoke(
+        &mut self,
+        callable: Value,
+        args: Vec<Value>,
+    ) -> Result<Option<Value>, crate::vm::VMError> {
+        let result = self.vm.invoke(callable, args);
+        if result.is_ok() {
+            self.flush_widget_trees();
+        }
+        result
     }
 
     pub fn run_reactive_cycle(&mut self) {
@@ -215,7 +264,11 @@ impl Runtime {
         &self.symbol_metadata
     }
 
-    pub fn completion_symbols(&self) -> Vec<String> {
+    pub fn completion_symbols(&mut self) -> Vec<String> {
+        if let Some(symbols) = &self.cached_completion_symbols {
+            return symbols.clone();
+        }
+
         let mut symbols = self.vm.global_names().to_vec();
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
@@ -226,10 +279,15 @@ impl Runtime {
         }
         symbols.sort();
         symbols.dedup();
+        self.cached_completion_symbols = Some(symbols.clone());
         symbols
     }
 
-    pub fn completion_metadata(&self) -> HashMap<String, SymbolMetadata> {
+    pub fn completion_metadata(&mut self) -> HashMap<String, SymbolMetadata> {
+        if let Some(metadata) = &self.cached_completion_metadata {
+            return metadata.clone();
+        }
+
         let mut metadata = self.symbol_metadata.clone();
         for global in self.vm.global_names() {
             if let Some(Value::Map(map)) = self.vm.global_value(global) {
@@ -244,11 +302,20 @@ impl Runtime {
                 }
             }
         }
+        self.cached_completion_metadata = Some(metadata.clone());
         metadata
+    }
+
+    pub fn symbol_revision(&self) -> u64 {
+        self.symbol_revision
     }
 
     pub fn take_status_message(&mut self) -> Option<String> {
         self.shared.borrow_mut().status_message.take()
+    }
+
+    pub fn layout_revision(&self) -> u64 {
+        self.layout_revision
     }
 
     pub(crate) fn drain_host_commands(&mut self) -> Vec<HostCommand> {
@@ -282,15 +349,55 @@ impl Runtime {
         std::mem::take(&mut self.rendered_layouts)
     }
 
+    pub fn clear_layout_effects(&mut self) {
+        self.vm.clear_effects();
+        self.current_layout = None;
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+        self.current_widget_tree = None;
+        self.rendered_layouts.clear();
+    }
+
     fn flush_widget_trees(&mut self) {
         let trees = std::mem::take(&mut self.vm.pending_widget_trees);
-        let engine = LayoutEngine::new(80, 24);
         for tree in trees {
-            if let Some(layout) = engine.layout(&tree) {
-                let lines = format_layout_tree_lines(&layout, 0);
-                self.rendered_layouts.push(lines);
-                self.current_layout = Some(layout);
+            self.current_widget_tree = Some(tree);
+            self.relayout_current_tree();
+        }
+    }
+
+    fn relayout_current_tree(&mut self) {
+        let Some(tree) = self.current_widget_tree.as_ref() else {
+            let had_layout = self.current_layout.is_some();
+            self.current_layout = None;
+            if had_layout {
+                self.layout_revision = self.layout_revision.wrapping_add(1);
+            }
+            return;
+        };
+        if let Some(existing) = self.current_layout.as_ref()
+            && let Some(updated) = reuse_layout_node(existing.as_ref(), tree)
+        {
+            self.rendered_layouts.push(format_layout_tree_lines(&updated, 0));
+            self.current_layout = Some(Arc::new(updated));
+            return;
+        }
+        let engine = LayoutEngine::new(self.layout_cols, self.layout_rows);
+        if let Some(layout) = engine.layout(tree) {
+            let geometry_changed = self
+                .current_layout
+                .as_ref()
+                .is_none_or(|existing| !same_layout_geometry(existing.as_ref(), &layout));
+            self.rendered_layouts.push(format_layout_tree_lines(&layout, 0));
+            self.current_layout = Some(Arc::new(layout));
+            if geometry_changed {
+                self.layout_revision = self.layout_revision.wrapping_add(1);
             }
         }
+    }
+
+    fn invalidate_symbol_cache(&mut self) {
+        self.symbol_revision = self.symbol_revision.wrapping_add(1);
+        self.cached_completion_symbols = None;
+        self.cached_completion_metadata = None;
     }
 }
