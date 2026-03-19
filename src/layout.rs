@@ -26,6 +26,7 @@ pub struct Constraints {
 
 #[derive(Debug, Clone)]
 pub struct LayoutNode {
+    pub widget_id: u64,
     pub widget_type: String,
     pub rect: Rect,
     pub props: HashMap<String, Value>,
@@ -55,7 +56,7 @@ impl LayoutEngine {
                 max_height: self.terminal_rows,
             },
         )?;
-        Some(self.build_layout_node(
+        let mut layout = self.build_layout_node(
             tree,
             Rect {
                 row: 0,
@@ -63,7 +64,10 @@ impl LayoutEngine {
                 width: size.width,
                 height: size.height,
             },
-        ))
+        );
+        let mut next_widget_id = 1;
+        assign_widget_ids(&mut layout, &mut next_widget_id);
+        Some(layout)
     }
 
     fn measure(&self, node: &Value, constraints: Constraints) -> Option<Size> {
@@ -224,6 +228,7 @@ impl LayoutEngine {
         let children_values = get_children(node);
         let children = self.layout_children(node, rect, &children_values);
         LayoutNode {
+            widget_id: 0,
             widget_type,
             rect,
             props: collect_props(node),
@@ -372,7 +377,11 @@ pub fn hit_test_layout(node: &LayoutNode, row: u16, col: u16) -> Option<&LayoutN
     }
 }
 
-pub fn reuse_layout_node(existing: &LayoutNode, tree: &Value) -> Option<LayoutNode> {
+pub fn reuse_layout_node(
+    existing: &LayoutNode,
+    tree: &Value,
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Option<LayoutNode> {
     let widget_type = get_widget_type(tree)?;
     if widget_type != existing.widget_type {
         return None;
@@ -388,14 +397,19 @@ pub fn reuse_layout_node(existing: &LayoutNode, tree: &Value) -> Option<LayoutNo
         return None;
     }
 
+    if existing.props != new_props {
+        dirty_widget_ids.push(existing.widget_id);
+    }
+
     let children = existing
         .children
         .iter()
         .zip(children_values.iter())
-        .map(|(child_layout, child_tree)| reuse_layout_node(child_layout, child_tree))
+        .map(|(child_layout, child_tree)| reuse_layout_node(child_layout, child_tree, dirty_widget_ids))
         .collect::<Option<Vec<_>>>()?;
 
     Some(LayoutNode {
+        widget_id: existing.widget_id,
         widget_type,
         rect: existing.rect,
         props: new_props,
@@ -419,6 +433,14 @@ fn rect_contains(rect: Rect, row: u16, col: u16) -> bool {
         && col >= rect.col
         && row < rect.row.saturating_add(rect.height)
         && col < rect.col.saturating_add(rect.width)
+}
+
+fn assign_widget_ids(node: &mut LayoutNode, next_widget_id: &mut u64) {
+    node.widget_id = *next_widget_id;
+    *next_widget_id = next_widget_id.wrapping_add(1);
+    for child in &mut node.children {
+        assign_widget_ids(child, next_widget_id);
+    }
 }
 
 fn size_affecting_props_equal(

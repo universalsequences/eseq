@@ -106,10 +106,12 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
     backend.initialize()?;
     let frame_interval = Duration::from_secs_f64(1.0 / 30.0);
     let mut last_render_at = Instant::now() - frame_interval;
+    let mut pending_drag: Option<(Event, (f32, f32))> = None;
 
     loop {
         let (cols, rows) = backend.viewport_size();
-        let timeout = if editor.needs_redraw() {
+        let redraw_pending = editor.needs_redraw() || pending_drag.is_some();
+        let timeout = if redraw_pending {
             frame_interval.saturating_sub(last_render_at.elapsed())
         } else {
             Duration::from_millis(16)
@@ -120,6 +122,26 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                 let (precise_col, precise_row) = backend
                     .take_last_precise_mouse()
                     .unwrap_or((mouse.column as f32, mouse.row as f32));
+                if matches!(mouse.kind, crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)) {
+                    pending_drag = Some((Event::Mouse(mouse), (precise_col, precise_row)));
+                } else {
+                    editor.handle_mouse_precise(
+                        mouse,
+                        0,
+                        0,
+                        cols as u16,
+                        rows.saturating_sub(1) as u16,
+                        precise_col,
+                        precise_row,
+                    );
+                }
+            }
+            Some(Event::Resize(_, _)) => editor.mark_needs_redraw(),
+            _ => {}
+        }
+
+        if last_render_at.elapsed() >= frame_interval {
+            if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
                 editor.handle_mouse_precise(
                     mouse,
                     0,
@@ -128,10 +150,8 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                     rows.saturating_sub(1) as u16,
                     precise_col,
                     precise_row,
-                )
+                );
             }
-            Some(Event::Resize(_, _)) => editor.mark_needs_redraw(),
-            _ => {}
         }
 
         if editor.needs_redraw() && last_render_at.elapsed() >= frame_interval {

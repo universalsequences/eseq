@@ -103,6 +103,7 @@ pub struct Runtime {
     rendered_layouts: Vec<Vec<String>>,
     pub current_layout: Option<Arc<LayoutNode>>,
     layout_revision: u64,
+    dirty_widget_ids: Vec<u64>,
     current_widget_tree: Option<Value>,
     layout_cols: u16,
     layout_rows: u16,
@@ -131,6 +132,7 @@ impl Runtime {
             rendered_layouts: Vec::new(),
             current_layout: None,
             layout_revision: 0,
+            dirty_widget_ids: Vec::new(),
             current_widget_tree: None,
             layout_cols: 80,
             layout_rows: 24,
@@ -228,8 +230,13 @@ impl Runtime {
     }
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
-        self.layout_cols = cols.max(1);
-        self.layout_rows = rows.max(1);
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+        if self.layout_cols == cols && self.layout_rows == rows {
+            return;
+        }
+        self.layout_cols = cols;
+        self.layout_rows = rows;
         self.relayout_current_tree();
     }
 
@@ -318,6 +325,10 @@ impl Runtime {
         self.layout_revision
     }
 
+    pub fn take_dirty_widget_ids(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.dirty_widget_ids)
+    }
+
     pub(crate) fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         let mut shared = self.shared.borrow_mut();
         std::mem::take(&mut shared.queued_commands)
@@ -353,6 +364,7 @@ impl Runtime {
         self.vm.clear_effects();
         self.current_layout = None;
         self.layout_revision = self.layout_revision.wrapping_add(1);
+        self.dirty_widget_ids.clear();
         self.current_widget_tree = None;
         self.rendered_layouts.clear();
     }
@@ -369,16 +381,19 @@ impl Runtime {
         let Some(tree) = self.current_widget_tree.as_ref() else {
             let had_layout = self.current_layout.is_some();
             self.current_layout = None;
+            self.dirty_widget_ids.clear();
             if had_layout {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
             return;
         };
+        let mut dirty_widget_ids = Vec::new();
         if let Some(existing) = self.current_layout.as_ref()
-            && let Some(updated) = reuse_layout_node(existing.as_ref(), tree)
+            && let Some(updated) = reuse_layout_node(existing.as_ref(), tree, &mut dirty_widget_ids)
         {
             self.rendered_layouts.push(format_layout_tree_lines(&updated, 0));
             self.current_layout = Some(Arc::new(updated));
+            self.dirty_widget_ids = dirty_widget_ids;
             return;
         }
         let engine = LayoutEngine::new(self.layout_cols, self.layout_rows);
@@ -389,6 +404,7 @@ impl Runtime {
                 .is_none_or(|existing| !same_layout_geometry(existing.as_ref(), &layout));
             self.rendered_layouts.push(format_layout_tree_lines(&layout, 0));
             self.current_layout = Some(Arc::new(layout));
+            self.dirty_widget_ids.clear();
             if geometry_changed {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }

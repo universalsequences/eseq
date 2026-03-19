@@ -12,7 +12,7 @@ mod inner {
     use objc2::runtime::ProtocolObject;
     use objc2_app_kit::NSView;
     use objc2_core_foundation::CGSize;
-    use objc2_foundation::NSString;
+    use objc2_foundation::{NSRange, NSString};
     use objc2_metal::{
         MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
         MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat,
@@ -269,6 +269,20 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         corner_radius: f32, // offset 56 (unused by shader, kept for alignment)
     }
 
+    struct WidgetBatch {
+        instances: Vec<WidgetInstance>,
+        buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+        slot_by_widget_id: HashMap<u64, usize>,
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    struct WidgetViewMetrics {
+        cell_w_bits: u32,
+        cell_h_bits: u32,
+        vp_w_bits: u32,
+        vp_h_bits: u32,
+    }
+
     // ── Vertex type ───────────────────────────────────────────────────────────
 
     /// One vertex of a cell quad.  Two triangles (6 vertices) form each cell.
@@ -313,7 +327,10 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         cached_text_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
         cached_text_vertex_count: usize,
         cached_widget_layout_key: Option<u64>,
-        cached_widget_instances: HashMap<String, Vec<WidgetInstance>>,
+        cached_widget_batches: HashMap<String, WidgetBatch>,
+        cached_widget_view_metrics: Option<WidgetViewMetrics>,
+        widget_paths: HashMap<u64, Vec<usize>>,
+        widget_locations: HashMap<u64, (String, usize)>,
         stats: RenderStats,
         // Winit
         event_loop: Option<EventLoop<()>>,
@@ -347,7 +364,10 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 cached_text_buffer: None,
                 cached_text_vertex_count: 0,
                 cached_widget_layout_key: None,
-                cached_widget_instances: HashMap::new(),
+                cached_widget_batches: HashMap::new(),
+                cached_widget_view_metrics: None,
+                widget_paths: HashMap::new(),
+                widget_locations: HashMap::new(),
                 stats: RenderStats::new(),
                 event_loop: None,
                 window: None,
@@ -759,35 +779,30 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 }
             }
 
+            let mut widget_upload_bytes = 0;
+
             // ── Widget instanced draw (one draw call per widget type) ─────
             if let Some(layout) = &frame.widget_layout {
                 let cell_w = atlas.cell_w as f32;
                 let cell_h = atlas.cell_h as f32;
-                self.refresh_widget_instances(
+                widget_upload_bytes = self.refresh_widget_instances(
                     layout,
                     frame.widget_layout_cache_key,
+                    &frame.dirty_widget_ids,
                     cell_w,
                     cell_h,
                     vp_w,
                     vp_h,
                 );
 
-                for (widget_type, instances) in &self.cached_widget_instances {
+                for (widget_type, batch) in &self.cached_widget_batches {
                     let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                         continue;
                     };
-                    if instances.is_empty() {
+                    if batch.instances.is_empty() {
                         continue;
                     }
-                    let byte_len = instances.len() * std::mem::size_of::<WidgetInstance>();
-                    let wbuf = unsafe {
-                        self.device.newBufferWithBytes_length_options(
-                            NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                            byte_len,
-                            MTLResourceOptions(0),
-                        )
-                    };
-                    if let Some(wbuf) = &wbuf {
+                    if let Some(wbuf) = &batch.buffer {
                         enc.setRenderPipelineState(wpipe);
                         unsafe {
                             enc.setVertexBuffer_offset_atIndex(Some(wbuf), 0, 0);
@@ -795,7 +810,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                                 MTLPrimitiveType::Triangle,
                                 0,
                                 6,
-                                instances.len() as _,
+                                batch.instances.len() as _,
                             );
                         }
                     }
@@ -804,11 +819,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
             let text_bytes = text_upload_bytes;
             let label_bytes = label_quads.len() * std::mem::size_of::<Vertex>();
-            let widget_bytes = self
-                .cached_widget_instances
-                .values()
-                .map(|instances| instances.len() * std::mem::size_of::<WidgetInstance>())
-                .sum::<usize>();
+            let widget_bytes = widget_upload_bytes;
 
             enc.endEncoding();
             buf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
@@ -873,33 +884,74 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             &mut self,
             layout: &LayoutNode,
             layout_key: u64,
+            dirty_widget_ids: &[u64],
             cell_w: f32,
             cell_h: f32,
             vp_w: f32,
             vp_h: f32,
-        ) {
-            let can_patch = self.cached_widget_layout_key == Some(layout_key);
+        ) -> usize {
+            let view_metrics = WidgetViewMetrics {
+                cell_w_bits: cell_w.to_bits(),
+                cell_h_bits: cell_h.to_bits(),
+                vp_w_bits: vp_w.to_bits(),
+                vp_h_bits: vp_h.to_bits(),
+            };
+            let can_patch = self.cached_widget_layout_key == Some(layout_key)
+                && self.cached_widget_view_metrics == Some(view_metrics);
+            eprintln!(
+                "[widget-gpu] refresh can_patch={} layout_key={} dirty_ids={}",
+                can_patch,
+                layout_key,
+                dirty_widget_ids.len()
+            );
 
-            if can_patch {
-                let mut cursors = HashMap::new();
-                if !update_widget_instances_in_place(
+            let upload_bytes = if can_patch {
+                match patch_widget_instances_in_place(
+                    &self.device,
+                    layout,
+                    dirty_widget_ids,
+                    &self.widget_paths,
+                    &self.widget_locations,
+                    &mut self.cached_widget_batches,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                ) {
+                    Some(bytes) => bytes,
+                    None => {
+                        eprintln!("[widget-gpu] patch failed, rebuilding widget batches");
+                        rebuild_widget_batches(
+                            &self.device,
+                            layout,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            &mut self.cached_widget_batches,
+                            &mut self.widget_paths,
+                            &mut self.widget_locations,
+                        )
+                    }
+                }
+            } else {
+                eprintln!("[widget-gpu] geometry changed, rebuilding widget batches");
+                rebuild_widget_batches(
+                    &self.device,
                     layout,
                     cell_w,
                     cell_h,
                     vp_w,
                     vp_h,
-                    &mut self.cached_widget_instances,
-                    &mut cursors,
-                ) {
-                    self.cached_widget_instances =
-                        collect_widget_instances_grouped(layout, cell_w, cell_h, vp_w, vp_h);
-                }
-            } else {
-                self.cached_widget_instances =
-                    collect_widget_instances_grouped(layout, cell_w, cell_h, vp_w, vp_h);
-            }
+                    &mut self.cached_widget_batches,
+                    &mut self.widget_paths,
+                    &mut self.widget_locations,
+                )
+            };
 
             self.cached_widget_layout_key = Some(layout_key);
+            self.cached_widget_view_metrics = Some(view_metrics);
+            upload_bytes
         }
     }
 
@@ -1290,28 +1342,165 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     // ── Widget instance collection (grouped by type for per-pipeline draw) ──
 
-    fn collect_widget_instances_grouped(
-        node: &LayoutNode,
+    fn rebuild_widget_batches(
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        layout: &LayoutNode,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
-    ) -> HashMap<String, Vec<WidgetInstance>> {
-        let mut grouped: HashMap<String, Vec<WidgetInstance>> = HashMap::new();
-        collect_instances_recursive(node, cell_w, cell_h, vp_w, vp_h, &mut grouped);
-        grouped
+        batches: &mut HashMap<String, WidgetBatch>,
+        widget_paths: &mut HashMap<u64, Vec<usize>>,
+        widget_locations: &mut HashMap<u64, (String, usize)>,
+    ) -> usize {
+        batches.clear();
+        widget_paths.clear();
+        widget_locations.clear();
+        collect_instances_recursive(
+            layout,
+            &[],
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+            batches,
+            widget_paths,
+            widget_locations,
+        );
+        let total_instances = batches.values().map(|batch| batch.instances.len()).sum::<usize>();
+        eprintln!(
+            "[widget-gpu] rebuilt batches types={} instances={}",
+            batches.len(),
+            total_instances
+        );
+        let mut upload_bytes = 0;
+        for batch in batches.values_mut() {
+            upload_bytes += replace_widget_buffer(device, batch);
+        }
+        upload_bytes
     }
 
     fn collect_instances_recursive(
         node: &LayoutNode,
+        path: &[usize],
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
-        out: &mut HashMap<String, Vec<WidgetInstance>>,
+        out: &mut HashMap<String, WidgetBatch>,
+        widget_paths: &mut HashMap<u64, Vec<usize>>,
+        widget_locations: &mut HashMap<u64, (String, usize)>,
     ) {
+        if let Some(key) = widget_batch_key(node) {
+            let instance = widget_instance_for_node(node, cell_w, cell_h, vp_w, vp_h);
+            let batch = out.entry(key.clone()).or_insert_with(|| WidgetBatch {
+                instances: Vec::new(),
+                buffer: None,
+                slot_by_widget_id: HashMap::new(),
+            });
+            let slot = batch.instances.len();
+            batch.instances.push(instance);
+            batch.slot_by_widget_id.insert(node.widget_id, slot);
+            widget_paths.insert(node.widget_id, path.to_vec());
+            widget_locations.insert(node.widget_id, (key, slot));
+        }
+
+        for (idx, child) in node.children.iter().enumerate() {
+            let mut child_path = path.to_vec();
+            child_path.push(idx);
+            collect_instances_recursive(
+                child,
+                &child_path,
+                cell_w,
+                cell_h,
+                vp_w,
+                vp_h,
+                out,
+                widget_paths,
+                widget_locations,
+            );
+        }
+    }
+
+    fn patch_widget_instances_in_place(
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        layout: &LayoutNode,
+        dirty_widget_ids: &[u64],
+        widget_paths: &HashMap<u64, Vec<usize>>,
+        widget_locations: &HashMap<u64, (String, usize)>,
+        batches: &mut HashMap<String, WidgetBatch>,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Option<usize> {
+        if dirty_widget_ids.is_empty() {
+            eprintln!("[widget-gpu] no dirty widget ids, skipping patch");
+            return Some(0);
+        }
+
+        let mut upload_bytes = 0;
+        for widget_id in dirty_widget_ids {
+            let Some(path) = widget_paths.get(widget_id) else {
+                eprintln!("[widget-gpu] missing path for widget_id={widget_id}");
+                return None;
+            };
+            let Some((batch_key, slot)) = widget_locations.get(widget_id) else {
+                eprintln!("[widget-gpu] missing batch location for widget_id={widget_id}");
+                return None;
+            };
+            let Some(node) = layout_node_at_path(layout, path) else {
+                eprintln!("[widget-gpu] missing layout node for widget_id={widget_id}");
+                return None;
+            };
+            let Some(batch) = batches.get_mut(batch_key) else {
+                eprintln!("[widget-gpu] missing batch {batch_key} for widget_id={widget_id}");
+                return None;
+            };
+            let Some(instance) = batch.instances.get_mut(*slot) else {
+                eprintln!("[widget-gpu] missing slot {} in batch {} for widget_id={widget_id}", slot, batch_key);
+                return None;
+            };
+            *instance = widget_instance_for_node(node, cell_w, cell_h, vp_w, vp_h);
+            eprintln!(
+                "[widget-gpu] patch widget_id={} batch={} slot={} value_t={:.4}",
+                widget_id,
+                batch_key,
+                slot,
+                instance.value_t
+            );
+            upload_bytes += write_widget_instance_to_buffer(device, batch, *slot);
+        }
+
+        Some(upload_bytes)
+    }
+
+    fn widget_batch_key(node: &LayoutNode) -> Option<String> {
+        match node.widget_type.as_str() {
+            "slider" | "hslider" => Some(node.widget_type.clone()),
+            "vslider" => Some("vslider".to_string()),
+            "toggle" => Some("toggle".to_string()),
+            _ => None,
+        }
+    }
+
+    fn widget_instance_for_node(
+        node: &LayoutNode,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> WidgetInstance {
         let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
         let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let ndc_min = [
+            ndc_x(node.rect.col as f32 * cell_w),
+            ndc_y(node.rect.row as f32 * cell_h),
+        ];
+        let ndc_max = [
+            ndc_x((node.rect.col + node.rect.width) as f32 * cell_w),
+            ndc_y((node.rect.row + node.rect.height) as f32 * cell_h),
+        ];
 
         match node.widget_type.as_str() {
             "slider" | "hslider" => {
@@ -1324,23 +1513,15 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 } else {
                     0.0
                 };
-
-                let x0 = ndc_x(node.rect.col as f32 * cell_w);
-                let y0 = ndc_y(node.rect.row as f32 * cell_h);
-                let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
-                let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
-
-                out.entry(node.widget_type.clone())
-                    .or_default()
-                    .push(WidgetInstance {
-                        ndc_min: [x0, y0],
-                        ndc_max: [x1, y1],
-                        value_t: t,
-                        orientation: 0.0,
-                        color_a: [0.0, 0.85, 0.85, 1.0],
-                        color_b: [0.18, 0.18, 0.22, 1.0],
-                        corner_radius: 0.0,
-                    });
+                WidgetInstance {
+                    ndc_min,
+                    ndc_max,
+                    value_t: t,
+                    orientation: 0.0,
+                    color_a: [0.0, 0.85, 0.85, 1.0],
+                    color_b: [0.18, 0.18, 0.22, 1.0],
+                    corner_radius: 0.0,
+                }
             }
             "vslider" => {
                 let value = get_f32_prop(&node.props, "value", 0.0);
@@ -1352,146 +1533,112 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
                 } else {
                     0.0
                 };
-
-                let x0 = ndc_x(node.rect.col as f32 * cell_w);
-                let y0 = ndc_y(node.rect.row as f32 * cell_h);
-                let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
-                let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
-
-                out.entry("vslider".to_string())
-                    .or_default()
-                    .push(WidgetInstance {
-                        ndc_min: [x0, y0],
-                        ndc_max: [x1, y1],
-                        value_t: t,
-                        orientation: 0.0,
-                        color_a: [1.0, 1.00, 1.0, 1.0],
-                        color_b: [0.18, 0.18, 0.22, 1.0],
-                        corner_radius: 0.0,
-                    });
+                WidgetInstance {
+                    ndc_min,
+                    ndc_max,
+                    value_t: t,
+                    orientation: 0.0,
+                    color_a: [1.0, 1.0, 1.0, 1.0],
+                    color_b: [0.18, 0.18, 0.22, 1.0],
+                    corner_radius: 0.0,
+                }
             }
-            "toggle" => {
-                let on = get_bool_prop(&node.props, "value", false);
-
-                let x0 = ndc_x(node.rect.col as f32 * cell_w);
-                let y0 = ndc_y(node.rect.row as f32 * cell_h);
-                let x1 = ndc_x((node.rect.col + node.rect.width) as f32 * cell_w);
-                let y1 = ndc_y((node.rect.row + node.rect.height) as f32 * cell_h);
-
-                out.entry("toggle".to_string())
-                    .or_default()
-                    .push(WidgetInstance {
-                        ndc_min: [x0, y0],
-                        ndc_max: [x1, y1],
-                        value_t: if on { 1.0 } else { 0.0 },
-                        orientation: 0.0,
-                        color_a: [0.2, 0.78, 0.35, 1.0],
-                        color_b: [0.3, 0.3, 0.35, 1.0],
-                        corner_radius: 0.0,
-                    });
-            }
-            // Labels handled via glyph atlas in build_quads; containers recurse
-            _ => {}
-        }
-
-        for child in &node.children {
-            collect_instances_recursive(child, cell_w, cell_h, vp_w, vp_h, out);
+            "toggle" => WidgetInstance {
+                ndc_min,
+                ndc_max,
+                value_t: if get_bool_prop(&node.props, "value", false) {
+                    1.0
+                } else {
+                    0.0
+                },
+                orientation: 0.0,
+                color_a: [0.2, 0.78, 0.35, 1.0],
+                color_b: [0.3, 0.3, 0.35, 1.0],
+                corner_radius: 0.0,
+            },
+            _ => WidgetInstance {
+                ndc_min,
+                ndc_max,
+                value_t: 0.0,
+                orientation: 0.0,
+                color_a: [0.0, 0.0, 0.0, 0.0],
+                color_b: [0.0, 0.0, 0.0, 0.0],
+                corner_radius: 0.0,
+            },
         }
     }
 
-    fn update_widget_instances_in_place(
-        node: &LayoutNode,
-        cell_w: f32,
-        cell_h: f32,
-        vp_w: f32,
-        vp_h: f32,
-        grouped: &mut HashMap<String, Vec<WidgetInstance>>,
-        cursors: &mut HashMap<String, usize>,
-    ) -> bool {
-        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
-        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+    fn replace_widget_buffer(
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        batch: &mut WidgetBatch,
+    ) -> usize {
+        if batch.instances.is_empty() {
+            batch.buffer = None;
+            return 0;
+        }
+        let byte_len = std::mem::size_of_val(batch.instances.as_slice());
+        let buffer = device.newBufferWithLength_options(byte_len, MTLResourceOptions(0));
+        if let Some(buffer) = &buffer {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    batch.instances.as_ptr() as *const u8,
+                    buffer.contents().as_ptr() as *mut u8,
+                    byte_len,
+                );
+            }
+            buffer.didModifyRange(NSRange::from(0..byte_len));
+        }
+        batch.buffer = buffer;
+        byte_len
+    }
 
-        let key = match node.widget_type.as_str() {
-            "slider" | "hslider" => Some(node.widget_type.clone()),
-            "vslider" => Some("vslider".to_string()),
-            "toggle" => Some("toggle".to_string()),
-            _ => None,
+    fn write_widget_instance_to_buffer(
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        batch: &mut WidgetBatch,
+        slot: usize,
+    ) -> usize {
+        if batch.instances.is_empty() {
+            batch.buffer = None;
+            return 0;
+        }
+
+        let total_bytes = batch.instances.len() * std::mem::size_of::<WidgetInstance>();
+        let needs_replace = batch
+            .buffer
+            .as_ref()
+            .is_none_or(|buffer| buffer.length() < total_bytes);
+        if needs_replace {
+            return replace_widget_buffer(device, batch);
+        }
+
+        let Some(buffer) = &batch.buffer else {
+            return 0;
         };
-
-        if let Some(key) = key {
-            let idx = *cursors.get(&key).unwrap_or(&0);
-            let Some(instances) = grouped.get_mut(&key) else {
-                return false;
-            };
-            let Some(instance) = instances.get_mut(idx) else {
-                return false;
-            };
-
-            match node.widget_type.as_str() {
-                "slider" | "hslider" => {
-                    let value = get_f32_prop(&node.props, "value", 0.0);
-                    let min = get_f32_prop(&node.props, "min", 0.0);
-                    let max = get_f32_prop(&node.props, "max", 1.0);
-                    let range = max - min;
-                    instance.value_t = if range > 0.0 {
-                        ((value - min) / range).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    instance.ndc_min = [
-                        ndc_x(node.rect.col as f32 * cell_w),
-                        ndc_y(node.rect.row as f32 * cell_h),
-                    ];
-                    instance.ndc_max = [
-                        ndc_x((node.rect.col + node.rect.width) as f32 * cell_w),
-                        ndc_y((node.rect.row + node.rect.height) as f32 * cell_h),
-                    ];
-                }
-                "vslider" => {
-                    let value = get_f32_prop(&node.props, "value", 0.0);
-                    let min = get_f32_prop(&node.props, "min", 0.0);
-                    let max = get_f32_prop(&node.props, "max", 1.0);
-                    let range = max - min;
-                    instance.value_t = if range > 0.0 {
-                        ((value - min) / range).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    instance.ndc_min = [
-                        ndc_x(node.rect.col as f32 * cell_w),
-                        ndc_y(node.rect.row as f32 * cell_h),
-                    ];
-                    instance.ndc_max = [
-                        ndc_x((node.rect.col + node.rect.width) as f32 * cell_w),
-                        ndc_y((node.rect.row + node.rect.height) as f32 * cell_h),
-                    ];
-                }
-                "toggle" => {
-                    let on = get_bool_prop(&node.props, "value", false);
-                    instance.value_t = if on { 1.0 } else { 0.0 };
-                    instance.ndc_min = [
-                        ndc_x(node.rect.col as f32 * cell_w),
-                        ndc_y(node.rect.row as f32 * cell_h),
-                    ];
-                    instance.ndc_max = [
-                        ndc_x((node.rect.col + node.rect.width) as f32 * cell_w),
-                        ndc_y((node.rect.row + node.rect.height) as f32 * cell_h),
-                    ];
-                }
-                _ => {}
-            }
-
-            cursors.insert(key, idx + 1);
+        let instance_size = std::mem::size_of::<WidgetInstance>();
+        let offset = slot * instance_size;
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                &batch.instances[slot] as *const WidgetInstance as *const u8,
+                (buffer.contents().as_ptr() as *mut u8).add(offset),
+                instance_size,
+            );
         }
+        buffer.didModifyRange(NSRange::from(offset..offset + instance_size));
+        eprintln!(
+            "[widget-gpu] wrote slot={} bytes={}..{}",
+            slot,
+            offset,
+            offset + instance_size
+        );
+        instance_size
+    }
 
-        for child in &node.children {
-            if !update_widget_instances_in_place(
-                child, cell_w, cell_h, vp_w, vp_h, grouped, cursors,
-            ) {
-                return false;
-            }
+    fn layout_node_at_path<'a>(root: &'a LayoutNode, path: &[usize]) -> Option<&'a LayoutNode> {
+        let mut node = root;
+        for idx in path {
+            node = node.children.get(*idx)?;
         }
-        true
+        Some(node)
     }
 
     // Remove unused single-collection function

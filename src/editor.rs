@@ -260,6 +260,10 @@ impl Editor {
         self.runtime.layout_revision()
     }
 
+    pub fn take_dirty_widget_ids(&mut self) -> Vec<u64> {
+        self.runtime.take_dirty_widget_ids()
+    }
+
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
         self.runtime.set_layout_viewport(cols, rows);
     }
@@ -531,7 +535,13 @@ impl Editor {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_mouse_precise = Some((precise_col, precise_row));
-                if self.try_handle_widget_mouse_precise(mouse, content_col, content_row, precise_col, precise_row) {
+                if self.try_handle_widget_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                ) {
                     return;
                 }
                 self.handle_text_click(
@@ -543,7 +553,9 @@ impl Editor {
                 );
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let previous = self.last_mouse_precise.unwrap_or((precise_col, precise_row));
+                let previous = self
+                    .last_mouse_precise
+                    .unwrap_or((precise_col, precise_row));
                 self.try_handle_widget_drag_segment(
                     mouse,
                     content_col,
@@ -1056,9 +1068,10 @@ impl Editor {
         let local_col = precise_col - content_col as f32;
         let local_row = precise_row - content_row as f32;
         let output = {
-            let Some(node) =
-                self.widget_node_at(local_row.floor().max(0.0) as u16, local_col.floor().max(0.0) as u16)
-            else {
+            let Some(node) = self.widget_node_at(
+                local_row.floor().max(0.0) as u16,
+                local_col.floor().max(0.0) as u16,
+            ) else {
                 return false;
             };
 
@@ -1141,13 +1154,8 @@ impl Editor {
             );
             let key = node.as_ref().map(widget_hit_key);
             if key.is_some() && key != last_key {
-                let _ = self.try_handle_widget_mouse_precise(
-                    mouse,
-                    content_col,
-                    content_row,
-                    col,
-                    row,
-                );
+                let _ =
+                    self.try_handle_widget_mouse_precise(mouse, content_col, content_row, col, row);
             }
             last_key = key;
         }
@@ -1266,6 +1274,7 @@ fn fill_widget_hit_cells(
     rows: u16,
     cells: &mut [Option<crate::layout::LayoutNode>],
 ) {
+    println!("rebuilding");
     for child in &node.children {
         fill_widget_hit_cells(child, cols, rows, cells);
     }

@@ -206,6 +206,7 @@ pub fn build_render_frame(
         hasher.finish()
     };
 
+    let dirty_widget_ids = editor.take_dirty_widget_ids();
     let buf = editor.active_buffer();
     RenderFrame {
         lines,
@@ -216,6 +217,7 @@ pub fn build_render_frame(
         completion,
         text_cache_key,
         widget_layout_cache_key: editor.widget_layout_revision(),
+        dirty_widget_ids,
         widget_layout: editor.widget_layout(),
     }
 }
