@@ -141,6 +141,8 @@ pub struct RenderFrame {
     /// Reactive UI widget tree to render. Each backend renders this in its own way:
     /// Ratatui draws characters into the cell buffer; Metal dispatches instanced GPU draw calls.
     pub widget_layout: Option<Arc<LayoutNode>>,
+    /// Currently focused widget ID for highlight rendering.
+    pub focused_widget_id: Option<u64>,
 }
 
 // ── Backend trait ─────────────────────────────────────────────────────────────

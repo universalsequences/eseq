@@ -15,6 +15,7 @@ pub struct Buffer {
     /// Cursor position (row, col), 0-indexed. Col can be 0..=line.len().
     pub cursor: (usize, usize),
     pub dirty: bool,
+    pub read_only: bool,
     /// First visible line index (for scrolling).
     pub scroll_top: usize,
     pub revision: u64,
@@ -30,6 +31,7 @@ impl Buffer {
             lines: vec![String::new()],
             cursor: (0, 0),
             dirty: false,
+            read_only: false,
             scroll_top: 0,
             revision: 0,
         }

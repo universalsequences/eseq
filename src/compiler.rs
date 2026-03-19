@@ -594,13 +594,20 @@ impl Compiler {
             return SymbolResolution::Local(idx);
         }
 
-        if let Some(parent) = self.scopes.iter().rev().nth(1)
-            && let Some(_) = parent
-                .symbols
-                .iter()
-                .position(|s| *s == name)
-                .or_else(|| parent.upvalues.iter().position(|s| *s == name))
-        {
+        // Walk the entire scope chain (from innermost parent outward) looking
+        // for a local or upvalue that matches. This handles multi-level upvalue
+        // capture needed by sequential let desugaring.
+        let found_in_ancestor = self
+            .scopes
+            .iter()
+            .rev()
+            .skip(1) // skip current scope (already checked above)
+            .any(|scope| {
+                scope.symbols.iter().any(|s| *s == name)
+                    || scope.upvalues.iter().any(|s| *s == name)
+            });
+
+        if found_in_ancestor {
             let current = self.get_scope_mut();
             let upvalues_idx = current.upvalues.len();
             current.upvalues.push(name.to_string());
@@ -759,31 +766,46 @@ impl Compiler {
             return Err(CompilerError::InvalidArg);
         };
 
-        let mut args = Vec::with_capacity(bindings.len());
-        let mut values = Vec::with_capacity(bindings.len());
+        // Sequential binding (let*): each binding can reference previous ones.
+        // Desugared into nested single-binding lets:
+        //   (let ((a 1) (b a)) body)
+        //   → ((fn (a) ((fn (b) body) a)) 1)
+        let desugared = self.desugar_let_sequential(bindings, body)?;
+        self.compile_expression(&desugared)
+    }
 
-        for binding in bindings {
-            let Expression::List(pair) = binding else {
-                return Err(CompilerError::InvalidArg);
-            };
-            if pair.len() != 2 {
-                return Err(CompilerError::InvalidArg);
+    fn desugar_let_sequential(
+        &self,
+        bindings: &[Expression],
+        body: &[Expression],
+    ) -> Result<Expression, CompilerError> {
+        if bindings.is_empty() {
+            if body.len() == 1 {
+                return Ok(body[0].clone());
             }
-
-            let Expression::Symbol(name) = &pair[0] else {
-                return Err(CompilerError::InvalidArg);
-            };
-
-            args.push(Expression::Symbol(name.clone()));
-            values.push(pair[1].clone());
+            let mut exprs = vec![Expression::Symbol("do".to_string())];
+            exprs.extend_from_slice(body);
+            return Ok(Expression::List(exprs));
         }
 
-        for value in values {
-            self.compile_expression(&value)?;
+        let Expression::List(pair) = &bindings[0] else {
+            return Err(CompilerError::InvalidArg);
+        };
+        if pair.len() != 2 {
+            return Err(CompilerError::InvalidArg);
         }
-        self.compile_function(None, args, body.to_vec())?;
-        self.emit(OpCode::Call(bindings.len()));
-        Ok(())
+
+        let inner = self.desugar_let_sequential(&bindings[1..], body)?;
+
+        // ((lambda (name) inner) value)
+        Ok(Expression::List(vec![
+            Expression::List(vec![
+                Expression::Symbol("lambda".to_string()),
+                Expression::List(vec![pair[0].clone()]),
+                inner,
+            ]),
+            pair[1].clone(),
+        ]))
     }
 
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {

@@ -50,6 +50,20 @@ struct SavePrompt {
 }
 
 #[derive(Debug, Clone)]
+enum MinibufferMode {
+    Mx {
+        input: String,
+        candidates: Vec<String>,
+        selected: usize,
+    },
+    SwitchBuffer {
+        input: String,
+        candidates: Vec<String>,
+        selected: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub struct CompletionState {
     pub start_col: usize,
     pub items: Vec<CompletionItem>,
@@ -87,6 +101,14 @@ pub struct Mark {
     pub cursor: (usize, usize),
 }
 
+#[derive(Debug, Clone)]
+pub struct MajorMode {
+    pub name: String,
+    pub read_only: bool,
+    pub keybindings: HashMap<String, String>,
+    pub on_enter: Option<String>,
+}
+
 pub struct Editor {
     pub buffers: Vec<Buffer>,
     pub active: usize,
@@ -108,6 +130,9 @@ pub struct Editor {
     eval_flash: Option<SExpFlash>,
     mark: Option<Mark>,
     kill_ring: Vec<String>,
+    minibuffer_input: Option<MinibufferMode>,
+    mode_registry: HashMap<String, MajorMode>,
+    focused_widget_id: Option<u64>,
 }
 
 impl Editor {
@@ -134,6 +159,9 @@ impl Editor {
             eval_flash: None,
             mark: None,
             kill_ring: vec![],
+            minibuffer_input: None,
+            mode_registry: HashMap::new(),
+            focused_widget_id: None,
         };
         editor.bind_defaults();
         editor.load_init(config.init_source.as_deref());
@@ -177,7 +205,7 @@ impl Editor {
         let buffer = self.active_buffer();
         let buffer_id = buffer.id;
         let buffer_revision = buffer.revision;
-        let buffer_mode = buffer.mode;
+        let buffer_mode = buffer.mode.clone();
         let runtime_symbol_revision = self.runtime.symbol_revision();
 
         let is_fresh = self.highlight_cache.as_ref().is_some_and(|cache| {
@@ -193,7 +221,7 @@ impl Editor {
             let spans = buffer
                 .lines
                 .iter()
-                .map(|line| highlight_line(buffer.mode, line, &symbols, buffer))
+                .map(|line| highlight_line(&buffer.mode, line, &symbols, buffer))
                 .collect();
             self.highlight_cache = Some(HighlightCache {
                 buffer_id,
@@ -250,6 +278,10 @@ impl Editor {
 
     pub fn active_buffer_mut(&mut self) -> &mut Buffer {
         &mut self.buffers[self.active]
+    }
+
+    pub fn focused_widget_id(&self) -> Option<u64> {
+        self.focused_widget_id
     }
 
     pub fn widget_layout(&self) -> Option<Arc<crate::layout::LayoutNode>> {
@@ -455,6 +487,10 @@ impl Editor {
             return;
         }
 
+        if self.handle_minibuffer_key(key) {
+            return;
+        }
+
         if self.handle_completion_key(key) {
             return;
         }
@@ -472,6 +508,23 @@ impl Editor {
             return;
         }
 
+        if self.handle_focus_key(key) {
+            return;
+        }
+
+        // Check mode-specific keybindings
+        if let BufferMode::Named(ref mode_name) = self.active_buffer().mode {
+            if let Some(handler) = self
+                .mode_registry
+                .get(mode_name)
+                .and_then(|mode| mode.keybindings.get(&key_str(key)))
+                .cloned()
+            {
+                self.call_lisp_handler(&handler);
+                return;
+            }
+        }
+
         if let Some(cmd) = self.builtins.get(&key).cloned() {
             self.run_command(&cmd);
             return;
@@ -486,6 +539,9 @@ impl Editor {
             KeyCode::Char(c)
                 if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
             {
+                if self.guard_read_only() {
+                    return;
+                }
                 self.minibuffer = None;
                 self.clear_mark();
                 self.active_buffer_mut().insert_char(c);
@@ -493,6 +549,9 @@ impl Editor {
                 self.refresh_completion();
             }
             KeyCode::Enter => {
+                if self.guard_read_only() {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.clear_mark();
@@ -603,6 +662,11 @@ impl Editor {
             (KeyCode::Up, KeyModifiers::NONE, "move-up"),
             (KeyCode::Down, KeyModifiers::NONE, "move-down"),
             (KeyCode::Backspace, KeyModifiers::NONE, "delete-char-before"),
+            (
+                KeyCode::Char('x'),
+                KeyModifiers::ALT,
+                "execute-extended-command",
+            ),
         ];
         for (code, mods, cmd) in binds {
             self.builtins
@@ -690,12 +754,18 @@ impl Editor {
                 self.active_buffer_mut().move_word_right();
             }
             "delete-char-before" => {
+                if self.guard_read_only() {
+                    return;
+                }
                 self.minibuffer = None;
                 self.clear_mark();
                 self.active_buffer_mut().delete_char_before();
                 self.refresh_completion();
             }
             "kill-region-or-word" => {
+                if self.guard_read_only() {
+                    return;
+                }
                 self.minibuffer = None;
                 if !self.kill_active_region() {
                     self.active_buffer_mut().delete_word_before();
@@ -712,6 +782,9 @@ impl Editor {
                 }
             }
             "yank" => {
+                if self.guard_read_only() {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.clear_mark();
@@ -722,6 +795,9 @@ impl Editor {
                 }
             }
             "delete-to-line-end" => {
+                if self.guard_read_only() {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.clear_mark();
@@ -745,6 +821,27 @@ impl Editor {
                     self.active_buffer_mut().indent_current_line();
                     self.sync_runtime_context();
                 }
+            }
+            "execute-extended-command" => {
+                self.completion = None;
+                self.minibuffer = None;
+                let candidates = self.collect_mx_candidates();
+                self.minibuffer_input = Some(MinibufferMode::Mx {
+                    input: String::new(),
+                    candidates,
+                    selected: 0,
+                });
+            }
+            "switch-to-buffer" => {
+                self.completion = None;
+                self.minibuffer = None;
+                let candidates: Vec<String> =
+                    self.buffers.iter().map(|b| b.name.clone()).collect();
+                self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
+                    input: String::new(),
+                    candidates,
+                    selected: 0,
+                });
             }
             _ => {}
         }
@@ -819,7 +916,7 @@ impl Editor {
             .path
             .clone()
             .ok_or_else(|| EditorError::Message("buffer is not file-backed".to_string()))?;
-        let mode = active.mode;
+        let mode = active.mode.clone();
         let buffer = self.active_buffer_mut();
         let text = std::fs::read_to_string(&path)?;
         buffer.set_text(&text);
@@ -831,12 +928,22 @@ impl Editor {
 
     fn sync_runtime_context(&mut self) {
         let active = self.active_buffer();
+        let buffer_names: Vec<String> = self.buffers.iter().map(|b| b.name.clone()).collect();
         let mut shared = self.runtime.shared.borrow_mut();
         shared.current_buffer_id = Some(active.id);
         shared.current_buffer_name = active.name.clone();
         shared.current_buffer_path = active.path.clone();
         shared.current_buffer_text = active.text();
         shared.current_sexp = sexp_at_cursor(&active.lines, active.cursor);
+        shared.current_buffer_read_only = active.read_only;
+        shared.current_buffer_mode = active.mode.name().to_string();
+        shared.current_line_number = active.cursor.0 + 1;
+        shared.current_line_text = active
+            .lines
+            .get(active.cursor.0)
+            .cloned()
+            .unwrap_or_default();
+        shared.buffer_names = buffer_names;
     }
 
     fn handle_completion_key(&mut self, key: KeyEvent) -> bool {
@@ -904,7 +1011,7 @@ impl Editor {
             .and_then(|state| state.items.get(state.selected))
             .map(|item| item.label.clone());
         self.completion = completion_match(
-            self.active_buffer().mode,
+            &self.active_buffer().mode,
             self.active_buffer(),
             &symbols,
             &metadata,
@@ -1031,8 +1138,409 @@ impl Editor {
         true
     }
 
+    fn has_focusable_widgets(&self) -> bool {
+        self.runtime
+            .current_layout
+            .as_ref()
+            .map(|layout| has_focusable_node(layout))
+            .unwrap_or(false)
+    }
+
+    fn handle_focus_key(&mut self, key: KeyEvent) -> bool {
+        if !self.active_buffer().read_only || !self.has_focusable_widgets() {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right => {
+                self.navigate_focus(key.code);
+                true
+            }
+            KeyCode::Enter => {
+                self.activate_focused();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn navigate_focus(&mut self, direction: KeyCode) {
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return;
+        };
+        let mut focusable_nodes: Vec<(u64, u16, u16)> = Vec::new();
+        collect_focusable_nodes(&layout, &mut focusable_nodes);
+        if focusable_nodes.is_empty() {
+            return;
+        }
+
+        // Auto-focus first widget if nothing is focused
+        if self.focused_widget_id.is_none() {
+            self.focused_widget_id = Some(focusable_nodes[0].0);
+            self.mark_needs_redraw();
+            return;
+        }
+
+        let current_id = self.focused_widget_id.unwrap();
+        let current_idx = focusable_nodes
+            .iter()
+            .position(|(id, _, _)| *id == current_id)
+            .unwrap_or(0);
+
+        let next_idx = match direction {
+            KeyCode::Down | KeyCode::Right => {
+                if current_idx + 1 < focusable_nodes.len() {
+                    current_idx + 1
+                } else {
+                    0
+                }
+            }
+            KeyCode::Up | KeyCode::Left => {
+                if current_idx > 0 {
+                    current_idx - 1
+                } else {
+                    focusable_nodes.len() - 1
+                }
+            }
+            _ => current_idx,
+        };
+
+        self.focused_widget_id = Some(focusable_nodes[next_idx].0);
+        self.mark_needs_redraw();
+    }
+
+    fn activate_focused(&mut self) {
+        let Some(focused_id) = self.focused_widget_id else {
+            return;
+        };
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return;
+        };
+        let Some(node) = find_node_by_id(&layout, focused_id) else {
+            return;
+        };
+        // Look for :on-enter callback in props
+        if let Some(callback) = node.props.get("on-enter").cloned() {
+            let result = self.runtime.invoke(callback, vec![]);
+            if let Some(status) = self.runtime.take_status_message() {
+                self.minibuffer = Some(status);
+            } else if let Err(error) = result {
+                self.minibuffer = Some(format!("Error: {error:?}"));
+            }
+            self.refresh_runtime_side_effects();
+            self.sync_runtime_context();
+            self.mark_needs_redraw();
+        }
+    }
+
+    fn auto_focus_first_widget(&mut self) {
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return;
+        };
+        let mut focusable_nodes: Vec<(u64, u16, u16)> = Vec::new();
+        collect_focusable_nodes(&layout, &mut focusable_nodes);
+        if let Some((id, _, _)) = focusable_nodes.first() {
+            self.focused_widget_id = Some(*id);
+        }
+    }
+
+    fn guard_read_only(&mut self) -> bool {
+        if self.active_buffer().read_only {
+            self.minibuffer = Some("Buffer is read-only".to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    fn handle_minibuffer_key(&mut self, key: KeyEvent) -> bool {
+        let Some(mode) = self.minibuffer_input.take() else {
+            return false;
+        };
+
+        match mode {
+            MinibufferMode::Mx {
+                mut input,
+                candidates,
+                mut selected,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.minibuffer = None;
+                }
+                KeyCode::Enter => {
+                    let filtered = filter_candidates(&candidates, &input);
+                    let name = if let Some(sel) = filtered.get(selected) {
+                        sel.clone()
+                    } else {
+                        input.clone()
+                    };
+                    if !name.is_empty() {
+                        self.execute_mx_command(&name);
+                    }
+                    return true;
+                }
+                KeyCode::Tab => {
+                    let filtered = filter_candidates(&candidates, &input);
+                    if !filtered.is_empty() {
+                        selected = (selected + 1) % filtered.len();
+                    }
+                    self.minibuffer_input = Some(MinibufferMode::Mx {
+                        input,
+                        candidates,
+                        selected,
+                    });
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    selected = 0;
+                    self.minibuffer_input = Some(MinibufferMode::Mx {
+                        input,
+                        candidates,
+                        selected,
+                    });
+                }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    input.push(c);
+                    selected = 0;
+                    self.minibuffer_input = Some(MinibufferMode::Mx {
+                        input,
+                        candidates,
+                        selected,
+                    });
+                }
+                _ => {
+                    self.minibuffer_input = Some(MinibufferMode::Mx {
+                        input,
+                        candidates,
+                        selected,
+                    });
+                }
+            },
+            MinibufferMode::SwitchBuffer {
+                mut input,
+                candidates,
+                mut selected,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.minibuffer = None;
+                }
+                KeyCode::Enter => {
+                    let filtered = filter_candidates(&candidates, &input);
+                    let name = if let Some(sel) = filtered.get(selected) {
+                        sel.clone()
+                    } else {
+                        input.clone()
+                    };
+                    if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                        self.active = idx;
+                        self.mark_needs_redraw();
+                        self.sync_runtime_context();
+                        self.completion = None;
+                        self.clear_mark();
+                        self.minibuffer = Some(format!("Switched to {name}"));
+                    } else {
+                        self.minibuffer = Some(format!("No buffer named '{name}'"));
+                    }
+                    return true;
+                }
+                KeyCode::Tab => {
+                    let filtered = filter_candidates(&candidates, &input);
+                    if !filtered.is_empty() {
+                        selected = (selected + 1) % filtered.len();
+                    }
+                    self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
+                        input,
+                        candidates,
+                        selected,
+                    });
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    selected = 0;
+                    self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
+                        input,
+                        candidates,
+                        selected,
+                    });
+                }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    input.push(c);
+                    selected = 0;
+                    self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
+                        input,
+                        candidates,
+                        selected,
+                    });
+                }
+                _ => {
+                    self.minibuffer_input = Some(MinibufferMode::SwitchBuffer {
+                        input,
+                        candidates,
+                        selected,
+                    });
+                }
+            },
+        }
+        self.mark_needs_redraw();
+        true
+    }
+
+    fn execute_mx_command(&mut self, name: &str) {
+        // Check if it's a command that opens its own minibuffer
+        if name == "switch-to-buffer" {
+            self.run_command("switch-to-buffer");
+            return;
+        }
+        // First try as a builtin command name
+        let builtin_names: Vec<String> = self.builtins.values().cloned().collect();
+        if builtin_names.contains(&name.to_string()) {
+            self.run_command(name);
+            return;
+        }
+        // Then try as a Lisp function
+        self.call_lisp_handler(name);
+    }
+
+    fn collect_mx_candidates(&mut self) -> Vec<String> {
+        let mut names: Vec<String> = self.builtins.values().cloned().collect();
+        let symbols = self.runtime.completion_symbols();
+        names.extend(symbols);
+        // Also include lisp binding handler names
+        names.extend(self.lisp_bindings.values().cloned());
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub fn minibuffer_prompt(&self) -> Option<String> {
+        match &self.minibuffer_input {
+            Some(MinibufferMode::Mx {
+                input,
+                candidates,
+                selected,
+            }) => {
+                let filtered = filter_candidates(candidates, input);
+                let hint = filtered.get(*selected).map(|s| s.as_str()).unwrap_or("");
+                if hint.is_empty() || input.is_empty() {
+                    Some(format!("M-x {input}"))
+                } else {
+                    Some(format!("M-x {input}  [{hint}]"))
+                }
+            }
+            Some(MinibufferMode::SwitchBuffer {
+                input,
+                candidates,
+                selected,
+            }) => {
+                let filtered = filter_candidates(candidates, input);
+                let hint = filtered.get(*selected).map(|s| s.as_str()).unwrap_or("");
+                if hint.is_empty() || input.is_empty() {
+                    Some(format!("Switch to buffer: {input}"))
+                } else {
+                    Some(format!("Switch to buffer: {input}  [{hint}]"))
+                }
+            }
+            None => None,
+        }
+    }
+
     fn refresh_runtime_side_effects(&mut self) {
         self.lisp_bindings = self.runtime.lisp_bindings();
+
+        if let Some(read_only) = self.runtime.take_pending_set_read_only() {
+            self.active_buffer_mut().read_only = read_only;
+        }
+
+        // Process mode definitions
+        for (name, read_only, on_enter) in self.runtime.take_pending_mode_defs() {
+            self.mode_registry.insert(
+                name.clone(),
+                MajorMode {
+                    name,
+                    read_only,
+                    keybindings: HashMap::new(),
+                    on_enter,
+                },
+            );
+        }
+
+        // Process mode keybindings
+        for (mode_name, key, handler) in self.runtime.take_pending_mode_bindings() {
+            if let Some(mode) = self.mode_registry.get_mut(&mode_name) {
+                mode.keybindings.insert(key, handler);
+            }
+        }
+
+        // Process buffer operations first (create/switch must happen before set-mode)
+        if let Some(path) = self.runtime.take_pending_open_file() {
+            match self.open_file_buffer(&path) {
+                Ok(_) => self.minibuffer = Some(format!("Opened {path}")),
+                Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
+            }
+        }
+
+        if let Some(name) = self.runtime.take_pending_create_buffer() {
+            self.open_scratch_buffer(&name, "");
+        }
+
+        if let Some(name) = self.runtime.take_pending_switch_buffer() {
+            if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                self.active = idx;
+                self.mark_needs_redraw();
+                self.sync_runtime_context();
+                self.completion = None;
+                self.clear_mark();
+            }
+        }
+
+        // Process set-buffer-mode (after buffer creation so it targets the new buffer)
+        if let Some(mode_name) = self.runtime.take_pending_set_mode() {
+            let mode_def = self.mode_registry.get(&mode_name).cloned();
+            let buffer = self.active_buffer_mut();
+            buffer.mode = BufferMode::Named(mode_name.clone());
+            if let Some(mode_def) = &mode_def {
+                buffer.read_only = mode_def.read_only;
+            }
+            // Call on_enter hook
+            if let Some(on_enter) = mode_def.as_ref().and_then(|m| m.on_enter.clone()) {
+                self.sync_runtime_context();
+                let code = format!("({on_enter})");
+                let _ = self.runtime.eval_str(&code);
+                if let Some(status) = self.runtime.take_status_message() {
+                    self.minibuffer = Some(status);
+                }
+            }
+            // Auto-focus first focusable widget if mode has them
+            self.auto_focus_first_widget();
+        }
+
+        if let Some(text) = self.runtime.take_pending_set_text() {
+            self.active_buffer_mut().set_text(&text);
+        }
+
+        if let Some(lines) = self.runtime.take_pending_set_lines() {
+            let buffer = self.active_buffer_mut();
+            buffer.lines = if lines.is_empty() {
+                vec![String::new()]
+            } else {
+                lines
+            };
+            buffer.cursor = (0, 0);
+            buffer.scroll_top = 0;
+            buffer.revision = buffer.revision.wrapping_add(1);
+        }
+
+        if let Some(line) = self.runtime.take_pending_goto_line() {
+            let buffer = self.active_buffer_mut();
+            let row = line.saturating_sub(1).min(buffer.lines.len().saturating_sub(1));
+            buffer.cursor = (row, 0);
+        }
 
         if let Some(path) = self.runtime.take_pending_save_as() {
             match self.active_buffer_mut().save_as(path) {
@@ -1290,6 +1798,52 @@ impl Editor {
     }
 }
 
+fn has_focusable_node(node: &crate::layout::LayoutNode) -> bool {
+    if node.focusable {
+        return true;
+    }
+    node.children.iter().any(has_focusable_node)
+}
+
+fn collect_focusable_nodes(
+    node: &crate::layout::LayoutNode,
+    result: &mut Vec<(u64, u16, u16)>,
+) {
+    if node.focusable {
+        result.push((node.widget_id, node.rect.row, node.rect.col));
+    }
+    for child in &node.children {
+        collect_focusable_nodes(child, result);
+    }
+}
+
+fn find_node_by_id(
+    node: &crate::layout::LayoutNode,
+    id: u64,
+) -> Option<crate::layout::LayoutNode> {
+    if node.widget_id == id {
+        return Some(node.clone());
+    }
+    for child in &node.children {
+        if let Some(found) = find_node_by_id(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn filter_candidates(candidates: &[String], input: &str) -> Vec<String> {
+    if input.is_empty() {
+        return candidates.to_vec();
+    }
+    let input_lower = input.to_ascii_lowercase();
+    candidates
+        .iter()
+        .filter(|c| c.to_ascii_lowercase().contains(&input_lower))
+        .cloned()
+        .collect()
+}
+
 fn normalize_region(
     start: (usize, usize),
     end: (usize, usize),
@@ -1524,6 +2078,413 @@ fn register_editor_natives(runtime: &mut Runtime) {
         "(eval-buffer)",
         "Return the whole buffer as source for evaluation.",
         |_args, ctx| Ok(Value::String(ctx.current_buffer_text())),
+    );
+
+    runtime.register_native_with_docs(
+        "set-read-only",
+        "(set-read-only bool)",
+        "Set the current buffer's read-only state.",
+        |args, ctx| {
+            let read_only = match args.first() {
+                Some(Value::Bool(b)) => *b,
+                Some(Value::Nil) => false,
+                _ => true,
+            };
+            ctx.set_read_only(read_only);
+            Ok(Value::Bool(read_only))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "toggle-read-only",
+        "(toggle-read-only)",
+        "Toggle the current buffer's read-only state.",
+        |_args, ctx| {
+            let new_val = !ctx.current_buffer_read_only();
+            ctx.set_read_only(new_val);
+            Ok(Value::Bool(new_val))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "buffer-read-only?",
+        "(buffer-read-only?)",
+        "Return whether the current buffer is read-only.",
+        |_args, ctx| Ok(Value::Bool(ctx.current_buffer_read_only())),
+    );
+
+    runtime.register_native_with_docs(
+        "define-mode",
+        "(define-mode name :read-only bool :on-enter fn-name)",
+        "Register a named major mode.",
+        |args, ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("define-mode expects a name string".to_string());
+            };
+            let mut read_only = false;
+            let mut on_enter: Option<String> = None;
+            let mut i = 1;
+            while i < args.len() {
+                match args.get(i) {
+                    Some(Value::Keyword(k)) if k == "read-only" => {
+                        read_only = matches!(args.get(i + 1), Some(Value::Bool(true)));
+                        i += 2;
+                    }
+                    Some(Value::Keyword(k)) if k == "on-enter" => {
+                        if let Some(Value::String(fn_name)) = args.get(i + 1) {
+                            on_enter = Some(fn_name.clone());
+                        }
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            ctx.define_mode(name.clone(), read_only, on_enter);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "mode-bind-key",
+        "(mode-bind-key mode-name key handler)",
+        "Add a keybinding to a registered mode.",
+        |args, ctx| {
+            let (Some(Value::String(mode)), Some(Value::String(key)), Some(Value::String(handler))) =
+                (args.first(), args.get(1), args.get(2))
+            else {
+                return Err("mode-bind-key expects (string string string)".to_string());
+            };
+            ctx.mode_bind_key(mode.clone(), key.clone(), handler.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "set-buffer-mode",
+        "(set-buffer-mode name)",
+        "Activate a named mode on the current buffer.",
+        |args, ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("set-buffer-mode expects a name string".to_string());
+            };
+            ctx.set_buffer_mode(name.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "current-buffer-mode",
+        "(current-buffer-mode)",
+        "Return the current buffer's mode name.",
+        |_args, ctx| Ok(Value::String(ctx.current_buffer_mode())),
+    );
+
+    runtime.register_native_with_docs(
+        "create-buffer",
+        "(create-buffer name)",
+        "Create a new scratch buffer and switch to it.",
+        |args, ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("create-buffer expects a name string".to_string());
+            };
+            ctx.create_buffer(name.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "switch-to-buffer",
+        "(switch-to-buffer name)",
+        "Switch to a buffer by name.",
+        |args, ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("switch-to-buffer expects a name string".to_string());
+            };
+            ctx.switch_to_buffer(name.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "buffer-list",
+        "(buffer-list)",
+        "Return a list of buffer name strings.",
+        |_args, ctx| {
+            let names = ctx.buffer_names();
+            Ok(Value::List(
+                names
+                    .into_iter()
+                    .map(|n| Rc::new(std::cell::RefCell::new(Value::String(n))))
+                    .collect(),
+            ))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "set-buffer-text",
+        "(set-buffer-text text)",
+        "Replace the active buffer's contents.",
+        |args, ctx| {
+            let Some(Value::String(text)) = args.first() else {
+                return Err("set-buffer-text expects a string".to_string());
+            };
+            ctx.set_buffer_text(text.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "set-buffer-lines",
+        "(set-buffer-lines lines)",
+        "Set the buffer contents from a list of line strings.",
+        |args, ctx| {
+            let Some(Value::List(items)) = args.first() else {
+                return Err("set-buffer-lines expects a list".to_string());
+            };
+            let lines: Vec<String> = items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::String(s) => s.clone(),
+                    other => format_lisp_value(other),
+                })
+                .collect();
+            ctx.set_buffer_lines(lines);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "goto-line",
+        "(goto-line n)",
+        "Move cursor to line n (1-indexed).",
+        |args, ctx| {
+            let Some(Value::Number(n)) = args.first() else {
+                return Err("goto-line expects a number".to_string());
+            };
+            ctx.goto_line(*n as usize);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "current-line-number",
+        "(current-line-number)",
+        "Return the current cursor line number (1-indexed).",
+        |_args, ctx| Ok(Value::Number(ctx.current_line_number() as f64)),
+    );
+
+    runtime.register_native_with_docs(
+        "current-line-text",
+        "(current-line-text)",
+        "Return the text of the current line.",
+        |_args, ctx| Ok(Value::String(ctx.current_line_text())),
+    );
+
+    // ── Filesystem utilities ─────────────────────────────────────────────────
+
+    runtime.register_native_with_docs(
+        "list-directory",
+        "(list-directory path)",
+        "List directory entries as maps with :name, :directory, and :size keys.",
+        |args, _ctx| {
+            let Some(Value::String(path)) = args.first() else {
+                return Err("list-directory expects a path string".to_string());
+            };
+            let entries = std::fs::read_dir(path)
+                .map_err(|e| format!("list-directory: {e}"))?;
+            let mut result = Vec::new();
+            for entry in entries {
+                let entry = entry.map_err(|e| format!("list-directory: {e}"))?;
+                let metadata = entry.metadata().map_err(|e| format!("list-directory: {e}"))?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = metadata.is_dir();
+                let size = metadata.len();
+                let mut map = HashMap::new();
+                map.insert(
+                    "name".to_string(),
+                    Rc::new(std::cell::RefCell::new(Value::String(name))),
+                );
+                map.insert(
+                    "directory".to_string(),
+                    Rc::new(std::cell::RefCell::new(Value::Bool(is_dir))),
+                );
+                map.insert(
+                    "size".to_string(),
+                    Rc::new(std::cell::RefCell::new(Value::Number(size as f64))),
+                );
+                result.push(Rc::new(std::cell::RefCell::new(Value::Map(map))));
+            }
+            Ok(Value::List(result))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "current-directory",
+        "(current-directory)",
+        "Return the current working directory as a string.",
+        |_args, _ctx| {
+            let cwd = std::env::current_dir()
+                .map_err(|e| format!("current-directory: {e}"))?;
+            Ok(Value::String(cwd.display().to_string()))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "path-join",
+        "(path-join a b)",
+        "Join two path components.",
+        |args, _ctx| {
+            let (Some(Value::String(a)), Some(Value::String(b))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("path-join expects two strings".to_string());
+            };
+            let result = PathBuf::from(a).join(b);
+            Ok(Value::String(result.display().to_string()))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "path-parent",
+        "(path-parent path)",
+        "Return the parent directory of a path, or nil.",
+        |args, _ctx| {
+            let Some(Value::String(path)) = args.first() else {
+                return Err("path-parent expects a string".to_string());
+            };
+            Ok(match PathBuf::from(path).parent() {
+                Some(parent) => Value::String(parent.display().to_string()),
+                None => Value::Nil,
+            })
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "path-filename",
+        "(path-filename path)",
+        "Return the filename component of a path, or nil.",
+        |args, _ctx| {
+            let Some(Value::String(path)) = args.first() else {
+                return Err("path-filename expects a string".to_string());
+            };
+            Ok(match PathBuf::from(path).file_name() {
+                Some(name) => Value::String(name.to_string_lossy().to_string()),
+                None => Value::Nil,
+            })
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "file-exists?",
+        "(file-exists? path)",
+        "Return true if a file or directory exists at path.",
+        |args, _ctx| {
+            let Some(Value::String(path)) = args.first() else {
+                return Err("file-exists? expects a string".to_string());
+            };
+            Ok(Value::Bool(Path::new(path).exists()))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "directory?",
+        "(directory? path)",
+        "Return true if path is a directory.",
+        |args, _ctx| {
+            let Some(Value::String(path)) = args.first() else {
+                return Err("directory? expects a string".to_string());
+            };
+            Ok(Value::Bool(Path::new(path).is_dir()))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "read-file-to-string",
+        "(read-file-to-string path)",
+        "Read a file's contents as a string.",
+        |args, _ctx| {
+            let Some(Value::String(path)) = args.first() else {
+                return Err("read-file-to-string expects a string".to_string());
+            };
+            let contents = std::fs::read_to_string(path)
+                .map_err(|e| format!("read-file-to-string: {e}"))?;
+            Ok(Value::String(contents))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "open-file",
+        "(open-file path)",
+        "Open a file into a new file-backed buffer and switch to it.",
+        |args, ctx| {
+            let Some(Value::String(path)) = args.first() else {
+                return Err("open-file expects a path string".to_string());
+            };
+            ctx.open_file(path.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    // ── String utilities ─────────────────────────────────────────────────────
+
+    runtime.register_native_with_docs(
+        "substring",
+        "(substring s start [end])",
+        "Extract a substring by character index.",
+        |args, _ctx| {
+            let Some(Value::String(s)) = args.first() else {
+                return Err("substring expects a string".to_string());
+            };
+            let Some(Value::Number(start)) = args.get(1) else {
+                return Err("substring expects a start index".to_string());
+            };
+            let start = (*start as usize).min(s.len());
+            let end = match args.get(2) {
+                Some(Value::Number(e)) => (*e as usize).min(s.len()),
+                _ => s.len(),
+            };
+            Ok(Value::String(s.get(start..end).unwrap_or("").to_string()))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "string-starts-with?",
+        "(string-starts-with? s prefix)",
+        "Return true if string starts with prefix.",
+        |args, _ctx| {
+            let (Some(Value::String(s)), Some(Value::String(prefix))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("string-starts-with? expects two strings".to_string());
+            };
+            Ok(Value::Bool(s.starts_with(prefix.as_str())))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "string-ends-with?",
+        "(string-ends-with? s suffix)",
+        "Return true if string ends with suffix.",
+        |args, _ctx| {
+            let (Some(Value::String(s)), Some(Value::String(suffix))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("string-ends-with? expects two strings".to_string());
+            };
+            Ok(Value::Bool(s.ends_with(suffix.as_str())))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "string-trim",
+        "(string-trim s)",
+        "Remove leading and trailing whitespace.",
+        |args, _ctx| {
+            let Some(Value::String(s)) = args.first() else {
+                return Err("string-trim expects a string".to_string());
+            };
+            Ok(Value::String(s.trim().to_string()))
+        },
     );
 }
 
@@ -2431,5 +3392,43 @@ mod tests {
         assert!(result.is_ok(), "effect re-eval failed: {result:?}");
         let layout = editor.runtime.current_layout.as_ref().expect("layout");
         assert_eq!(layout.children.len(), 9);
+    }
+
+    #[test]
+    fn dired_mode_loads_and_refreshes() {
+        let init = std::fs::read_to_string("init.lisp").unwrap_or_default();
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                init_source: Some(init),
+            },
+        );
+
+        // Call dired-here and verify full state
+        editor.call_lisp_handler("dired-here");
+
+        assert_eq!(editor.active_buffer().name, "*dired*");
+        assert!(
+            editor.active_buffer().read_only,
+            "dired buffer should be read-only, mode={:?}",
+            editor.active_buffer().mode
+        );
+        assert!(
+            matches!(editor.active_buffer().mode, BufferMode::Named(ref n) if n == "dired-mode"),
+            "mode should be dired-mode, got {:?}",
+            editor.active_buffer().mode
+        );
+        assert!(editor.active_buffer().lines.len() > 2, "should list files");
+
+        // Press Enter on line 3 (first entry) — should open dir or file
+        editor.active_buffer_mut().cursor = (2, 0);
+        editor.sync_runtime_context();
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let msg = editor.minibuffer.clone().unwrap_or_default();
+        assert!(
+            !msg.contains("Error"),
+            "Enter on first entry failed: {msg}"
+        );
     }
 }

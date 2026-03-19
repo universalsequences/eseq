@@ -503,7 +503,10 @@ pub fn register_core_natives(vm: &mut VM) {
     vm.register_native("str", |args| {
         let mut s = String::new();
         for v in &args {
-            s.push_str(&format_lisp_value(v));
+            match v {
+                Value::String(val) => s.push_str(val),
+                other => s.push_str(&format_lisp_value(other)),
+            }
         }
         Value::String(s)
     });
@@ -1274,7 +1277,7 @@ impl VM {
                             (Value::Bool(a), Value::Bool(b)) => result = a == b,
                             (Value::Nil, Value::Nil) => result = true,
                             (Value::String(a), Value::String(b)) => result = a == b,
-                            _ => return Err(VMError::IncorrectType),
+                            _ => result = false,
                         }
                     }
                     stack.push(Rc::new(RefCell::new(Value::Bool(result))));

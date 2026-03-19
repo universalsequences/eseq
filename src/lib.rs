@@ -356,6 +356,113 @@ mod tests {
     }
 
     #[test]
+    fn test_let_sequential_binding() {
+        // Each binding can reference previous ones
+        assert_eq!(
+            run_prog("(let ((a 10) (b (+ a 5))) b)"),
+            Ok(Some(Value::Number(15.0)))
+        );
+    }
+
+    #[test]
+    fn test_let_sequential_three_bindings() {
+        assert_eq!(
+            run_prog("(let ((a 2) (b (* a 3)) (c (+ a b))) c)"),
+            Ok(Some(Value::Number(8.0)))
+        );
+    }
+
+    #[test]
+    fn test_dired_refresh_pattern() {
+        // Reproduce the exact dired-refresh let nesting with separate eval calls
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                "(def my-filter (fn xs)
+                   (if (= (len xs) 0) '()
+                     (if (fn (first xs))
+                       (cons (first xs) (my-filter fn (rest xs)))
+                       (my-filter fn (rest xs)))))",
+            )
+            .unwrap();
+        runtime
+            .eval_str(
+                "(def my-map (fn xs)
+                   (if (= (len xs) 0) '()
+                     (cons (fn (first xs)) (my-map fn (rest xs)))))",
+            )
+            .unwrap();
+        // Simulate dired-refresh: set! global between two lets, use outer vars in inner let
+        runtime.eval_str("(def my-global '())").unwrap();
+        runtime.eval_str("(def my-format (x) (str \"item-\" x))").unwrap();
+        let result = runtime.eval_str(
+            "(def test-it ()
+               (let ((entries (list 1 2 3 4 5))
+                     (dirs (my-filter |x| (> x 3) entries))
+                     (files (my-filter |x| (not (> x 3)) entries)))
+                 (set! my-global (append dirs files))
+                 (let ((dir-lines (my-map my-format dirs))
+                       (file-lines (my-map my-format files)))
+                   (append dir-lines file-lines))))
+             (test-it)",
+        );
+        assert!(result.is_ok(), "dired pattern failed: {result:?}");
+    }
+
+    #[test]
+    fn test_let_deep_upvalue_chain() {
+        // Outer let var used deep inside inner let after set! (dired pattern)
+        assert_eq!(
+            run_prog(
+                "(def my-double (x) (* x 2))
+                 (let ((a 5)
+                       (b (+ a 1))
+                       (c (+ a 2)))
+                   (set! a 99)
+                   (let ((d (my-double b))
+                         (e (my-double c)))
+                     (+ d e)))"
+            ),
+            Ok(Some(Value::Number(26.0)))
+        );
+    }
+
+    #[test]
+    fn test_let_outer_vars_in_inner_let_bindings() {
+        // Outer let vars used in inner let bindings (like dired-refresh)
+        assert_eq!(
+            run_prog(
+                "(let ((a 10) (b 20))
+                   (let ((c (* a 2)) (d (+ b 1)))
+                     (+ c d)))"
+            ),
+            Ok(Some(Value::Number(41.0)))
+        );
+    }
+
+    #[test]
+    fn test_let_sequential_with_user_globals() {
+        // Simulates the dired pattern: globals used inside nested let bindings
+        assert_eq!(
+            run_prog(
+                "(def my-filter (fn xs) (if (= (len xs) 0) '() (if (fn (first xs)) (cons (first xs) (my-filter fn (rest xs))) (my-filter fn (rest xs)))))
+                 (let ((entries (list 1 2 3 4))
+                       (big (my-filter |x| (> x 2) entries)))
+                   (len big))"
+            ),
+            Ok(Some(Value::Number(2.0)))
+        );
+    }
+
+    #[test]
+    fn test_let_sequential_nested_let_uses_outer_binding() {
+        assert_eq!(
+            run_prog("(let ((a 1) (b 2)) (let ((c (+ a b))) c))"),
+            Ok(Some(Value::Number(3.0)))
+        );
+    }
+
+    #[test]
     fn test_do_expression() {
         assert_eq!(run_prog("(do 1 2 3)"), Ok(Some(Value::Number(3.0))));
     }

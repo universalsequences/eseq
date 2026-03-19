@@ -34,6 +34,21 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_save: bool,
     pub pending_save_as: Option<PathBuf>,
     pub pending_load: bool,
+    pub current_buffer_read_only: bool,
+    pub pending_set_read_only: Option<bool>,
+    pub current_buffer_mode: String,
+    pub pending_mode_defs: Vec<(String, bool, Option<String>)>, // (name, read_only, on_enter)
+    pub pending_mode_bindings: Vec<(String, String, String)>,    // (mode, key, handler)
+    pub pending_set_mode: Option<String>,
+    pub pending_open_file: Option<String>,
+    pub pending_create_buffer: Option<String>,
+    pub pending_switch_buffer: Option<String>,
+    pub pending_set_text: Option<String>,
+    pub pending_set_lines: Option<Vec<String>>,
+    pub pending_goto_line: Option<usize>,
+    pub current_line_number: usize,
+    pub current_line_text: String,
+    pub buffer_names: Vec<String>,
 }
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
@@ -89,6 +104,72 @@ impl NativeContext {
 
     pub fn request_load(&mut self) {
         self.shared.borrow_mut().pending_load = true;
+    }
+
+    pub fn current_buffer_read_only(&self) -> bool {
+        self.shared.borrow().current_buffer_read_only
+    }
+
+    pub fn set_read_only(&mut self, read_only: bool) {
+        self.shared.borrow_mut().pending_set_read_only = Some(read_only);
+    }
+
+    pub fn current_buffer_mode(&self) -> String {
+        self.shared.borrow().current_buffer_mode.clone()
+    }
+
+    pub fn define_mode(&mut self, name: String, read_only: bool, on_enter: Option<String>) {
+        self.shared
+            .borrow_mut()
+            .pending_mode_defs
+            .push((name, read_only, on_enter));
+    }
+
+    pub fn mode_bind_key(&mut self, mode: String, key: String, handler: String) {
+        self.shared
+            .borrow_mut()
+            .pending_mode_bindings
+            .push((mode, key, handler));
+    }
+
+    pub fn set_buffer_mode(&mut self, mode: String) {
+        self.shared.borrow_mut().pending_set_mode = Some(mode);
+    }
+
+    pub fn open_file(&mut self, path: String) {
+        self.shared.borrow_mut().pending_open_file = Some(path);
+    }
+
+    pub fn create_buffer(&mut self, name: String) {
+        self.shared.borrow_mut().pending_create_buffer = Some(name);
+    }
+
+    pub fn switch_to_buffer(&mut self, name: String) {
+        self.shared.borrow_mut().pending_switch_buffer = Some(name);
+    }
+
+    pub fn set_buffer_text(&mut self, text: String) {
+        self.shared.borrow_mut().pending_set_text = Some(text);
+    }
+
+    pub fn set_buffer_lines(&mut self, lines: Vec<String>) {
+        self.shared.borrow_mut().pending_set_lines = Some(lines);
+    }
+
+    pub fn goto_line(&mut self, line: usize) {
+        self.shared.borrow_mut().pending_goto_line = Some(line);
+    }
+
+    pub fn current_line_number(&self) -> usize {
+        self.shared.borrow().current_line_number
+    }
+
+    pub fn current_line_text(&self) -> String {
+        self.shared.borrow().current_line_text.clone()
+    }
+
+    pub fn buffer_names(&self) -> Vec<String> {
+        self.shared.borrow().buffer_names.clone()
     }
 }
 
@@ -354,6 +435,46 @@ impl Runtime {
         let pending = shared.pending_load;
         shared.pending_load = false;
         pending
+    }
+
+    pub(crate) fn take_pending_set_read_only(&mut self) -> Option<bool> {
+        self.shared.borrow_mut().pending_set_read_only.take()
+    }
+
+    pub(crate) fn take_pending_mode_defs(&mut self) -> Vec<(String, bool, Option<String>)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_mode_defs)
+    }
+
+    pub(crate) fn take_pending_mode_bindings(&mut self) -> Vec<(String, String, String)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_mode_bindings)
+    }
+
+    pub(crate) fn take_pending_set_mode(&mut self) -> Option<String> {
+        self.shared.borrow_mut().pending_set_mode.take()
+    }
+
+    pub(crate) fn take_pending_open_file(&mut self) -> Option<String> {
+        self.shared.borrow_mut().pending_open_file.take()
+    }
+
+    pub(crate) fn take_pending_create_buffer(&mut self) -> Option<String> {
+        self.shared.borrow_mut().pending_create_buffer.take()
+    }
+
+    pub(crate) fn take_pending_switch_buffer(&mut self) -> Option<String> {
+        self.shared.borrow_mut().pending_switch_buffer.take()
+    }
+
+    pub(crate) fn take_pending_set_text(&mut self) -> Option<String> {
+        self.shared.borrow_mut().pending_set_text.take()
+    }
+
+    pub(crate) fn take_pending_set_lines(&mut self) -> Option<Vec<String>> {
+        self.shared.borrow_mut().pending_set_lines.take()
+    }
+
+    pub(crate) fn take_pending_goto_line(&mut self) -> Option<usize> {
+        self.shared.borrow_mut().pending_goto_line.take()
     }
 
     pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {

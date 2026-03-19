@@ -3,10 +3,21 @@ use std::collections::{HashMap, HashSet};
 use crate::buffer::Buffer;
 use crate::runtime::SymbolMetadata;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BufferMode {
     ESeqLisp,
     DGenLisp,
+    Named(String),
+}
+
+impl BufferMode {
+    pub fn name(&self) -> &str {
+        match self {
+            BufferMode::ESeqLisp => "eseqlisp-mode",
+            BufferMode::DGenLisp => "dgenlisp-mode",
+            BufferMode::Named(name) => name,
+        }
+    }
 }
 
 impl Default for BufferMode {
@@ -301,7 +312,7 @@ const DGENLISP_BUILTINS: &[(&str, &str, &str)] = &[
 ];
 
 pub fn completion_match(
-    mode: BufferMode,
+    mode: &BufferMode,
     buffer: &Buffer,
     runtime_symbols: &[String],
     runtime_metadata: &HashMap<String, SymbolMetadata>,
@@ -339,7 +350,7 @@ pub fn completion_match(
 }
 
 pub fn highlight_line(
-    mode: BufferMode,
+    mode: &BufferMode,
     line: &str,
     runtime_symbols: &[String],
     buffer: &Buffer,
@@ -412,7 +423,7 @@ pub fn highlight_line(
     spans
 }
 
-fn classify_token(mode: BufferMode, token: &str, known: &HashSet<String>) -> Option<TokenClass> {
+fn classify_token(mode: &BufferMode, token: &str, known: &HashSet<String>) -> Option<TokenClass> {
     if token.is_empty() {
         return None;
     }
@@ -435,14 +446,14 @@ fn classify_token(mode: BufferMode, token: &str, known: &HashSet<String>) -> Opt
 }
 
 fn completion_candidates(
-    mode: BufferMode,
+    mode: &BufferMode,
     runtime_symbols: &[String],
     buffer: &Buffer,
 ) -> Vec<CompletionItem> {
     let mut items = static_items(special_forms(mode));
     items.extend(buffer_defined_symbols(buffer));
     match mode {
-        BufferMode::ESeqLisp => {
+        BufferMode::ESeqLisp | BufferMode::Named(_) => {
             items.extend(static_items(ESEQLISP_BUILTINS));
             items.extend(runtime_symbols.iter().cloned().map(|label| CompletionItem {
                 label,
@@ -481,9 +492,9 @@ fn buffer_defined_symbols(buffer: &Buffer) -> Vec<CompletionItem> {
     items
 }
 
-fn special_forms(mode: BufferMode) -> &'static [(&'static str, &'static str, &'static str)] {
+fn special_forms(mode: &BufferMode) -> &'static [(&'static str, &'static str, &'static str)] {
     match mode {
-        BufferMode::ESeqLisp => ESEQLISP_SPECIALS,
+        BufferMode::ESeqLisp | BufferMode::Named(_) => ESEQLISP_SPECIALS,
         BufferMode::DGenLisp => DGENLISP_SPECIALS,
     }
 }
@@ -539,7 +550,7 @@ mod tests {
         let mut buffer = Buffer::from_text(0, "*test*", "(seq-");
         buffer.cursor = (0, 5);
         let result = completion_match(
-            BufferMode::ESeqLisp,
+            &BufferMode::ESeqLisp,
             &buffer,
             &[String::from("seq-step"), String::from("seq-track-steps")],
             &HashMap::new(),
@@ -552,7 +563,7 @@ mod tests {
     #[test]
     fn dgenlisp_highlights_param_keywords() {
         let buffer = Buffer::from_text(0, "*test*", "(param freq @default 440)");
-        let spans = highlight_line(BufferMode::DGenLisp, &buffer.lines[0], &[], &buffer);
+        let spans = highlight_line(&BufferMode::DGenLisp, &buffer.lines[0], &[], &buffer);
         assert!(
             spans
                 .iter()
@@ -578,7 +589,7 @@ mod tests {
             },
         );
         let result = completion_match(
-            BufferMode::ESeqLisp,
+            &BufferMode::ESeqLisp,
             &buffer,
             &[String::from("seq-step")],
             &metadata,
@@ -598,7 +609,7 @@ mod tests {
         let mut buffer = Buffer::from_text(0, "*test*", "(MODU");
         buffer.cursor = (0, 5);
         let result = completion_match(
-            BufferMode::ESeqLisp,
+            &BufferMode::ESeqLisp,
             &buffer,
             &[String::from("MODUM_DELAY")],
             &HashMap::new(),

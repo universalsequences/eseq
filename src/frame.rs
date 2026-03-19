@@ -128,14 +128,18 @@ pub fn build_render_frame(
 
     // Status bar text
     let buf = editor.active_buffer();
-    let status = if let Some(prompt) = editor.prompt_text() {
+    let status = if let Some(prompt) = editor.minibuffer_prompt() {
+        format!(" {prompt}")
+    } else if let Some(prompt) = editor.prompt_text() {
         prompt
     } else if let Some(msg) = &editor.minibuffer {
         format!(" {msg}")
     } else {
         let dirty = if buf.dirty { "**" } else { "  " };
+        let ro = if buf.read_only { "[RO] " } else { "" };
+        let mode_name = buf.mode.name();
         format!(
-            " {dirty} {}  L{} C{}   C-q: quit  C-x C-e: eval sexp",
+            " {dirty} {ro}{}  ({mode_name})  L{} C{}   C-q: quit  C-x C-e: eval sexp",
             buf.name,
             cursor_row + 1,
             cursor_col + 1
@@ -220,5 +224,6 @@ pub fn build_render_frame(
         widget_layout_cache_key: editor.widget_layout_revision(),
         dirty_widget_ids,
         widget_layout: editor.widget_layout(),
+        focused_widget_id: editor.focused_widget_id(),
     }
 }

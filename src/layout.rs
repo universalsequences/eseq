@@ -32,6 +32,7 @@ pub struct LayoutNode {
     pub rect: Rect,
     pub props: HashMap<String, Value>,
     pub children: Vec<LayoutNode>,
+    pub focusable: bool,
 }
 
 pub struct LayoutEngine {
@@ -90,12 +91,18 @@ impl LayoutEngine {
         let widget_type = get_widget_type(node).unwrap_or_default();
         let children_values = get_children(node);
         let children = self.layout_children(node, rect, &children_values);
+        let props = collect_props(node);
+        let focusable = matches!(
+            props.get("focusable"),
+            Some(Value::Bool(true))
+        );
         LayoutNode {
             widget_id: 0,
             widget_type,
             rect,
-            props: collect_props(node),
+            props,
             children,
+            focusable,
         }
     }
 
@@ -167,12 +174,14 @@ pub fn reuse_layout_node(
         .map(|(child_layout, child_tree)| reuse_layout_node(child_layout, child_tree, dirty_widget_ids))
         .collect::<Option<Vec<_>>>()?;
 
+    let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
     Some(LayoutNode {
         widget_id: existing.widget_id,
         widget_type,
         rect: existing.rect,
         props: new_props,
         children,
+        focusable,
     })
 }
 

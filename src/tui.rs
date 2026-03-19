@@ -108,6 +108,36 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
         blit_cell_buffer(&cell_buf, frame, inner);
     }
 
+    // ── Focus highlight ──────────────────────────────────────────────────────
+    if let (Some(layout), Some(focused_id)) =
+        (&render_frame.widget_layout, render_frame.focused_widget_id)
+    {
+        if let Some(node) = find_focused_node(layout, focused_id) {
+            let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
+            let focus_style = Style::default()
+                .fg(to_rcolor(crate::theme::FG))
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED);
+            // Draw bracket indicators at corners
+            let x = inner.x + node.rect.col;
+            let y = inner.y + node.rect.row;
+            let right = x + node.rect.width.saturating_sub(1);
+            let bottom = y + node.rect.height.saturating_sub(1);
+            let buf = frame.buffer_mut();
+            if x < inner.right() && y < inner.bottom() {
+                buf[(x, y)].set_style(focus_style);
+            }
+            if right < inner.right() && y < inner.bottom() {
+                buf[(right, y)].set_style(focus_style);
+            }
+            if x < inner.right() && bottom < inner.bottom() {
+                buf[(x, bottom)].set_style(focus_style);
+            }
+            if right < inner.right() && bottom < inner.bottom() {
+                buf[(right, bottom)].set_style(focus_style);
+            }
+        }
+    }
+
     // ── Completion popup ──────────────────────────────────────────────────────
     if let Some(comp) = &render_frame.completion {
         let list_width = comp
@@ -202,6 +232,21 @@ fn blit_cell_buffer(cell_buf: &widget_render::CellBuffer, frame: &mut Frame, are
             }
         }
     }
+}
+
+fn find_focused_node(
+    node: &crate::layout::LayoutNode,
+    id: u64,
+) -> Option<&crate::layout::LayoutNode> {
+    if node.widget_id == id {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = find_focused_node(child, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn pad_right(text: &str, width: usize) -> String {
