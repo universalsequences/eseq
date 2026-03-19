@@ -218,24 +218,6 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
     }
 }
 
-/// Blit a CellBuffer onto the ratatui frame. Only `Some` cells overwrite.
-fn blit_cell_buffer(cell_buf: &widget_render::CellBuffer, frame: &mut Frame, area: Rect) {
-    let buf = frame.buffer_mut();
-    for (row_idx, row) in cell_buf.cells.iter().enumerate() {
-        for (col_idx, cell_opt) in row.iter().enumerate() {
-            if let Some(cell) = cell_opt {
-                let x = area.x + col_idx as u16;
-                let y = area.y + row_idx as u16;
-                if x < area.right() && y < area.bottom() {
-                    let ratatui_cell = &mut buf[(x, y)];
-                    ratatui_cell.set_char(cell.ch);
-                    ratatui_cell.set_style(cell_style_to_ratatui(cell.style));
-                }
-            }
-        }
-    }
-}
-
 /// Blit a CellBuffer onto the ratatui frame with a vertical scroll offset.
 fn blit_cell_buffer_scrolled(
     cell_buf: &widget_render::CellBuffer,

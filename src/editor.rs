@@ -330,10 +330,7 @@ impl Editor {
         self.mark_needs_redraw();
         self.sync_runtime_context();
         self.refresh_completion();
-        // New buffer has no widgets — hide layout without destroying effects
-        self.runtime.current_layout = None;
-        self.focused_widget_id = None;
-        self.widget_scroll_top = 0;
+        self.clear_widget_focus();
         id
     }
 
@@ -355,9 +352,7 @@ impl Editor {
         self.mark_needs_redraw();
         self.sync_runtime_context();
         self.refresh_completion();
-        self.runtime.current_layout = None;
-        self.focused_widget_id = None;
-        self.widget_scroll_top = 0;
+        self.clear_widget_focus();
         Ok(id)
     }
 
@@ -1213,7 +1208,7 @@ impl Editor {
 
         // Find the focusable widget at this position
         let mut focusable_nodes: Vec<(u64, u16, u16, u16, u16)> = Vec::new();
-        collect_focusable_rects(&layout, &mut focusable_nodes);
+        collect_focusable_nodes(&layout, &mut focusable_nodes);
 
         for (id, row, col, width, height) in &focusable_nodes {
             if local_row >= *row
@@ -1261,7 +1256,7 @@ impl Editor {
         let Some(layout) = self.runtime.current_layout.clone() else {
             return;
         };
-        let mut focusable_nodes: Vec<(u64, u16, u16)> = Vec::new();
+        let mut focusable_nodes: Vec<(u64, u16, u16, u16, u16)> = Vec::new();
         collect_focusable_nodes(&layout, &mut focusable_nodes);
         if focusable_nodes.is_empty() {
             return;
@@ -1277,7 +1272,7 @@ impl Editor {
         let current_id = self.focused_widget_id.unwrap();
         let current_idx = focusable_nodes
             .iter()
-            .position(|(id, _, _)| *id == current_id)
+            .position(|(id, _, _, _, _)| *id == current_id)
             .unwrap_or(0);
 
         let next_idx = match direction {
@@ -1348,6 +1343,13 @@ impl Editor {
         }
     }
 
+    /// Clear widget layout and focus state for a buffer with no widget tree.
+    fn clear_widget_focus(&mut self) {
+        self.runtime.current_layout = None;
+        self.focused_widget_id = None;
+        self.widget_scroll_top = 0;
+    }
+
     fn restore_buffer_widget_tree(&mut self) {
         let tree = self.active_buffer().widget_tree.clone();
         match tree {
@@ -1356,10 +1358,7 @@ impl Editor {
                 self.auto_focus_first_widget();
             }
             None => {
-                // Just clear the visual layout, don't destroy reactive effects
-                self.runtime.current_layout = None;
-                self.focused_widget_id = None;
-                self.widget_scroll_top = 0;
+                self.clear_widget_focus();
             }
         }
     }
@@ -1368,9 +1367,9 @@ impl Editor {
         let Some(layout) = self.runtime.current_layout.clone() else {
             return;
         };
-        let mut focusable_nodes: Vec<(u64, u16, u16)> = Vec::new();
+        let mut focusable_nodes: Vec<(u64, u16, u16, u16, u16)> = Vec::new();
         collect_focusable_nodes(&layout, &mut focusable_nodes);
-        if let Some((id, _, _)) = focusable_nodes.first() {
+        if let Some((id, _, _, _, _)) = focusable_nodes.first() {
             self.focused_widget_id = Some(*id);
         }
     }
@@ -1613,9 +1612,7 @@ impl Editor {
             match self.open_file_buffer(&path) {
                 Ok(_) => {
                     self.minibuffer = Some(format!("Opened {path}"));
-                    // New file buffer has no widget tree — hide without destroying effects
-                    self.runtime.current_layout = None;
-                    self.focused_widget_id = None;
+                    self.clear_widget_focus();
                 }
                 Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
             }
@@ -1623,7 +1620,6 @@ impl Editor {
 
         if let Some(name) = self.runtime.take_pending_create_buffer() {
             self.open_scratch_buffer(&name, "");
-            self.focused_widget_id = None;
         }
 
         if let Some(name) = self.runtime.take_pending_switch_buffer() {
@@ -1968,7 +1964,7 @@ fn has_focusable_node(node: &crate::layout::LayoutNode) -> bool {
     node.children.iter().any(has_focusable_node)
 }
 
-fn collect_focusable_rects(
+fn collect_focusable_nodes(
     node: &crate::layout::LayoutNode,
     result: &mut Vec<(u64, u16, u16, u16, u16)>,
 ) {
@@ -1980,18 +1976,6 @@ fn collect_focusable_rects(
             node.rect.width,
             node.rect.height,
         ));
-    }
-    for child in &node.children {
-        collect_focusable_rects(child, result);
-    }
-}
-
-fn collect_focusable_nodes(
-    node: &crate::layout::LayoutNode,
-    result: &mut Vec<(u64, u16, u16)>,
-) {
-    if node.focusable {
-        result.push((node.widget_id, node.rect.row, node.rect.col));
     }
     for child in &node.children {
         collect_focusable_nodes(child, result);
@@ -3644,8 +3628,7 @@ mod tests {
         editor.handle_mouse(
             mouse_event(MouseEventKind::Down(MouseButton::Left), 16, 1), 1, 1, 20, 6,
         );
-        let val = editor.runtime_mut().eval_str("level").unwrap().unwrap();
-        eprintln!("before switch: level={val:?}");
+        let _val = editor.runtime_mut().eval_str("level").unwrap().unwrap();
 
         // Switch away
         editor.open_scratch_buffer("*other*", "hello");
@@ -3656,15 +3639,6 @@ mod tests {
         editor.set_active_buffer(id);
         assert!(editor.widget_layout().is_some(), "layout should be restored");
 
-        // Check that the layout has proper nodes
-        let layout = editor.widget_layout().unwrap();
-        eprintln!("restored layout: type={} children={}", layout.widget_type, layout.children.len());
-        eprintln!("restored layout props: {:?}", layout.props.keys().collect::<Vec<_>>());
-
-        // Check hit detection
-        let node = editor.widget_node_at(0, 10);
-        eprintln!("hit test at (0,10): {:?}", node.as_ref().map(|n| (&n.widget_type, n.widget_id)));
-
         // Try to interact after switch back
         editor.handle_mouse(
             mouse_event(MouseEventKind::Down(MouseButton::Left), 16, 1), 1, 1, 20, 6,
@@ -3674,7 +3648,6 @@ mod tests {
         );
 
         let val = editor.runtime_mut().eval_str("level").unwrap().unwrap();
-        eprintln!("after switch back: level={val:?}");
         match val {
             Value::Number(n) => assert!(n > 0.0, "level should have changed, got {n}"),
             _ => panic!("expected number"),
