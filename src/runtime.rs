@@ -404,9 +404,11 @@ impl Runtime {
                 .is_none_or(|existing| !same_layout_geometry(existing.as_ref(), &layout));
             self.rendered_layouts.push(format_layout_tree_lines(&layout, 0));
             self.current_layout = Some(Arc::new(layout));
-            self.dirty_widget_ids.clear();
             if geometry_changed {
+                self.dirty_widget_ids.clear();
                 self.layout_revision = self.layout_revision.wrapping_add(1);
+            } else if let Some(layout) = self.current_layout.as_ref() {
+                self.dirty_widget_ids = collect_shader_widget_ids(layout);
             }
         }
     }
@@ -415,5 +417,23 @@ impl Runtime {
         self.symbol_revision = self.symbol_revision.wrapping_add(1);
         self.cached_completion_symbols = None;
         self.cached_completion_metadata = None;
+    }
+}
+
+fn collect_shader_widget_ids(node: &LayoutNode) -> Vec<u64> {
+    let mut ids = Vec::new();
+    collect_shader_widget_ids_recursive(node, &mut ids);
+    ids
+}
+
+fn collect_shader_widget_ids_recursive(node: &LayoutNode, ids: &mut Vec<u64>) {
+    if matches!(
+        node.widget_type.as_str(),
+        "slider" | "hslider" | "vslider" | "toggle" | "knob"
+    ) {
+        ids.push(node.widget_id);
+    }
+    for child in &node.children {
+        collect_shader_widget_ids_recursive(child, ids);
     }
 }

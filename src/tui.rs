@@ -102,10 +102,9 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
 
     // ── Widget overlay ──────────────────────────────────────────────────────
     if let Some(ref layout) = render_frame.widget_layout {
-        let registry = widget_render::build_registry();
         let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
         let mut cell_buf = widget_render::CellBuffer::new(inner.width, inner.height);
-        widget_render::render_widget_tree(layout, &registry, &mut cell_buf);
+        widget_render::render_widget_tree(layout, &mut cell_buf);
         blit_cell_buffer(&cell_buf, frame, inner);
     }
 

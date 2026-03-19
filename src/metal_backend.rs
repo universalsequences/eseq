@@ -37,6 +37,7 @@ mod inner {
     use crate::backend::{Backend, BackendError, Color, RenderFrame};
     use crate::glyph_atlas::GlyphAtlas;
     use crate::layout::LayoutNode;
+    use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
     // ── Shader source ─────────────────────────────────────────────────────────
     //
@@ -89,7 +90,7 @@ fragment float4 frag(
     // SDF-based rendering for sliders and toggles. Each widget is one instanced
     // quad (6 vertices from vertex_id). The fragment shader decides color per
     // pixel using UV coordinates and per-instance data.
-    // ── Shared shader preamble (instance struct, vertex shader, SDF utils) ──
+    // ── Shared shader preamble (instance struct, varyings, SDF utils) ──────
 
     const WIDGET_SHADER_PREAMBLE: &str = r#"
 #include <metal_stdlib>
@@ -104,6 +105,7 @@ struct WidgetInstance {
     packed_float4 color_a;
     packed_float4 color_b;
     float         corner_radius;
+    float         pixel_aspect;
 };
 
 struct WidgetVaryings {
@@ -114,33 +116,6 @@ struct WidgetVaryings {
     float4 color_b    [[flat]];
     float  aspect     [[flat]];
 };
-
-vertex WidgetVaryings widget_vert(
-    uint vid [[vertex_id]],
-    uint iid [[instance_id]],
-    device const WidgetInstance* instances [[buffer(0)]])
-{
-    float2 corners[6] = {
-        float2(0, 0), float2(0, 1), float2(1, 0),
-        float2(1, 0), float2(0, 1), float2(1, 1)
-    };
-    float2 corner = corners[vid];
-    WidgetInstance inst = instances[iid];
-    float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
-
-    float ndc_w = abs(float(inst.ndc_max[0]) - float(inst.ndc_min[0]));
-    float ndc_h = abs(float(inst.ndc_max[1]) - float(inst.ndc_min[1]));
-    float aspect = (ndc_h > 0.0001) ? (ndc_w / ndc_h) : 1.0;
-
-    WidgetVaryings out;
-    out.position = float4(ndc, 0.0, 1.0);
-    out.uv = corner;
-    out.value_t = inst.value_t;
-    out.color_a = inst.color_a;
-    out.color_b = inst.color_b;
-    out.aspect = aspect;
-    return out;
-}
 
 float sdf_rounded_rect(float2 p, float2 half_size, float radius) {
     float2 d = abs(p) - half_size + radius;
@@ -161,114 +136,33 @@ float compute_border_mask(float2 localPos, float2 outerSize, float cornerRadius,
 }
 "#;
 
-    // ── Per-widget fragment shaders ──────────────────────────────────────
-
-    const HSLIDER_FRAG: &str = r#"
-fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+    const DEFAULT_WIDGET_VERTEX_SHADER: &str = r#"
+vertex WidgetVaryings widget_vert(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const WidgetInstance* instances [[buffer(0)]])
 {
-    float2 uv = in.uv;
-    float aspect = in.aspect;
+    float2 corners[6] = {
+        float2(0, 0), float2(0, 1), float2(1, 0),
+        float2(1, 0), float2(0, 1), float2(1, 1)
+    };
+    float2 corner = corners[vid];
+    WidgetInstance inst = instances[iid];
+    float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
 
-    float2 localPos = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
-    float2 sdfSize = float2(aspect, 1.0);
-    float cornerRadius = min(aspect, 1.0);
-
-    float3 borderColor = float3(0.45, 0.45, 0.5);
-    float outerMask;
-    float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
-    if (outerMask <= 0.001) { discard_fragment(); }
-
-    float fillDist = uv.x - in.value_t;
-    float fillDeriv = max(fwidth(fillDist), 0.001);
-    float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
-    float4 interior = mix(in.color_a, in.color_b, edge);
-
-    float3 final_rgb = mix(interior.rgb, borderColor, borderMask);
-    return float4(final_rgb, outerMask);
+    WidgetVaryings out;
+    out.position = float4(ndc, 0.0, 1.0);
+    out.uv = corner;
+    out.value_t = inst.value_t;
+    out.color_a = inst.color_a;
+    out.color_b = inst.color_b;
+    out.aspect = inst.pixel_aspect;
+    return out;
 }
 "#;
-
-    const VSLIDER_FRAG: &str = r#"
-fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
-{
-    float2 uv = in.uv;
-    float aspect = in.aspect;
-
-    float2 localPos = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
-    float2 sdfSize = float2(aspect, 1.0);
-    float cornerRadius = min(aspect, 1.0);
-
-    float3 borderColor = float3(0.45, 0.45, 0.5);
-    float outerMask;
-    float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
-    if (outerMask <= 0.001) { discard_fragment(); }
-
-    // Fill from bottom: uv.y=0 is top, uv.y=1 is bottom
-    float threshold = 1.0 - in.value_t;
-    float fillDist = uv.y - threshold;
-    float fillDeriv = max(fwidth(fillDist), 0.001);
-    float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
-    float4 interior = mix(in.color_b, in.color_a, edge);
-
-    float3 final_rgb = mix(interior.rgb, borderColor, borderMask);
-    return float4(final_rgb, outerMask);
-}
-"#;
-
-    const TOGGLE_FRAG: &str = r#"
-fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
-{
-    float2 uv = in.uv;
-    float aspect = in.aspect;
-
-    float2 localPos = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
-    float2 sdfSize = float2(aspect, 1.0);
-    // Full pill shape: corner radius = half the shorter dimension
-    float cornerRadius = 1.0;
-
-    float3 borderColor = float3(0.5, 0.5, 0.55);
-    float outerMask;
-    float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
-    if (outerMask <= 0.001) { discard_fragment(); }
-
-    float on = in.value_t;
-    float4 bg = mix(in.color_b, in.color_a, on);
-
-    // Knob: circular, slides left-right
-    float knob_x = mix(0.3, 0.7, on);
-    float2 knob_pos = float2((uv.x - knob_x) * aspect, uv.y - 0.5);
-    float knob_dist = length(knob_pos);
-    float knob_aa = max(fwidth(knob_dist), 0.001);
-    float knob = 1.0 - smoothstep(0.35 - knob_aa, 0.35 + knob_aa, knob_dist);
-    float4 interior = mix(bg, float4(0.95, 0.95, 0.95, 1.0), knob);
-
-    float3 final_rgb = mix(interior.rgb, borderColor, borderMask);
-    return float4(final_rgb, outerMask);
-}
-"#;
-
-    /// Widget types that have custom GPU shaders.
-    const WIDGET_SHADER_TYPES: &[(&str, &str)] = &[
-        ("hslider", HSLIDER_FRAG),
-        ("slider", HSLIDER_FRAG),
-        ("vslider", VSLIDER_FRAG),
-        ("toggle", TOGGLE_FRAG),
-    ];
 
     /// Per-instance data for widget shader. Must match WidgetInstance in MSL.
     /// Uses packed_float types in MSL to match Rust's [f32; N] layout.
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct WidgetInstance {
-        ndc_min: [f32; 2],  // offset 0
-        ndc_max: [f32; 2],  // offset 8
-        value_t: f32,       // offset 16
-        orientation: f32,   // offset 20
-        color_a: [f32; 4],  // offset 24
-        color_b: [f32; 4],  // offset 40
-        corner_radius: f32, // offset 56 (unused by shader, kept for alignment)
-    }
-
     struct WidgetBatch {
         instances: Vec<WidgetInstance>,
         buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -453,8 +347,13 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
             // ── Widget render pipelines (one per widget type) ────────────────
             // Each widget gets its own fragment shader but shares the vertex
             // shader and SDF utilities from the preamble.
-            for &(widget_type, frag_src) in WIDGET_SHADER_TYPES {
-                let full_src = format!("{}{}", WIDGET_SHADER_PREAMBLE, frag_src);
+            for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources() {
+                let full_src = format!(
+                    "{}{}{}",
+                    WIDGET_SHADER_PREAMBLE,
+                    vertex_src.unwrap_or(DEFAULT_WIDGET_VERTEX_SHADER),
+                    fragment_src
+                );
                 let src_ns = NSString::from_str(&full_src);
                 let wlib = self
                     .device
@@ -1292,8 +1191,6 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     // ── Widget rendering helpers ────────────────────────────────────────────
 
-    use crate::widget_render::{get_bool_prop, get_f32_prop};
-
     /// Render label widgets as glyph quads (uses the text atlas, not the widget shader).
     fn render_label_quads(
         node: &LayoutNode,
@@ -1476,12 +1373,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     }
 
     fn widget_batch_key(node: &LayoutNode) -> Option<String> {
-        match node.widget_type.as_str() {
-            "slider" | "hslider" => Some(node.widget_type.clone()),
-            "vslider" => Some("vslider".to_string()),
-            "toggle" => Some("toggle".to_string()),
-            _ => None,
-        }
+        widget_render::widget_definition(&node.widget_type)
+            .and_then(|definition| definition.metal_fragment_shader(&node.widget_type))
+            .map(|_| node.widget_type.clone())
     }
 
     fn widget_instance_for_node(
@@ -1491,81 +1385,25 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
         vp_w: f32,
         vp_h: f32,
     ) -> WidgetInstance {
-        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
-        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
-        let ndc_min = [
-            ndc_x(node.rect.col as f32 * cell_w),
-            ndc_y(node.rect.row as f32 * cell_h),
-        ];
-        let ndc_max = [
-            ndc_x((node.rect.col + node.rect.width) as f32 * cell_w),
-            ndc_y((node.rect.row + node.rect.height) as f32 * cell_h),
-        ];
-
-        match node.widget_type.as_str() {
-            "slider" | "hslider" => {
-                let value = get_f32_prop(&node.props, "value", 0.0);
-                let min = get_f32_prop(&node.props, "min", 0.0);
-                let max = get_f32_prop(&node.props, "max", 1.0);
-                let range = max - min;
-                let t = if range > 0.0 {
-                    ((value - min) / range).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                WidgetInstance {
-                    ndc_min,
-                    ndc_max,
-                    value_t: t,
-                    orientation: 0.0,
-                    color_a: [0.0, 0.85, 0.85, 1.0],
-                    color_b: [0.18, 0.18, 0.22, 1.0],
-                    corner_radius: 0.0,
-                }
-            }
-            "vslider" => {
-                let value = get_f32_prop(&node.props, "value", 0.0);
-                let min = get_f32_prop(&node.props, "min", 0.0);
-                let max = get_f32_prop(&node.props, "max", 1.0);
-                let range = max - min;
-                let t = if range > 0.0 {
-                    ((value - min) / range).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                WidgetInstance {
-                    ndc_min,
-                    ndc_max,
-                    value_t: t,
-                    orientation: 0.0,
-                    color_a: [1.0, 1.0, 1.0, 1.0],
-                    color_b: [0.18, 0.18, 0.22, 1.0],
-                    corner_radius: 0.0,
-                }
-            }
-            "toggle" => WidgetInstance {
-                ndc_min,
-                ndc_max,
-                value_t: if get_bool_prop(&node.props, "value", false) {
-                    1.0
-                } else {
-                    0.0
-                },
-                orientation: 0.0,
-                color_a: [0.2, 0.78, 0.35, 1.0],
-                color_b: [0.3, 0.3, 0.35, 1.0],
-                corner_radius: 0.0,
+        widget_render::widget_instance_for_node(
+            node,
+            WidgetViewport {
+                cell_w,
+                cell_h,
+                vp_w,
+                vp_h,
             },
-            _ => WidgetInstance {
-                ndc_min,
-                ndc_max,
-                value_t: 0.0,
-                orientation: 0.0,
-                color_a: [0.0, 0.0, 0.0, 0.0],
-                color_b: [0.0, 0.0, 0.0, 0.0],
-                corner_radius: 0.0,
-            },
-        }
+        )
+        .unwrap_or(WidgetInstance {
+            ndc_min: [0.0, 0.0],
+            ndc_max: [0.0, 0.0],
+            value_t: 0.0,
+            orientation: 0.0,
+            color_a: [0.0, 0.0, 0.0, 0.0],
+            color_b: [0.0, 0.0, 0.0, 0.0],
+            corner_radius: 0.0,
+            pixel_aspect: 1.0,
+        })
     }
 
     fn replace_widget_buffer(

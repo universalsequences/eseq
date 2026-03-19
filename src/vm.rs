@@ -156,6 +156,32 @@ pub fn format_lisp_source(value: &Value) -> String {
     }
 }
 
+fn format_fmt_value(value: &Value, precision: Option<usize>) -> String {
+    match (value, precision) {
+        (Value::Number(n), Some(precision)) => format!("{n:.precision$}"),
+        (Value::String(s), _) => s.clone(),
+        _ => format_lisp_value(value),
+    }
+}
+
+fn parse_fmt_placeholder(template: &str, start: usize) -> Option<(usize, Option<usize>)> {
+    let rest = template.get(start..)?;
+    if rest.starts_with("{}") {
+        return Some((2, None));
+    }
+
+    let Some(spec) = rest.strip_prefix("{:.") else {
+        return None;
+    };
+    let digits_len = spec.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits_len == 0 || spec.as_bytes().get(digits_len) != Some(&b'}') {
+        return None;
+    }
+
+    let precision = spec[..digits_len].parse().ok()?;
+    Some((digits_len + 4, Some(precision)))
+}
+
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", format_lisp_value(self))
@@ -498,8 +524,21 @@ pub fn register_core_natives(vm: &mut VM) {
 
         let mut rendered = template.clone();
         for value in args.iter().skip(1) {
-            if let Some(idx) = rendered.find("{}") {
-                rendered.replace_range(idx..idx + 2, &format_lisp_value(value));
+            let mut replaced = false;
+            let mut search_from = 0;
+            while let Some(relative_idx) = rendered[search_from..].find('{') {
+                let idx = search_from + relative_idx;
+                let Some((len, precision)) = parse_fmt_placeholder(&rendered, idx) else {
+                    search_from = idx + 1;
+                    continue;
+                };
+                let replacement = format_fmt_value(value, precision);
+                rendered.replace_range(idx..idx + len, &replacement);
+                replaced = true;
+                break;
+            }
+            if !replaced {
+                break;
             }
         }
         Value::String(rendered)

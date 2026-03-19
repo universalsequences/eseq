@@ -16,7 +16,7 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::vm::{Value, format_lisp_value};
-use crate::widget_render::{WidgetEvent, handle_event};
+use crate::widget_render::{self, MouseEventOutcome, handle_event, map_mouse_event};
 
 #[derive(Default, Clone)]
 pub struct EditorConfig {
@@ -1074,43 +1074,10 @@ impl Editor {
             ) else {
                 return false;
             };
-
-            let widget_event = match (node.widget_type.as_str(), mouse.kind) {
-                ("slider" | "hslider", MouseEventKind::Down(MouseButton::Left)) => return true,
-                ("slider" | "hslider", MouseEventKind::Drag(MouseButton::Left)) => {
-                    let denom = node.rect.width.saturating_sub(1).max(1) as f32;
-                    let t = ((local_col - node.rect.col as f32) / denom).clamp(0.0, 1.0);
-                    WidgetEvent::SetNormalized(t)
-                }
-                ("vslider", MouseEventKind::Down(MouseButton::Left)) => return true,
-                ("vslider", MouseEventKind::Drag(MouseButton::Left)) => {
-                    let denom = node.rect.height.saturating_sub(1).max(1) as f32;
-                    let offset = (local_row - node.rect.row as f32) / denom;
-                    let t = (1.0 - offset).clamp(0.0, 1.0);
-                    WidgetEvent::SetNormalized(t)
-                }
-                ("toggle", MouseEventKind::Down(MouseButton::Left)) => WidgetEvent::Activate,
-                _ => return true,
-            };
-
-            handle_event(&node, widget_event)
+            self.dispatch_widget_mouse_event(&node, mouse.kind, content_col, content_row, precise_col, precise_row)
         };
 
-        let Some(output) = output else {
-            return true;
-        };
-        let result = self.runtime.invoke(output.callback, vec![output.value]);
-        if let Some(status) = self.runtime.take_status_message() {
-            self.minibuffer = Some(status);
-        } else if let Err(error) = result {
-            self.minibuffer = Some(format!("Error: {error:?}"));
-        } else {
-            self.minibuffer = None;
-        }
-        self.refresh_runtime_side_effects();
-        self.completion = None;
-        self.mark_needs_redraw();
-        true
+        self.apply_widget_output(output)
     }
 
     fn try_handle_widget_drag_segment(
@@ -1131,6 +1098,37 @@ impl Editor {
             end_local.1.floor().max(0.0) as u16,
             end_local.0.floor().max(0.0) as u16,
         );
+
+        if let Some(node) = start_node.as_ref()
+            && widget_render::widget_captures_drag(&node.widget_type)
+        {
+            let clamped_col = end
+                .0
+                .clamp(
+                    content_col as f32 + node.rect.col as f32,
+                    content_col as f32
+                        + node.rect.col as f32
+                        + node.rect.width.saturating_sub(1) as f32,
+                );
+            let clamped_row = end
+                .1
+                .clamp(
+                    content_row as f32 + node.rect.row as f32,
+                    content_row as f32
+                        + node.rect.row as f32
+                        + node.rect.height.saturating_sub(1) as f32,
+                );
+            let output = self.dispatch_widget_mouse_event(
+                node,
+                mouse.kind,
+                content_col,
+                content_row,
+                clamped_col,
+                clamped_row,
+            );
+            let _ = self.apply_widget_output(output);
+            return;
+        }
 
         if same_widget_hit(start_node.as_ref(), end_node.as_ref()) {
             let _ =
@@ -1236,6 +1234,41 @@ impl Editor {
         self.mark = None;
     }
 
+    fn dispatch_widget_mouse_event(
+        &self,
+        node: &crate::layout::LayoutNode,
+        mouse_kind: MouseEventKind,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<crate::widget_render::EventOutput> {
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32;
+        match map_mouse_event(node, mouse_kind, local_col, local_row) {
+            MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
+            MouseEventOutcome::Dispatch(widget_event) => handle_event(node, widget_event),
+        }
+    }
+
+    fn apply_widget_output(&mut self, output: Option<crate::widget_render::EventOutput>) -> bool {
+        let Some(output) = output else {
+            return true;
+        };
+        let result = self.runtime.invoke(output.callback, vec![output.value]);
+        if let Some(status) = self.runtime.take_status_message() {
+            self.minibuffer = Some(status);
+        } else if let Err(error) = result {
+            self.minibuffer = Some(format!("Error: {error:?}"));
+        } else {
+            self.minibuffer = None;
+        }
+        self.refresh_runtime_side_effects();
+        self.completion = None;
+        self.mark_needs_redraw();
+        true
+    }
+
     fn copy_active_region(&mut self) -> bool {
         let Some((start, end)) = self.active_region_range() else {
             return false;
@@ -1274,15 +1307,11 @@ fn fill_widget_hit_cells(
     rows: u16,
     cells: &mut [Option<crate::layout::LayoutNode>],
 ) {
-    println!("rebuilding");
     for child in &node.children {
         fill_widget_hit_cells(child, cols, rows, cells);
     }
 
-    if matches!(
-        node.widget_type.as_str(),
-        "v-stack" | "h-stack" | "box" | "grid"
-    ) {
+    if widget_render::is_layout_widget_type(&node.widget_type) {
         return;
     }
 
@@ -2093,6 +2122,134 @@ mod tests {
     }
 
     #[test]
+    fn mouse_down_updates_knob_via_bind_shorthand() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(6, 6);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def level (state 0))
+                (effect
+                  (knob
+                    :size 2
+                    :min 0
+                    :max 100
+                    :bind level))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(6, 6);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            1,
+            1,
+            6,
+            6,
+        );
+
+        let value = editor.runtime.eval_str("level").unwrap().unwrap();
+        match value {
+            Value::Number(n) => assert!(n >= 99.0),
+            _ => panic!("expected numeric knob state"),
+        }
+    }
+
+    #[test]
+    fn knob_updates_shared_label_state_from_each_binding() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(40, 12);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (defstate steps '(20 30 40 50))
+                (effect
+                  (h-stack
+                    (grid :cols 4 :col-width 4
+                      (each steps |step|
+                        (knob :min 0 :max 100 :bind step)))
+                    (grid :cols 4 :col-width 4
+                      (each steps |step|
+                        (label (fmt "{:.0}" step))))))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(40, 12);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            1,
+            1,
+            40,
+            12,
+        );
+
+        let value = editor.runtime.eval_str("steps").unwrap().unwrap();
+        let Value::List(items) = value else {
+            panic!("expected steps list");
+        };
+        let first = items[0].borrow().clone();
+        match first {
+            Value::Number(n) => assert!(n >= 99.0),
+            _ => panic!("expected numeric step"),
+        }
+
+        let layout = editor.runtime.current_layout.as_ref().expect("layout");
+        let rendered = crate::layout::format_layout_tree_lines(layout, 0);
+        assert!(
+            rendered.iter().any(|line| line.contains("text=\"100\"")),
+            "expected shared label text to reflect updated knob value: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn knob_drag_clamps_after_leaving_hit_rect() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(10, 10);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def level (state 0))
+                (effect
+                  (knob
+                    :size 4
+                    :min 0
+                    :max 100
+                    :bind level))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(10, 10);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 4),
+            1,
+            1,
+            10,
+            10,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 0),
+            1,
+            1,
+            10,
+            10,
+        );
+
+        let value = editor.runtime.eval_str("level").unwrap().unwrap();
+        match value {
+            Value::Number(n) => assert!(n >= 99.0),
+            _ => panic!("expected numeric knob state"),
+        }
+    }
+
+    #[test]
     fn eval_sexp_replaces_previous_preview_effect_layout() {
         let init = r#"
             (def eval-sexp ()
@@ -2153,8 +2310,8 @@ mod tests {
                       (dict :velocity 50))))
                 (effect
                   (h-stack
-                    (each pattern.steps |step|
-                      (hslider :min 0 :max 100 :bind step.velocity))))
+                    (each pattern.steps |v|
+                      (hslider :min 0 :max 100 :bind v.velocity))))
                 "#,
             )
             .unwrap();

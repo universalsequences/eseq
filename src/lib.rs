@@ -773,6 +773,52 @@ mod tests {
     }
 
     #[test]
+    fn test_label_coerces_each_bound_numbers_to_text() {
+        let mut runtime = Runtime::new();
+        let tree = runtime
+            .eval_str(
+                r#"
+                (defstate steps '(4 8 15 16))
+                (h-stack
+                  (each steps |step|
+                    (label step)))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+        assert_eq!(
+            lines,
+            vec![
+                ":h-stack  row=0 col=0 w=9 h=1".to_string(),
+                "  :label  row=0 col=0 w=1 h=1  text=\"4\"".to_string(),
+                "  :label  row=0 col=2 w=1 h=1  text=\"8\"".to_string(),
+                "  :label  row=0 col=4 w=2 h=1  text=\"15\"".to_string(),
+                "  :label  row=0 col=7 w=2 h=1  text=\"16\"".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_fmt_supports_numeric_precision() {
+        let mut runtime = Runtime::new();
+        assert_eq!(
+            runtime.eval_str(r#"(fmt "{:.2}" 3.14159)"#),
+            Ok(Some(Value::String("3.14".to_string())))
+        );
+        assert_eq!(
+            runtime.eval_str(r#"(fmt "value: {:.1}" 12.75)"#),
+            Ok(Some(Value::String("value: 12.8".to_string())))
+        );
+        assert_eq!(
+            runtime.eval_str(r#"(fmt "hello {}" "world")"#),
+            Ok(Some(Value::String("hello world".to_string())))
+        );
+    }
+
+    #[test]
     fn test_set_bang_updates_lisp_state_and_reruns_effects() {
         let mut runtime = Runtime::new();
         let _ = runtime

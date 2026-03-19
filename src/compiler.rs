@@ -514,13 +514,14 @@ impl Compiler {
                     let on_change_kw = self.use_string_constant("on-change");
                     self.emit(OpCode::PushKeyword(on_change_kw));
                     arity += 1;
+                    let callback_arg = "__eseq_bound_value".to_string();
                     let setter = Expression::List(vec![
                         Expression::Symbol("lambda".to_string()),
-                        Expression::List(vec![Expression::Symbol("v".to_string())]),
+                        Expression::List(vec![Expression::Symbol(callback_arg.clone())]),
                         Expression::List(vec![
                             Expression::Symbol("set!".to_string()),
                             Expression::Symbol(target.clone()),
-                            Expression::Symbol("v".to_string()),
+                            Expression::Symbol(callback_arg),
                         ]),
                     ]);
                     self.compile_expression(&setter)?;

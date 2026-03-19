@@ -1,12 +1,19 @@
+pub mod box_widget;
+pub mod grid;
 pub mod hslider;
+pub mod hstack;
+pub mod knob;
 pub mod label;
 pub mod toggle;
 pub mod vslider;
+pub mod vstack;
 
 use std::collections::HashMap;
 
+use crossterm::event::MouseEventKind;
+
 use crate::backend::{Cell, CellStyle, Color};
-use crate::layout::{LayoutNode, Rect};
+use crate::layout::{Constraints, LayoutNode, Rect, Size};
 use crate::vm::Value;
 
 // ── Semantic events (backend-agnostic) ───────────────────────────────────────
@@ -24,6 +31,35 @@ pub enum WidgetEvent {
 pub struct EventOutput {
     pub callback: Value,
     pub value: Value,
+}
+
+pub enum MouseEventOutcome {
+    Ignore,
+    Consume,
+    Dispatch(WidgetEvent),
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WidgetInstance {
+    pub ndc_min: [f32; 2],
+    pub ndc_max: [f32; 2],
+    pub value_t: f32,
+    pub orientation: f32,
+    pub color_a: [f32; 4],
+    pub color_b: [f32; 4],
+    pub corner_radius: f32,
+    pub pixel_aspect: f32,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub struct WidgetViewport {
+    pub cell_w: f32,
+    pub cell_h: f32,
+    pub vp_w: f32,
+    pub vp_h: f32,
 }
 
 // ── CellBuffer ───────────────────────────────────────────────────────────────
@@ -63,169 +99,124 @@ impl CellBuffer {
     }
 }
 
-// ── Type-erased TUI registry ─────────────────────────────────────────────────
-
-struct TuiEntry {
-    render: Box<dyn Fn(&HashMap<String, Value>, Rect, &mut CellBuffer)>,
-}
-
-#[cfg(target_os = "macos")]
-struct MetalEntry {
-    #[allow(dead_code)]
-    shader_source: &'static str,
-    gpu_data_size: usize,
-    write_gpu_data: Box<dyn Fn(&HashMap<String, Value>, Rect, (f32, f32), &mut Vec<u8>)>,
-}
-
-pub struct WidgetRenderRegistry {
-    tui: HashMap<String, TuiEntry>,
+pub trait WidgetDefinition: Sync {
+    fn names(&self) -> &'static [&'static str];
+    fn is_container(&self) -> bool {
+        false
+    }
+    fn size_affecting_props(&self) -> &'static [&'static str] {
+        &[]
+    }
+    fn measure(
+        &self,
+        node: &Value,
+        children: &[Value],
+        constraints: Constraints,
+        measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
+    ) -> Option<Size>;
+    fn layout_children(
+        &self,
+        node: &Value,
+        area: Rect,
+        children: &[Value],
+        measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
+        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+    ) -> Vec<LayoutNode> {
+        let _ = (node, area, children, measure_child, build_child);
+        vec![]
+    }
+    fn tui_render(&self, _props: &HashMap<String, Value>, _rect: Rect, _buf: &mut CellBuffer) {}
+    fn mouse_event(
+        &self,
+        _node: &LayoutNode,
+        _mouse_kind: MouseEventKind,
+        _local_col: f32,
+        _local_row: f32,
+    ) -> MouseEventOutcome {
+        MouseEventOutcome::Ignore
+    }
+    fn captures_drag(&self) -> bool {
+        false
+    }
+    fn handle_event(&self, _node: &LayoutNode, _event: WidgetEvent) -> Option<EventOutput> {
+        None
+    }
     #[cfg(target_os = "macos")]
-    metal: HashMap<String, MetalEntry>,
-}
-
-impl WidgetRenderRegistry {
-    fn new() -> Self {
-        Self {
-            tui: HashMap::new(),
-            #[cfg(target_os = "macos")]
-            metal: HashMap::new(),
-        }
+    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
+        None
+    }
+    #[cfg(target_os = "macos")]
+    fn metal_vertex_shader(&self, _widget_type: &str) -> Option<&'static str> {
+        None
+    }
+    #[cfg(target_os = "macos")]
+    fn build_metal_instance(
+        &self,
+        _widget_type: &str,
+        _node: &LayoutNode,
+        _viewport: WidgetViewport,
+    ) -> Option<WidgetInstance> {
+        None
     }
 }
 
-fn register_tui<F>(name: &str, registry: &mut WidgetRenderRegistry, render_fn: F)
-where
-    F: Fn(&HashMap<String, Value>, Rect, &mut CellBuffer) + 'static,
-{
-    registry.tui.insert(
-        name.to_string(),
-        TuiEntry {
-            render: Box::new(render_fn),
-        },
-    );
+static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
+    &label::LABEL_WIDGET,
+    &hslider::HSLIDER_WIDGET,
+    &vslider::VSLIDER_WIDGET,
+    &toggle::TOGGLE_WIDGET,
+    &knob::KNOB_WIDGET,
+    &vstack::VSTACK_WIDGET,
+    &hstack::HSTACK_WIDGET,
+    &box_widget::BOX_WIDGET,
+    &grid::GRID_WIDGET,
+];
+
+pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {
+    WIDGET_DEFINITIONS
+        .iter()
+        .copied()
+        .find(|definition| definition.names().contains(&widget_type))
+}
+
+pub fn is_layout_widget_type(widget_type: &str) -> bool {
+    widget_definition(widget_type)
+        .map(WidgetDefinition::is_container)
+        .unwrap_or(false)
+}
+
+pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
+    if is_layout_widget_type(&node.widget_type) {
+        for child in &node.children {
+            render_widget_tree(child, buf);
+        }
+        return;
+    }
+
+    if let Some(definition) = widget_definition(&node.widget_type) {
+        definition.tui_render(&node.props, node.rect, buf);
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn register_metal<F>(
-    name: &str,
-    registry: &mut WidgetRenderRegistry,
-    shader_source: &'static str,
-    gpu_data_size: usize,
-    write_fn: F,
-) where
-    F: Fn(&HashMap<String, Value>, Rect, (f32, f32), &mut Vec<u8>) + 'static,
-{
-    registry.metal.insert(
-        name.to_string(),
-        MetalEntry {
-            shader_source,
-            gpu_data_size,
-            write_gpu_data: Box::new(write_fn),
-        },
-    );
-}
-
-/// Build the full registry with all widget renderers.
-pub fn build_registry() -> WidgetRenderRegistry {
-    let mut registry = WidgetRenderRegistry::new();
-
-    // TUI renderers
-    register_tui("label", &mut registry, label::tui_render);
-    register_tui("slider", &mut registry, hslider::tui_render);
-    register_tui("hslider", &mut registry, hslider::tui_render);
-    register_tui("vslider", &mut registry, vslider::tui_render);
-    register_tui("toggle", &mut registry, toggle::tui_render);
-
-    // Metal renderers (labels use glyph atlas path, not custom shader)
-    #[cfg(target_os = "macos")]
-    {
-        register_metal(
-            "slider",
-            &mut registry,
-            hslider::SLIDER_SHADER,
-            std::mem::size_of::<hslider::SliderGpuData>(),
-            hslider::write_gpu_data,
-        );
-        register_metal(
-            "hslider",
-            &mut registry,
-            hslider::SLIDER_SHADER,
-            std::mem::size_of::<hslider::SliderGpuData>(),
-            hslider::write_gpu_data,
-        );
-        register_metal(
-            "vslider",
-            &mut registry,
-            vslider::VSLIDER_SHADER,
-            std::mem::size_of::<vslider::VSliderGpuData>(),
-            vslider::write_gpu_data,
-        );
-        register_metal(
-            "toggle",
-            &mut registry,
-            toggle::TOGGLE_SHADER,
-            std::mem::size_of::<toggle::ToggleGpuData>(),
-            toggle::write_gpu_data,
-        );
-    }
-
-    registry
-}
-
-// ── Tree walker ──────────────────────────────────────────────────────────────
-
-/// Recursively walk the layout tree and render leaf widgets into the CellBuffer.
-/// Containers (v-stack, h-stack, box, grid) are invisible — only recurse children.
-pub fn render_widget_tree(
-    node: &LayoutNode,
-    registry: &WidgetRenderRegistry,
-    buf: &mut CellBuffer,
-) {
-    match node.widget_type.as_str() {
-        "v-stack" | "h-stack" | "box" | "grid" => {
-            for child in &node.children {
-                render_widget_tree(child, registry, buf);
-            }
-        }
-        widget_type => {
-            if let Some(entry) = registry.tui.get(widget_type) {
-                (entry.render)(&node.props, node.rect, buf);
+pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
+    let mut shaders = Vec::new();
+    for definition in WIDGET_DEFINITIONS {
+        for &name in definition.names() {
+            if let Some(fragment_shader) = definition.metal_fragment_shader(name) {
+                shaders.push((name, definition.metal_vertex_shader(name), fragment_shader));
             }
         }
     }
-}
-
-// ── Metal tree walker ────────────────────────────────────────────────────────
-
-/// Collect GPU instance data for a specific widget type from the layout tree.
-#[cfg(target_os = "macos")]
-pub fn collect_widget_instances(
-    node: &LayoutNode,
-    widget_type: &str,
-    registry: &WidgetRenderRegistry,
-    viewport: (f32, f32),
-) -> Vec<u8> {
-    let mut data = Vec::new();
-    collect_instances_recursive(node, widget_type, registry, viewport, &mut data);
-    data
+    shaders
 }
 
 #[cfg(target_os = "macos")]
-fn collect_instances_recursive(
+pub fn widget_instance_for_node(
     node: &LayoutNode,
-    widget_type: &str,
-    registry: &WidgetRenderRegistry,
-    viewport: (f32, f32),
-    data: &mut Vec<u8>,
-) {
-    if node.widget_type == widget_type {
-        if let Some(entry) = registry.metal.get(widget_type) {
-            (entry.write_gpu_data)(&node.props, node.rect, viewport, data);
-        }
-    }
-    for child in &node.children {
-        collect_instances_recursive(child, widget_type, registry, viewport, data);
-    }
+    viewport: WidgetViewport,
+) -> Option<WidgetInstance> {
+    widget_definition(&node.widget_type)?.build_metal_instance(&node.widget_type, node, viewport)
 }
 
 /// Collect all label nodes from the layout tree (labels use glyph atlas, not custom shaders).
@@ -246,6 +237,27 @@ fn collect_labels_recursive(node: &LayoutNode, labels: &mut Vec<(Rect, String)>)
     for child in &node.children {
         collect_labels_recursive(child, labels);
     }
+}
+
+pub fn handle_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+    widget_definition(&node.widget_type)?.handle_event(node, event)
+}
+
+pub fn map_mouse_event(
+    node: &LayoutNode,
+    mouse_kind: MouseEventKind,
+    local_col: f32,
+    local_row: f32,
+) -> MouseEventOutcome {
+    widget_definition(&node.widget_type)
+        .map(|definition| definition.mouse_event(node, mouse_kind, local_col, local_row))
+        .unwrap_or(MouseEventOutcome::Ignore)
+}
+
+pub fn widget_captures_drag(widget_type: &str) -> bool {
+    widget_definition(widget_type)
+        .map(WidgetDefinition::captures_drag)
+        .unwrap_or(false)
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
@@ -276,51 +288,18 @@ pub fn styled_cell(ch: char, fg: Color, bg: Option<Color>) -> Cell {
     }
 }
 
-pub fn handle_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
-    match node.widget_type.as_str() {
-        "slider" | "hslider" => slider_event(node, event),
-        "vslider" => vslider_event(node, event),
-        "toggle" => toggle_event(node, event),
-        _ => None,
-    }
-}
-
-fn slider_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
-    let WidgetEvent::SetNormalized(t) = event else {
-        return None;
-    };
-    let callback = node.props.get("on-change")?.clone();
-    let min = get_f32_prop(&node.props, "min", 0.0);
-    let max = get_f32_prop(&node.props, "max", 1.0);
-    let value = min + (max - min) * t.clamp(0.0, 1.0);
-    Some(EventOutput {
-        callback,
-        value: Value::Number(value as f64),
-    })
-}
-
-fn vslider_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
-    let WidgetEvent::SetNormalized(t) = event else {
-        return None;
-    };
-    let callback = node.props.get("on-change")?.clone();
-    let min = get_f32_prop(&node.props, "min", 0.0);
-    let max = get_f32_prop(&node.props, "max", 1.0);
-    let value = min + (max - min) * t.clamp(0.0, 1.0);
-    Some(EventOutput {
-        callback,
-        value: Value::Number(value as f64),
-    })
-}
-
-fn toggle_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
-    let WidgetEvent::Activate = event else {
-        return None;
-    };
-    let callback = node.props.get("on-change")?.clone();
-    let current = get_bool_prop(&node.props, "value", false);
-    Some(EventOutput {
-        callback,
-        value: Value::Bool(!current),
-    })
+#[cfg(target_os = "macos")]
+pub fn ndc_bounds(rect: Rect, viewport: WidgetViewport) -> ([f32; 2], [f32; 2]) {
+    let ndc_x = |px: f32| px / viewport.vp_w * 2.0 - 1.0;
+    let ndc_y = |px: f32| 1.0 - px / viewport.vp_h * 2.0;
+    (
+        [
+            ndc_x(rect.col as f32 * viewport.cell_w),
+            ndc_y(rect.row as f32 * viewport.cell_h),
+        ],
+        [
+            ndc_x((rect.col + rect.width) as f32 * viewport.cell_w),
+            ndc_y((rect.row + rect.height) as f32 * viewport.cell_h),
+        ],
+    )
 }

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::vm::{VM, Value};
+use crate::vm::{VM, Value, format_lisp_value};
 
 pub fn register_widget_natives(vm: &mut VM) {
     for widget in [
@@ -36,12 +36,13 @@ fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     let mut i = 0;
 
     if widget_type == "label"
-        && let Some(Value::String(text)) = args.first()
+        && let Some(value) = args.first()
     {
-        map.insert(
-            "text".to_string(),
-            Rc::new(RefCell::new(Value::String(text.clone()))),
-        );
+        let text = match value {
+            Value::String(text) => text.clone(),
+            other => format_lisp_value(other),
+        };
+        map.insert("text".to_string(), Rc::new(RefCell::new(Value::String(text))));
         i = 1;
     }
 
