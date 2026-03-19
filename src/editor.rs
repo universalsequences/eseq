@@ -3476,5 +3476,10 @@ mod tests {
         );
         let layout = editor.widget_layout().unwrap();
         assert!(layout.children.len() > 2, "should list files as widget children");
+
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "should auto-focus first focusable widget"
+        );
     }
 }

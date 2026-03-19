@@ -1186,11 +1186,30 @@ vertex WidgetVaryings widget_vert(
         let cell_w = atlas.cell_w as f32;
         let cell_h = atlas.cell_h as f32;
         let mut verts = Vec::new();
-        render_label_quads(layout, atlas, cell_w, cell_h, vp_w, vp_h, &mut verts);
+        let focused_id = frame.focused_widget_id;
+        render_label_quads(layout, atlas, cell_w, cell_h, vp_w, vp_h, focused_id, &mut verts);
         verts
     }
 
     // ── Widget rendering helpers ────────────────────────────────────────────
+
+    fn resolve_label_color(props: &std::collections::HashMap<String, crate::vm::Value>) -> [f32; 4] {
+        match props.get("color") {
+            Some(crate::vm::Value::String(name)) | Some(crate::vm::Value::Keyword(name)) => {
+                match name.as_str() {
+                    "red" => [1.0, 0.4, 0.4, 1.0],
+                    "green" | "cyan" => [0.38, 1.0, 0.79, 1.0],
+                    "yellow" | "orange" => [1.0, 0.79, 0.52, 1.0],
+                    "blue" | "purple" => [0.635, 0.467, 1.0, 1.0],
+                    "magenta" => [0.635, 0.467, 1.0, 1.0],
+                    "white" => [0.93, 0.93, 0.93, 1.0],
+                    "gray" | "grey" | "dim" => [0.3, 0.3, 0.3, 1.0],
+                    _ => [0.93, 0.93, 0.93, 1.0],
+                }
+            }
+            _ => [0.93, 0.93, 0.93, 1.0],
+        }
+    }
 
     /// Render label widgets as glyph quads (uses the text atlas, not the widget shader).
     fn render_label_quads(
@@ -1200,6 +1219,7 @@ vertex WidgetVaryings widget_vert(
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
+        focused_id: Option<u64>,
         verts: &mut Vec<Vertex>,
     ) {
         if node.widget_type == "label" {
@@ -1207,15 +1227,19 @@ vertex WidgetVaryings widget_vert(
                 Some(crate::vm::Value::String(s)) => s.clone(),
                 _ => return,
             };
-            let clear_bg = [0.05_f32, 0.05, 0.07, 1.0];
-            let fg = [1.0_f32, 1.0, 1.0, 1.0];
+            let is_focused = focused_id == Some(node.widget_id) && node.focusable;
+            let bg = if is_focused {
+                [0.33, 0.31, 0.59, 1.0] // purple tint for focus
+            } else {
+                [0.05, 0.05, 0.07, 1.0]
+            };
+            let fg = resolve_label_color(&node.props);
+
+            // Render text characters
             for (i, ch) in text.chars().enumerate() {
                 let col = node.rect.col as usize + i;
                 if col >= (node.rect.col + node.rect.width) as usize {
                     break;
-                }
-                if ch == ' ' {
-                    continue;
                 }
                 rasterize_char(
                     atlas,
@@ -1227,14 +1251,36 @@ vertex WidgetVaryings widget_vert(
                         vp_w,
                         vp_h,
                         fg,
-                        bg: clear_bg,
+                        bg,
                     },
                     verts,
                 );
             }
+
+            // For focused labels, fill the rest of the width with background
+            if is_focused {
+                let text_len = text.chars().count();
+                for i in text_len..(node.rect.width as usize) {
+                    let col = node.rect.col as usize + i;
+                    rasterize_char(
+                        atlas,
+                        ' ',
+                        (col, node.rect.row as usize),
+                        &CharCtx {
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            fg,
+                            bg,
+                        },
+                        verts,
+                    );
+                }
+            }
         }
         for child in &node.children {
-            render_label_quads(child, atlas, cell_w, cell_h, vp_w, vp_h, verts);
+            render_label_quads(child, atlas, cell_w, cell_h, vp_w, vp_h, focused_id, verts);
         }
     }
 

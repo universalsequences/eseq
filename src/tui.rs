@@ -114,10 +114,9 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
     {
         if let Some(node) = find_focused_node(layout, focused_id) {
             let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
-            let focus_style = Style::default()
-                .add_modifier(Modifier::REVERSED);
+            let focus_bg = to_rcolor(crate::theme::COMP_SELECTED_BG);
             let buf = frame.buffer_mut();
-            // Highlight the entire widget rect
+            // Highlight the entire widget rect with a visible background
             for row in node.rect.row..node.rect.row + node.rect.height {
                 let y = inner.y + row;
                 if y >= inner.bottom() {
@@ -128,7 +127,13 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                     if x >= inner.right() {
                         break;
                     }
-                    buf[(x, y)].set_style(focus_style);
+                    let cell = &mut buf[(x, y)];
+                    cell.set_style(
+                        Style::default()
+                            .fg(cell.style().fg.unwrap_or(RColor::White))
+                            .bg(focus_bg)
+                            .add_modifier(Modifier::BOLD),
+                    );
                 }
             }
         }
