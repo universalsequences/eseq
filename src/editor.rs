@@ -16,7 +16,11 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::vm::{Value, format_lisp_value};
-use crate::widget_render::{self, MouseEventOutcome, handle_event, map_mouse_event};
+use crate::widget_render::{
+    self, MouseEventOutcome, WidgetKeyEvent, begin_widget_gesture as begin_widget_gesture_data,
+    handle_event, map_double_click_event, map_key_event, map_magnify_event, map_mouse_event,
+    map_scroll_gesture_event,
+};
 
 #[derive(Default, Clone)]
 pub struct EditorConfig {
@@ -96,6 +100,22 @@ struct WidgetHitCache {
     cells: Vec<Option<crate::layout::LayoutNode>>,
 }
 
+#[derive(Debug, Clone)]
+struct WidgetGesture {
+    widget_id: u64,
+    start_precise_col: f32,
+    start_precise_row: f32,
+    gesture_data: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct WidgetClick {
+    widget_id: u64,
+    precise_col: f32,
+    precise_row: f32,
+    at: Instant,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Mark {
     pub buffer_id: BufferId,
@@ -135,6 +155,8 @@ pub struct Editor {
     mode_registry: HashMap<String, MajorMode>,
     focused_widget_id: Option<u64>,
     widget_scroll_top: u16,
+    active_widget_gesture: Option<WidgetGesture>,
+    last_widget_click: Option<WidgetClick>,
 }
 
 impl Editor {
@@ -165,6 +187,8 @@ impl Editor {
             mode_registry: HashMap::new(),
             focused_widget_id: None,
             widget_scroll_top: 0,
+            active_widget_gesture: None,
+            last_widget_click: None,
         };
         editor.bind_defaults();
         editor.load_init(config.init_source.as_deref());
@@ -525,6 +549,10 @@ impl Editor {
             return;
         }
 
+        if self.handle_focused_widget_key(key) {
+            return;
+        }
+
         if self.handle_focus_key(key) {
             return;
         }
@@ -611,12 +639,28 @@ impl Editor {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_mouse_precise = Some((precise_col, precise_row));
+                self.active_widget_gesture = None;
                 // Try click-to-activate on focusable widgets first
                 if self.try_click_focusable_widget(
                     mouse, content_col, content_row,
                 ) {
                     return;
                 }
+                if self.try_handle_widget_double_click(
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                ) {
+                    self.remember_widget_click(content_col, content_row, precise_col, precise_row);
+                    return;
+                }
+                self.begin_widget_gesture(
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                );
                 if self.try_handle_widget_mouse_precise(
                     mouse,
                     content_col,
@@ -624,6 +668,19 @@ impl Editor {
                     precise_col,
                     precise_row,
                 ) {
+                    self.remember_widget_click(content_col, content_row, precise_col, precise_row);
+                    return;
+                }
+                let local_col = precise_col - content_col as f32;
+                let local_row = precise_row - content_row as f32;
+                if self
+                    .widget_node_at(
+                        local_row.floor().max(0.0) as u16,
+                        local_col.floor().max(0.0) as u16,
+                    )
+                    .is_some()
+                {
+                    self.remember_widget_click(content_col, content_row, precise_col, precise_row);
                     return;
                 }
                 self.handle_text_click(
@@ -633,24 +690,58 @@ impl Editor {
                     content_width,
                     content_height,
                 );
+                self.last_widget_click = None;
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let previous = self
                     .last_mouse_precise
                     .unwrap_or((precise_col, precise_row));
-                self.try_handle_widget_drag_segment(
-                    mouse,
-                    content_col,
-                    content_row,
-                    previous,
-                    (precise_col, precise_row),
-                );
+                if let Some(gesture) = self.active_widget_gesture.clone() {
+                    if let Some(output) = self.dispatch_gesture_widget_mouse_event(
+                        gesture,
+                        mouse.kind,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    ) {
+                        let _ = self.apply_widget_output(Some(output));
+                    }
+                } else {
+                    self.try_handle_widget_drag_segment(
+                        mouse,
+                        content_col,
+                        content_row,
+                        previous,
+                        (precise_col, precise_row),
+                    );
+                }
                 self.last_mouse_precise = Some((precise_col, precise_row));
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(gesture) = self.active_widget_gesture.take() {
+                    let output = self.dispatch_gesture_widget_mouse_event(
+                        gesture,
+                        mouse.kind,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    );
+                    let _ = self.apply_widget_output(output);
+                }
                 self.last_mouse_precise = None;
             }
             MouseEventKind::ScrollUp => {
+                if self.try_handle_widget_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                ) {
+                    return;
+                }
                 if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Up);
                 } else {
@@ -665,6 +756,15 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollDown => {
+                if self.try_handle_widget_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                ) {
+                    return;
+                }
                 if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Down);
                 } else {
@@ -677,8 +777,73 @@ impl Editor {
                     self.mark_needs_redraw();
                 }
             }
+            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
+                let _ = self.try_handle_widget_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    precise_col,
+                    precise_row,
+                );
+            }
             _ => {}
         }
+    }
+
+    pub fn handle_touchpad_magnify(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+        delta: f64,
+    ) {
+        if precise_col < content_col as f32 || precise_row < content_row as f32 {
+            return;
+        }
+
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32;
+        let query_row = local_row.floor().max(0.0) as u16;
+        let query_col = local_col.floor().max(0.0) as u16;
+        let Some(node) = self.widget_node_at(query_row, query_col) else {
+            return;
+        };
+        let local_row = local_row + self.widget_scroll_top() as f32;
+        let Some(widget_event) = map_magnify_event(&node, local_col, local_row, delta) else {
+            return;
+        };
+        let output = handle_event(&node, widget_event);
+        let _ = self.apply_widget_output(output);
+    }
+
+    pub fn handle_touchpad_scroll(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) {
+        if precise_col < content_col as f32 || precise_row < content_row as f32 {
+            return;
+        }
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32;
+        let query_row = local_row.floor().max(0.0) as u16;
+        let query_col = local_col.floor().max(0.0) as u16;
+        let Some(node) = self.widget_node_at(query_row, query_col) else {
+            return;
+        };
+        let local_row = local_row + self.widget_scroll_top() as f32;
+        let Some(widget_event) =
+            map_scroll_gesture_event(&node, local_col, local_row, delta_x, delta_y)
+        else {
+            return;
+        };
+        let output = handle_event(&node, widget_event);
+        let _ = self.apply_widget_output(output);
     }
 
     fn bind_defaults(&mut self) {
@@ -1219,8 +1384,7 @@ impl Editor {
                 self.focused_widget_id = Some(*id);
                 self.adjust_widget_scroll(*row);
                 self.mark_needs_redraw();
-                self.activate_focused();
-                return true;
+                return self.activate_focused();
             }
         }
         false
@@ -1250,6 +1414,31 @@ impl Editor {
             }
             _ => false,
         }
+    }
+
+    fn handle_focused_widget_key(&mut self, key: KeyEvent) -> bool {
+        let Some(focused_id) = self.focused_widget_id else {
+            return false;
+        };
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return false;
+        };
+        let Some(node) = find_node_by_id(&layout, focused_id) else {
+            return false;
+        };
+        let output = map_key_event(
+            &node,
+            WidgetKeyEvent {
+                code: key.code,
+                modifiers: key.modifiers,
+            },
+        )
+        .and_then(|event| handle_event(&node, event));
+        if output.is_none() {
+            return false;
+        }
+        let _ = self.apply_widget_output(output);
+        true
     }
 
     fn navigate_focus(&mut self, direction: KeyCode) {
@@ -1313,15 +1502,15 @@ impl Editor {
         }
     }
 
-    fn activate_focused(&mut self) {
+    fn activate_focused(&mut self) -> bool {
         let Some(focused_id) = self.focused_widget_id else {
-            return;
+            return false;
         };
         let Some(layout) = self.runtime.current_layout.clone() else {
-            return;
+            return false;
         };
         let Some(node) = find_node_by_id(&layout, focused_id) else {
-            return;
+            return false;
         };
         // Look for :on-enter callback in props
         if let Some(callback) = node.props.get("on-enter").cloned() {
@@ -1334,7 +1523,9 @@ impl Editor {
             self.refresh_runtime_side_effects();
             self.sync_runtime_context();
             self.mark_needs_redraw();
+            return true;
         }
+        false
     }
 
     fn save_current_widget_tree(&mut self) {
@@ -1348,6 +1539,7 @@ impl Editor {
         self.runtime.current_layout = None;
         self.focused_widget_id = None;
         self.widget_scroll_top = 0;
+        self.active_widget_gesture = None;
     }
 
     fn restore_buffer_widget_tree(&mut self) {
@@ -1364,6 +1556,10 @@ impl Editor {
     }
 
     fn auto_focus_first_widget(&mut self) {
+        if !self.active_buffer().read_only {
+            self.focused_widget_id = None;
+            return;
+        }
         let Some(layout) = self.runtime.current_layout.clone() else {
             return;
         };
@@ -1732,10 +1928,106 @@ impl Editor {
             let Some(node) = self.widget_node_at(query_row, query_col) else {
                 return false;
             };
-            self.dispatch_widget_mouse_event(&node, mouse.kind, content_col, content_row, precise_col, precise_row)
+            self.dispatch_widget_mouse_event(
+                &node,
+                mouse.kind,
+                content_col,
+                content_row,
+                precise_col,
+                precise_row,
+                None,
+                None,
+            )
         };
 
         self.apply_widget_output(output)
+    }
+
+    fn try_handle_widget_double_click(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        if precise_col < content_col as f32 || precise_row < content_row as f32 {
+            return false;
+        }
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32;
+        let query_row = local_row.floor().max(0.0) as u16;
+        let query_col = local_col.floor().max(0.0) as u16;
+        let Some(node) = self.widget_node_at(query_row, query_col) else {
+            return false;
+        };
+        if !self.is_double_click_candidate(node.widget_id, precise_col, precise_row) {
+            return false;
+        }
+        let local_row = local_row + self.widget_scroll_top() as f32;
+        let Some(widget_event) = map_double_click_event(&node, local_col, local_row) else {
+            return false;
+        };
+        let output = handle_event(&node, widget_event);
+        self.apply_widget_output(output)
+    }
+
+    fn is_double_click_candidate(&self, widget_id: u64, precise_col: f32, precise_row: f32) -> bool {
+        const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+        const DOUBLE_CLICK_SLOP: f32 = 1.5;
+        self.last_widget_click.as_ref().is_some_and(|click| {
+            click.widget_id == widget_id
+                && click.at.elapsed() <= DOUBLE_CLICK_WINDOW
+                && (click.precise_col - precise_col).abs() <= DOUBLE_CLICK_SLOP
+                && (click.precise_row - precise_row).abs() <= DOUBLE_CLICK_SLOP
+        })
+    }
+
+    fn remember_widget_click(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        if precise_col < content_col as f32 || precise_row < content_row as f32 {
+            self.last_widget_click = None;
+            return;
+        }
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32;
+        let query_row = local_row.floor().max(0.0) as u16;
+        let query_col = local_col.floor().max(0.0) as u16;
+        self.last_widget_click = self.widget_node_at(query_row, query_col).map(|node| WidgetClick {
+            widget_id: node.widget_id,
+            precise_col,
+            precise_row,
+            at: Instant::now(),
+        });
+    }
+
+    fn begin_widget_gesture(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32;
+        let query_row = local_row.floor().max(0.0) as u16;
+        let query_col = local_col.floor().max(0.0) as u16;
+        let Some(node) = self.widget_node_at(query_row, query_col) else {
+            return;
+        };
+        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row + self.widget_scroll_top() as f32);
+        if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
+            self.active_widget_gesture = Some(WidgetGesture {
+                widget_id: node.widget_id,
+                start_precise_col: precise_col,
+                start_precise_row: precise_row,
+                gesture_data,
+            });
+        }
     }
 
     fn try_handle_widget_drag_segment(
@@ -1785,6 +2077,8 @@ impl Editor {
                 content_row,
                 clamped_col,
                 clamped_row,
+                Some(start),
+                None,
             );
             let _ = self.apply_widget_output(output);
             return;
@@ -1877,6 +2171,10 @@ impl Editor {
             .min(buffer.lines.len().saturating_sub(1));
         let absolute_col = (local_col as usize).min(buffer.lines[absolute_row].len());
         buffer.cursor = (absolute_row, absolute_col);
+        if !buffer.read_only {
+            self.focused_widget_id = None;
+            self.active_widget_gesture = None;
+        }
         self.completion = None;
         self.minibuffer = None;
         self.clear_mark();
@@ -1909,20 +2207,57 @@ impl Editor {
         content_row: u16,
         precise_col: f32,
         precise_row: f32,
+        drag_start: Option<(f32, f32)>,
+        explicit_gesture: Option<&crate::vm::Value>,
     ) -> Option<crate::widget_render::EventOutput> {
         let local_col = precise_col - content_col as f32;
         let local_row = precise_row - content_row as f32 + self.widget_scroll_top() as f32;
-        match map_mouse_event(node, mouse_kind, local_col, local_row) {
+        let drag_start = drag_start.map(|(start_col, start_row)| {
+            (
+                start_col - content_col as f32,
+                start_row - content_row as f32 + self.widget_scroll_top() as f32,
+            )
+        });
+        let gesture = self
+            .active_widget_gesture
+            .as_ref()
+            .and_then(|gesture| (gesture.widget_id == node.widget_id).then_some(gesture))
+            .and_then(|gesture| gesture.gesture_data.as_ref())
+            .or(explicit_gesture);
+        match map_mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture) {
             MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
             MouseEventOutcome::Dispatch(widget_event) => handle_event(node, widget_event),
         }
     }
 
+    fn dispatch_gesture_widget_mouse_event(
+        &self,
+        gesture: WidgetGesture,
+        mouse_kind: MouseEventKind,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<crate::widget_render::EventOutput> {
+        let layout = self.runtime.current_layout.as_ref()?;
+        let node = find_node_by_id(layout, gesture.widget_id)?;
+        self.dispatch_widget_mouse_event(
+            &node,
+            mouse_kind,
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+            Some((gesture.start_precise_col, gesture.start_precise_row)),
+            gesture.gesture_data.as_ref(),
+        )
+    }
+
     fn apply_widget_output(&mut self, output: Option<crate::widget_render::EventOutput>) -> bool {
         let Some(output) = output else {
-            return true;
+            return false;
         };
-        let result = self.runtime.invoke(output.callback, vec![output.value]);
+        let result = self.runtime.invoke(output.callback, output.args);
         if let Some(status) = self.runtime.take_status_message() {
             self.minibuffer = Some(status);
         } else if let Err(error) = result {
@@ -1962,6 +2297,42 @@ fn has_focusable_node(node: &crate::layout::LayoutNode) -> bool {
         return true;
     }
     node.children.iter().any(has_focusable_node)
+}
+
+#[cfg(test)]
+fn get_map_field_number(value: &Value, key: &str) -> Option<f64> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    match &*map.get(key)?.borrow() {
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn get_map_field_keyword(value: &Value, key: &str) -> Option<String> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    match &*map.get(key)?.borrow() {
+        Value::Keyword(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn get_first_list_number(value: &Value, key: &str) -> Option<f64> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    let Value::List(items) = &*map.get(key)?.borrow() else {
+        return None;
+    };
+    match &*items.first()?.borrow() {
+        Value::Number(n) => Some(*n),
+        _ => None,
+    }
 }
 
 fn collect_focusable_nodes(
@@ -3654,6 +4025,162 @@ mod tests {
     }
 
     #[test]
+    fn editable_widget_buffers_do_not_auto_focus_widgets() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| e))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        assert_eq!(editor.focused_widget_id(), None);
+    }
+
+    #[test]
+    fn editable_buffers_keep_text_navigation_when_widget_is_unfocused() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.active_buffer_mut().set_text("abc");
+        editor.active_buffer_mut().cursor = (0, 1);
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| e))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        assert_eq!(editor.focused_widget_id(), None);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().cursor, (0, 2));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().text(), "ac");
+    }
+
+    #[test]
+    fn text_click_clears_widget_focus_only_in_editable_buffers() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (effect
+                  (timeline
+                    :height 4
+                    :focusable true
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| e))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        assert!(editor.focused_widget_id().is_some(), "widget click should focus it");
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 7),
+            1,
+            1,
+            30,
+            8,
+        );
+        assert_eq!(editor.focused_widget_id(), None, "text click should blur in editable buffers");
+
+        editor.active_buffer_mut().read_only = true;
+        editor.auto_focus_first_widget();
+        assert!(editor.focused_widget_id().is_some(), "read-only buffers should auto-focus");
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 7),
+            1,
+            1,
+            30,
+            8,
+        );
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "background clicks should keep focus in read-only buffers"
+        );
+    }
+
+    #[test]
+    fn timeline_draw_click_focuses_even_without_pointer_down_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :tool :draw
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items ()
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| e))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 3),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        assert!(
+            editor.focused_widget_id().is_some(),
+            "timeline clicks should focus even when mouse-down does not dispatch an action"
+        );
+    }
+
+    #[test]
     fn widget_interaction_survives_buffer_switch() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -3729,5 +4256,841 @@ mod tests {
             "widget layout should be restored after switching back. widget_tree={:?}",
             editor.active_buffer().widget_tree.is_some()
         );
+    }
+
+    #[test]
+    fn first_layout_buffer_stays_interactive_after_second_layout_buffer_eval() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(20, 6);
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def roll-level (state 0))
+                (effect
+                  (h-stack
+                    (label (fmt "roll={}" roll-level))
+                    (hslider :min 0 :max 100 :value roll-level :on-change |v| (set! roll-level v))))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(20, 6);
+        let roll_id = editor.active_buffer().id;
+
+        editor.open_scratch_buffer("*grid*", "");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def grid-level (state 0))
+                (effect
+                  (h-stack
+                    (label (fmt "grid={}" grid-level))
+                    (hslider :min 0 :max 100 :value grid-level :on-change |v| (set! grid-level v))))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(20, 6);
+
+        editor.set_active_buffer(roll_id);
+        assert!(editor.widget_layout().is_some(), "roll layout should be restored");
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 16, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 16, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+
+        let val = editor.runtime_mut().eval_str("roll-level").unwrap().unwrap();
+        match val {
+            Value::Number(n) => assert!(n > 0.0, "roll-level should have changed, got {n}"),
+            _ => panic!("expected number"),
+        }
+
+        let layout = editor.widget_layout().expect("roll layout");
+        let label_text = layout.children[0]
+            .props
+            .get("text")
+            .and_then(|value| match value {
+                Value::String(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or("");
+        assert_ne!(label_text, "roll=0", "roll layout should have rerendered");
+    }
+
+    #[test]
+    fn first_layout_buffer_stays_interactive_after_buffer_list_switch() {
+        let init = include_str!("../init.lisp").to_string();
+        let runtime = Runtime::with_init_source(&init);
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                init_source: Some(init),
+            },
+        );
+        editor.set_layout_viewport(80, 12);
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def roll-level (state 0))
+                (effect
+                  (hslider :min 0 :max 100 :value roll-level :on-change |v| (set! roll-level v)))
+                "#,
+            )
+            .unwrap();
+        let roll_id = editor.active_buffer().id;
+
+        editor.open_scratch_buffer("*grid*", "");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def grid-level (state 0))
+                (effect
+                  (hslider :min 0 :max 100 :value grid-level :on-change |v| (set! grid-level v)))
+                "#,
+            )
+            .unwrap();
+
+        editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+        editor.refresh_runtime_side_effects();
+        assert_eq!(editor.active_buffer().name, "*buffers*");
+
+        editor.set_active_buffer(roll_id);
+        assert!(editor.widget_layout().is_some(), "roll layout should be restored");
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 16, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 16, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+
+        let val = editor.runtime_mut().eval_str("roll-level").unwrap().unwrap();
+        match val {
+            Value::Number(n) => assert!(n > 0.0, "roll-level should have changed, got {n}"),
+            _ => panic!("expected number"),
+        }
+    }
+
+    #[test]
+    fn timeline_click_item_emits_select_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 9, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(super::get_map_field_keyword(&action, "type"), Some("select".to_string()));
+        assert_eq!(super::get_first_list_number(&action, "ids"), Some(10.0));
+    }
+
+    #[test]
+    fn timeline_drag_item_emits_move_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 15, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("move-items-absolute".to_string())
+        );
+        assert!(super::get_map_field_number(&action, "start").unwrap_or(0.0) > 4.5);
+        assert_eq!(super::get_first_list_number(&action, "ids"), Some(10.0));
+    }
+
+    #[test]
+    fn timeline_drag_unselected_item_moves_that_item_even_if_another_is_selected() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(40, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :sidebar-width 4
+                    :lanes (list
+                      (dict :id 0 :label "L0")
+                      (dict :id 1 :label "L1"))
+                    :items (list
+                      (dict :id 10 :lane 0 :start 2 :end 6 :selected true)
+                      (dict :id 11 :lane 1 :start 8 :end 12 :selected false))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(40, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 26, 6),
+            1,
+            1,
+            40,
+            8,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 30, 6),
+            1,
+            1,
+            40,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("move-items-absolute".to_string())
+        );
+        assert_eq!(
+            super::get_first_list_number(&action, "ids"),
+            Some(11.0),
+            "dragging an unselected item should target that item, not stale selection"
+        );
+    }
+
+    #[test]
+    fn focusable_timeline_click_still_dispatches_pointer_selection_before_drag() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(40, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :sidebar-width 4
+                    :lanes (list
+                      (dict :id 0 :label "L0")
+                      (dict :id 1 :label "L1"))
+                    :items (list
+                      (dict :id 10 :lane 0 :start 2 :end 6 :selected true)
+                      (dict :id 11 :lane 1 :start 8 :end 12 :selected false))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(40, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 26, 6),
+            1,
+            1,
+            40,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("select".to_string()),
+            "focusable widgets should still receive pointer down if they do not have :on-enter"
+        );
+        assert_eq!(super::get_first_list_number(&action, "ids"), Some(11.0));
+    }
+
+    #[test]
+    fn timeline_drag_item_edge_emits_resize_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 8, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 6, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("resize-item-absolute".to_string())
+        );
+        assert_eq!(super::get_map_field_keyword(&action, "edge"), Some("start".to_string()));
+        assert_eq!(super::get_map_field_number(&action, "id"), Some(10.0));
+    }
+
+    #[test]
+    fn timeline_draw_tool_emits_create_item() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :tool :draw
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items ()
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 6, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 12, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("create-item".to_string())
+        );
+        assert!(
+            super::get_map_field_number(&action, "end").unwrap_or(0.0)
+                > super::get_map_field_number(&action, "start").unwrap_or(0.0)
+        );
+    }
+
+    #[test]
+    fn timeline_draw_tool_mouse_up_emits_finish_create_item() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :tool :draw
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items ()
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 6, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 12, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 12, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("finish-create-item".to_string())
+        );
+    }
+
+    #[test]
+    fn timeline_scroll_content_vertical_wheel_emits_lane_scroll_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollDown, 10, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("scroll-view".to_string())
+        );
+        assert_eq!(super::get_map_field_number(&action, "delta-time"), Some(0.0));
+        assert!(super::get_map_field_number(&action, "delta-lanes").unwrap_or(0.0) > 0.0);
+    }
+
+    #[test]
+    fn timeline_scroll_header_vertical_wheel_emits_zoom_view_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollUp, 10, 1),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("zoom-view".to_string())
+        );
+        assert!(super::get_map_field_number(&action, "factor").unwrap_or(0.0) > 1.0);
+    }
+
+    #[test]
+    fn timeline_touchpad_magnify_emits_zoom_view_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_touchpad_magnify(1, 1, 10.5, 3.0, 0.2);
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("zoom-view".to_string())
+        );
+        assert!(super::get_map_field_number(&action, "factor").unwrap_or(0.0) > 1.0);
+    }
+
+    #[test]
+    fn timeline_scroll_content_horizontal_wheel_emits_time_scroll_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8))
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollRight, 10, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("scroll-view".to_string())
+        );
+        assert_eq!(super::get_map_field_number(&action, "delta-lanes"), Some(0.0));
+        assert!(super::get_map_field_number(&action, "delta-time").unwrap_or(0.0) > 0.0);
+    }
+
+    #[test]
+    fn focused_timeline_right_arrow_emits_nudge_selection_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("nudge-selection".to_string())
+        );
+        assert_eq!(super::get_map_field_number(&action, "delta-time"), Some(1.0));
+    }
+
+    #[test]
+    fn focused_timeline_delete_emits_delete_items_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("delete-items".to_string())
+        );
+        assert_eq!(super::get_first_list_number(&action, "ids"), Some(10.0));
+    }
+
+    #[test]
+    fn focused_timeline_escape_emits_clear_selection_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("clear-selection".to_string())
+        );
+    }
+
+    #[test]
+    fn focused_timeline_d_shortcut_emits_set_tool_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :tool :pointer
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("set-tool".to_string())
+        );
+        assert_eq!(
+            super::get_map_field_keyword(&action, "tool"),
+            Some("draw".to_string())
+        );
+    }
+
+    #[test]
+    fn pointer_timeline_double_click_background_creates_default_note() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :tool :pointer
+                    :lanes (list (dict :id 0 :label "L0")
+                                 (dict :id 1 :label "L1"))
+                    :items (list)
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        let click = mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 3);
+        editor.handle_mouse(click, 1, 1, 30, 8);
+        editor.handle_mouse(click, 1, 1, 30, 8);
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("finish-create-item".to_string())
+        );
+        assert_eq!(super::get_map_field_number(&action, "start"), Some(5.0));
+        assert_eq!(super::get_map_field_number(&action, "end"), Some(6.0));
     }
 }

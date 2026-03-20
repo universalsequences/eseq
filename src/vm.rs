@@ -1,4 +1,5 @@
 use crate::compiler::{Chunk, Compiler, OpCode};
+use crate::host::BufferId;
 use crate::parser::{ASTParser, Parser};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -62,8 +63,15 @@ pub enum ReactiveNode {
     Effect {
         id: NodeId,
         chunk_idx: usize,
+        owner_buffer_id: Option<BufferId>,
         dirty: bool,
     },
+}
+
+#[derive(Clone)]
+pub struct PendingWidgetTree {
+    pub owner_buffer_id: Option<BufferId>,
+    pub tree: Value,
 }
 
 pub struct ReactiveDag {
@@ -242,7 +250,7 @@ pub struct VM {
     current_chunk: usize,
     globals: Vec<Option<Rc<RefCell<Value>>>>,
     pub global_names: Vec<String>,
-    pub pending_widget_trees: Vec<Value>,
+    pub pending_widget_trees: Vec<PendingWidgetTree>,
     pub dag: ReactiveDag,
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
@@ -251,6 +259,7 @@ pub struct VM {
     pub state_bindings: HashMap<String, NodeId>,
     execution_depth: usize,
     processing_reactive: bool,
+    current_effect_owner: Option<BufferId>,
 }
 
 /// Register built-in functions available in all contexts.
@@ -739,6 +748,19 @@ impl ReactiveDag {
             .filter_map(|(id, node)| matches!(node, ReactiveNode::Effect { .. }).then_some(*id))
             .collect()
     }
+
+    pub fn effect_ids_for_owner(&self, owner_buffer_id: Option<BufferId>) -> Vec<NodeId> {
+        self.nodes
+            .iter()
+            .filter_map(|(id, node)| match node {
+                ReactiveNode::Effect {
+                    owner_buffer_id: current_owner,
+                    ..
+                } if *current_owner == owner_buffer_id => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 impl VM {
@@ -757,6 +779,7 @@ impl VM {
             state_bindings: HashMap::new(),
             execution_depth: 0,
             processing_reactive: false,
+            current_effect_owner: None,
         }
     }
 
@@ -842,11 +865,16 @@ impl VM {
             .map(|value| value.borrow().clone())
     }
 
-    pub fn clear_effects(&mut self) {
-        for id in self.dag.effect_ids() {
+    pub fn clear_effects_for_owner(&mut self, owner_buffer_id: Option<BufferId>) {
+        for id in self.dag.effect_ids_for_owner(owner_buffer_id) {
             self.dag.remove_node(id);
         }
-        self.pending_widget_trees.clear();
+        self.pending_widget_trees
+            .retain(|pending| pending.owner_buffer_id != owner_buffer_id);
+    }
+
+    pub fn set_current_effect_owner(&mut self, owner_buffer_id: Option<BufferId>) {
+        self.current_effect_owner = owner_buffer_id;
     }
 
     fn execute_from(&mut self, entry_chunk: usize) -> Result<Option<Value>, VMError> {
@@ -1051,7 +1079,15 @@ impl VM {
                         continue;
                     };
                     progressed = true;
+                    let previous_owner = self.current_effect_owner;
+                    if let Some(ReactiveNode::Effect {
+                        owner_buffer_id, ..
+                    }) = self.dag.nodes.get(&node_id)
+                    {
+                        self.current_effect_owner = *owner_buffer_id;
+                    }
                     self.execute_from(chunk_idx)?;
+                    self.current_effect_owner = previous_owner;
                 }
 
                 if !progressed {
@@ -1270,15 +1306,9 @@ impl VM {
                     if stack.len() < 2 {
                         return Err(VMError::StackUnderflow);
                     }
-                    let mut result: bool = false;
+                    let mut result = false;
                     if let (Some(a), Some(b)) = (stack.pop(), stack.pop()) {
-                        match (&*a.borrow(), &*b.borrow()) {
-                            (Value::Number(a), Value::Number(b)) => result = a == b,
-                            (Value::Bool(a), Value::Bool(b)) => result = a == b,
-                            (Value::Nil, Value::Nil) => result = true,
-                            (Value::String(a), Value::String(b)) => result = a == b,
-                            _ => result = false,
-                        }
+                        result = *a.borrow() == *b.borrow();
                     }
                     stack.push(Rc::new(RefCell::new(Value::Bool(result))));
                     frames.last_mut().unwrap().pc += 1;
@@ -1474,6 +1504,7 @@ impl VM {
                         self.dag.add_node(ReactiveNode::Effect {
                             id: node_id,
                             chunk_idx,
+                            owner_buffer_id: self.current_effect_owner,
                             dirty: false,
                         });
                     }
@@ -1704,7 +1735,10 @@ impl VM {
                 }
                 OpCode::EmitTree => match stack.pop() {
                     Some(tree) => {
-                        self.pending_widget_trees.push(tree.borrow().clone());
+                        self.pending_widget_trees.push(PendingWidgetTree {
+                            owner_buffer_id: self.current_effect_owner,
+                            tree: tree.borrow().clone(),
+                        });
                         frames.last_mut().unwrap().pc += 1;
                     }
                     None => return Err(VMError::StackUnderflow),

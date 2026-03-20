@@ -272,6 +272,9 @@ impl ASTParser {
                     args.push(Expression::Symbol(s.to_string()));
                     self.next();
                 }
+                Some(Token::LeftParen) => {
+                    args.push(Expression::List(self.parse_list()?));
+                }
                 Some(_) => return Err(ParserError::InvalidLambda),
                 None => return Err(ParserError::UnexpectedEOF),
             }

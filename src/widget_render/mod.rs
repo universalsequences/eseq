@@ -4,13 +4,14 @@ pub mod hslider;
 pub mod hstack;
 pub mod knob;
 pub mod label;
+pub mod timeline;
 pub mod toggle;
 pub mod vslider;
 pub mod vstack;
 
 use std::collections::HashMap;
 
-use crossterm::event::MouseEventKind;
+use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
 use crate::backend::{Cell, CellStyle, Color};
 use crate::layout::{Constraints, LayoutNode, Rect, Size};
@@ -27,11 +28,36 @@ pub enum WidgetEvent {
     Nudge(f32),
     /// Click/confirm
     Activate,
+    PointerDown(PointerEvent),
+    PointerDrag(PointerDragEvent),
+    PointerUp(PointerEvent),
+    Key(WidgetKeyEvent),
+    Custom(Value),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PointerEvent {
+    pub local_col: f32,
+    pub local_row: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PointerDragEvent {
+    pub start_local_col: f32,
+    pub start_local_row: f32,
+    pub local_col: f32,
+    pub local_row: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct WidgetKeyEvent {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
 }
 
 pub struct EventOutput {
     pub callback: Value,
-    pub value: Value,
+    pub args: Vec<Value>,
 }
 
 pub enum MouseEventOutcome {
@@ -61,6 +87,46 @@ pub struct WidgetViewport {
     pub cell_h: f32,
     pub vp_w: f32,
     pub vp_h: f32,
+    pub focused_widget_id: Option<u64>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct MetalRectPrimitive {
+    pub rect: Rect,
+    pub color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+pub struct MetalQuadPrimitive {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct MetalGlyphRunPrimitive {
+    pub row: u16,
+    pub col: u16,
+    pub text: String,
+    pub fg: Color,
+    pub bg: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub enum MetalPrimitive {
+    Rect(MetalRectPrimitive),
+    Quad(MetalQuadPrimitive),
+    GlyphRun(MetalGlyphRunPrimitive),
+    WidgetInstance {
+        widget_type: String,
+        instance: WidgetInstance,
+    },
 }
 
 // ── CellBuffer ───────────────────────────────────────────────────────────────
@@ -127,14 +193,54 @@ pub trait WidgetDefinition: Sync {
         vec![]
     }
     fn tui_render(&self, _props: &HashMap<String, Value>, _rect: Rect, _buf: &mut CellBuffer) {}
+    fn begin_gesture(
+        &self,
+        _node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+    ) -> Option<Value> {
+        None
+    }
     fn mouse_event(
         &self,
         _node: &LayoutNode,
         _mouse_kind: MouseEventKind,
         _local_col: f32,
         _local_row: f32,
+        _drag_start: Option<(f32, f32)>,
+        _gesture: Option<&Value>,
     ) -> MouseEventOutcome {
         MouseEventOutcome::Ignore
+    }
+    fn double_click_event(
+        &self,
+        _node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+    ) -> Option<WidgetEvent> {
+        None
+    }
+    fn key_event(&self, _node: &LayoutNode, _key: WidgetKeyEvent) -> Option<WidgetEvent> {
+        None
+    }
+    fn magnify_event(
+        &self,
+        _node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+        _delta: f64,
+    ) -> Option<WidgetEvent> {
+        None
+    }
+    fn scroll_gesture_event(
+        &self,
+        _node: &LayoutNode,
+        _local_col: f32,
+        _local_row: f32,
+        _delta_x: f32,
+        _delta_y: f32,
+    ) -> Option<WidgetEvent> {
+        None
     }
     fn captures_drag(&self) -> bool {
         false
@@ -159,6 +265,22 @@ pub trait WidgetDefinition: Sync {
     ) -> Option<WidgetInstance> {
         None
     }
+    #[cfg(target_os = "macos")]
+    fn build_metal_primitives(
+        &self,
+        widget_type: &str,
+        node: &LayoutNode,
+        viewport: WidgetViewport,
+    ) -> Vec<MetalPrimitive> {
+        self.build_metal_instance(widget_type, node, viewport)
+            .map(|instance| {
+                vec![MetalPrimitive::WidgetInstance {
+                    widget_type: widget_type.to_string(),
+                    instance,
+                }]
+            })
+            .unwrap_or_default()
+    }
 }
 
 static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
@@ -167,6 +289,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &vslider::VSLIDER_WIDGET,
     &toggle::TOGGLE_WIDGET,
     &knob::KNOB_WIDGET,
+    &timeline::TIMELINE_WIDGET,
     &vstack::VSTACK_WIDGET,
     &hstack::HSTACK_WIDGET,
     &box_widget::BOX_WIDGET,
@@ -213,30 +336,52 @@ pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'sta
 }
 
 #[cfg(target_os = "macos")]
-pub fn widget_instance_for_node(
+pub fn widget_primitives_for_node(
     node: &LayoutNode,
     viewport: WidgetViewport,
-) -> Option<WidgetInstance> {
-    widget_definition(&node.widget_type)?.build_metal_instance(&node.widget_type, node, viewport)
-}
-
-/// Collect all label nodes from the layout tree (labels use glyph atlas, not custom shaders).
-#[cfg(target_os = "macos")]
-pub fn collect_label_nodes(node: &LayoutNode) -> Vec<(Rect, String)> {
-    let mut labels = Vec::new();
-    collect_labels_recursive(node, &mut labels);
-    labels
+) -> Vec<MetalPrimitive> {
+    widget_definition(&node.widget_type)
+        .map(|definition| definition.build_metal_primitives(&node.widget_type, node, viewport))
+        .unwrap_or_default()
 }
 
 #[cfg(target_os = "macos")]
-fn collect_labels_recursive(node: &LayoutNode, labels: &mut Vec<(Rect, String)>) {
-    if node.widget_type == "label" {
-        if let Some(Value::String(text)) = node.props.get("text") {
-            labels.push((node.rect, text.clone()));
-        }
+pub fn collect_metal_primitives(
+    node: &LayoutNode,
+    viewport: WidgetViewport,
+    scroll_top: u16,
+    max_rows: u16,
+) -> Vec<MetalPrimitive> {
+    let mut primitives = Vec::new();
+    collect_metal_primitives_recursive(node, viewport, scroll_top, max_rows, &mut primitives);
+    primitives
+}
+
+#[cfg(target_os = "macos")]
+fn collect_metal_primitives_recursive(
+    node: &LayoutNode,
+    viewport: WidgetViewport,
+    scroll_top: u16,
+    max_rows: u16,
+    primitives: &mut Vec<MetalPrimitive>,
+) {
+    let vis_row = node.rect.row as i32 - scroll_top as i32;
+    let vis_end = vis_row + node.rect.height as i32;
+    if vis_end <= 0 || vis_row >= max_rows as i32 {
+        return;
     }
+
+    let mut scrolled_node = node.clone();
+    scrolled_node.rect.row = vis_row.max(0) as u16;
+    let clipped_end = vis_end.min(max_rows as i32).max(scrolled_node.rect.row as i32) as u16;
+    scrolled_node.rect.height = clipped_end
+        .saturating_sub(scrolled_node.rect.row)
+        .max(1);
+
+    primitives.extend(widget_primitives_for_node(&scrolled_node, viewport));
+
     for child in &node.children {
-        collect_labels_recursive(child, labels);
+        collect_metal_primitives_recursive(child, viewport, scroll_top, max_rows, primitives);
     }
 }
 
@@ -249,9 +394,11 @@ pub fn map_mouse_event(
     mouse_kind: MouseEventKind,
     local_col: f32,
     local_row: f32,
+    drag_start: Option<(f32, f32)>,
+    gesture: Option<&Value>,
 ) -> MouseEventOutcome {
     widget_definition(&node.widget_type)
-        .map(|definition| definition.mouse_event(node, mouse_kind, local_col, local_row))
+        .map(|definition| definition.mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture))
         .unwrap_or(MouseEventOutcome::Ignore)
 }
 
@@ -259,6 +406,46 @@ pub fn widget_captures_drag(widget_type: &str) -> bool {
     widget_definition(widget_type)
         .map(WidgetDefinition::captures_drag)
         .unwrap_or(false)
+}
+
+pub fn begin_widget_gesture(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+) -> Option<Value> {
+    widget_definition(&node.widget_type)?.begin_gesture(node, local_col, local_row)
+}
+
+pub fn map_key_event(node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
+    widget_definition(&node.widget_type)?.key_event(node, key)
+}
+
+pub fn map_double_click_event(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+) -> Option<WidgetEvent> {
+    widget_definition(&node.widget_type)?.double_click_event(node, local_col, local_row)
+}
+
+pub fn map_magnify_event(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+    delta: f64,
+) -> Option<WidgetEvent> {
+    widget_definition(&node.widget_type)?.magnify_event(node, local_col, local_row, delta)
+}
+
+pub fn map_scroll_gesture_event(
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+    delta_x: f32,
+    delta_y: f32,
+) -> Option<WidgetEvent> {
+    widget_definition(&node.widget_type)?
+        .scroll_gesture_event(node, local_col, local_row, delta_x, delta_y)
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────

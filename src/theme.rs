@@ -9,6 +9,7 @@ use crate::backend::Color;
 
 pub const BG: Color = Color::from_hex(0x15, 0x14, 0x1b);
 pub const FG: Color = Color::from_hex(0xed, 0xec, 0xee);
+pub const FG_MUTED: Color = Color::from_hex(0x4d, 0x4c, 0x4e);
 
 pub const BLACK: Color = Color::from_hex(0x11, 0x0f, 0x18);
 pub const RED: Color = Color::from_hex(0xff, 0x67, 0x67);

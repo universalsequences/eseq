@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::{CellBuffer, WidgetDefinition, resolve_named_color, styled_cell};
+use super::{CellBuffer, MetalGlyphRunPrimitive, MetalPrimitive, MetalRectPrimitive, WidgetDefinition, resolve_named_color, styled_cell};
 use crate::backend::Color;
 use crate::theme;
 use crate::layout::{
@@ -70,5 +70,36 @@ impl WidgetDefinition for LabelWidget {
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         tui_render(props, rect, buf);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn build_metal_primitives(
+        &self,
+        _widget_type: &str,
+        node: &crate::layout::LayoutNode,
+        viewport: super::WidgetViewport,
+    ) -> Vec<MetalPrimitive> {
+        let Some(Value::String(text)) = node.props.get("text") else {
+            return Vec::new();
+        };
+        let fg = resolve_color(&node.props);
+        let bg = if viewport.focused_widget_id == Some(node.widget_id) && node.focusable {
+            theme::STATUS_BG
+        } else {
+            theme::BG
+        };
+        vec![
+            MetalPrimitive::Rect(MetalRectPrimitive {
+                rect: node.rect,
+                color: bg,
+            }),
+            MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
+                row: node.rect.row,
+                col: node.rect.col,
+                text: text.clone(),
+                fg,
+                bg,
+            }),
+        ]
     }
 }

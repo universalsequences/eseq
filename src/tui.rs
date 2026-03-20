@@ -19,6 +19,19 @@ fn to_rcolor(c: Color) -> RColor {
     )
 }
 
+fn brighten_rcolor(color: RColor, amount: f32) -> RColor {
+    match color {
+        RColor::Rgb(r, g, b) => {
+            let brighten = |channel: u8| -> u8 {
+                let channel = channel as f32;
+                (channel + (255.0 - channel) * amount).round().clamp(0.0, 255.0) as u8
+            };
+            RColor::Rgb(brighten(r), brighten(g), brighten(b))
+        }
+        other => other,
+    }
+}
+
 fn cell_style_to_ratatui(s: CellStyle) -> Style {
     let mut style = Style::default().fg(to_rcolor(s.fg));
     if let Some(bg) = s.bg {
@@ -116,25 +129,31 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
         (&render_frame.widget_layout, render_frame.focused_widget_id)
     {
         if let Some(node) = find_focused_node(layout, focused_id) {
-            let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
-            let focus_bg = to_rcolor(crate::theme::COMP_SELECTED_BG);
-            let buf = frame.buffer_mut();
-            for row in node.rect.row..node.rect.row + node.rect.height {
-                let vis_row = row as i32 - wscroll as i32;
-                if vis_row < 0 || vis_row >= inner.height as i32 {
-                    continue;
-                }
-                let y = inner.y + vis_row as u16;
-                for col in node.rect.col..node.rect.col + node.rect.width {
-                    let x = inner.x + col;
-                    if x >= inner.right() { break; }
-                    let cell = &mut buf[(x, y)];
-                    cell.set_style(
-                        Style::default()
-                            .fg(cell.style().fg.unwrap_or(RColor::White))
-                            .bg(focus_bg)
-                            .add_modifier(Modifier::BOLD),
-                    );
+            if node.widget_type != "timeline" {
+                let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
+                let buf = frame.buffer_mut();
+                for row in node.rect.row..node.rect.row + node.rect.height {
+                    let vis_row = row as i32 - wscroll as i32;
+                    if vis_row < 0 || vis_row >= inner.height as i32 {
+                        continue;
+                    }
+                    let y = inner.y + vis_row as u16;
+                    for col in node.rect.col..node.rect.col + node.rect.width {
+                        let x = inner.x + col;
+                        if x >= inner.right() { break; }
+                        let cell = &mut buf[(x, y)];
+                        let style = cell.style();
+                        let fg = style.fg.map(|color| brighten_rcolor(color, 0.25));
+                        let bg = style.bg.map(|color| brighten_rcolor(color, 0.25));
+                        let mut new_style = Style::default();
+                        if let Some(fg) = fg {
+                            new_style = new_style.fg(fg);
+                        }
+                        if let Some(bg) = bg {
+                            new_style = new_style.bg(bg);
+                        }
+                        cell.set_style(new_style.add_modifier(Modifier::BOLD));
+                    }
                 }
             }
         }

@@ -340,6 +340,127 @@ mod tests {
     }
 
     #[test]
+    fn test_nested_if_over_dict_keyword_type_hits_move_items_branch() {
+        let program = r#"
+            (defstate lastmove "")
+            (def handle-timeline-action (e)
+              (if (= (get e :type) :select)
+                (set! lastmove "select")
+                (if (= (get e :type) :clear-selection)
+                  (set! lastmove "clear")
+                  (if (= (get e :type) :marquee-select)
+                    (set! lastmove "marquee")
+                    (if (= (get e :type) :move-items)
+                      (set! lastmove "hello")
+                      (if (= (get e :type) :resize-item)
+                        (set! lastmove "resize")
+                        (if (= (get e :type) :create-item)
+                          (set! lastmove "create")
+                          nil))))))
+              lastmove)
+            (handle-timeline-action (dict :type :move-items :ids (list 10) :delta-time 1))
+        "#;
+
+        assert_eq!(
+            run_prog(program),
+            Ok(Some(Value::String("hello".to_string())))
+        );
+    }
+
+    #[test]
+    fn test_match_statement_dispatches_on_keyword_from_dict() {
+        let program = r#"
+            (def handle-timeline-action (e)
+              (match e.type
+                :select "select"
+                :move-items-absolute "move"
+                :resize-item-absolute "resize"
+                _ "unknown"))
+            (handle-timeline-action (dict :type :move-items-absolute :ids (list 10) :start 4 :lane 1))
+        "#;
+
+        assert_eq!(run_prog(program), Ok(Some(Value::String("move".to_string()))));
+    }
+
+    #[test]
+    fn test_match_statement_without_default_returns_nil() {
+        assert_eq!(
+            run_prog("(match :resize-item-absolute :move-items-absolute 1 :select 2)"),
+            Ok(Some(Value::Nil))
+        );
+    }
+
+    #[test]
+    fn test_and_short_circuits_and_returns_falsey_value() {
+        assert_eq!(run_prog("(and true 1 nil 2)"), Ok(Some(Value::Nil)));
+    }
+
+    #[test]
+    fn test_and_short_circuits_side_effects() {
+        let program = r#"
+            (defstate x 0)
+            (and false (set! x 1))
+            x
+        "#;
+        assert_eq!(run_prog(program), Ok(Some(Value::Number(0.0))));
+    }
+
+    #[test]
+    fn test_or_short_circuits_and_returns_truthy_value() {
+        assert_eq!(run_prog("(or nil false 7 9)"), Ok(Some(Value::Number(7.0))));
+    }
+
+    #[test]
+    fn test_or_short_circuits_side_effects() {
+        let program = r#"
+            (defstate x 0)
+            (or true (set! x 1))
+            x
+        "#;
+        assert_eq!(run_prog(program), Ok(Some(Value::Number(0.0))));
+    }
+
+    #[test]
+    fn test_let_map_destructuring_by_symbol_name() {
+        assert_eq!(
+            run_prog("(let (((id lane) (dict :id 10 :lane 2))) (+ id lane))"),
+            Ok(Some(Value::Number(12.0)))
+        );
+    }
+
+    #[test]
+    fn test_lambda_map_destructuring_by_symbol_name() {
+        assert_eq!(
+            run_prog("((lambda ((id lane)) (+ id lane)) (dict :id 10 :lane 2))"),
+            Ok(Some(Value::Number(12.0)))
+        );
+    }
+
+    #[test]
+    fn test_lambda_shorthand_map_destructuring_by_symbol_name() {
+        assert_eq!(
+            run_prog("(|(id lane)| (+ id lane) (dict :id 10 :lane 2))"),
+            Ok(Some(Value::Number(12.0)))
+        );
+    }
+
+    #[test]
+    fn test_thread_first_macro() {
+        assert_eq!(
+            run_prog("(-> 5 (+ 3) (* 2))"),
+            Ok(Some(Value::Number(16.0)))
+        );
+    }
+
+    #[test]
+    fn test_thread_last_macro() {
+        assert_eq!(
+            run_prog("(->> 5 (list 1 2) (reverse) first)"),
+            Ok(Some(Value::Number(5.0)))
+        );
+    }
+
+    #[test]
     fn test_recursion() {
         assert_eq!(
             run_prog("(def gauss (n) (if (= n 0) 0 (+ n (gauss (- n 1))))) (gauss 5)"),

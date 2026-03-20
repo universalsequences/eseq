@@ -284,6 +284,8 @@ impl Runtime {
     }
 
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.vm.set_current_effect_owner(current_buffer_id);
         if src.contains("(effect") {
             self.clear_layout_effects();
         }
@@ -334,6 +336,8 @@ impl Runtime {
         callable: Value,
         args: Vec<Value>,
     ) -> Result<Option<Value>, crate::vm::VMError> {
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.vm.set_current_effect_owner(current_buffer_id);
         let result = self.vm.invoke(callable, args);
         if result.is_ok() {
             self.flush_widget_trees();
@@ -342,6 +346,8 @@ impl Runtime {
     }
 
     pub fn run_reactive_cycle(&mut self) {
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.vm.set_current_effect_owner(current_buffer_id);
         let dirty = self.reactive_registry.drain_dirty();
         if dirty.is_empty() {
             return;
@@ -521,7 +527,8 @@ impl Runtime {
     }
 
     pub fn clear_layout_effects(&mut self) {
-        self.vm.clear_effects();
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.vm.clear_effects_for_owner(current_buffer_id);
         self.current_layout = None;
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
@@ -531,8 +538,12 @@ impl Runtime {
 
     fn flush_widget_trees(&mut self) {
         let trees = std::mem::take(&mut self.vm.pending_widget_trees);
-        for tree in trees {
-            self.current_widget_tree = Some(tree);
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        for pending in trees {
+            if pending.owner_buffer_id != current_buffer_id {
+                continue;
+            }
+            self.current_widget_tree = Some(pending.tree);
             self.relayout_current_tree();
         }
     }

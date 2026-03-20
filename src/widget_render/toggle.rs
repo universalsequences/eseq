@@ -103,6 +103,8 @@ impl WidgetDefinition for ToggleWidget {
         mouse_kind: MouseEventKind,
         _local_col: f32,
         _local_row: f32,
+        _drag_start: Option<(f32, f32)>,
+        _gesture: Option<&Value>,
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -120,7 +122,7 @@ impl WidgetDefinition for ToggleWidget {
         let current = get_bool_prop(&node.props, "value", false);
         Some(EventOutput {
             callback,
-            value: Value::Bool(!current),
+            args: vec![Value::Bool(!current)],
         })
     }
 

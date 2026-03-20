@@ -92,6 +92,7 @@ pub struct Compiler {
     derived_bindings: HashMap<String, u32>,
     state_bindings: HashMap<String, u32>,
     next_node_id: u32,
+    next_temp_id: u32,
 }
 
 fn is_widget_name(name: &str) -> bool {
@@ -144,6 +145,40 @@ fn extract_if_statement(list: &[Expression]) -> Option<(Expression, Expression, 
     }
 }
 
+fn extract_match_statement(
+    list: &[Expression],
+) -> Option<(Expression, Vec<(Expression, Expression)>, Option<Expression>)> {
+    let (Some(Expression::Symbol(s)), Some(value)) = (list.first(), list.get(1)) else {
+        return None;
+    };
+    if s != "match" || list.len() < 4 {
+        return None;
+    }
+
+    let mut branches = Vec::new();
+    let mut default = None;
+    let mut idx = 2;
+    while idx + 1 < list.len() {
+        let pattern = list[idx].clone();
+        let body = list[idx + 1].clone();
+        if matches!(&pattern, Expression::Symbol(sym) if sym == "_") {
+            default = Some(body);
+            break;
+        }
+        branches.push((pattern, body));
+        idx += 2;
+    }
+
+    Some((value.clone(), branches, default))
+}
+
+fn extract_boolean_chain<'a>(list: &'a [Expression], name: &str) -> Option<&'a [Expression]> {
+    let Some(Expression::Symbol(symbol)) = list.first() else {
+        return None;
+    };
+    (symbol == name).then_some(&list[1..])
+}
+
 impl Compiler {
     pub fn new(expressions: Vec<Expression>) -> Self {
         Compiler {
@@ -156,6 +191,7 @@ impl Compiler {
             derived_bindings: HashMap::new(),
             state_bindings: HashMap::new(),
             next_node_id: 0,
+            next_temp_id: 0,
         }
     }
 
@@ -180,7 +216,132 @@ impl Compiler {
             derived_bindings,
             state_bindings,
             next_node_id,
+            next_temp_id: 0,
         }
+    }
+
+    fn alloc_temp_symbol(&mut self, prefix: &str) -> String {
+        let symbol = format!("__eseq_{}_{}", prefix, self.next_temp_id);
+        self.next_temp_id += 1;
+        symbol
+    }
+
+    fn desugar_pattern_binding(
+        &mut self,
+        pattern: &Expression,
+        value: Expression,
+        inner: Expression,
+    ) -> Result<Expression, CompilerError> {
+        match pattern {
+            Expression::Symbol(_) => Ok(Expression::List(vec![
+                Expression::List(vec![
+                    Expression::Symbol("lambda".to_string()),
+                    Expression::List(vec![pattern.clone()]),
+                    inner,
+                ]),
+                value,
+            ])),
+            Expression::List(fields) => {
+                let temp_symbol = self.alloc_temp_symbol("destructure");
+                let mut nested = inner;
+                for field in fields.iter().rev() {
+                    let Expression::Symbol(name) = field else {
+                        return Err(CompilerError::InvalidArg);
+                    };
+                    nested = self.desugar_pattern_binding(
+                        &Expression::Symbol(name.clone()),
+                        Expression::List(vec![
+                            Expression::Symbol("get".to_string()),
+                            Expression::Symbol(temp_symbol.clone()),
+                            Expression::Keyword(name.clone()),
+                        ]),
+                        nested,
+                    )?;
+                }
+                Ok(Expression::List(vec![
+                    Expression::List(vec![
+                        Expression::Symbol("lambda".to_string()),
+                        Expression::List(vec![Expression::Symbol(temp_symbol)]),
+                        nested,
+                    ]),
+                    value,
+                ]))
+            }
+            _ => Err(CompilerError::InvalidArg),
+        }
+    }
+
+    fn desugar_threading(
+        &self,
+        initial: &Expression,
+        stages: &[Expression],
+        thread_last: bool,
+    ) -> Result<Expression, CompilerError> {
+        stages.iter().try_fold(initial.clone(), |acc, stage| match stage {
+            Expression::Symbol(name) => Ok(Expression::List(vec![
+                Expression::Symbol(name.clone()),
+                acc,
+            ])),
+            Expression::List(items) if !items.is_empty() => {
+                let mut rewritten = items.clone();
+                let insert_idx = if thread_last { rewritten.len() } else { 1 };
+                rewritten.insert(insert_idx, acc);
+                Ok(Expression::List(rewritten))
+            }
+            _ => Err(CompilerError::InvalidArg),
+        })
+    }
+
+    fn desugar_and(&mut self, exprs: &[Expression]) -> Result<Expression, CompilerError> {
+        if exprs.is_empty() {
+            return Ok(Expression::Symbol("true".to_string()));
+        }
+        if exprs.len() == 1 {
+            return Ok(exprs[0].clone());
+        }
+
+        let first = exprs[0].clone();
+        let temp = self.alloc_temp_symbol("and");
+        let rest = self.desugar_and(&exprs[1..])?;
+        Ok(Expression::List(vec![
+            Expression::Symbol("let".to_string()),
+            Expression::List(vec![Expression::List(vec![
+                Expression::Symbol(temp.clone()),
+                first,
+            ])]),
+            Expression::List(vec![
+                Expression::Symbol("if".to_string()),
+                Expression::Symbol(temp.clone()),
+                rest,
+                Expression::Symbol(temp),
+            ]),
+        ]))
+    }
+
+    fn desugar_or(&mut self, exprs: &[Expression]) -> Result<Expression, CompilerError> {
+        if exprs.is_empty() {
+            return Ok(Expression::Symbol("nil".to_string()));
+        }
+        if exprs.len() == 1 {
+            return Ok(exprs[0].clone());
+        }
+
+        let first = exprs[0].clone();
+        let temp = self.alloc_temp_symbol("or");
+        let rest = self.desugar_or(&exprs[1..])?;
+        Ok(Expression::List(vec![
+            Expression::Symbol("let".to_string()),
+            Expression::List(vec![Expression::List(vec![
+                Expression::Symbol(temp.clone()),
+                first,
+            ])]),
+            Expression::List(vec![
+                Expression::Symbol("if".to_string()),
+                Expression::Symbol(temp.clone()),
+                Expression::Symbol(temp),
+                rest,
+            ]),
+        ]))
     }
 
     fn compile_quoted_expression(&mut self, expression: &Expression) -> Result<(), CompilerError> {
@@ -383,7 +544,7 @@ impl Compiler {
     }
 
     fn rewrite_each_lambda(
-        &self,
+        &mut self,
         source: &Expression,
         lambda: &Expression,
     ) -> Result<Expression, CompilerError> {
@@ -397,8 +558,13 @@ impl Compiler {
             return Err(CompilerError::InvalidArg);
         }
 
-        let Expression::Symbol(item_name) = &args[0] else {
-            return Err(CompilerError::InvalidArg);
+        let (item_name, item_pattern, needs_destructure) = match &args[0] {
+            Expression::Symbol(name) => (name.clone(), Expression::Symbol(name.clone()), false),
+            Expression::List(pattern) => {
+                let temp = self.alloc_temp_symbol("each_item");
+                (temp.clone(), Expression::List(pattern.clone()), true)
+            }
+            _ => return Err(CompilerError::InvalidArg),
         };
         let index_name = if args.len() == 2 {
             match &args[1] {
@@ -411,13 +577,34 @@ impl Compiler {
 
         let rewritten_body = body
             .iter()
-            .map(|expr| self.rewrite_each_bind_expr(expr, source, item_name, &index_name))
+            .map(|expr| self.rewrite_each_bind_expr(expr, source, &item_name, &index_name))
             .collect::<Vec<_>>();
 
-        let mut lambda_args = args;
-        if lambda_args.len() == 1 {
-            lambda_args.push(Expression::Symbol(index_name));
+        let mut lambda_args = vec![Expression::Symbol(item_name.clone())];
+        if args.len() == 2 {
+            lambda_args.push(Expression::Symbol(index_name.clone()));
+        } else {
+            lambda_args.push(Expression::Symbol(index_name.clone()));
         }
+
+        let rewritten_body = if needs_destructure {
+            vec![Expression::List(vec![
+                Expression::Symbol("let".to_string()),
+                Expression::List(vec![Expression::List(vec![
+                    item_pattern,
+                    Expression::Symbol(item_name),
+                ])]),
+                if rewritten_body.len() == 1 {
+                    rewritten_body[0].clone()
+                } else {
+                    let mut exprs = vec![Expression::Symbol("do".to_string())];
+                    exprs.extend(rewritten_body.iter().cloned());
+                    Expression::List(exprs)
+                },
+            ])]
+        } else {
+            rewritten_body
+        };
 
         Ok(Expression::List(
             std::iter::once(Expression::Symbol("lambda".to_string()))
@@ -675,16 +862,35 @@ impl Compiler {
         args: Vec<Expression>,
         body: Vec<Expression>,
     ) -> Result<(), CompilerError> {
-        let symbols: Vec<String> = args
-            .iter()
-            .map(|arg| {
-                if let Expression::Symbol(s) = arg {
-                    Ok(s.to_string())
-                } else {
-                    Err(CompilerError::InvalidArg)
+        let mut symbols = Vec::with_capacity(args.len());
+        let mut wrapped_body = if body.len() == 1 {
+            body[0].clone()
+        } else {
+            let mut exprs = vec![Expression::Symbol("do".to_string())];
+            exprs.extend(body.iter().cloned());
+            Expression::List(exprs)
+        };
+        let mut arg_symbols = Vec::with_capacity(args.len());
+        for arg in args.iter() {
+            match arg {
+                Expression::Symbol(s) => arg_symbols.push(s.to_string()),
+                Expression::List(_) => {
+                    let temp = self.alloc_temp_symbol("arg");
+                    arg_symbols.push(temp);
                 }
-            })
-            .collect::<Result<_, _>>()?;
+                _ => return Err(CompilerError::InvalidArg),
+            }
+        }
+        for (arg, symbol) in args.iter().zip(arg_symbols.iter()).rev() {
+            if matches!(arg, Expression::List(_)) {
+                wrapped_body = self.desugar_pattern_binding(
+                    arg,
+                    Expression::Symbol(symbol.clone()),
+                    wrapped_body,
+                )?;
+            }
+        }
+        symbols.extend(arg_symbols);
         let (new_chunk_idx, previous_chunk_idx) = self.new_chunk(Chunk {
             ops: vec![],
             constants: vec![],
@@ -692,7 +898,7 @@ impl Compiler {
             symbols,
             upvalues: vec![],
         });
-        self.compile_block(&body)?;
+        self.compile_expression(&wrapped_body)?;
 
         let scope = self.scopes.pop().unwrap();
         if let Some(chunk) = self.chunks.get_mut(new_chunk_idx) {
@@ -742,6 +948,34 @@ impl Compiler {
         Ok(())
     }
 
+    pub fn compile_match_statement(
+        &mut self,
+        value: Expression,
+        branches: Vec<(Expression, Expression)>,
+        default: Option<Expression>,
+    ) -> Result<(), CompilerError> {
+        let match_value_symbol = Expression::Symbol("__eseq_match_value".to_string());
+        let default_expr = default.unwrap_or(Expression::Symbol("nil".to_string()));
+        let nested_ifs = branches.into_iter().rev().fold(default_expr, |else_body, (pattern, body)| {
+            Expression::List(vec![
+                Expression::Symbol("if".to_string()),
+                Expression::List(vec![
+                    Expression::Symbol("=".to_string()),
+                    match_value_symbol.clone(),
+                    pattern,
+                ]),
+                body,
+                else_body,
+            ])
+        });
+        let desugared = Expression::List(vec![
+            Expression::Symbol("let".to_string()),
+            Expression::List(vec![Expression::List(vec![match_value_symbol, value])]),
+            nested_ifs,
+        ]);
+        self.compile_expression(&desugared)
+    }
+
     fn compile_block(&mut self, expressions: &[Expression]) -> Result<(), CompilerError> {
         if expressions.is_empty() {
             self.emit(OpCode::PushNil);
@@ -775,7 +1009,7 @@ impl Compiler {
     }
 
     fn desugar_let_sequential(
-        &self,
+        &mut self,
         bindings: &[Expression],
         body: &[Expression],
     ) -> Result<Expression, CompilerError> {
@@ -796,16 +1030,7 @@ impl Compiler {
         }
 
         let inner = self.desugar_let_sequential(&bindings[1..], body)?;
-
-        // ((lambda (name) inner) value)
-        Ok(Expression::List(vec![
-            Expression::List(vec![
-                Expression::Symbol("lambda".to_string()),
-                Expression::List(vec![pair[0].clone()]),
-                inner,
-            ]),
-            pair[1].clone(),
-        ]))
+        self.desugar_pattern_binding(&pair[0], pair[1].clone(), inner)
     }
 
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
@@ -853,6 +1078,27 @@ impl Compiler {
 
         if let Some((cond, then_body, else_body)) = extract_if_statement(list) {
             return self.compile_if_statement(cond, then_body, else_body);
+        }
+
+        if let Some((value, branches, default)) = extract_match_statement(list) {
+            return self.compile_match_statement(value, branches, default);
+        }
+
+        if let Some(exprs) = extract_boolean_chain(list, "and") {
+            let desugared = self.desugar_and(exprs)?;
+            return self.compile_expression(&desugared);
+        }
+
+        if let Some(exprs) = extract_boolean_chain(list, "or") {
+            let desugared = self.desugar_or(exprs)?;
+            return self.compile_expression(&desugared);
+        }
+
+        if let [Expression::Symbol(thread), initial, stages @ ..] = list
+            && (thread == "->" || thread == "->>")
+        {
+            let desugared = self.desugar_threading(initial, stages, thread == "->>")?;
+            return self.compile_expression(&desugared);
         }
 
         // (eval expr) — compile expr to produce a string, then evaluate it at runtime

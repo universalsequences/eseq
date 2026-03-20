@@ -104,6 +104,8 @@ impl WidgetDefinition for HorizontalSliderWidget {
         mouse_kind: MouseEventKind,
         local_col: f32,
         _local_row: f32,
+        _drag_start: Option<(f32, f32)>,
+        _gesture: Option<&Value>,
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => MouseEventOutcome::Consume,
@@ -126,7 +128,7 @@ impl WidgetDefinition for HorizontalSliderWidget {
         let value = min + (max - min) * t.clamp(0.0, 1.0);
         Some(EventOutput {
             callback,
-            value: Value::Number(value as f64),
+            args: vec![Value::Number(value as f64)],
         })
     }
 
