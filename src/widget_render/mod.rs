@@ -110,8 +110,8 @@ pub struct MetalQuadPrimitive {
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct MetalGlyphRunPrimitive {
-    pub row: u16,
-    pub col: u16,
+    pub row: i32,
+    pub col: i32,
     pub text: String,
     pub fg: Color,
     pub bg: Color,
@@ -353,27 +353,16 @@ pub fn collect_metal_primitives(
 fn collect_metal_primitives_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
-    scroll_top: u16,
-    max_rows: u16,
+    _scroll_top: u16,
+    _max_rows: u16,
     primitives: &mut Vec<MetalPrimitive>,
 ) {
-    let vis_row = node.rect.row as i32 - scroll_top as i32;
-    let vis_end = vis_row + node.rect.height as i32;
-    if vis_end <= 0 || vis_row >= max_rows as i32 {
-        return;
-    }
-
-    let mut scrolled_node = node.clone();
-    scrolled_node.rect.row = vis_row.max(0) as u16;
-    let clipped_end = vis_end.min(max_rows as i32).max(scrolled_node.rect.row as i32) as u16;
-    scrolled_node.rect.height = clipped_end
-        .saturating_sub(scrolled_node.rect.row)
-        .max(1);
-
-    primitives.extend(widget_primitives_for_node(&scrolled_node, viewport));
+    // No scroll adjustment or clipping here — the Metal backend applies
+    // scroll offsets via offset_primitive and clips via scissor rects.
+    primitives.extend(widget_primitives_for_node(node, viewport));
 
     for child in &node.children {
-        collect_metal_primitives_recursive(child, viewport, scroll_top, max_rows, primitives);
+        collect_metal_primitives_recursive(child, viewport, _scroll_top, _max_rows, primitives);
     }
 }
 

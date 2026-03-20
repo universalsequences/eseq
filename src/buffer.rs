@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
 
+use crate::editor::ViewMode;
 use crate::host::BufferId;
 use crate::mode::BufferMode;
 use crate::text::sexp_range_at_cursor;
@@ -13,7 +14,7 @@ pub struct Buffer {
     pub mode: BufferMode,
     /// Text contents as lines. Empty buffer starts as vec![""]
     pub lines: Vec<String>,
-    /// Cursor position (row, col), 0-indexed. Col can be 0..=line.len().
+    /// Cursor position (row, col), 0-indexed. Col is measured in characters.
     pub cursor: (usize, usize),
     pub dirty: bool,
     pub read_only: bool,
@@ -22,6 +23,7 @@ pub struct Buffer {
     pub revision: u64,
     /// Per-buffer widget tree (for modes that render widgets).
     pub widget_tree: Option<Value>,
+    pub view_mode: ViewMode,
 }
 
 impl Buffer {
@@ -38,6 +40,7 @@ impl Buffer {
             scroll_top: 0,
             revision: 0,
             widget_tree: None,
+            view_mode: ViewMode::Both,
         }
     }
 
@@ -125,19 +128,20 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, c: char) {
+        let cursor_col = Self::char_to_byte_idx(&self.lines[self.cursor.0], self.cursor.1);
         match c {
             '\n' => {
-                let new_line = self.lines[self.cursor.0].split_off(self.cursor.1);
+                let new_line = self.lines[self.cursor.0].split_off(cursor_col);
                 self.lines.insert(self.cursor.0 + 1, new_line);
                 self.cursor = (self.cursor.0 + 1, 0);
             }
             '(' => {
-                self.lines[self.cursor.0].insert(self.cursor.1, ')');
-                self.lines[self.cursor.0].insert(self.cursor.1, '(');
+                self.lines[self.cursor.0].insert(cursor_col, ')');
+                self.lines[self.cursor.0].insert(cursor_col, '(');
                 self.cursor.1 += 1;
             }
             _ => {
-                self.lines[self.cursor.0].insert(self.cursor.1, c);
+                self.lines[self.cursor.0].insert(cursor_col, c);
                 self.cursor.1 += 1;
             }
         }
@@ -148,7 +152,8 @@ impl Buffer {
         let row = self.cursor.0;
         let col = self.cursor.1;
         let indent = lisp_indent_for_position(&self.lines, row, col);
-        let new_line = self.lines[row].split_off(col);
+        let split_at = Self::char_to_byte_idx(&self.lines[row], col);
+        let new_line = self.lines[row].split_off(split_at);
         let new_line = new_line.trim_start_matches(' ').to_string();
         self.lines
             .insert(row + 1, format!("{}{}", " ".repeat(indent), new_line));
@@ -220,12 +225,13 @@ impl Buffer {
 
     pub fn delete_char_before(&mut self) {
         if self.cursor.1 > 0 {
-            self.lines[self.cursor.0].remove(self.cursor.1 - 1);
+            let remove_at = Self::char_to_byte_idx(&self.lines[self.cursor.0], self.cursor.1 - 1);
+            self.lines[self.cursor.0].remove(remove_at);
             self.cursor.1 -= 1;
             self.touch();
         } else if self.cursor.0 > 0 {
             let line = self.lines.remove(self.cursor.0);
-            let prev_len = self.lines[self.cursor.0 - 1].len();
+            let prev_len = Self::line_len(&self.lines[self.cursor.0 - 1]);
             self.lines[self.cursor.0 - 1].push_str(&line);
             self.cursor = (self.cursor.0 - 1, prev_len);
             self.touch();
@@ -234,28 +240,32 @@ impl Buffer {
 
     pub fn slice_range(&self, start: (usize, usize), end: (usize, usize)) -> String {
         let ((start_row, start_col), (end_row, end_col)) = normalize_range(start, end);
+        let start_idx = Self::char_to_byte_idx(&self.lines[start_row], start_col);
+        let end_idx = Self::char_to_byte_idx(&self.lines[end_row], end_col);
         if start_row == end_row {
-            return self.lines[start_row][start_col..end_col].to_string();
+            return self.lines[start_row][start_idx..end_idx].to_string();
         }
 
         let mut out = String::new();
-        out.push_str(&self.lines[start_row][start_col..]);
+        out.push_str(&self.lines[start_row][start_idx..]);
         out.push('\n');
         for row in (start_row + 1)..end_row {
             out.push_str(&self.lines[row]);
             out.push('\n');
         }
-        out.push_str(&self.lines[end_row][..end_col]);
+        out.push_str(&self.lines[end_row][..end_idx]);
         out
     }
 
     pub fn delete_range(&mut self, start: (usize, usize), end: (usize, usize)) {
         let ((start_row, start_col), (end_row, end_col)) = normalize_range(start, end);
+        let start_idx = Self::char_to_byte_idx(&self.lines[start_row], start_col);
+        let end_idx = Self::char_to_byte_idx(&self.lines[end_row], end_col);
         if start_row == end_row {
-            self.lines[start_row].drain(start_col..end_col);
+            self.lines[start_row].drain(start_idx..end_idx);
         } else {
-            let suffix = self.lines[end_row][end_col..].to_string();
-            self.lines[start_row].truncate(start_col);
+            let suffix = self.lines[end_row][end_idx..].to_string();
+            self.lines[start_row].truncate(start_idx);
             self.lines[start_row].push_str(&suffix);
             self.lines.drain((start_row + 1)..=end_row);
         }
@@ -269,12 +279,13 @@ impl Buffer {
         }
         let row = self.cursor.0;
         let col = self.cursor.1;
-        let suffix = self.lines[row].split_off(col);
+        let split_at = Self::char_to_byte_idx(&self.lines[row], col);
+        let suffix = self.lines[row].split_off(split_at);
         let parts = text.split('\n').collect::<Vec<_>>();
         if parts.len() == 1 {
             self.lines[row].push_str(parts[0]);
             self.lines[row].push_str(&suffix);
-            self.cursor.1 += parts[0].len();
+            self.cursor.1 += parts[0].chars().count();
         } else {
             self.lines[row].push_str(parts[0]);
             for (idx, part) in parts.iter().enumerate().skip(1) {
@@ -283,7 +294,10 @@ impl Buffer {
             }
             let last_row = row + parts.len() - 1;
             self.lines[last_row].push_str(&suffix);
-            self.cursor = (last_row, parts.last().map(|part| part.len()).unwrap_or(0));
+            self.cursor = (
+                last_row,
+                parts.last().map(|part| part.chars().count()).unwrap_or(0),
+            );
         }
         self.touch();
     }
@@ -296,7 +310,7 @@ impl Buffer {
             let row = self.cursor.0;
             let line = self.lines.remove(row);
             let prev_row = row - 1;
-            let prev_len = self.lines[prev_row].len();
+            let prev_len = Self::line_len(&self.lines[prev_row]);
             self.lines[prev_row].push_str(&line);
             self.cursor = (prev_row, prev_len);
             self.touch();
@@ -305,7 +319,8 @@ impl Buffer {
 
         let original = self.cursor;
         let line = &self.lines[original.0];
-        let mut delete_start = original.1;
+        let original_idx = Self::char_to_byte_idx(line, original.1);
+        let mut delete_start = original_idx;
 
         while delete_start > 0 {
             let ch = line[..delete_start].chars().next_back().unwrap();
@@ -316,7 +331,7 @@ impl Buffer {
         }
 
         if delete_start == 0 {
-            self.lines[original.0].drain(0..original.1);
+            self.lines[original.0].drain(0..original_idx);
             self.cursor = (original.0, 0);
             self.touch();
             return;
@@ -335,16 +350,18 @@ impl Buffer {
             }
         }
 
-        self.lines[original.0].drain(delete_start..original.1);
-        self.cursor = (original.0, delete_start);
+        let new_col = Self::byte_to_char_idx(line, delete_start);
+        self.lines[original.0].drain(delete_start..original_idx);
+        self.cursor = (original.0, new_col);
         self.touch();
     }
 
     pub fn delete_to_line_end(&mut self) {
         let row = self.cursor.0;
         let col = self.cursor.1;
-        if col < self.lines[row].len() {
-            self.lines[row].truncate(col);
+        let col_idx = Self::char_to_byte_idx(&self.lines[row], col);
+        if col < Self::line_len(&self.lines[row]) {
+            self.lines[row].truncate(col_idx);
             self.touch();
         } else if row + 1 < self.lines.len() {
             let next = self.lines.remove(row + 1);
@@ -363,12 +380,12 @@ impl Buffer {
             self.cursor.1 -= 1;
         } else if self.cursor.0 > 0 {
             self.cursor.0 -= 1;
-            self.cursor.1 = self.lines[self.cursor.0].len();
+            self.cursor.1 = Self::line_len(&self.lines[self.cursor.0]);
         }
     }
 
     pub fn move_right(&mut self) {
-        if self.cursor.1 < self.lines[self.cursor.0].len() {
+        if self.cursor.1 < Self::line_len(&self.lines[self.cursor.0]) {
             self.cursor.1 += 1;
         } else if self.cursor.0 < self.lines.len() - 1 {
             self.cursor.0 += 1;
@@ -379,14 +396,14 @@ impl Buffer {
     pub fn move_up(&mut self) {
         if self.cursor.0 > 0 {
             self.cursor.0 -= 1;
-            self.cursor.1 = self.cursor.1.min(self.lines[self.cursor.0].len());
+            self.cursor.1 = self.cursor.1.min(Self::line_len(&self.lines[self.cursor.0]));
         }
     }
 
     pub fn move_down(&mut self) {
         if self.cursor.0 < self.lines.len() - 1 {
             self.cursor.0 += 1;
-            self.cursor.1 = self.cursor.1.min(self.lines[self.cursor.0].len());
+            self.cursor.1 = self.cursor.1.min(Self::line_len(&self.lines[self.cursor.0]));
         }
     }
 
@@ -398,7 +415,7 @@ impl Buffer {
         if let Some(line) = self.lines.last()
             && !line.is_empty()
         {
-            self.cursor.1 = line.len() - 1;
+            self.cursor.1 = Self::line_len(line) - 1;
         }
     }
 
@@ -407,7 +424,7 @@ impl Buffer {
     }
 
     pub fn move_to_line_end(&mut self) {
-        self.cursor.1 = self.lines[self.cursor.0].len();
+        self.cursor.1 = Self::line_len(&self.lines[self.cursor.0]);
     }
 
     pub fn move_word_left(&mut self) {
@@ -415,7 +432,7 @@ impl Buffer {
         if self.cursor.1 == 0 {
             if self.cursor.0 > 0 {
                 self.cursor.0 -= 1;
-                self.cursor.1 = self.lines[self.cursor.0].len();
+                self.cursor.1 = Self::line_len(&self.lines[self.cursor.0]);
                 self.move_word_left();
             }
             return;
@@ -454,6 +471,24 @@ impl Buffer {
         } else {
             self.cursor.1 = idx;
         }
+    }
+
+    fn line_len(line: &str) -> usize {
+        line.chars().count()
+    }
+
+    fn char_to_byte_idx(line: &str, col: usize) -> usize {
+        if col == 0 {
+            return 0;
+        }
+        line.char_indices()
+            .nth(col)
+            .map(|(idx, _)| idx)
+            .unwrap_or_else(|| line.len())
+    }
+
+    fn byte_to_char_idx(line: &str, byte_idx: usize) -> usize {
+        line[..byte_idx.min(line.len())].chars().count()
     }
 }
 
@@ -651,6 +686,27 @@ mod tests {
         buffer.insert_str("cd\nxy");
         assert_eq!(buffer.text(), "abcd\nxyef");
         assert_eq!(buffer.cursor, (1, 2));
+    }
+
+    #[test]
+    fn unicode_columns_do_not_panic_when_slicing_and_deleting() {
+        let mut buffer = Buffer::from_text(0, "*test*", "a😀bc\ndéf");
+        assert_eq!(buffer.slice_range((0, 1), (1, 2)), "😀bc\ndé");
+        buffer.delete_range((0, 1), (1, 2));
+        assert_eq!(buffer.text(), "af");
+        assert_eq!(buffer.cursor, (0, 1));
+    }
+
+    #[test]
+    fn unicode_insert_and_backspace_use_character_columns() {
+        let mut buffer = Buffer::from_text(0, "*test*", "😀z");
+        buffer.cursor = (0, 1);
+        buffer.insert_char('x');
+        assert_eq!(buffer.text(), "😀xz");
+        assert_eq!(buffer.cursor, (0, 2));
+        buffer.delete_char_before();
+        assert_eq!(buffer.text(), "😀z");
+        assert_eq!(buffer.cursor, (0, 1));
     }
 }
 

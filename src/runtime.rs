@@ -52,6 +52,15 @@ pub(crate) struct RuntimeBridgeState {
     pub buffer_names: Vec<String>,
     pub pending_cycle_view_mode: bool,
     pub current_view_mode: String,
+    // Tiling operations
+    pub pending_split_right: bool,
+    pub pending_split_below: bool,
+    pub pending_delete_window: bool,
+    pub pending_delete_other_windows: bool,
+    pub pending_other_window: bool,
+    pub pending_set_window_buffer: Option<String>,
+    pub pending_window_hide_status: bool,
+    pub pending_resize_window: Option<f64>,
 }
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
@@ -180,6 +189,48 @@ impl NativeContext {
 
     pub fn buffer_names(&self) -> Vec<String> {
         self.shared.borrow().buffer_names.clone()
+    }
+
+    // ── Tiling operations ─────────────────────────────────────────────────
+
+    pub fn split_window_right(&mut self) {
+        self.shared.borrow_mut().pending_split_right = true;
+    }
+
+    pub fn split_window_below(&mut self) {
+        self.shared.borrow_mut().pending_split_below = true;
+    }
+
+    pub fn delete_window(&mut self) {
+        self.shared.borrow_mut().pending_delete_window = true;
+    }
+
+    pub fn delete_other_windows(&mut self) {
+        self.shared.borrow_mut().pending_delete_other_windows = true;
+    }
+
+    pub fn other_window(&mut self) {
+        self.shared.borrow_mut().pending_other_window = true;
+    }
+
+    pub fn set_window_buffer(&mut self, name: String) {
+        self.shared.borrow_mut().pending_set_window_buffer = Some(name);
+    }
+
+    pub fn window_hide_status(&mut self) {
+        self.shared.borrow_mut().pending_window_hide_status = true;
+    }
+
+    pub fn resize_window(&mut self, delta: f64) {
+        self.shared.borrow_mut().pending_resize_window = Some(delta);
+    }
+
+    pub fn cycle_view_mode(&mut self) {
+        self.shared.borrow_mut().pending_cycle_view_mode = true;
+    }
+
+    pub fn current_view_mode(&self) -> String {
+        self.shared.borrow().current_view_mode.clone()
     }
 }
 
@@ -500,12 +551,80 @@ impl Runtime {
         self.shared.borrow_mut().pending_goto_line.take()
     }
 
+    // ── Tiling pending operations ──────────────────────────────────────────
+
+    pub(crate) fn take_pending_split_right(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let v = shared.pending_split_right;
+        shared.pending_split_right = false;
+        v
+    }
+
+    pub(crate) fn take_pending_split_below(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let v = shared.pending_split_below;
+        shared.pending_split_below = false;
+        v
+    }
+
+    pub(crate) fn take_pending_delete_window(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let v = shared.pending_delete_window;
+        shared.pending_delete_window = false;
+        v
+    }
+
+    pub(crate) fn take_pending_delete_other_windows(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let v = shared.pending_delete_other_windows;
+        shared.pending_delete_other_windows = false;
+        v
+    }
+
+    pub(crate) fn take_pending_other_window(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let v = shared.pending_other_window;
+        shared.pending_other_window = false;
+        v
+    }
+
+    pub(crate) fn take_pending_set_window_buffer(&mut self) -> Option<String> {
+        self.shared.borrow_mut().pending_set_window_buffer.take()
+    }
+
+    pub(crate) fn take_pending_window_hide_status(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let v = shared.pending_window_hide_status;
+        shared.pending_window_hide_status = false;
+        v
+    }
+
+    pub(crate) fn take_pending_resize_window(&mut self) -> Option<f64> {
+        self.shared.borrow_mut().pending_resize_window.take()
+    }
+
+    pub(crate) fn take_pending_cycle_view_mode(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        let pending = shared.pending_cycle_view_mode;
+        shared.pending_cycle_view_mode = false;
+        pending
+    }
+
     pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {
         std::mem::take(&mut self.rendered_layouts)
     }
 
     pub fn current_widget_tree(&self) -> Option<Value> {
         self.current_widget_tree.clone()
+    }
+
+    /// Clear the current widget tree and layout without destroying reactive effects.
+    /// Used when switching to a buffer/tile that has no widget tree.
+    pub fn clear_current_widget_tree(&mut self) {
+        self.current_widget_tree = None;
+        self.current_layout = None;
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+        self.dirty_widget_ids.clear();
     }
 
     pub fn layout_rows(&self) -> u16 {

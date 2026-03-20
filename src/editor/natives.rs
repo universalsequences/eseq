@@ -511,6 +511,94 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         },
     );
 
+    // ── Tiling / window management ──────────────────────────────────────────
+
+    runtime.register_native_with_docs(
+        "split-window-right",
+        "(split-window-right)",
+        "Split the current window vertically (C-x 3). The new tile appears to the right.",
+        |_args, ctx| {
+            ctx.split_window_right();
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "split-window-below",
+        "(split-window-below)",
+        "Split the current window horizontally (C-x 2). The new tile appears below.",
+        |_args, ctx| {
+            ctx.split_window_below();
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "delete-window",
+        "(delete-window)",
+        "Close the current tile (C-x 0). The buffer is not deleted.",
+        |_args, ctx| {
+            ctx.delete_window();
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "delete-other-windows",
+        "(delete-other-windows)",
+        "Close all tiles except the current one (C-x 1).",
+        |_args, ctx| {
+            ctx.delete_other_windows();
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "other-window",
+        "(other-window)",
+        "Cycle focus to the next tile (C-x o).",
+        |_args, ctx| {
+            ctx.other_window();
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "set-window-buffer",
+        "(set-window-buffer name)",
+        "Show a different buffer in the current tile.",
+        |args, ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("set-window-buffer expects a buffer name string".to_string());
+            };
+            ctx.set_window_buffer(name.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "window-hide-status",
+        "(window-hide-status)",
+        "Toggle the status bar for the current tile.",
+        |_args, ctx| {
+            ctx.window_hide_status();
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "resize-window",
+        "(resize-window delta)",
+        "Adjust the parent split ratio by delta (e.g. 0.05 or -0.05).",
+        |args, ctx| {
+            let Some(Value::Number(delta)) = args.first() else {
+                return Err("resize-window expects a number".to_string());
+            };
+            ctx.resize_window(*delta);
+            Ok(Value::Bool(true))
+        },
+    );
+
     runtime.register_native_with_docs(
         "open-file",
         "(open-file path)",
@@ -572,6 +660,23 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             };
             Ok(Value::Bool(s.ends_with(suffix.as_str())))
         },
+    );
+
+    runtime.register_native_with_docs(
+        "cycle-view-mode",
+        "(cycle-view-mode)",
+        "Cycle the view mode: both -> ui -> text -> both. Returns the new mode name.",
+        |_args, ctx| {
+            ctx.cycle_view_mode();
+            Ok(Value::String("cycled".to_string()))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "view-mode",
+        "(view-mode)",
+        "Return the current view mode: \"both\", \"ui\", or \"text\".",
+        |_args, ctx| Ok(Value::String(ctx.current_view_mode())),
     );
 
     runtime.register_native_with_docs(

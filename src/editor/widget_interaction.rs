@@ -3,6 +3,7 @@ use std::time::Duration;
 use crossterm::event::{MouseEvent, MouseEventKind};
 
 use crate::layout::LayoutNode;
+use crate::tile::{CachedHitGrid, WidgetClick, WidgetGesture};
 use crate::ui::hit::{self, HitGrid};
 use crate::vm::Value;
 use crate::widget_render::{
@@ -11,7 +12,7 @@ use crate::widget_render::{
     map_scroll_gesture_event,
 };
 
-use super::{Editor, CachedHitGrid, WidgetGesture, WidgetClick};
+use super::Editor;
 use super::widget_focus::find_node_by_id;
 
 impl Editor {
@@ -63,7 +64,7 @@ impl Editor {
         if !self.is_double_click_candidate(node.widget_id, precise_col, precise_row) {
             return false;
         }
-        let scrolled_row = local_row + self.widget_scroll_top() as f32;
+        let scrolled_row = local_row + self.widget_scroll_top() as f32 + self.active_buffer().scroll_top as f32;
         let Some(widget_event) = map_double_click_event(&node, local_col, scrolled_row) else {
             return false;
         };
@@ -74,7 +75,7 @@ impl Editor {
     fn is_double_click_candidate(&self, widget_id: u64, precise_col: f32, precise_row: f32) -> bool {
         const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
         const DOUBLE_CLICK_SLOP: f32 = 1.5;
-        self.last_widget_click.as_ref().is_some_and(|click| {
+        self.active_leaf().last_widget_click.as_ref().is_some_and(|click| {
             click.widget_id == widget_id
                 && click.at.elapsed() <= DOUBLE_CLICK_WINDOW
                 && (click.precise_col - precise_col).abs() <= DOUBLE_CLICK_SLOP
@@ -90,16 +91,17 @@ impl Editor {
         precise_row: f32,
     ) {
         let Some((local_col, local_row)) = hit::to_local(precise_col, precise_row, content_col, content_row) else {
-            self.last_widget_click = None;
+            self.active_leaf_mut().last_widget_click = None;
             return;
         };
         let (query_col, query_row) = hit::to_query(local_col, local_row);
-        self.last_widget_click = self.widget_node_at(query_row, query_col).map(|node| WidgetClick {
+        let click = self.widget_node_at(query_row, query_col).map(|node| WidgetClick {
             widget_id: node.widget_id,
             precise_col,
             precise_row,
             at: std::time::Instant::now(),
         });
+        self.active_leaf_mut().last_widget_click = click;
     }
 
     pub(super) fn begin_widget_gesture(
@@ -116,9 +118,9 @@ impl Editor {
         let Some(node) = self.widget_node_at(query_row, query_col) else {
             return;
         };
-        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row + self.widget_scroll_top() as f32);
+        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row + self.widget_scroll_top() as f32 + self.active_buffer().scroll_top as f32);
         if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
-            self.active_widget_gesture = Some(WidgetGesture {
+            self.active_leaf_mut().active_widget_gesture = Some(WidgetGesture {
                 widget_id: node.widget_id,
                 start_precise_col: precise_col,
                 start_precise_row: precise_row,
@@ -145,7 +147,7 @@ impl Editor {
         if let Some(node) = start_node.as_ref()
             && widget_render::widget_captures_drag(&node.widget_type)
         {
-            let scroll = self.widget_scroll_top() as f32;
+            let scroll = self.widget_scroll_top() as f32 + self.active_buffer().scroll_top as f32;
             let screen_row = node.rect.row as f32 - scroll;
             let clamped_col = end
                 .0
@@ -205,23 +207,29 @@ impl Editor {
 
     pub(super) fn widget_node_at(&mut self, row: u16, col: u16) -> Option<LayoutNode> {
         let revision = self.runtime.layout_revision();
-        let scroll = self.widget_scroll_top();
+        let widget_scroll = self.widget_scroll_top();
+        let text_scroll = self.active_buffer().scroll_top as u16;
         let layout = self.runtime.current_layout.as_ref()?;
 
-        let needs_rebuild = self.hit_grid_cache.as_ref().is_none_or(|cache| {
-            cache.layout_revision != revision || cache.scroll_top != scroll
+        let leaf = self.active_leaf();
+        let needs_rebuild = leaf.hit_grid_cache.as_ref().is_none_or(|cache| {
+            cache.layout_revision != revision || cache.scroll_top != widget_scroll
         });
         if needs_rebuild {
-            self.hit_grid_cache = Some(CachedHitGrid {
+            let grid = HitGrid::build(layout);
+            self.active_leaf_mut().hit_grid_cache = Some(CachedHitGrid {
                 layout_revision: revision,
-                scroll_top: scroll,
-                grid: HitGrid::build(layout),
+                scroll_top: widget_scroll,
+                grid,
             });
         }
 
-        let layout_row = row + scroll;
-        let cache = self.hit_grid_cache.as_ref()?;
-        cache.grid.node_at(layout_row, col).cloned()
+        // Account for both widget scroll AND text scroll
+        let layout_row = row + widget_scroll + text_scroll;
+        let hscroll = self.active_leaf().widget_scroll_left;
+        let layout_col = col + hscroll;
+        let cache = self.active_leaf().hit_grid_cache.as_ref()?;
+        cache.grid.node_at(layout_row, layout_col).cloned()
     }
 
     pub(super) fn widget_node_at_screen(
@@ -254,15 +262,16 @@ impl Editor {
         }
 
         let buffer = self.active_buffer_mut();
-        let absolute_row = buffer
-            .scroll_top
-            .saturating_add(local_row as usize)
-            .min(buffer.lines.len().saturating_sub(1));
-        let absolute_col = (local_col as usize).min(buffer.lines[absolute_row].len());
-        buffer.cursor = (absolute_row, absolute_col);
         if !buffer.read_only {
-            self.focused_widget_id = None;
-            self.active_widget_gesture = None;
+            let absolute_row = buffer
+                .scroll_top
+                .saturating_add(local_row as usize)
+                .min(buffer.lines.len().saturating_sub(1));
+            let absolute_col = (local_col as usize).min(buffer.lines[absolute_row].len());
+            buffer.cursor = (absolute_row, absolute_col);
+            let leaf = self.active_leaf_mut();
+            leaf.focused_widget_id = None;
+            leaf.active_widget_gesture = None;
         }
         self.completion = None;
         self.minibuffer = None;
@@ -282,15 +291,18 @@ impl Editor {
         drag_start: Option<(f32, f32)>,
         explicit_gesture: Option<&Value>,
     ) -> Option<crate::widget_render::EventOutput> {
-        let local_col = precise_col - content_col as f32;
-        let local_row = precise_row - content_row as f32 + self.widget_scroll_top() as f32;
+        let total_scroll_top = self.widget_scroll_top() as f32 + self.active_buffer().scroll_top as f32;
+        let total_scroll_left = self.active_leaf().widget_scroll_left as f32;
+        let local_col = precise_col - content_col as f32 + total_scroll_left;
+        let local_row = precise_row - content_row as f32 + total_scroll_top;
         let drag_start = drag_start.map(|(start_col, start_row)| {
             (
-                start_col - content_col as f32,
-                start_row - content_row as f32 + self.widget_scroll_top() as f32,
+                start_col - content_col as f32 + total_scroll_left,
+                start_row - content_row as f32 + total_scroll_top,
             )
         });
-        let gesture = self
+        let leaf = self.active_leaf();
+        let gesture = leaf
             .active_widget_gesture
             .as_ref()
             .and_then(|gesture| (gesture.widget_id == node.widget_id).then_some(gesture))
@@ -340,7 +352,7 @@ impl Editor {
         let Some(node) = self.widget_node_at(query_row, query_col) else {
             return;
         };
-        let scrolled_row = local_row + self.widget_scroll_top() as f32;
+        let scrolled_row = local_row + self.widget_scroll_top() as f32 + self.active_buffer().scroll_top as f32;
         let Some(widget_event) = map_magnify_event(&node, local_col, scrolled_row, delta) else {
             return;
         };
@@ -364,7 +376,7 @@ impl Editor {
         let Some(node) = self.widget_node_at(query_row, query_col) else {
             return;
         };
-        let scrolled_row = local_row + self.widget_scroll_top() as f32;
+        let scrolled_row = local_row + self.widget_scroll_top() as f32 + self.active_buffer().scroll_top as f32;
         let Some(widget_event) =
             map_scroll_gesture_event(&node, local_col, scrolled_row, delta_x, delta_y)
         else {

@@ -94,8 +94,8 @@ impl WidgetDefinition for LabelWidget {
                 color: bg,
             }),
             MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
-                row: node.rect.row,
-                col: node.rect.col,
+                row: node.rect.row as i32,
+                col: node.rect.col as i32,
                 text: text.clone(),
                 fg,
                 bg,

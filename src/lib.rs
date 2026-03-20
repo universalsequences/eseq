@@ -24,6 +24,7 @@ pub mod mode;
 pub mod reactive;
 pub mod runtime;
 pub mod text;
+pub mod tile;
 pub mod widget_render;
 pub mod widgets;
 
@@ -67,12 +68,12 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
                 Event::Key(key) => editor.handle_key(key),
                 Event::Mouse(mouse) => {
                     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-                    editor.handle_mouse(
+                    editor.update_tile_rects(cols, rows);
+                    editor.handle_tiled_mouse_precise(
                         mouse,
-                        1,
-                        1,
-                        cols.saturating_sub(2),
-                        rows.saturating_sub(3),
+                        mouse.column as f32,
+                        mouse.row as f32,
+                        1, // TUI: cell-based borders
                     );
                 }
                 Event::Resize(_, _) => editor.mark_needs_redraw(),
@@ -83,11 +84,9 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
         if editor.needs_redraw() {
             terminal.draw(|f| {
                 let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-                let viewport_width = (cols as usize).saturating_sub(2);
-                let viewport_height = (rows as usize).saturating_sub(3); // borders + status bar
-                let render_frame =
-                    frame::build_render_frame(&mut editor, viewport_width, viewport_height);
-                tui::render(f, &render_frame);
+                let tiled_frame =
+                    frame::build_tiled_render_frame(&mut editor, cols as usize, rows as usize);
+                tui::render_tiled(f, &tiled_frame);
             })?;
             editor.clear_needs_redraw();
         }
@@ -117,6 +116,10 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
     let frame_interval = Duration::from_secs_f64(1.0 / 30.0);
     let mut last_render_at = Instant::now() - frame_interval;
     let mut pending_drag: Option<(Event, (f32, f32))> = None;
+    #[allow(unused_mut)]
+    let mut scroll_accum_y: f32 = 0.0;
+    #[allow(unused_mut)]
+    let mut scroll_accum_x: f32 = 0.0;
 
     loop {
         let (cols, rows) = backend.viewport_size();
@@ -135,14 +138,12 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                 if matches!(mouse.kind, crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)) {
                     pending_drag = Some((Event::Mouse(mouse), (precise_col, precise_row)));
                 } else {
-                    editor.handle_mouse_precise(
+                    editor.update_tile_rects(cols as u16, rows as u16);
+                    editor.handle_tiled_mouse_precise(
                         mouse,
-                        0,
-                        0,
-                        cols as u16,
-                        rows.saturating_sub(1) as u16,
                         precise_col,
                         precise_row,
+                        0, // Metal: no cell borders
                     );
                 }
             }
@@ -150,23 +151,104 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
             _ => {}
         }
 
+        // Process touchpad gestures (Metal-specific, not crossterm events)
+        while let Some((delta, (precise_col, precise_row))) = backend.take_pending_magnify() {
+            // Find tile under pointer and compute content coords
+            editor.update_tile_rects(cols as u16, rows as u16);
+            if let Some(tile_id) = editor.tile_at_screen(precise_col as u16, precise_row as u16) {
+                if let Some(rect) = editor.tile_rect(tile_id) {
+                    editor.handle_touchpad_magnify(
+                        rect.col, rect.row,
+                        precise_col, precise_row, delta,
+                    );
+                }
+            }
+        }
+        while let Some(((delta_x, delta_y), (precise_col, precise_row))) = backend.take_pending_scroll() {
+            editor.update_tile_rects(cols as u16, rows as u16);
+            if let Some(tile_id) = editor.tile_at_screen(precise_col as u16, precise_row as u16) {
+                if let Some(rect) = editor.tile_rect(tile_id) {
+                    // First try widget-level scroll (timeline etc.)
+                    editor.handle_touchpad_scroll(
+                        rect.col, rect.row,
+                        precise_col, precise_row,
+                        delta_x, delta_y,
+                    );
+                    // Accumulate pixel deltas for text buffer scrolling.
+                    // Only emit ScrollUp/Down after accumulating ~1 line of pixels.
+                    scroll_accum_y += delta_y;
+                    let line_px = backend.viewport_size().1.max(1) as f32
+                        / (rows.max(1) as f32); // approx pixels per cell row
+                    let threshold = line_px.max(20.0); // at least 20px per scroll step
+                    while scroll_accum_y > threshold {
+                        scroll_accum_y -= threshold;
+                        let mouse = crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::ScrollUp,
+                            column: precise_col as u16,
+                            row: precise_row as u16,
+                            modifiers: crossterm::event::KeyModifiers::NONE,
+                        };
+                        editor.handle_tiled_mouse_precise(
+                            mouse, precise_col, precise_row, 0,
+                        );
+                    }
+                    while scroll_accum_y < -threshold {
+                        scroll_accum_y += threshold;
+                        let mouse = crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::ScrollDown,
+                            column: precise_col as u16,
+                            row: precise_row as u16,
+                            modifiers: crossterm::event::KeyModifiers::NONE,
+                        };
+                        editor.handle_tiled_mouse_precise(
+                            mouse, precise_col, precise_row, 0,
+                        );
+                    }
+                    // Horizontal scroll accumulation
+                    scroll_accum_x += delta_x;
+                    while scroll_accum_x > threshold {
+                        scroll_accum_x -= threshold;
+                        let mouse = crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::ScrollLeft,
+                            column: precise_col as u16,
+                            row: precise_row as u16,
+                            modifiers: crossterm::event::KeyModifiers::NONE,
+                        };
+                        editor.handle_tiled_mouse_precise(
+                            mouse, precise_col, precise_row, 0,
+                        );
+                    }
+                    while scroll_accum_x < -threshold {
+                        scroll_accum_x += threshold;
+                        let mouse = crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::ScrollRight,
+                            column: precise_col as u16,
+                            row: precise_row as u16,
+                            modifiers: crossterm::event::KeyModifiers::NONE,
+                        };
+                        editor.handle_tiled_mouse_precise(
+                            mouse, precise_col, precise_row, 0,
+                        );
+                    }
+                }
+            }
+        }
+
         if last_render_at.elapsed() >= frame_interval {
             if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
-                editor.handle_mouse_precise(
+                editor.update_tile_rects(cols as u16, rows as u16);
+                editor.handle_tiled_mouse_precise(
                     mouse,
-                    0,
-                    0,
-                    cols as u16,
-                    rows.saturating_sub(1) as u16,
                     precise_col,
                     precise_row,
+                    0, // Metal: no cell borders
                 );
             }
         }
 
         if editor.needs_redraw() && last_render_at.elapsed() >= frame_interval {
-            let render_frame = frame::build_render_frame(&mut editor, cols, rows.saturating_sub(1));
-            backend.render(&render_frame)?;
+            let tiled_frame = frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
+            backend.render_tiled(&tiled_frame)?;
             editor.clear_needs_redraw();
             last_render_at = Instant::now();
         }

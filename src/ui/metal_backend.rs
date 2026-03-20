@@ -17,8 +17,8 @@ mod inner {
         MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
         MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat,
         MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-        MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLStoreAction,
-        MTLTexture,
+        MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions,
+        MTLScissorRect, MTLStoreAction, MTLTexture,
     };
     use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
     use winit::{
@@ -34,7 +34,7 @@ mod inner {
         window::Window,
     };
 
-    use crate::backend::{Backend, BackendError, Color, RenderFrame};
+    use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
     use crate::theme;
     use crate::glyph_atlas::GlyphAtlas;
     use crate::layout::Rect;
@@ -188,6 +188,14 @@ vertex WidgetVaryings widget_vert(
         bg: [f32; 4],
     }
 
+    /// Cell offset for placing tile content at the right screen position.
+    /// Signed to support negative offsets from horizontal scrolling.
+    #[derive(Clone, Copy, Default)]
+    struct TileOffset {
+        col: i32,
+        row: i32,
+    }
+
     // ── Backend ───────────────────────────────────────────────────────────────
 
     pub struct MetalBackend {
@@ -264,6 +272,271 @@ vertex WidgetVaryings widget_vert(
 
         pub fn take_pending_scroll(&mut self) -> Option<((f32, f32), (f32, f32))> {
             self.pending_scroll.pop_front()
+        }
+
+        /// Render a tiled frame with per-tile scissor clipping.
+        pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
+            let (Some(pipeline), Some(atlas)) = (&self.pipeline, &mut self.atlas) else {
+                return Ok(());
+            };
+            let Some(drawable) = self.layer.nextDrawable() else {
+                return Ok(());
+            };
+            let texture = drawable.texture();
+            let vp_w = texture.width() as f32;
+            let vp_h = texture.height() as f32;
+            let cell_w = atlas.cell_w as f32;
+            let cell_h = atlas.cell_h as f32;
+            let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+            let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+            let to_rgba = |c: Color| [c.r, c.g, c.b, c.a];
+            let has_multiple_tiles = tiled.tiles.len() > 1;
+            let border_px = 2.0f32;
+
+            // ── Render pass setup ────────────────────────────────────────────
+            let desc = MTLRenderPassDescriptor::new();
+            let attach = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+            attach.setTexture(Some(&texture));
+            attach.setLoadAction(MTLLoadAction::Clear);
+            attach.setClearColor(MTLClearColor {
+                red: theme::BG.r as f64,
+                green: theme::BG.g as f64,
+                blue: theme::BG.b as f64,
+                alpha: 1.0,
+            });
+            attach.setStoreAction(MTLStoreAction::Store);
+
+            let cmdbuf = self.command_queue.commandBuffer()
+                .ok_or(BackendError::MetalError)?;
+            let enc = cmdbuf.renderCommandEncoderWithDescriptor(&desc)
+                .ok_or(BackendError::MetalError)?;
+
+            // Helper: upload verts to a buffer and draw with text pipeline
+            let draw_text_verts = |enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+                                   device: &ProtocolObject<dyn MTLDevice>,
+                                   pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+                                   atlas_tex: &ProtocolObject<dyn MTLTexture>,
+                                   verts: &[Vertex]| {
+                if verts.is_empty() { return; }
+                let byte_len = std::mem::size_of_val(verts);
+                let Some(vbuf) = (unsafe {
+                    device.newBufferWithBytes_length_options(
+                        NonNull::new(verts.as_ptr() as *mut _).unwrap(),
+                        byte_len, MTLResourceOptions(0),
+                    )
+                }) else { return; };
+                enc.setRenderPipelineState(pipeline);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(Some(&vbuf), 0, 0);
+                    enc.setFragmentTexture_atIndex(Some(atlas_tex), 0);
+                    enc.drawPrimitives_vertexStart_vertexCount(
+                        MTLPrimitiveType::Triangle, 0, verts.len() as _,
+                    );
+                }
+            };
+
+            // ── Per-tile rendering with scissor rect ─────────────────────────
+            for tile in &tiled.tiles {
+                let col_off = tile.rect.col as usize;
+                let row_off = tile.rect.row as usize;
+                let tile_w = tile.rect.width as usize;
+                let tile_h = tile.rect.height as usize;
+
+                // Set scissor rect to clip to tile content area (exclude status row)
+                let scissor_rows = if tile.show_status { tile_h.saturating_sub(1) } else { tile_h };
+                let scissor = MTLScissorRect {
+                    x: (col_off as f32 * cell_w) as usize,
+                    y: (row_off as f32 * cell_h) as usize,
+                    width: (tile_w as f32 * cell_w) as usize,
+                    height: (scissor_rows as f32 * cell_h) as usize,
+                };
+                enc.setScissorRect(scissor);
+
+                // ── Text content (shifted by horizontal scroll) ──────────────
+                let hscroll = tile.frame.widget_scroll_left as i32;
+                let offset = TileOffset {
+                    col: col_off as i32 - hscroll,
+                    row: row_off as i32,
+                };
+                let text_verts = build_text_quads_offset(
+                    &tile.frame, atlas, vp_w, vp_h, offset,
+                );
+                draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &text_verts);
+
+                // ── Cursor ───────────────────────────────────────────────────
+                if tile.is_active {
+                    if let Some((vis_row, vis_col)) = tile.frame.cursor {
+                        let mut cursor_verts = Vec::new();
+                        push_solid_rect_vertices(
+                            Rect { row: (row_off + vis_row) as u16, col: (col_off + vis_col) as u16, width: 1, height: 1 },
+                            theme::CURSOR, cell_w, cell_h, vp_w, vp_h, &mut cursor_verts,
+                        );
+                        draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &cursor_verts);
+                    }
+                }
+
+                // ── Widget primitives (clipped to content area, above status) ─
+                // Collect with LOCAL coords (no offset) so scroll/clip logic works,
+                // then offset the resulting primitives to screen position.
+                if let Some(ref layout) = tile.frame.widget_layout {
+                    let inner_rows = tile.rect.height.saturating_sub(if tile.show_status { 1 } else { 0 });
+                    let primitives = widget_render::collect_metal_primitives(
+                        layout,
+                        WidgetViewport { cell_w, cell_h, vp_w, vp_h,
+                            focused_widget_id: tile.frame.focused_widget_id },
+                        tile.frame.widget_scroll_top,
+                        inner_rows,
+                    );
+                    // Offset primitives to tile's screen position,
+                    // shifted by both text scroll (vertical) and hscroll (horizontal)
+                    // so widgets move with the text.
+                    let text_scroll = tile.frame.text_scroll_top as i32;
+                    let widget_scroll = tile.frame.widget_scroll_top as i32;
+                    let widget_col_off = col_off as i32 - hscroll;
+                    let widget_row_off = row_off as i32 - text_scroll - widget_scroll;
+                    let offset_prims: Vec<_> = primitives.into_iter()
+                        .map(|p| offset_primitive(p, widget_col_off, widget_row_off, cell_w, cell_h, vp_w, vp_h))
+                        .collect();
+                    // Rect/Quad/GlyphRun primitives
+                    let prim_quads = build_widget_primitive_quads(&offset_prims, atlas, vp_w, vp_h);
+                    draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &prim_quads);
+                    // Widget instances (sliders, toggles, knobs)
+                    let batches = group_widget_instances(&offset_prims);
+                    for (widget_type, instances) in &batches {
+                        let Some(wpipe) = self.widget_pipelines.get(widget_type) else { continue };
+                        if instances.is_empty() { continue; }
+                        let byte_len = std::mem::size_of_val(instances.as_slice());
+                        let Some(wbuf) = (unsafe {
+                            self.device.newBufferWithBytes_length_options(
+                                NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                                byte_len, MTLResourceOptions(0),
+                            )
+                        }) else { continue };
+                        enc.setRenderPipelineState(wpipe);
+                        unsafe {
+                            enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                MTLPrimitiveType::Triangle, 0, 6, instances.len() as _,
+                            );
+                        }
+                    }
+                }
+
+                // ── Per-tile status bar (drawn ON TOP of widgets with full-tile scissor)
+                if tile.show_status {
+                    enc.setScissorRect(MTLScissorRect {
+                        x: (col_off as f32 * cell_w) as usize,
+                        y: (row_off as f32 * cell_h) as usize,
+                        width: (tile_w as f32 * cell_w) as usize,
+                        height: (tile_h as f32 * cell_h) as usize,
+                    });
+                    let mut status_verts = Vec::new();
+                    let status_row = row_off + tile_h - 1;
+                    let status_fg = to_rgba(theme::STATUS_FG);
+                    let status_bg = to_rgba(theme::STATUS_BG);
+                    let sx0 = ndc_x(col_off as f32 * cell_w);
+                    let sx1 = ndc_x((col_off + tile_w) as f32 * cell_w);
+                    let sy0 = ndc_y(status_row as f32 * cell_h);
+                    let sy1 = ndc_y((status_row + 1) as f32 * cell_h);
+                    let sb = |px, py| Vertex {
+                        position: [px, py], uv: [0.0, 0.0], fg: status_bg, bg: status_bg,
+                    };
+                    status_verts.extend_from_slice(&[
+                        sb(sx0, sy0), sb(sx0, sy1), sb(sx1, sy0),
+                        sb(sx1, sy0), sb(sx0, sy1), sb(sx1, sy1),
+                    ]);
+                    for (i, ch) in tile.frame.status.chars().enumerate() {
+                        let ch_col = col_off + i;
+                        if ch_col >= col_off + tile_w || ch == ' ' { continue; }
+                        rasterize_char(
+                            atlas, ch, (ch_col as i32, status_row as i32),
+                            &CharCtx { cell_w, cell_h, vp_w, vp_h, fg: status_fg, bg: status_bg },
+                            &mut status_verts,
+                        );
+                    }
+                    draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &status_verts);
+                }
+
+                // ── Thin pixel borders (drawn AFTER content, on top) ─────────
+                if has_multiple_tiles {
+                    let border_color = if tile.is_active { theme::PURPLE } else { Color::DARK_GRAY };
+                    let bc = to_rgba(border_color);
+                    let bv = |px, py| Vertex {
+                        position: [px, py], uv: [0.0, 0.0], fg: bc, bg: bc,
+                    };
+                    let left_px = col_off as f32 * cell_w;
+                    let right_px = (col_off + tile_w) as f32 * cell_w;
+                    let top_px = row_off as f32 * cell_h;
+                    let bottom_px = (row_off + tile_h) as f32 * cell_h;
+                    let mut bverts = Vec::new();
+                    // Right edge
+                    let (rx0, rx1) = (ndc_x(right_px - border_px), ndc_x(right_px));
+                    let (ry0, ry1) = (ndc_y(top_px), ndc_y(bottom_px));
+                    bverts.extend_from_slice(&[bv(rx0,ry0),bv(rx0,ry1),bv(rx1,ry0),bv(rx1,ry0),bv(rx0,ry1),bv(rx1,ry1)]);
+                    // Left edge
+                    let (lx0, lx1) = (ndc_x(left_px), ndc_x(left_px + border_px));
+                    bverts.extend_from_slice(&[bv(lx0,ry0),bv(lx0,ry1),bv(lx1,ry0),bv(lx1,ry0),bv(lx0,ry1),bv(lx1,ry1)]);
+                    // Top edge
+                    let (tx0, tx1) = (ndc_x(left_px), ndc_x(right_px));
+                    let (ty0, ty1) = (ndc_y(top_px), ndc_y(top_px + border_px));
+                    bverts.extend_from_slice(&[bv(tx0,ty0),bv(tx0,ty1),bv(tx1,ty0),bv(tx1,ty0),bv(tx0,ty1),bv(tx1,ty1)]);
+                    // Bottom edge
+                    let (by0, by1) = (ndc_y(bottom_px - border_px), ndc_y(bottom_px));
+                    bverts.extend_from_slice(&[bv(tx0,by0),bv(tx0,by1),bv(tx1,by0),bv(tx1,by0),bv(tx0,by1),bv(tx1,by1)]);
+                    draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &bverts);
+                }
+            }
+
+            // ── Completion popup (no scissor — drawn on top of everything) ───
+            if let Some(comp) = &tiled.completion {
+                // Reset scissor to full viewport
+                {
+                    enc.setScissorRect(MTLScissorRect {
+                        x: 0, y: 0,
+                        width: vp_w as usize, height: vp_h as usize,
+                    });
+                }
+                if let Some(tile) = tiled.tiles.iter().find(|t| t.is_active) {
+                    let col_off = tile.rect.col as usize;
+                    let row_off = tile.rect.row as usize;
+                    let sel_bg = to_rgba(theme::COMP_SELECTED_BG);
+                    let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG);
+                    let pop_fg = to_rgba(theme::COMP_FG);
+                    let popup_col = col_off + comp.anchor.1;
+                    let popup_row = row_off + comp.anchor.0 + 1;
+                    let label_w = comp.entries.iter()
+                        .map(|e| e.label.len()).max().unwrap_or(0).max(12);
+                    let mut popup_verts = Vec::new();
+                    let x0 = ndc_x(popup_col as f32 * cell_w);
+                    let x1 = ndc_x((popup_col + label_w) as f32 * cell_w);
+                    for (i, entry) in comp.entries.iter().enumerate() {
+                        let row = popup_row + i;
+                        let y0 = ndc_y(row as f32 * cell_h);
+                        let y1 = ndc_y((row + 1) as f32 * cell_h);
+                        let bg = if entry.selected { sel_bg } else { unsel_bg };
+                        let gv = |px, py| Vertex {
+                            position: [px, py], uv: [0.0, 0.0], fg: pop_fg, bg,
+                        };
+                        popup_verts.extend_from_slice(&[
+                            gv(x0,y0),gv(x0,y1),gv(x1,y0),gv(x1,y0),gv(x0,y1),gv(x1,y1),
+                        ]);
+                        for (j, ch) in entry.label.chars().enumerate() {
+                            if ch == ' ' { continue; }
+                            rasterize_char(
+                                atlas, ch, ((popup_col + j) as i32, row as i32),
+                                &CharCtx { cell_w, cell_h, vp_w, vp_h, fg: pop_fg, bg },
+                                &mut popup_verts,
+                            );
+                        }
+                    }
+                    draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &popup_verts);
+                }
+            }
+
+            enc.endEncoding();
+            cmdbuf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
+            cmdbuf.commit();
+            Ok(())
         }
     }
 
@@ -787,7 +1060,7 @@ vertex WidgetVaryings widget_vert(
     fn rasterize_char(
         atlas: &mut GlyphAtlas,
         ch: char,
-        (col, row): (usize, usize),
+        (col, row): (i32, i32),
         ctx: &CharCtx,
         out: &mut Vec<Vertex>,
     ) {
@@ -836,6 +1109,16 @@ vertex WidgetVaryings widget_vert(
         vp_w: f32,
         vp_h: f32,
     ) -> Vec<Vertex> {
+        build_text_quads_offset(frame, atlas, vp_w, vp_h, TileOffset::default())
+    }
+
+    fn build_text_quads_offset(
+        frame: &RenderFrame,
+        atlas: &mut GlyphAtlas,
+        vp_w: f32,
+        vp_h: f32,
+        offset: TileOffset,
+    ) -> Vec<Vertex> {
         let cell_w = atlas.cell_w as f32;
         let cell_h = atlas.cell_h as f32;
         let mut verts = Vec::with_capacity(frame.lines.len() * 80 * 6);
@@ -846,12 +1129,14 @@ vertex WidgetVaryings widget_vert(
 
         for (row, line) in frame.lines.iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
+                let abs_col = col as i32 + offset.col;
+                let abs_row = row as i32 + offset.row;
                 let is_cursor = frame.cursor == Some((row, col));
 
-                let x0 = ndc_x(col as f32 * cell_w);
-                let x1 = ndc_x((col + 1) as f32 * cell_w);
-                let y0 = ndc_y(row as f32 * cell_h); // top (larger NDC Y)
-                let y1 = ndc_y((row + 1) as f32 * cell_h); // bottom
+                let x0 = ndc_x(abs_col as f32 * cell_w);
+                let x1 = ndc_x((abs_col + 1) as f32 * cell_w);
+                let y0 = ndc_y(abs_row as f32 * cell_h);
+                let y1 = ndc_y((abs_row + 1) as f32 * cell_h);
 
                 // Cursor inverts fg/bg; otherwise use cell style.
                 let (fg, bg) = if is_cursor {
@@ -889,7 +1174,7 @@ vertex WidgetVaryings widget_vert(
                 rasterize_char(
                     atlas,
                     cell.ch,
-                    (col, row),
+                    (abs_col, abs_row),
                     &CharCtx {
                         cell_w,
                         cell_h,
@@ -903,9 +1188,14 @@ vertex WidgetVaryings widget_vert(
             }
         }
 
-        // ── Status bar (bottom row) ───────────────────────────────────────────
+        // ── Status bar (placed at bottom of tile region) ─────────────────────
         let total_rows = (vp_h / cell_h).floor() as usize;
-        let status_row = total_rows.saturating_sub(1);
+        let status_row = if offset.col == 0 && offset.row == 0 {
+            total_rows.saturating_sub(1) // legacy single-tile: bottom of screen
+        } else {
+            // Skip status bar for offset tiles — handled by tiled renderer
+            return verts;
+        };
         let status_fg = to_rgba(theme::STATUS_FG);
         let status_bg = to_rgba(theme::STATUS_BG);
 
@@ -958,7 +1248,7 @@ vertex WidgetVaryings widget_vert(
                     rasterize_char(
                         atlas,
                         ch,
-                        (ch_col, ch_row),
+                        (ch_col as i32, ch_row as i32),
                         &CharCtx {
                             cell_w,
                             cell_h,
@@ -1011,7 +1301,7 @@ vertex WidgetVaryings widget_vert(
                         rasterize_char(
                             atlas,
                             ch,
-                            (doc_col + j, title_row),
+                            ((doc_col + j) as i32, title_row as i32),
                             &CharCtx {
                                 cell_w,
                                 cell_h,
@@ -1038,7 +1328,7 @@ vertex WidgetVaryings widget_vert(
                         rasterize_char(
                             atlas,
                             ch,
-                            (doc_col + j, doc_row),
+                            ((doc_col + j) as i32, doc_row as i32),
                             &CharCtx {
                                 cell_w,
                                 cell_h,
@@ -1087,7 +1377,7 @@ vertex WidgetVaryings widget_vert(
             rasterize_char(
                 atlas,
                 ch,
-                (col, status_row),
+                (col as i32, status_row as i32),
                 &CharCtx {
                     cell_w,
                     cell_h,
@@ -1128,7 +1418,7 @@ vertex WidgetVaryings widget_vert(
                         rasterize_char(
                             atlas,
                             ch,
-                            (run.col as usize + idx, run.row as usize),
+                            (run.col + idx as i32, run.row),
                             &CharCtx {
                                 cell_w,
                                 cell_h,
@@ -1227,6 +1517,47 @@ vertex WidgetVaryings widget_vert(
             }
         }
         batches
+    }
+
+    /// Offset a MetalPrimitive by (col_off, row_off) cells.
+    /// For Rect/Quad/GlyphRun: shift cell coordinates.
+    /// For WidgetInstance: shift NDC bounds using the pixel conversion.
+    /// Offset a MetalPrimitive by (col_off, row_off) cells (signed for scroll).
+    fn offset_primitive(
+        prim: widget_render::MetalPrimitive,
+        col_off: i32,
+        row_off: i32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> widget_render::MetalPrimitive {
+        match prim {
+            widget_render::MetalPrimitive::Rect(mut r) => {
+                r.rect.col = (r.rect.col as i32 + col_off).max(0) as u16;
+                r.rect.row = (r.rect.row as i32 + row_off).max(0) as u16;
+                widget_render::MetalPrimitive::Rect(r)
+            }
+            widget_render::MetalPrimitive::Quad(mut q) => {
+                q.x += col_off as f32;
+                q.y += row_off as f32;
+                widget_render::MetalPrimitive::Quad(q)
+            }
+            widget_render::MetalPrimitive::GlyphRun(mut g) => {
+                g.col += col_off;
+                g.row += row_off;
+                widget_render::MetalPrimitive::GlyphRun(g)
+            }
+            widget_render::MetalPrimitive::WidgetInstance { widget_type, mut instance } => {
+                let ndc_dx = (col_off as f32 * cell_w / vp_w) * 2.0;
+                let ndc_dy = -(row_off as f32 * cell_h / vp_h) * 2.0;
+                instance.ndc_min[0] += ndc_dx;
+                instance.ndc_max[0] += ndc_dx;
+                instance.ndc_min[1] += ndc_dy;
+                instance.ndc_max[1] += ndc_dy;
+                widget_render::MetalPrimitive::WidgetInstance { widget_type, instance }
+            }
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

@@ -115,6 +115,7 @@ pub struct CompletionFrame {
 /// Built by `crate::tui::build_render_frame` from live `Editor` state and
 /// passed to whichever `Backend` is active. Backends must not mutate editor
 /// state — they only read this frame.
+#[derive(Clone)]
 pub struct RenderFrame {
     /// Visible lines of styled cells, top-to-bottom, left-to-right.
     pub lines: Vec<Vec<Cell>>,
@@ -145,6 +146,31 @@ pub struct RenderFrame {
     pub focused_widget_id: Option<u64>,
     /// Widget scroll offset (rows to skip when rendering widget overlay).
     pub widget_scroll_top: u16,
+    /// Widget horizontal scroll offset (cols to skip when rendering widget overlay).
+    pub widget_scroll_left: u16,
+    /// Text scroll offset — how many rows the text has scrolled.
+    /// Used by Metal to sync widget vertical position with text scrolling.
+    pub text_scroll_top: usize,
+}
+
+// ── Tiled rendering ──────────────────────────────────────────────────────────
+
+use crate::tile::TileId;
+use crate::layout::Rect;
+
+/// One tile's worth of rendering data, positioned within the full screen.
+pub struct TileFrame {
+    pub tile_id: TileId,
+    pub rect: Rect,       // screen position for this tile
+    pub is_active: bool,   // colored border for active tile
+    pub show_status: bool, // whether to render per-tile status bar
+    pub frame: RenderFrame, // the per-buffer frame
+}
+
+/// A complete frame with all tiles rendered, plus global UI elements.
+pub struct TiledRenderFrame {
+    pub tiles: Vec<TileFrame>,
+    pub completion: Option<CompletionFrame>, // completion popup (global)
 }
 
 // ── Backend trait ─────────────────────────────────────────────────────────────

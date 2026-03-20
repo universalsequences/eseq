@@ -219,3 +219,4 @@
 (bind-key "C-x b" "buffer-list-here")
 
 ;; dired-open-at-cursor is no longer needed — Enter triggers :on-enter on focused widget
+(bind-key "C-x v" "cycle-view-mode")

@@ -44,13 +44,26 @@ impl Editor {
             self.builtins
                 .insert(KeyEvent::new(*code, *mods), cmd.to_string());
         }
+
+        // Tiling keybindings (C-x chords, registered as Lisp bindings)
+        let tiling_binds: &[(&str, &str)] = &[
+            ("C-x 2", "split-window-below"),
+            ("C-x 3", "split-window-right"),
+            ("C-x 0", "delete-window"),
+            ("C-x 1", "delete-other-windows"),
+            ("C-x o", "other-window"),
+        ];
+        for (key, handler) in tiling_binds {
+            self.default_lisp_bindings
+                .insert(key.to_string(), handler.to_string());
+        }
     }
 
     pub(super) fn run_command(&mut self, cmd: &str) {
         match cmd {
             "quit" => {
                 self.completion = None;
-                if self.needs_save_as_prompt() {
+                if self.should_prompt_on_quit() {
                     self.open_save_prompt(true);
                 } else {
                     self.should_quit = true;
@@ -66,47 +79,74 @@ impl Editor {
                 });
             }
             "move-left" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_left();
             }
             "move-right" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_right();
             }
             "move-up" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_up();
             }
             "move-down" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_down();
             }
             "move-buffer-end" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_to_buffer_end();
             }
 
             "move-line-start" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_to_line_start();
             }
             "move-line-end" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_to_line_end();
             }
             "move-word-left" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_word_left();
             }
             "move-word-right" => {
+                if self.active_buffer().read_only {
+                    return;
+                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_word_right();
@@ -228,4 +268,3 @@ pub(super) fn key_str(key: KeyEvent) -> String {
         _ => format!("{:?}", key.code),
     }
 }
-

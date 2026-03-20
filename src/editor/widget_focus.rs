@@ -21,7 +21,8 @@ impl Editor {
         if mouse.column < content_col || mouse.row < content_row {
             return false;
         }
-        let local_row = (mouse.row - content_row) + self.widget_scroll_top;
+        let scroll_top = self.active_leaf().widget_scroll_top;
+        let local_row = (mouse.row - content_row) + scroll_top;
         let local_col = mouse.column - content_col;
 
         // Find the focusable widget at this position
@@ -34,7 +35,7 @@ impl Editor {
                 && local_col >= *col
                 && local_col < col + width
             {
-                self.focused_widget_id = Some(*id);
+                self.active_leaf_mut().focused_widget_id = Some(*id);
                 self.adjust_widget_scroll(*row);
                 self.mark_needs_redraw();
                 return self.activate_focused();
@@ -70,7 +71,7 @@ impl Editor {
     }
 
     pub(super) fn handle_focused_widget_key(&mut self, key: KeyEvent) -> bool {
-        let Some(focused_id) = self.focused_widget_id else {
+        let Some(focused_id) = self.active_leaf().focused_widget_id else {
             return false;
         };
         let Some(layout) = self.runtime.current_layout.clone() else {
@@ -104,14 +105,16 @@ impl Editor {
             return;
         }
 
+        let focused_id = self.active_leaf().focused_widget_id;
+
         // Auto-focus first widget if nothing is focused
-        if self.focused_widget_id.is_none() {
-            self.focused_widget_id = Some(focusable_nodes[0].0);
+        if focused_id.is_none() {
+            self.active_leaf_mut().focused_widget_id = Some(focusable_nodes[0].0);
             self.mark_needs_redraw();
             return;
         }
 
-        let current_id = self.focused_widget_id.unwrap();
+        let current_id = focused_id.unwrap();
         let current_idx = focusable_nodes
             .iter()
             .position(|(id, _, _, _, _)| *id == current_id)
@@ -135,7 +138,7 @@ impl Editor {
             _ => current_idx,
         };
 
-        self.focused_widget_id = Some(focusable_nodes[next_idx].0);
+        self.active_leaf_mut().focused_widget_id = Some(focusable_nodes[next_idx].0);
         self.adjust_widget_scroll(focusable_nodes[next_idx].1);
         self.mark_needs_redraw();
     }
@@ -145,18 +148,19 @@ impl Editor {
         if viewport_height == 0 {
             return;
         }
+        let leaf = self.active_leaf_mut();
         // Scroll up if focused row is above viewport
-        if focused_row < self.widget_scroll_top {
-            self.widget_scroll_top = focused_row;
+        if focused_row < leaf.widget_scroll_top {
+            leaf.widget_scroll_top = focused_row;
         }
         // Scroll down if focused row is below viewport
-        if focused_row >= self.widget_scroll_top + viewport_height {
-            self.widget_scroll_top = focused_row - viewport_height + 1;
+        if focused_row >= leaf.widget_scroll_top + viewport_height {
+            leaf.widget_scroll_top = focused_row - viewport_height + 1;
         }
     }
 
     pub(super) fn activate_focused(&mut self) -> bool {
-        let Some(focused_id) = self.focused_widget_id else {
+        let Some(focused_id) = self.active_leaf().focused_widget_id else {
             return false;
         };
         let Some(layout) = self.runtime.current_layout.clone() else {
@@ -189,10 +193,13 @@ impl Editor {
 
     /// Clear widget layout and focus state for a buffer with no widget tree.
     pub(super) fn clear_widget_focus(&mut self) {
-        self.runtime.current_layout = None;
-        self.focused_widget_id = None;
-        self.widget_scroll_top = 0;
-        self.active_widget_gesture = None;
+        self.runtime.clear_current_widget_tree();
+        let leaf = self.active_leaf_mut();
+        leaf.focused_widget_id = None;
+        leaf.widget_scroll_top = 0;
+        leaf.widget_scroll_left = 0;
+        leaf.active_widget_gesture = None;
+        leaf.cached_layout = None;
     }
 
     pub(super) fn restore_buffer_widget_tree(&mut self) {
@@ -210,7 +217,7 @@ impl Editor {
 
     pub(super) fn auto_focus_first_widget(&mut self) {
         if !self.active_buffer().read_only {
-            self.focused_widget_id = None;
+            self.active_leaf_mut().focused_widget_id = None;
             return;
         }
         let Some(layout) = self.runtime.current_layout.clone() else {
@@ -219,7 +226,7 @@ impl Editor {
         let mut focusable_nodes: Vec<(u64, u16, u16, u16, u16)> = Vec::new();
         collect_focusable_nodes(&layout, &mut focusable_nodes);
         if let Some((id, _, _, _, _)) = focusable_nodes.first() {
-            self.focused_widget_id = Some(*id);
+            self.active_leaf_mut().focused_widget_id = Some(*id);
         }
     }
 }

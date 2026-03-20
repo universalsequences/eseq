@@ -401,8 +401,8 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         }
         for (absolute_col, label) in view.time_ruler_labels() {
             primitives.push(MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
-                row: rect.row,
-                col: absolute_col.saturating_add(1),
+                row: rect.row as i32,
+                col: absolute_col as i32 + 1,
                 text: label,
                 fg: theme::FG_MUTED,
                 bg: theme::STATUS_BG,
@@ -424,6 +424,18 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
                 height: lane_height,
                 color: sidebar_bg,
             }));
+            // Lane label text
+            let label = lane.label.as_deref().unwrap_or("");
+            if !label.is_empty() {
+                let label_fg = lane.label_fg.unwrap_or(theme::FG);
+                primitives.push(MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
+                    row: row_start.floor() as i32,
+                    col: rect.col as i32,
+                    text: label.chars().take(view.sidebar_width as usize).collect(),
+                    fg: label_fg,
+                    bg: sidebar_bg,
+                }));
+            }
             let divider_col = rect.col + view.sidebar_width.saturating_sub(1);
             if divider_col < rect.col + rect.width {
                 primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {

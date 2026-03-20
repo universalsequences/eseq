@@ -13,9 +13,10 @@ pub struct HitGrid {
 
 impl HitGrid {
     /// Build a new hit grid from the root layout node.
+    /// Uses the max extent of all descendants, not just the root rect,
+    /// so overflowing children (wider than viewport) are hittable.
     pub fn build(layout: &LayoutNode) -> Self {
-        let cols = layout.rect.col.saturating_add(layout.rect.width);
-        let rows = layout.rect.row.saturating_add(layout.rect.height);
+        let (cols, rows) = max_extent(layout);
         let mut cells = vec![None; cols as usize * rows as usize];
         fill_cells(layout, cols, rows, &mut cells);
         HitGrid { cols, rows, cells }
@@ -79,6 +80,16 @@ fn fill_cells(node: &LayoutNode, cols: u16, rows: u16, cells: &mut [Option<Layou
             fill_cells(child, cols, rows, cells);
         }
     }
+}
+
+/// Find the max (cols, rows) extent across all descendants.
+fn max_extent(node: &LayoutNode) -> (u16, u16) {
+    let own_cols = node.rect.col.saturating_add(node.rect.width);
+    let own_rows = node.rect.row.saturating_add(node.rect.height);
+    node.children.iter().fold((own_cols, own_rows), |(c, r), child| {
+        let (cc, cr) = max_extent(child);
+        (c.max(cc), r.max(cr))
+    })
 }
 
 fn hit_key(node: &LayoutNode) -> (String, u16, u16, u16, u16) {

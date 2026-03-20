@@ -54,6 +54,18 @@
     }
 
     #[test]
+    fn default_window_split_bindings_survive_runtime_sync() {
+        let runtime = Runtime::with_init_source("(bind-key \"C-c C-c\" \"ignore\")");
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(+ 1 2)");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+
+        assert_eq!(editor.tile_root.leaf_count(), 2);
+    }
+
+    #[test]
     fn ctrl_a_moves_to_start_of_line() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -418,6 +430,40 @@
     }
 
     #[test]
+    fn quit_does_not_prompt_for_dirty_scratch_buffer() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "abc");
+        editor.active_buffer_mut().insert_char('x');
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+
+        assert!(editor.should_quit());
+        assert_eq!(editor.prompt_text(), None);
+    }
+
+    #[test]
+    fn quit_prompt_allows_discard_for_dirty_file_buffer() {
+        let path = temp_file_path("quit-discard");
+        fs::write(&path, "abc\n").unwrap();
+
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.open_file_buffer(&path).unwrap();
+        editor.active_buffer_mut().insert_char('x');
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(editor.prompt_text().is_some());
+        assert!(!editor.should_quit());
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        assert!(editor.should_quit());
+        assert_eq!(editor.prompt_text(), None);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn mouse_click_moves_cursor_in_text_view() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -432,6 +478,53 @@
         );
 
         assert_eq!(editor.active_buffer().cursor, (1, 2));
+    }
+
+    #[test]
+    fn read_only_buffers_ignore_keyboard_cursor_movement() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha\nbravo");
+        editor.active_buffer_mut().cursor = (0, 2);
+        editor.active_buffer_mut().read_only = true;
+
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 2));
+    }
+
+    #[test]
+    fn read_only_buffers_ignore_text_click_cursor_changes() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha\nbravo");
+        editor.active_buffer_mut().cursor = (0, 1);
+        editor.active_buffer_mut().read_only = true;
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 2),
+            1,
+            1,
+            20,
+            10,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (0, 1));
+    }
+
+    #[test]
+    fn read_only_buffers_hide_text_cursor() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha");
+        editor.active_buffer_mut().cursor = (0, 2);
+        editor.active_buffer_mut().read_only = true;
+
+        let frame = crate::frame::build_render_frame(&mut editor, 20, 10);
+
+        assert_eq!(frame.cursor, None);
     }
 
     #[test]

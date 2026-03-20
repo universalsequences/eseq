@@ -21,6 +21,8 @@ use crate::mode::{
 };
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
+use crate::layout::Rect;
+use crate::tile::{HighlightCache, SplitDir, TileId, TileLeaf, TileNode};
 use crate::vm::{Value, format_lisp_value};
 use commands::key_str;
 use natives::register_editor_natives;
@@ -110,36 +112,7 @@ pub struct SExpFlash {
     pub expires_at: Instant,
 }
 
-#[derive(Debug, Clone)]
-struct HighlightCache {
-    buffer_id: BufferId,
-    buffer_revision: u64,
-    buffer_mode: BufferMode,
-    runtime_symbol_revision: u64,
-    spans: Rc<Vec<Vec<TokenSpan>>>,
-}
-
-struct CachedHitGrid {
-    layout_revision: u64,
-    scroll_top: u16,
-    grid: crate::ui::hit::HitGrid,
-}
-
-#[derive(Debug, Clone)]
-struct WidgetGesture {
-    widget_id: u64,
-    start_precise_col: f32,
-    start_precise_row: f32,
-    gesture_data: Option<Value>,
-}
-
-#[derive(Debug, Clone)]
-struct WidgetClick {
-    widget_id: u64,
-    precise_col: f32,
-    precise_row: f32,
-    at: Instant,
-}
+// HighlightCache, CachedHitGrid, WidgetGesture, WidgetClick are in tile.rs
 
 #[derive(Debug, Clone, Copy)]
 pub struct Mark {
@@ -157,11 +130,14 @@ pub struct MajorMode {
 
 pub struct Editor {
     pub buffers: Vec<Buffer>,
-    pub active: usize,
+    pub tile_root: TileNode,
+    pub active_tile: TileId,
+    next_tile_id: TileId,
     pub minibuffer: Option<String>,
 
     pending_key: Option<KeyEvent>,
     builtins: HashMap<KeyEvent, String>,
+    default_lisp_bindings: LispBindings,
     lisp_bindings: LispBindings,
     runtime: Runtime,
     needs_redraw: bool,
@@ -170,19 +146,14 @@ pub struct Editor {
     next_buffer_id: BufferId,
     save_prompt: Option<SavePrompt>,
     completion: Option<CompletionState>,
-    highlight_cache: Option<HighlightCache>,
-    hit_grid_cache: Option<CachedHitGrid>,
     last_mouse_precise: Option<(f32, f32)>,
     eval_flash: Option<SExpFlash>,
     mark: Option<Mark>,
     kill_ring: Vec<String>,
     minibuffer_input: Option<MinibufferMode>,
     mode_registry: HashMap<String, MajorMode>,
-    focused_widget_id: Option<u64>,
-    widget_scroll_top: u16,
-    active_widget_gesture: Option<WidgetGesture>,
-    last_widget_click: Option<WidgetClick>,
-    pub view_mode: ViewMode,
+    /// Cached tile rects, recomputed when tiles change or viewport resizes.
+    cached_tile_rects: Vec<(TileId, Rect)>,
 }
 
 impl Editor {
@@ -191,10 +162,13 @@ impl Editor {
 
         let mut editor = Editor {
             buffers: vec![Buffer::new(0, "*scratch*")],
-            active: 0,
+            tile_root: TileNode::Leaf(TileLeaf::new(0, 0)),
+            active_tile: 0,
+            next_tile_id: 1,
             minibuffer: None,
             pending_key: None,
             builtins: HashMap::new(),
+            default_lisp_bindings: HashMap::new(),
             lisp_bindings: HashMap::new(),
             runtime,
             needs_redraw: true,
@@ -203,25 +177,253 @@ impl Editor {
             next_buffer_id: 1,
             save_prompt: None,
             completion: None,
-            highlight_cache: None,
-            hit_grid_cache: None,
             last_mouse_precise: None,
             eval_flash: None,
             mark: None,
             kill_ring: vec![],
             minibuffer_input: None,
             mode_registry: HashMap::new(),
-            focused_widget_id: None,
-            widget_scroll_top: 0,
-            active_widget_gesture: None,
-            last_widget_click: None,
-            view_mode: ViewMode::Both,
+            cached_tile_rects: vec![],
         };
         editor.bind_defaults();
         editor.load_init(config.init_source.as_deref());
         editor.refresh_runtime_side_effects();
         editor.sync_runtime_context();
         editor
+    }
+
+    // ── Tile accessors ─────────────────────────────────────────────────────
+
+    pub fn active_leaf(&self) -> &TileLeaf {
+        self.tile_root
+            .find_leaf(self.active_tile)
+            .expect("active tile must exist")
+    }
+
+    pub fn active_leaf_mut(&mut self) -> &mut TileLeaf {
+        self.tile_root
+            .find_leaf_mut(self.active_tile)
+            .expect("active tile must exist")
+    }
+
+    fn alloc_tile_id(&mut self) -> TileId {
+        let id = self.next_tile_id;
+        self.next_tile_id += 1;
+        id
+    }
+
+    /// Get the buffer index for the active tile.
+    pub fn active_buffer_idx(&self) -> usize {
+        self.active_leaf().buffer_idx
+    }
+
+    /// Recompute cached tile rects for the given viewport.
+    pub fn update_tile_rects(&mut self, total_width: u16, total_height: u16) {
+        let area = Rect {
+            row: 0,
+            col: 0,
+            width: total_width,
+            // Reserve 1 row for global status bar
+            height: total_height.saturating_sub(1),
+        };
+        self.cached_tile_rects = self.tile_root.compute_rects(area);
+    }
+
+    /// Find which tile contains the given screen coordinate.
+    pub fn tile_at_screen(&self, col: u16, row: u16) -> Option<TileId> {
+        for (tile_id, rect) in &self.cached_tile_rects {
+            if col >= rect.col
+                && col < rect.col + rect.width
+                && row >= rect.row
+                && row < rect.row + rect.height
+            {
+                return Some(*tile_id);
+            }
+        }
+        None
+    }
+
+    /// Get the rect for a given tile ID from the cache.
+    pub fn tile_rect(&self, tile_id: TileId) -> Option<Rect> {
+        self.cached_tile_rects
+            .iter()
+            .find(|(id, _)| *id == tile_id)
+            .map(|(_, rect)| *rect)
+    }
+
+    /// Check if a screen coordinate is on a border between tiles.
+    /// Returns the parent split if found.
+    #[allow(dead_code)]
+    fn is_on_tile_border(&self, col: u16, row: u16) -> bool {
+        if self.cached_tile_rects.len() <= 1 {
+            return false;
+        }
+        // A position is on a border if it's at the edge of one tile
+        // and the start of another (within the 1-char border zone)
+        for (_, rect) in &self.cached_tile_rects {
+            // Right edge of a tile (vertical split border)
+            if col == rect.col + rect.width && row >= rect.row && row < rect.row + rect.height {
+                return true;
+            }
+            // Bottom edge (horizontal split border)
+            if row == rect.row + rect.height && col >= rect.col && col < rect.col + rect.width {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Switch the active tile (updates runtime context, saves/restores widget trees).
+    pub fn switch_active_tile(&mut self, new_tile: TileId) {
+        if new_tile == self.active_tile {
+            return;
+        }
+        if self.tile_root.find_leaf(new_tile).is_none() {
+            return;
+        }
+        self.save_current_widget_tree();
+        self.active_tile = new_tile;
+        self.sync_runtime_context();
+        self.restore_buffer_widget_tree();
+        self.mark_needs_redraw();
+    }
+
+    /// Split the active tile. Returns the new tile's ID, or None if no split was possible.
+    pub fn split_active_tile(&mut self, dir: SplitDir, new_buffer_idx: usize) -> Option<TileId> {
+        let target = self.active_tile;
+        let split_id = self.alloc_tile_id();
+        let new_tile_id = self.alloc_tile_id();
+        if self
+            .tile_root
+            .split_leaf(target, split_id, new_tile_id, new_buffer_idx, dir)
+        {
+            self.mark_needs_redraw();
+            Some(new_tile_id)
+        } else {
+            // Roll back IDs
+            self.next_tile_id -= 2;
+            None
+        }
+    }
+
+    /// Delete the active tile (close window, not buffer).
+    /// Returns true if successful. Cannot delete the last tile.
+    pub fn delete_active_tile(&mut self) -> bool {
+        if self.tile_root.leaf_count() <= 1 {
+            return false;
+        }
+        let removed = self.tile_root.remove_leaf(self.active_tile);
+        if removed.is_some() {
+            // Switch to the first remaining leaf
+            let ids = self.tile_root.leaf_ids();
+            self.active_tile = ids[0];
+            self.sync_runtime_context();
+            self.restore_buffer_widget_tree();
+            self.mark_needs_redraw();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Collapse all tiles to a single tile showing the active buffer.
+    pub fn delete_other_tiles(&mut self) {
+        if self.tile_root.leaf_count() <= 1 {
+            return;
+        }
+        let buffer_idx = self.active_leaf().buffer_idx;
+        let new_id = self.alloc_tile_id();
+        self.tile_root.collapse_to_single(new_id, buffer_idx);
+        self.active_tile = new_id;
+        self.mark_needs_redraw();
+    }
+
+    /// Cycle active tile to the next leaf in order.
+    pub fn cycle_active_tile(&mut self) {
+        let ids = self.tile_root.leaf_ids();
+        if ids.len() <= 1 {
+            return;
+        }
+        let current_idx = ids.iter().position(|id| *id == self.active_tile).unwrap_or(0);
+        let next_idx = (current_idx + 1) % ids.len();
+        self.switch_active_tile(ids[next_idx]);
+    }
+
+    /// Handle tiled mouse event: hit-test tiles, switch active, then dispatch.
+    /// `border_inset`: 1 for TUI (cell-based borders), 0 for Metal (pixel borders).
+    pub fn handle_tiled_mouse_precise(
+        &mut self,
+        mouse: MouseEvent,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) {
+        let screen_col = mouse.column;
+        let screen_row = mouse.row;
+
+        // Find which tile this mouse event targets
+        if let Some(tile_id) = self.tile_at_screen(screen_col, screen_row) {
+            // Switch active tile on click
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.switch_active_tile(tile_id);
+            }
+
+            // Get tile rect and compute content area
+            if let Some(rect) = self.tile_rect(tile_id) {
+                let content_col = rect.col + border_inset;
+                let content_row = rect.row + border_inset;
+                let content_width = rect.width.saturating_sub(border_inset * 2);
+                let leaf = self.tile_root.find_leaf(tile_id).unwrap();
+                let show_status = leaf.show_status;
+                let content_height = if show_status {
+                    rect.height.saturating_sub(border_inset * 2 + 1) // borders + status
+                } else {
+                    rect.height.saturating_sub(border_inset * 2)
+                };
+
+                self.handle_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    content_width,
+                    content_height,
+                    precise_col,
+                    precise_row,
+                );
+            }
+        }
+    }
+
+    /// Adjust the ratio of a parent split when dragging a border.
+    pub fn resize_tile_border(&mut self, col: u16, _row: u16) {
+        // Walk through all cached rects and find the split whose border is being dragged
+        for (tile_id, rect) in &self.cached_tile_rects {
+            // Check if col is at the right edge (vertical split)
+            if col >= rect.col + rect.width.saturating_sub(1)
+                && col <= rect.col + rect.width
+            {
+                if let Some(split) = self.tile_root.find_parent_split(*tile_id) {
+                    if split.dir == SplitDir::Vertical {
+                        // Compute new ratio based on mouse position
+                        let total_width = split.a.compute_rects(Rect {
+                            row: 0, col: 0,
+                            width: rect.width, height: rect.height,
+                        }).iter().chain(
+                            split.b.compute_rects(Rect {
+                                row: 0, col: 0,
+                                width: rect.width, height: rect.height,
+                            }).iter()
+                        ).map(|(_, r)| r.width).sum::<u16>();
+                        if total_width > 0 {
+                            split.ratio = ((col as f32 - rect.col as f32) / total_width as f32)
+                                .clamp(0.1, 0.9);
+                            self.mark_needs_redraw();
+                        }
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     pub fn needs_redraw(&self) -> bool {
@@ -256,13 +458,15 @@ impl Editor {
     }
 
     pub fn active_highlight_spans(&mut self) -> Rc<Vec<Vec<TokenSpan>>> {
-        let buffer = self.active_buffer();
+        let buf_idx = self.active_buffer_idx();
+        let buffer = &self.buffers[buf_idx];
         let buffer_id = buffer.id;
         let buffer_revision = buffer.revision;
         let buffer_mode = buffer.mode.clone();
         let runtime_symbol_revision = self.runtime.symbol_revision();
 
-        let is_fresh = self.highlight_cache.as_ref().is_some_and(|cache| {
+        let leaf = self.active_leaf();
+        let is_fresh = leaf.highlight_cache.as_ref().is_some_and(|cache| {
             cache.buffer_id == buffer_id
                 && cache.buffer_revision == buffer_revision
                 && cache.buffer_mode == buffer_mode
@@ -271,13 +475,13 @@ impl Editor {
 
         if !is_fresh {
             let symbols = self.runtime.completion_symbols();
-            let buffer = self.active_buffer();
+            let buffer = &self.buffers[buf_idx];
             let spans = buffer
                 .lines
                 .iter()
                 .map(|line| highlight_line(&buffer.mode, line, &symbols, buffer))
                 .collect();
-            self.highlight_cache = Some(HighlightCache {
+            self.active_leaf_mut().highlight_cache = Some(HighlightCache {
                 buffer_id,
                 buffer_revision,
                 buffer_mode,
@@ -288,6 +492,7 @@ impl Editor {
 
         Rc::clone(
             &self
+                .active_leaf()
                 .highlight_cache
                 .as_ref()
                 .expect("highlight cache")
@@ -322,22 +527,30 @@ impl Editor {
     }
 
     pub fn active_buffer(&self) -> &Buffer {
-        &self.buffers[self.active]
+        let idx = self.active_leaf().buffer_idx;
+        &self.buffers[idx]
     }
 
     pub fn active_buffer_mut(&mut self) -> &mut Buffer {
-        &mut self.buffers[self.active]
+        let idx = self.active_leaf().buffer_idx;
+        &mut self.buffers[idx]
     }
 
     pub fn widget_scroll_top(&self) -> u16 {
-        self.widget_scroll_top
+        self.active_leaf().widget_scroll_top
+    }
+
+    pub fn widget_scroll_left(&self) -> u16 {
+        self.active_leaf().widget_scroll_left
     }
 
     pub fn focused_widget_id(&self) -> Option<u64> {
-        self.focused_widget_id
+        self.active_leaf().focused_widget_id
     }
 
     pub fn widget_layout(&self) -> Option<Arc<crate::layout::LayoutNode>> {
+        // For active tile, runtime holds the authoritative layout.
+        // For other tiles, their cached_layout is used directly.
         self.runtime.current_layout.clone()
     }
 
@@ -351,6 +564,17 @@ impl Editor {
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
         self.runtime.set_layout_viewport(cols, rows);
+        self.sync_layout_to_active_leaf();
+    }
+
+    /// Sync the Runtime's current layout to the active tile leaf's cached_layout.
+    /// Call this after any operation that may change the layout (eval, widget tree, etc.)
+    pub fn sync_layout_to_active_leaf(&mut self) {
+        let layout = self.runtime.current_layout.clone();
+        let revision = self.runtime.layout_revision();
+        let leaf = self.active_leaf_mut();
+        leaf.cached_layout = layout;
+        leaf.layout_revision = revision;
     }
 
     pub fn open_scratch_buffer(&mut self, name: &str, initial: &str) -> BufferId {
@@ -369,7 +593,7 @@ impl Editor {
         buffer.set_mode(mode);
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -400,7 +624,7 @@ impl Editor {
         buffer.dirty = false;
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -438,7 +662,7 @@ impl Editor {
         buffer.dirty = false;
         self.save_current_widget_tree();
         self.buffers.push(buffer);
-        self.active = self.buffers.len() - 1;
+        self.active_leaf_mut().buffer_idx = self.buffers.len() - 1;
         self.sync_runtime_context();
         self.completion = None;
         self.clear_mark();
@@ -449,7 +673,7 @@ impl Editor {
     pub fn set_active_buffer(&mut self, id: BufferId) {
         if let Some(index) = self.buffers.iter().position(|buffer| buffer.id == id) {
             self.save_current_widget_tree();
-            self.active = index;
+            self.active_leaf_mut().buffer_idx = index;
             self.mark_needs_redraw();
             self.sync_runtime_context();
             self.completion = None;
@@ -666,99 +890,111 @@ impl Editor {
         precise_col: f32,
         precise_row: f32,
     ) {
+        let view_mode = self.active_buffer().view_mode;
+        let widgets_visible = view_mode != ViewMode::TextOnly;
+        let text_visible = view_mode != ViewMode::UiOnly;
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_mouse_precise = Some((precise_col, precise_row));
-                self.active_widget_gesture = None;
-                // Try click-to-activate on focusable widgets first
-                if self.try_click_focusable_widget(
-                    mouse, content_col, content_row,
-                ) {
-                    return;
-                }
-                if self.try_handle_widget_double_click(
-                    content_col,
-                    content_row,
-                    precise_col,
-                    precise_row,
-                ) {
-                    self.remember_widget_click(content_col, content_row, precise_col, precise_row);
-                    return;
-                }
-                self.begin_widget_gesture(
-                    content_col,
-                    content_row,
-                    precise_col,
-                    precise_row,
-                );
-                if self.try_handle_widget_mouse_precise(
-                    mouse,
-                    content_col,
-                    content_row,
-                    precise_col,
-                    precise_row,
-                ) {
-                    self.remember_widget_click(content_col, content_row, precise_col, precise_row);
-                    return;
-                }
-                if self
-                    .widget_node_at_screen(precise_col, precise_row, content_col, content_row)
-                    .is_some()
-                {
-                    self.remember_widget_click(content_col, content_row, precise_col, precise_row);
-                    return;
-                }
-                self.handle_text_click(
-                    mouse,
-                    content_col,
-                    content_row,
-                    content_width,
-                    content_height,
-                );
-                self.last_widget_click = None;
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                let previous = self
-                    .last_mouse_precise
-                    .unwrap_or((precise_col, precise_row));
-                if let Some(gesture) = self.active_widget_gesture.clone() {
-                    if let Some(output) = self.dispatch_gesture_widget_mouse_event(
-                        gesture,
-                        mouse.kind,
+                self.active_leaf_mut().active_widget_gesture = None;
+                if widgets_visible {
+                    // Try click-to-activate on focusable widgets first
+                    if self.try_click_focusable_widget(
+                        mouse, content_col, content_row,
+                    ) {
+                        return;
+                    }
+                    if self.try_handle_widget_double_click(
                         content_col,
                         content_row,
                         precise_col,
                         precise_row,
                     ) {
-                        let _ = self.apply_widget_output(Some(output));
+                        self.remember_widget_click(content_col, content_row, precise_col, precise_row);
+                        return;
                     }
-                } else {
-                    self.try_handle_widget_drag_segment(
-                        mouse,
-                        content_col,
-                        content_row,
-                        previous,
-                        (precise_col, precise_row),
-                    );
-                }
-                self.last_mouse_precise = Some((precise_col, precise_row));
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(gesture) = self.active_widget_gesture.take() {
-                    let output = self.dispatch_gesture_widget_mouse_event(
-                        gesture,
-                        mouse.kind,
+                    self.begin_widget_gesture(
                         content_col,
                         content_row,
                         precise_col,
                         precise_row,
                     );
-                    let _ = self.apply_widget_output(output);
+                    if self.try_handle_widget_mouse_precise(
+                        mouse,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    ) {
+                        self.remember_widget_click(content_col, content_row, precise_col, precise_row);
+                        return;
+                    }
+                    if self
+                        .widget_node_at_screen(precise_col, precise_row, content_col, content_row)
+                        .is_some()
+                    {
+                        self.remember_widget_click(content_col, content_row, precise_col, precise_row);
+                        return;
+                    }
+                }
+                if text_visible {
+                    self.handle_text_click(
+                        mouse,
+                        content_col,
+                        content_row,
+                        content_width,
+                        content_height,
+                    );
+                }
+                self.active_leaf_mut().last_widget_click = None;
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if widgets_visible {
+                    let previous = self
+                        .last_mouse_precise
+                        .unwrap_or((precise_col, precise_row));
+                    if let Some(gesture) = self.active_leaf().active_widget_gesture.clone() {
+                        if let Some(output) = self.dispatch_gesture_widget_mouse_event(
+                            gesture,
+                            mouse.kind,
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        ) {
+                            let _ = self.apply_widget_output(Some(output));
+                        }
+                    } else {
+                        self.try_handle_widget_drag_segment(
+                            mouse,
+                            content_col,
+                            content_row,
+                            previous,
+                            (precise_col, precise_row),
+                        );
+                    }
+                }
+                self.last_mouse_precise = Some((precise_col, precise_row));
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if widgets_visible {
+                    if let Some(gesture) = self.active_leaf_mut().active_widget_gesture.take() {
+                        let output = self.dispatch_gesture_widget_mouse_event(
+                            gesture,
+                            mouse.kind,
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        );
+                        let _ = self.apply_widget_output(output);
+                    }
                 }
                 self.last_mouse_precise = None;
             }
             MouseEventKind::ScrollUp => {
-                if self.try_handle_widget_mouse_precise(
+                if widgets_visible && self.try_handle_widget_mouse_precise(
                     mouse,
                     content_col,
                     content_row,
@@ -767,21 +1003,28 @@ impl Editor {
                 ) {
                     return;
                 }
-                if self.active_buffer().read_only && self.has_focusable_widgets() {
+                if !text_visible {
+                    // UI-only: scroll widget viewport
+                    let leaf = self.active_leaf_mut();
+                    leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_sub(3);
+                    self.mark_needs_redraw();
+                } else if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Up);
                 } else {
                     let buffer = self.active_buffer_mut();
                     if buffer.scroll_top > 0 {
                         buffer.scroll_top = buffer.scroll_top.saturating_sub(3);
-                        buffer.cursor.0 = buffer.cursor.0.min(
-                            buffer.scroll_top + content_height.saturating_sub(1) as usize,
-                        );
+                        if !buffer.read_only {
+                            buffer.cursor.0 = buffer.cursor.0.min(
+                                buffer.scroll_top + content_height.saturating_sub(1) as usize,
+                            );
+                        }
                     }
                     self.mark_needs_redraw();
                 }
             }
             MouseEventKind::ScrollDown => {
-                if self.try_handle_widget_mouse_precise(
+                if widgets_visible && self.try_handle_widget_mouse_precise(
                     mouse,
                     content_col,
                     content_row,
@@ -790,29 +1033,74 @@ impl Editor {
                 ) {
                     return;
                 }
-                if self.active_buffer().read_only && self.has_focusable_widgets() {
+                if !text_visible {
+                    // UI-only: scroll widget viewport, clamped to widget bounds
+                    let max_scroll = self.runtime.current_layout.as_ref()
+                        .map(|l| (l.rect.row + l.rect.height).saturating_sub(content_height))
+                        .unwrap_or(0);
+                    let leaf = self.active_leaf_mut();
+                    leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_add(3).min(max_scroll);
+                    self.mark_needs_redraw();
+                } else if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Down);
                 } else {
                     let buffer = self.active_buffer_mut();
                     let max_scroll = buffer.lines.len().saturating_sub(1);
                     buffer.scroll_top = (buffer.scroll_top + 3).min(max_scroll);
-                    if buffer.cursor.0 < buffer.scroll_top {
+                    if !buffer.read_only && buffer.cursor.0 < buffer.scroll_top {
                         buffer.cursor.0 = buffer.scroll_top;
                     }
                     self.mark_needs_redraw();
                 }
             }
-            MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => {
-                let _ = self.try_handle_widget_mouse_precise(
-                    mouse,
-                    content_col,
-                    content_row,
-                    precise_col,
-                    precise_row,
-                );
+            MouseEventKind::ScrollLeft => {
+                if !widgets_visible || !self.try_handle_widget_mouse_precise(
+                    mouse, content_col, content_row, precise_col, precise_row,
+                ) {
+                    if widgets_visible {
+                        let leaf = self.active_leaf_mut();
+                        leaf.widget_scroll_left = leaf.widget_scroll_left.saturating_sub(3);
+                        self.mark_needs_redraw();
+                    }
+                }
+            }
+            MouseEventKind::ScrollRight => {
+                if !widgets_visible || !self.try_handle_widget_mouse_precise(
+                    mouse, content_col, content_row, precise_col, precise_row,
+                ) {
+                    if widgets_visible {
+                        let max_scroll = self.max_horizontal_scroll(content_width);
+                        let leaf = self.active_leaf_mut();
+                        leaf.widget_scroll_left = leaf.widget_scroll_left.saturating_add(3).min(max_scroll);
+                        self.mark_needs_redraw();
+                    }
+                }
             }
             _ => {}
         }
+    }
+
+    /// Maximum horizontal scroll: how far right content extends past the viewport.
+    fn max_horizontal_scroll(&self, viewport_width: u16) -> u16 {
+        let vp = viewport_width as usize;
+        // Walk the layout tree to find the rightmost edge of any descendant,
+        // since the root rect is clamped to viewport width by LayoutEngine.
+        let layout_width = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .map(|l| max_layout_right_edge(l) as usize)
+            .unwrap_or(0);
+        // Check max text line length
+        let max_line = self
+            .active_buffer()
+            .lines
+            .iter()
+            .map(|l| l.len())
+            .max()
+            .unwrap_or(0);
+        let content_width = layout_width.max(max_line);
+        content_width.saturating_sub(vp) as u16
     }
 
     pub fn handle_touchpad_magnify(
@@ -823,6 +1111,9 @@ impl Editor {
         precise_row: f32,
         delta: f64,
     ) {
+        if self.active_buffer().view_mode == ViewMode::TextOnly {
+            return;
+        }
         self.handle_touchpad_magnify_impl(content_col, content_row, precise_col, precise_row, delta);
     }
 
@@ -835,6 +1126,9 @@ impl Editor {
         delta_x: f32,
         delta_y: f32,
     ) {
+        if self.active_buffer().view_mode == ViewMode::TextOnly {
+            return;
+        }
         self.handle_touchpad_scroll_impl(content_col, content_row, precise_col, precise_row, delta_x, delta_y);
     }
 
@@ -950,6 +1244,7 @@ impl Editor {
             .cloned()
             .unwrap_or_default();
         shared.buffer_names = buffer_names;
+        shared.current_view_mode = active.view_mode.label().to_string();
     }
 
     fn handle_completion_key(&mut self, key: KeyEvent) -> bool {
@@ -1068,6 +1363,11 @@ impl Editor {
             .unwrap_or(true)
     }
 
+    fn should_prompt_on_quit(&self) -> bool {
+        let buffer = self.active_buffer();
+        buffer.dirty && buffer.path.is_some()
+    }
+
     fn open_save_prompt(&mut self, quit_after_save: bool) {
         let default_name = self
             .active_buffer()
@@ -1095,6 +1395,20 @@ impl Editor {
             KeyCode::Esc => {
                 self.save_prompt = None;
                 self.minibuffer = Some("Save cancelled".to_string());
+            }
+            KeyCode::Char('d') if prompt.quit_after_save => {
+                self.save_prompt = None;
+                self.minibuffer = Some("Discarded changes".to_string());
+                self.should_quit = true;
+                self.last_exit = EditorExit::Closed;
+            }
+            KeyCode::Char('q')
+                if prompt.quit_after_save && key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.save_prompt = None;
+                self.minibuffer = Some("Discarded changes".to_string());
+                self.should_quit = true;
+                self.last_exit = EditorExit::Closed;
             }
             KeyCode::Enter => {
                 let quit_after_save = prompt.quit_after_save;
@@ -1145,7 +1459,8 @@ impl Editor {
     }
 
     fn refresh_runtime_side_effects(&mut self) {
-        self.lisp_bindings = self.runtime.lisp_bindings();
+        self.lisp_bindings = self.default_lisp_bindings.clone();
+        self.lisp_bindings.extend(self.runtime.lisp_bindings());
 
         if let Some(read_only) = self.runtime.take_pending_set_read_only() {
             self.active_buffer_mut().read_only = read_only;
@@ -1189,7 +1504,7 @@ impl Editor {
         if let Some(name) = self.runtime.take_pending_switch_buffer() {
             if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
                 self.save_current_widget_tree();
-                self.active = idx;
+                self.active_leaf_mut().buffer_idx = idx;
                 self.mark_needs_redraw();
                 self.sync_runtime_context();
                 self.completion = None;
@@ -1247,7 +1562,7 @@ impl Editor {
                 Value::Nil | Value::Bool(false) => {
                     self.active_buffer_mut().widget_tree = None;
                     self.runtime.clear_layout_effects();
-                    self.focused_widget_id = None;
+                    self.active_leaf_mut().focused_widget_id = None;
                 }
                 tree => {
                     self.active_buffer_mut().widget_tree = Some(tree.clone());
@@ -1274,6 +1589,90 @@ impl Editor {
             }
         }
         self.completion = None;
+
+        // ── Process tiling operations ────────────────────────────────────────
+        if self.runtime.take_pending_split_right() {
+            // Create a new tile showing the *scratch* buffer (or first available)
+            let new_buf_idx = self.find_or_create_scratch_buffer();
+            self.split_active_tile(SplitDir::Vertical, new_buf_idx);
+        }
+
+        if self.runtime.take_pending_split_below() {
+            let new_buf_idx = self.find_or_create_scratch_buffer();
+            self.split_active_tile(SplitDir::Horizontal, new_buf_idx);
+        }
+
+        if self.runtime.take_pending_delete_window() {
+            if !self.delete_active_tile() {
+                self.minibuffer = Some("Cannot delete the only window".to_string());
+            }
+        }
+
+        if self.runtime.take_pending_delete_other_windows() {
+            self.delete_other_tiles();
+        }
+
+        if self.runtime.take_pending_other_window() {
+            self.cycle_active_tile();
+        }
+
+        if let Some(name) = self.runtime.take_pending_set_window_buffer() {
+            if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                self.save_current_widget_tree();
+                self.active_leaf_mut().buffer_idx = idx;
+                self.sync_runtime_context();
+                self.restore_buffer_widget_tree();
+            } else {
+                self.minibuffer = Some(format!("No buffer named '{name}'"));
+            }
+        }
+
+        if self.runtime.take_pending_window_hide_status() {
+            let leaf = self.active_leaf_mut();
+            leaf.show_status = !leaf.show_status;
+            self.mark_needs_redraw();
+        }
+
+        if let Some(delta) = self.runtime.take_pending_resize_window() {
+            if let Some(split) = self.tile_root.find_parent_split(self.active_tile) {
+                split.ratio = (split.ratio + delta as f32).clamp(0.1, 0.9);
+                self.mark_needs_redraw();
+            }
+        }
+
+        if self.runtime.take_pending_cycle_view_mode() {
+            let buf = self.active_buffer_mut();
+            buf.view_mode = buf.view_mode.cycle();
+            let label = buf.view_mode.label();
+            self.minibuffer = Some(format!("view: {label}"));
+            self.mark_needs_redraw();
+        }
+
+        self.sync_layout_to_active_leaf();
+    }
+
+    /// Choose which buffer to display in a newly split tile.
+    /// Prefers an existing undisplayed buffer; creates a scratch if all are taken.
+    fn find_or_create_scratch_buffer(&mut self) -> usize {
+        let tile_buffer_idxs: Vec<usize> = self
+            .tile_root
+            .leaf_ids()
+            .iter()
+            .filter_map(|id| self.tile_root.find_leaf(*id).map(|l| l.buffer_idx))
+            .collect();
+
+        // Pick the first buffer not currently shown in any tile
+        for (idx, _) in self.buffers.iter().enumerate() {
+            if !tile_buffer_idxs.contains(&idx) {
+                return idx;
+            }
+        }
+
+        // All buffers visible — create a new scratch
+        let id = self.alloc_buffer_id();
+        let buffer = Buffer::new(id, "*scratch*");
+        self.buffers.push(buffer);
+        self.buffers.len() - 1
     }
 
     fn start_eval_flash(&mut self) {
@@ -1335,6 +1734,8 @@ impl Editor {
         if self.active_buffer().read_only {
             self.minibuffer = Some("Buffer is read-only".to_string());
             true
+        } else if self.active_buffer().view_mode == ViewMode::UiOnly {
+            true
         } else {
             false
         }
@@ -1351,6 +1752,16 @@ impl CompletionState {
             self.scroll = self.selected + 1 - Self::VISIBLE_ROWS;
         }
     }
+}
+
+/// Find the rightmost edge (col + width) of any node in the layout tree.
+/// The root rect is clamped to viewport width, but children may overflow.
+fn max_layout_right_edge(node: &crate::layout::LayoutNode) -> u16 {
+    let own = node.rect.col + node.rect.width;
+    node.children
+        .iter()
+        .map(max_layout_right_edge)
+        .fold(own, u16::max)
 }
 
 fn normalize_region(
