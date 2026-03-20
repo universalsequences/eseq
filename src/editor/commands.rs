@@ -1,0 +1,231 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use super::Editor;
+
+impl Editor {
+    pub(super) fn bind_defaults(&mut self) {
+        let binds: &[(KeyCode, KeyModifiers, &str)] = &[
+            (KeyCode::Char('q'), KeyModifiers::CONTROL, "quit"),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL, "save-buffer"),
+            (KeyCode::Char(' '), KeyModifiers::CONTROL, "set-mark"),
+            (KeyCode::Char('a'), KeyModifiers::CONTROL, "move-line-start"),
+            (KeyCode::Char('e'), KeyModifiers::CONTROL, "move-line-end"),
+            (
+                KeyCode::Char('w'),
+                KeyModifiers::CONTROL,
+                "kill-region-or-word",
+            ),
+            (KeyCode::Char('w'), KeyModifiers::ALT, "copy-region"),
+            (KeyCode::Char('y'), KeyModifiers::CONTROL, "yank"),
+            (
+                KeyCode::Char('k'),
+                KeyModifiers::CONTROL,
+                "delete-to-line-end",
+            ),
+            (KeyCode::Tab, KeyModifiers::NONE, "complete"),
+            (KeyCode::Left, KeyModifiers::CONTROL, "move-word-left"),
+            (KeyCode::Right, KeyModifiers::CONTROL, "move-word-right"),
+            (KeyCode::Left, KeyModifiers::ALT, "move-word-left"),
+            (KeyCode::Right, KeyModifiers::ALT, "move-word-right"),
+            (KeyCode::Char('b'), KeyModifiers::ALT, "move-word-left"),
+            (KeyCode::Char('f'), KeyModifiers::ALT, "move-word-right"),
+            (KeyCode::Left, KeyModifiers::NONE, "move-left"),
+            (KeyCode::Right, KeyModifiers::NONE, "move-right"),
+            (KeyCode::Up, KeyModifiers::NONE, "move-up"),
+            (KeyCode::Down, KeyModifiers::NONE, "move-down"),
+            (KeyCode::Backspace, KeyModifiers::NONE, "delete-char-before"),
+            (
+                KeyCode::Char('x'),
+                KeyModifiers::ALT,
+                "execute-extended-command",
+            ),
+        ];
+        for (code, mods, cmd) in binds {
+            self.builtins
+                .insert(KeyEvent::new(*code, *mods), cmd.to_string());
+        }
+    }
+
+    pub(super) fn run_command(&mut self, cmd: &str) {
+        match cmd {
+            "quit" => {
+                self.completion = None;
+                if self.needs_save_as_prompt() {
+                    self.open_save_prompt(true);
+                } else {
+                    self.should_quit = true;
+                    self.last_exit = super::EditorExit::Closed;
+                }
+            }
+            "set-mark" => {
+                self.completion = None;
+                self.minibuffer = Some("Mark set".to_string());
+                self.mark = Some(super::Mark {
+                    buffer_id: self.active_buffer().id,
+                    cursor: self.active_buffer().cursor,
+                });
+            }
+            "move-left" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_left();
+            }
+            "move-right" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_right();
+            }
+            "move-up" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_up();
+            }
+            "move-down" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_down();
+            }
+            "move-buffer-end" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_to_buffer_end();
+            }
+
+            "move-line-start" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_to_line_start();
+            }
+            "move-line-end" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_to_line_end();
+            }
+            "move-word-left" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_word_left();
+            }
+            "move-word-right" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.active_buffer_mut().move_word_right();
+            }
+            "delete-char-before" => {
+                if self.guard_read_only() {
+                    return;
+                }
+                self.minibuffer = None;
+                self.clear_mark();
+                self.active_buffer_mut().delete_char_before();
+                self.refresh_completion();
+            }
+            "kill-region-or-word" => {
+                if self.guard_read_only() {
+                    return;
+                }
+                self.minibuffer = None;
+                if !self.kill_active_region() {
+                    self.active_buffer_mut().delete_word_before();
+                }
+                self.refresh_completion();
+            }
+            "copy-region" => {
+                self.completion = None;
+                self.minibuffer = None;
+                if self.copy_active_region() {
+                    self.clear_mark();
+                } else {
+                    self.minibuffer = Some("No active region".to_string());
+                }
+            }
+            "yank" => {
+                if self.guard_read_only() {
+                    return;
+                }
+                self.completion = None;
+                self.minibuffer = None;
+                self.clear_mark();
+                if let Some(text) = self.kill_ring.last().cloned() {
+                    self.active_buffer_mut().insert_str(&text);
+                } else {
+                    self.minibuffer = Some("Kill ring is empty".to_string());
+                }
+            }
+            "delete-to-line-end" => {
+                if self.guard_read_only() {
+                    return;
+                }
+                self.completion = None;
+                self.minibuffer = None;
+                self.clear_mark();
+                self.active_buffer_mut().delete_to_line_end();
+            }
+            "save-buffer" => {
+                self.completion = None;
+                if self.needs_save_as_prompt() {
+                    self.open_save_prompt(false);
+                } else {
+                    match self.save_active_buffer() {
+                        Ok(path) => self.minibuffer = Some(format!("Saved {}", path.display())),
+                        Err(error) => self.minibuffer = Some(format!("Error: {error:?}")),
+                    }
+                }
+            }
+            "complete" => {
+                self.minibuffer = None;
+                self.refresh_completion();
+                if self.completion.is_none() {
+                    self.active_buffer_mut().indent_current_line();
+                    self.sync_runtime_context();
+                }
+            }
+            "execute-extended-command" => {
+                self.completion = None;
+                self.minibuffer = None;
+                let candidates = self.collect_mx_candidates();
+                self.minibuffer_input = Some(super::MinibufferMode::Mx {
+                    input: String::new(),
+                    candidates,
+                    selected: 0,
+                });
+            }
+            "switch-to-buffer" => {
+                self.completion = None;
+                self.minibuffer = None;
+                let candidates: Vec<String> =
+                    self.buffers.iter().map(|b| b.name.clone()).collect();
+                self.minibuffer_input = Some(super::MinibufferMode::SwitchBuffer {
+                    input: String::new(),
+                    candidates,
+                    selected: 0,
+                });
+            }
+            _ => {}
+        }
+        self.sync_runtime_context();
+    }
+}
+
+pub(super) fn key_str(key: KeyEvent) -> String {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let prefix = match (ctrl, alt) {
+        (true, true) => "C-M-",
+        (true, false) => "C-",
+        (false, true) => "M-",
+        (false, false) => "",
+    };
+    match key.code {
+        KeyCode::Char(c) => format!("{prefix}{}", c.to_ascii_lowercase()),
+        KeyCode::Enter => format!("{prefix}RET"),
+        KeyCode::Backspace => format!("{prefix}BS"),
+        KeyCode::Esc => "ESC".to_string(),
+        KeyCode::Up => "UP".to_string(),
+        KeyCode::Down => "DOWN".to_string(),
+        KeyCode::Left => "LEFT".to_string(),
+        KeyCode::Right => "RIGHT".to_string(),
+        _ => format!("{:?}", key.code),
+    }
+}
+

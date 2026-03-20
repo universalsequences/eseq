@@ -129,6 +129,14 @@ pub enum MetalPrimitive {
     },
 }
 
+#[cfg(target_os = "macos")]
+pub fn metal_widget_instance(widget_type: &str, instance: WidgetInstance) -> Vec<MetalPrimitive> {
+    vec![MetalPrimitive::WidgetInstance {
+        widget_type: widget_type.to_string(),
+        instance,
+    }]
+}
+
 // ── CellBuffer ───────────────────────────────────────────────────────────────
 
 /// A 2D grid of optional cells for widget rendering.
@@ -257,29 +265,13 @@ pub trait WidgetDefinition: Sync {
         None
     }
     #[cfg(target_os = "macos")]
-    fn build_metal_instance(
+    fn build_metal_primitives(
         &self,
         _widget_type: &str,
         _node: &LayoutNode,
         _viewport: WidgetViewport,
-    ) -> Option<WidgetInstance> {
-        None
-    }
-    #[cfg(target_os = "macos")]
-    fn build_metal_primitives(
-        &self,
-        widget_type: &str,
-        node: &LayoutNode,
-        viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        self.build_metal_instance(widget_type, node, viewport)
-            .map(|instance| {
-                vec![MetalPrimitive::WidgetInstance {
-                    widget_type: widget_type.to_string(),
-                    instance,
-                }]
-            })
-            .unwrap_or_default()
+        Vec::new()
     }
 }
 

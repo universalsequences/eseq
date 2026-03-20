@@ -1,20 +1,29 @@
-pub mod backend;
-pub mod theme;
+// ── Domain modules ───────────────────────────────────────────────────────
+pub mod lang;
+pub mod ui;
+
+// Re-export submodules at crate root for backward-compatible paths
+// (e.g. crate::vm, crate::layout still work).
+pub use lang::compiler;
+pub use lang::parser;
+pub use lang::vm;
+
+pub use ui::backend;
+pub use ui::frame;
+pub use ui::glyph_atlas;
+pub use ui::layout;
+pub use ui::metal_backend;
+pub use ui::theme;
+pub use ui::tui;
+
+// ── Root-level modules ───────────────────────────────────────────────────
 pub mod buffer;
-pub mod compiler;
 pub mod editor;
-pub mod frame;
-pub mod glyph_atlas;
 pub mod host;
-pub mod layout;
-pub mod metal_backend;
 pub mod mode;
-pub mod parser;
 pub mod reactive;
 pub mod runtime;
 pub mod text;
-pub mod tui;
-pub mod vm;
 pub mod widget_render;
 pub mod widgets;
 
@@ -1170,6 +1179,37 @@ mod tests {
         assert_eq!(layout.children.len(), 2);
         assert_eq!(layout.children[0].widget_type, "label");
         assert_eq!(layout.children[1].widget_type, "hslider");
+    }
+
+    #[test]
+    fn layout_recomputes_when_viewport_changes() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 8);
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (timeline
+                    :height 8
+                    :sidebar-width 6
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list)
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1))
+                "#,
+            )
+            .unwrap();
+
+        let initial = runtime.current_layout.as_ref().expect("layout").rect;
+        assert_eq!(initial.width, 40);
+        assert_eq!(initial.height, 8);
+
+        runtime.set_layout_viewport(72, 18);
+
+        let resized = runtime.current_layout.as_ref().expect("layout").rect;
+        assert_eq!(resized.width, 72);
+        assert_eq!(resized.height, 8);
     }
 
     #[test]

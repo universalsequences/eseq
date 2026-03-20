@@ -1,0 +1,376 @@
+use std::time::Duration;
+
+use crossterm::event::{MouseEvent, MouseEventKind};
+
+use crate::layout::LayoutNode;
+use crate::ui::hit::{self, HitGrid};
+use crate::vm::Value;
+use crate::widget_render::{
+    self, MouseEventOutcome, handle_event, map_double_click_event, map_mouse_event,
+    begin_widget_gesture as begin_widget_gesture_data, map_magnify_event,
+    map_scroll_gesture_event,
+};
+
+use super::{Editor, CachedHitGrid, WidgetGesture, WidgetClick};
+use super::widget_focus::find_node_by_id;
+
+impl Editor {
+    pub(super) fn try_handle_widget_mouse_precise(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some((local_col, local_row)) = hit::to_local(precise_col, precise_row, content_col, content_row) else {
+            return false;
+        };
+        let (query_col, query_row) = hit::to_query(local_col, local_row);
+        let output = {
+            let Some(node) = self.widget_node_at(query_row, query_col) else {
+                return false;
+            };
+            self.dispatch_widget_mouse_event(
+                &node,
+                mouse.kind,
+                content_col,
+                content_row,
+                precise_col,
+                precise_row,
+                None,
+                None,
+            )
+        };
+
+        self.apply_widget_output(output)
+    }
+
+    pub(super) fn try_handle_widget_double_click(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some((local_col, local_row)) = hit::to_local(precise_col, precise_row, content_col, content_row) else {
+            return false;
+        };
+        let (query_col, query_row) = hit::to_query(local_col, local_row);
+        let Some(node) = self.widget_node_at(query_row, query_col) else {
+            return false;
+        };
+        if !self.is_double_click_candidate(node.widget_id, precise_col, precise_row) {
+            return false;
+        }
+        let scrolled_row = local_row + self.widget_scroll_top() as f32;
+        let Some(widget_event) = map_double_click_event(&node, local_col, scrolled_row) else {
+            return false;
+        };
+        let output = handle_event(&node, widget_event);
+        self.apply_widget_output(output)
+    }
+
+    fn is_double_click_candidate(&self, widget_id: u64, precise_col: f32, precise_row: f32) -> bool {
+        const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+        const DOUBLE_CLICK_SLOP: f32 = 1.5;
+        self.last_widget_click.as_ref().is_some_and(|click| {
+            click.widget_id == widget_id
+                && click.at.elapsed() <= DOUBLE_CLICK_WINDOW
+                && (click.precise_col - precise_col).abs() <= DOUBLE_CLICK_SLOP
+                && (click.precise_row - precise_row).abs() <= DOUBLE_CLICK_SLOP
+        })
+    }
+
+    pub(super) fn remember_widget_click(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        let Some((local_col, local_row)) = hit::to_local(precise_col, precise_row, content_col, content_row) else {
+            self.last_widget_click = None;
+            return;
+        };
+        let (query_col, query_row) = hit::to_query(local_col, local_row);
+        self.last_widget_click = self.widget_node_at(query_row, query_col).map(|node| WidgetClick {
+            widget_id: node.widget_id,
+            precise_col,
+            precise_row,
+            at: std::time::Instant::now(),
+        });
+    }
+
+    pub(super) fn begin_widget_gesture(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        let Some((local_col, local_row)) = hit::to_local(precise_col, precise_row, content_col, content_row) else {
+            return;
+        };
+        let (query_col, query_row) = hit::to_query(local_col, local_row);
+        let Some(node) = self.widget_node_at(query_row, query_col) else {
+            return;
+        };
+        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row + self.widget_scroll_top() as f32);
+        if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
+            self.active_widget_gesture = Some(WidgetGesture {
+                widget_id: node.widget_id,
+                start_precise_col: precise_col,
+                start_precise_row: precise_row,
+                gesture_data,
+            });
+        }
+    }
+
+    pub(super) fn try_handle_widget_drag_segment(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        start: (f32, f32),
+        end: (f32, f32),
+    ) {
+        let start_local = (start.0 - content_col as f32, start.1 - content_row as f32);
+        let end_local = (end.0 - content_col as f32, end.1 - content_row as f32);
+        let (start_qc, start_qr) = hit::to_query(start_local.0, start_local.1);
+        let (end_qc, end_qr) = hit::to_query(end_local.0, end_local.1);
+        let start_node = self.widget_node_at(start_qr, start_qc);
+        let end_node = self.widget_node_at(end_qr, end_qc);
+
+        if let Some(node) = start_node.as_ref()
+            && widget_render::widget_captures_drag(&node.widget_type)
+        {
+            let scroll = self.widget_scroll_top() as f32;
+            let screen_row = node.rect.row as f32 - scroll;
+            let clamped_col = end
+                .0
+                .clamp(
+                    content_col as f32 + node.rect.col as f32,
+                    content_col as f32
+                        + node.rect.col as f32
+                        + node.rect.width.saturating_sub(1) as f32,
+                );
+            let clamped_row = end
+                .1
+                .clamp(
+                    content_row as f32 + screen_row,
+                    content_row as f32
+                        + screen_row
+                        + node.rect.height.saturating_sub(1) as f32,
+                );
+            let output = self.dispatch_widget_mouse_event(
+                node,
+                mouse.kind,
+                content_col,
+                content_row,
+                clamped_col,
+                clamped_row,
+                Some(start),
+                None,
+            );
+            let _ = self.apply_widget_output(output);
+            return;
+        }
+
+        if HitGrid::same_hit(start_node.as_ref(), end_node.as_ref()) {
+            let _ =
+                self.try_handle_widget_mouse_precise(mouse, content_col, content_row, end.0, end.1);
+            return;
+        }
+
+        let steps = ((end.0 - start.0).abs().max((end.1 - start.1).abs()) * 2.0)
+            .ceil()
+            .max(1.0) as usize;
+        let mut last_hit: Option<LayoutNode> = None;
+        for step in 0..=steps {
+            let t = step as f32 / steps as f32;
+            let col = start.0 + (end.0 - start.0) * t;
+            let row = start.1 + (end.1 - start.1) * t;
+            let local_col = col - content_col as f32;
+            let local_row = row - content_row as f32;
+            let (qc, qr) = hit::to_query(local_col, local_row);
+            let node = self.widget_node_at(qr, qc);
+            if node.is_some() && !HitGrid::same_hit(node.as_ref(), last_hit.as_ref()) {
+                let _ =
+                    self.try_handle_widget_mouse_precise(mouse, content_col, content_row, col, row);
+            }
+            last_hit = node;
+        }
+    }
+
+    pub(super) fn widget_node_at(&mut self, row: u16, col: u16) -> Option<LayoutNode> {
+        let revision = self.runtime.layout_revision();
+        let scroll = self.widget_scroll_top();
+        let layout = self.runtime.current_layout.as_ref()?;
+
+        let needs_rebuild = self.hit_grid_cache.as_ref().is_none_or(|cache| {
+            cache.layout_revision != revision || cache.scroll_top != scroll
+        });
+        if needs_rebuild {
+            self.hit_grid_cache = Some(CachedHitGrid {
+                layout_revision: revision,
+                scroll_top: scroll,
+                grid: HitGrid::build(layout),
+            });
+        }
+
+        let layout_row = row + scroll;
+        let cache = self.hit_grid_cache.as_ref()?;
+        cache.grid.node_at(layout_row, col).cloned()
+    }
+
+    pub(super) fn widget_node_at_screen(
+        &mut self,
+        precise_col: f32,
+        precise_row: f32,
+        content_col: u16,
+        content_row: u16,
+    ) -> Option<LayoutNode> {
+        let (local_col, local_row) = hit::to_local(precise_col, precise_row, content_col, content_row)?;
+        let (query_col, query_row) = hit::to_query(local_col, local_row);
+        self.widget_node_at(query_row, query_col)
+    }
+
+    pub(super) fn handle_text_click(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        content_width: u16,
+        content_height: u16,
+    ) {
+        if mouse.column < content_col || mouse.row < content_row {
+            return;
+        }
+        let local_col = mouse.column - content_col;
+        let local_row = mouse.row - content_row;
+        if local_col >= content_width || local_row >= content_height {
+            return;
+        }
+
+        let buffer = self.active_buffer_mut();
+        let absolute_row = buffer
+            .scroll_top
+            .saturating_add(local_row as usize)
+            .min(buffer.lines.len().saturating_sub(1));
+        let absolute_col = (local_col as usize).min(buffer.lines[absolute_row].len());
+        buffer.cursor = (absolute_row, absolute_col);
+        if !buffer.read_only {
+            self.focused_widget_id = None;
+            self.active_widget_gesture = None;
+        }
+        self.completion = None;
+        self.minibuffer = None;
+        self.clear_mark();
+        self.sync_runtime_context();
+        self.mark_needs_redraw();
+    }
+
+    pub(super) fn dispatch_widget_mouse_event(
+        &self,
+        node: &LayoutNode,
+        mouse_kind: MouseEventKind,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+        drag_start: Option<(f32, f32)>,
+        explicit_gesture: Option<&Value>,
+    ) -> Option<crate::widget_render::EventOutput> {
+        let local_col = precise_col - content_col as f32;
+        let local_row = precise_row - content_row as f32 + self.widget_scroll_top() as f32;
+        let drag_start = drag_start.map(|(start_col, start_row)| {
+            (
+                start_col - content_col as f32,
+                start_row - content_row as f32 + self.widget_scroll_top() as f32,
+            )
+        });
+        let gesture = self
+            .active_widget_gesture
+            .as_ref()
+            .and_then(|gesture| (gesture.widget_id == node.widget_id).then_some(gesture))
+            .and_then(|gesture| gesture.gesture_data.as_ref())
+            .or(explicit_gesture);
+        match map_mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture) {
+            MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
+            MouseEventOutcome::Dispatch(widget_event) => handle_event(node, widget_event),
+        }
+    }
+
+    pub(super) fn dispatch_gesture_widget_mouse_event(
+        &self,
+        gesture: WidgetGesture,
+        mouse_kind: MouseEventKind,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<crate::widget_render::EventOutput> {
+        let layout = self.runtime.current_layout.as_ref()?;
+        let node = find_node_by_id(layout, gesture.widget_id)?;
+        self.dispatch_widget_mouse_event(
+            &node,
+            mouse_kind,
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+            Some((gesture.start_precise_col, gesture.start_precise_row)),
+            gesture.gesture_data.as_ref(),
+        )
+    }
+
+    pub(super) fn handle_touchpad_magnify_impl(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+        delta: f64,
+    ) {
+        let Some((local_col, local_row)) = hit::to_local(precise_col, precise_row, content_col, content_row) else {
+            return;
+        };
+        let (query_col, query_row) = hit::to_query(local_col, local_row);
+        let Some(node) = self.widget_node_at(query_row, query_col) else {
+            return;
+        };
+        let scrolled_row = local_row + self.widget_scroll_top() as f32;
+        let Some(widget_event) = map_magnify_event(&node, local_col, scrolled_row, delta) else {
+            return;
+        };
+        let output = handle_event(&node, widget_event);
+        let _ = self.apply_widget_output(output);
+    }
+
+    pub(super) fn handle_touchpad_scroll_impl(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) {
+        let Some((local_col, local_row)) = hit::to_local(precise_col, precise_row, content_col, content_row) else {
+            return;
+        };
+        let (query_col, query_row) = hit::to_query(local_col, local_row);
+        let Some(node) = self.widget_node_at(query_row, query_col) else {
+            return;
+        };
+        let scrolled_row = local_row + self.widget_scroll_top() as f32;
+        let Some(widget_event) =
+            map_scroll_gesture_event(&node, local_col, scrolled_row, delta_x, delta_y)
+        else {
+            return;
+        };
+        let output = handle_event(&node, widget_event);
+        let _ = self.apply_widget_output(output);
+    }
+}

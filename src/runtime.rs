@@ -50,6 +50,8 @@ pub(crate) struct RuntimeBridgeState {
     pub current_line_number: usize,
     pub current_line_text: String,
     pub buffer_names: Vec<String>,
+    pub pending_cycle_view_mode: bool,
+    pub current_view_mode: String,
 }
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
@@ -328,6 +330,9 @@ impl Runtime {
         }
         self.layout_cols = cols;
         self.layout_rows = rows;
+        // Viewport changes invalidate layout geometry even if the widget tree is unchanged.
+        self.current_layout = None;
+        self.dirty_widget_ids.clear();
         self.relayout_current_tree();
     }
 

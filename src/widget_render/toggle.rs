@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crossterm::event::{MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_bool_prop,
-    ndc_bounds, resolve_named_color, styled_cell,
+    CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
+    get_bool_prop, metal_widget_instance, ndc_bounds, resolve_named_color, styled_cell,
 };
 use crate::theme;
 use crate::layout::{Constraints, LayoutNode, Rect, Size};
@@ -132,16 +132,16 @@ impl WidgetDefinition for ToggleWidget {
     }
 
     #[cfg(target_os = "macos")]
-    fn build_metal_instance(
+    fn build_metal_primitives(
         &self,
-        _widget_type: &str,
+        widget_type: &str,
         node: &LayoutNode,
         viewport: super::WidgetViewport,
-    ) -> Option<super::WidgetInstance> {
+    ) -> Vec<MetalPrimitive> {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width as f32 * viewport.cell_w;
         let px_h = node.rect.height as f32 * viewport.cell_h;
-        Some(super::WidgetInstance {
+        metal_widget_instance(widget_type, super::WidgetInstance {
             ndc_min,
             ndc_max,
             value_t: if get_bool_prop(&node.props, "value", false) {
