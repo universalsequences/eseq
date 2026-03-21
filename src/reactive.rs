@@ -91,6 +91,11 @@ impl ReactiveRegistry {
         names
     }
 
+    pub fn namespace_value(&self, name: &str) -> Option<Value> {
+        let namespace = self.namespaces.get(name)?;
+        Some(Value::Map(namespace.map.clone()))
+    }
+
     pub fn is_writable(&self, namespace: &str) -> bool {
         self.namespaces
             .get(namespace)

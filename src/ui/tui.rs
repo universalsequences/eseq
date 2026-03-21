@@ -104,10 +104,8 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
     }
 
     // ── Status bar ────────────────────────────────────────────────────────────
-    let status_widget = Paragraph::new(render_frame.status.clone()).style(
-        Style::default()
-            .bg(to_rcolor(crate::theme::STATUS_BG))
-            .fg(to_rcolor(crate::theme::STATUS_FG)),
+    let status_widget = Paragraph::new(cells_to_line(&render_frame.status_cells)).style(
+        Style::default().bg(to_rcolor(crate::theme::STATUS_BG())),
     );
     frame.render_widget(status_widget, chunks[1]);
 
@@ -203,15 +201,15 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                     Line::from(Span::styled(
                         label,
                         Style::default()
-                            .bg(to_rcolor(crate::theme::COMP_SELECTED_BG))
-                            .fg(to_rcolor(crate::theme::COMP_FG)),
+                            .bg(to_rcolor(crate::theme::COMP_SELECTED_BG()))
+                            .fg(to_rcolor(crate::theme::COMP_FG())),
                     ))
                 } else {
                     Line::from(Span::styled(
                         label,
                         Style::default()
-                            .bg(to_rcolor(crate::theme::COMP_UNSELECTED_BG))
-                            .fg(to_rcolor(crate::theme::COMP_FG)),
+                            .bg(to_rcolor(crate::theme::COMP_UNSELECTED_BG()))
+                            .fg(to_rcolor(crate::theme::COMP_FG())),
                     ))
                 }
             })
@@ -229,7 +227,7 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                 let doc_lines: Vec<Line> = std::iter::once(Line::from(Span::styled(
                     title.clone(),
                     Style::default()
-                        .fg(to_rcolor(crate::theme::COMP_DOC_TITLE_FG))
+                        .fg(to_rcolor(crate::theme::COMP_DOC_TITLE_FG()))
                         .add_modifier(Modifier::BOLD),
                 )))
                 .chain(std::iter::once(Line::from("")))
@@ -242,8 +240,8 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                     Paragraph::new(doc_lines)
                         .style(
                             Style::default()
-                                .bg(to_rcolor(crate::theme::COMP_DOC_BG))
-                                .fg(to_rcolor(crate::theme::COMP_DOC_FG)),
+                                .bg(to_rcolor(crate::theme::COMP_DOC_BG()))
+                                .fg(to_rcolor(crate::theme::COMP_DOC_FG())),
                         )
                         .wrap(Wrap { trim: false }),
                     doc_area,
@@ -362,7 +360,7 @@ fn render_tile_in_area(
     show_status: bool,
 ) {
     let border_color = if is_active {
-        to_rcolor(crate::theme::PURPLE)
+        to_rcolor(crate::theme::PURPLE())
     } else {
         to_rcolor(Color::DARK_GRAY)
     };
@@ -407,11 +405,8 @@ fn render_tile_in_area(
 
     // ── Per-tile status bar ────────────────────────────────────────────────
     if let Some(status_rect) = status_area {
-        let status_widget = Paragraph::new(render_frame.status.clone()).style(
-            Style::default()
-                .bg(to_rcolor(crate::theme::STATUS_BG))
-                .fg(to_rcolor(crate::theme::STATUS_FG)),
-        );
+        let status_widget = Paragraph::new(cells_to_line(&render_frame.status_cells))
+            .style(Style::default().bg(to_rcolor(crate::theme::STATUS_BG())));
         frame.render_widget(status_widget, status_rect);
     }
 
@@ -511,15 +506,15 @@ fn render_completion_popup(
                 Line::from(Span::styled(
                     label,
                     Style::default()
-                        .bg(to_rcolor(crate::theme::COMP_SELECTED_BG))
-                        .fg(to_rcolor(crate::theme::COMP_FG)),
+                        .bg(to_rcolor(crate::theme::COMP_SELECTED_BG()))
+                        .fg(to_rcolor(crate::theme::COMP_FG())),
                 ))
             } else {
                 Line::from(Span::styled(
                     label,
                     Style::default()
-                        .bg(to_rcolor(crate::theme::COMP_UNSELECTED_BG))
-                        .fg(to_rcolor(crate::theme::COMP_FG)),
+                        .bg(to_rcolor(crate::theme::COMP_UNSELECTED_BG()))
+                        .fg(to_rcolor(crate::theme::COMP_FG())),
                 ))
             }
         })
@@ -537,7 +532,7 @@ fn render_completion_popup(
             let doc_lines: Vec<Line> = std::iter::once(Line::from(Span::styled(
                 title.clone(),
                 Style::default()
-                    .fg(to_rcolor(crate::theme::COMP_DOC_TITLE_FG))
+                    .fg(to_rcolor(crate::theme::COMP_DOC_TITLE_FG()))
                     .add_modifier(Modifier::BOLD),
             )))
             .chain(std::iter::once(Line::from("")))
@@ -550,8 +545,8 @@ fn render_completion_popup(
                 Paragraph::new(doc_lines)
                     .style(
                         Style::default()
-                            .bg(to_rcolor(crate::theme::COMP_DOC_BG))
-                            .fg(to_rcolor(crate::theme::COMP_DOC_FG)),
+                            .bg(to_rcolor(crate::theme::COMP_DOC_BG()))
+                            .fg(to_rcolor(crate::theme::COMP_DOC_FG())),
                     )
                     .wrap(Wrap { trim: false }),
                 doc_area,

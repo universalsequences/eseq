@@ -6,7 +6,7 @@ use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     get_f32_prop, metal_widget_instance, ndc_bounds, styled_cell,
 };
-use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 
@@ -85,9 +85,9 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             }
 
             let (ch, fg) = if dist <= fill_radius {
-                ('●', theme::WIDGET_KNOB_FILLED)
+                ('●', theme::WIDGET_KNOB_FILLED())
             } else {
-                ('○', theme::WIDGET_KNOB_TRACK)
+                ('○', theme::WIDGET_KNOB_TRACK())
             };
             buf.set(
                 row_u16 + row_offset,
@@ -112,6 +112,7 @@ impl WidgetDefinition for KnobWidget {
         node: &Value,
         _children: &[Value],
         constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let size = get_prop_num(node, "size")
@@ -188,8 +189,10 @@ impl WidgetDefinition for KnobWidget {
                 ndc_max,
                 value_t: normalized_value(&node.props),
                 orientation: 0.0,
-                color_a: theme::WIDGET_KNOB_FILLED.to_rgba(),
-                color_b: theme::WIDGET_KNOB_TRACK.to_rgba(),
+                color_a: theme::WIDGET_KNOB_FILLED().to_rgba(),
+                color_b: theme::WIDGET_KNOB_TRACK().to_rgba(),
+                color_c: [0.0; 4],
+                color_d: [0.0; 4],
                 corner_radius: 0.0,
                 pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
             },

@@ -662,10 +662,23 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     runtime.register_native_with_docs(
         "cycle-view-mode",
         "(cycle-view-mode)",
-        "Cycle the view mode: both -> ui -> text -> both. Returns the new mode name.",
+        "Toggle the primary view mode between ui and text. Returns the new mode name.",
         |_args, ctx| {
             ctx.cycle_view_mode();
             Ok(Value::String("cycled".to_string()))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "set-view-mode",
+        "(set-view-mode mode)",
+        "Set the view mode to \"ui\", \"text\", or \"both\". Returns the requested mode.",
+        |args, ctx| {
+            let Some(Value::String(mode)) = args.first() else {
+                return Err("set-view-mode expects a mode string".to_string());
+            };
+            ctx.set_view_mode(mode.clone());
+            Ok(Value::String(mode.clone()))
         },
     );
 

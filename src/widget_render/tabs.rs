@@ -6,7 +6,7 @@ use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_f32_prop,
     styled_cell,
 };
-use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size};
 use crate::theme;
 use crate::vm::Value;
 
@@ -52,9 +52,9 @@ fn tui_render_header(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellB
         let tab_col = col_u16 + (i as u16) * tab_width;
         let is_selected = i == selected;
         let fg = if is_selected {
-            theme::GREEN
+            theme::GREEN()
         } else {
-            theme::BRIGHT_BLACK
+            theme::BRIGHT_BLACK()
         };
 
         let label_len = label.chars().count() as u16;
@@ -74,9 +74,9 @@ fn tui_render_header(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellB
         for c in 0..tab_width {
             let ch = if is_selected { '\u{2500}' } else { ' ' };
             let line_fg = if is_selected {
-                theme::GREEN
+                theme::GREEN()
             } else {
-                theme::BRIGHT_BLACK
+                theme::BRIGHT_BLACK()
             };
             buf.set(underline_row, tab_col + c, styled_cell(ch, line_fg, None));
         }
@@ -101,6 +101,7 @@ impl WidgetDefinition for TabsWidget {
         node: &Value,
         children: &[Value],
         constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let _ = node;
@@ -249,27 +250,28 @@ impl WidgetDefinition for TabsWidget {
         // Header background
         prims.push(super::MetalPrimitive::Rect(super::MetalRectPrimitive {
             rect: header_rect,
-            color: theme::BG,
+            color: theme::BG(),
         }));
 
         for (i, label) in items.iter().enumerate() {
             let is_selected = i == selected;
             let tab_col = tab_col_start + (i as f32) * tab_width;
             let fg = if is_selected {
-                theme::GREEN
+                theme::GREEN()
             } else {
-                theme::BRIGHT_BLACK
+                theme::BRIGHT_BLACK()
             };
 
             let label_len = label.chars().count() as f32;
             let text_pad = ((tab_width - label_len) / 2.0).max(0.0);
-            prims.push(super::MetalPrimitive::GlyphRun(
-                super::MetalGlyphRunPrimitive {
-                    row: header_rect.row / aspect,
-                    col: (tab_col + text_pad).round() as i32,
+            prims.push(super::MetalPrimitive::ProportionalText(
+                super::MetalProportionalTextPrimitive {
+                    row: header_rect.row,
+                    col: tab_col + text_pad,
                     text: label.clone(),
+                    font_size: 14.0,
                     fg,
-                    bg: theme::BG,
+                    bg: theme::BG(),
                 },
             ));
 
@@ -280,7 +282,7 @@ impl WidgetDefinition for TabsWidget {
                     y: (header_rect.row + header_h - underline_height) * viewport.cell_w,
                     width: tab_width * viewport.cell_w,
                     height: underline_height * viewport.cell_w,
-                    color: theme::GREEN,
+                    color: theme::GREEN(),
                 }));
             }
         }

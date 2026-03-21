@@ -37,8 +37,9 @@ pub struct TileLeaf {
     pub cached_layout: Option<Arc<LayoutNode>>,
     pub layout_revision: u64,
     /// Cached RenderFrame for inactive tile optimization.
-    /// Key is (buffer_revision, layout_revision, scroll_top).
-    pub cached_inactive_frame: Option<((u64, u64, usize), crate::backend::RenderFrame)>,
+    /// Key is (buffer_revision, layout_revision, scroll_top, view_mode).
+    pub cached_inactive_frame:
+        Option<((u64, u64, usize, crate::editor::ViewMode), crate::backend::RenderFrame)>,
 }
 
 pub struct TileSplit {

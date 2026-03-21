@@ -27,7 +27,7 @@ use crate::vm::{Value, format_lisp_value};
 use commands::key_str;
 use natives::register_editor_natives;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewMode {
     Both,
     UiOnly,
@@ -35,11 +35,10 @@ pub enum ViewMode {
 }
 
 impl ViewMode {
-    pub fn cycle(self) -> Self {
+    pub fn toggle_primary(self) -> Self {
         match self {
-            ViewMode::Both => ViewMode::UiOnly,
-            ViewMode::UiOnly => ViewMode::TextOnly,
-            ViewMode::TextOnly => ViewMode::Both,
+            ViewMode::TextOnly => ViewMode::UiOnly,
+            ViewMode::UiOnly | ViewMode::Both => ViewMode::TextOnly,
         }
     }
 
@@ -134,6 +133,7 @@ pub struct Editor {
     pub active_tile: TileId,
     next_tile_id: TileId,
     pub minibuffer: Option<String>,
+    minibuffer_expires_at: Option<Instant>,
 
     pending_key: Option<KeyEvent>,
     builtins: HashMap<KeyEvent, String>,
@@ -174,6 +174,7 @@ impl Editor {
             active_tile: 0,
             next_tile_id: 1,
             minibuffer: None,
+            minibuffer_expires_at: None,
             pending_key: None,
             builtins: HashMap::new(),
             default_lisp_bindings: HashMap::new(),
@@ -406,8 +407,8 @@ impl Editor {
             return;
         }
 
-        let screen_col = mouse.column as f32;
-        let screen_row = mouse.row as f32;
+        let screen_col = precise_col;
+        let screen_row = precise_row;
 
         if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.begin_tile_resize_drag(precise_col, precise_row, border_inset)
@@ -415,11 +416,30 @@ impl Editor {
             return;
         }
 
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some(tile_id) =
+                self.status_toggle_tile_at_screen(mouse.column as f32, mouse.row as f32)
+        {
+            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+                editor.toggle_active_buffer_view_mode_from_indicator();
+            });
+            return;
+        }
+
         // Find which tile this mouse event targets
         if let Some(tile_id) = self.tile_at_screen(screen_col, screen_row) {
+            let persist_selection = matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::ScrollUp
+                    | MouseEventKind::ScrollDown
+                    | MouseEventKind::ScrollLeft
+                    | MouseEventKind::ScrollRight
+            );
             self.route_pointer_event_to_tile(
                 tile_id,
-                matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)),
+                border_inset,
+                persist_selection,
                 |editor| {
                     let Some((content_col, content_row, content_width, content_height)) =
                         editor.tile_content_area(tile_id, border_inset)
@@ -451,7 +471,7 @@ impl Editor {
         let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
             return;
         };
-        self.route_pointer_event_to_tile(tile_id, false, |editor| {
+        self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
             let Some((content_col, content_row, _, _)) =
                 editor.tile_content_area(tile_id, border_inset)
             else {
@@ -478,7 +498,7 @@ impl Editor {
         let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
             return false;
         };
-        self.route_pointer_event_to_tile(tile_id, false, |editor| {
+        self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
             let Some((content_col, content_row, _, _)) =
                 editor.tile_content_area(tile_id, border_inset)
             else {
@@ -514,26 +534,115 @@ impl Editor {
         Some((content_col, content_row, content_width, content_height))
     }
 
+    fn status_toggle_tile_at_screen(&self, precise_col: f32, precise_row: f32) -> Option<TileId> {
+        self.cached_tile_rects.iter().find_map(|(tile_id, _)| {
+            self.tile_status_toggle_hit(*tile_id, precise_col, precise_row)
+                .then_some(*tile_id)
+        })
+    }
+
+    fn tile_status_toggle_hit(&self, tile_id: TileId, precise_col: f32, precise_row: f32) -> bool {
+        const STATUS_TOGGLE_WIDTH: f32 = 4.0;
+
+        let Some(rect) = self.tile_rect(tile_id) else {
+            return false;
+        };
+        let Some(leaf) = self.tile_root.find_leaf(tile_id) else {
+            return false;
+        };
+        if !leaf.show_status {
+            return false;
+        }
+        let ui_available = if tile_id == self.active_tile {
+            self.active_buffer_has_ui()
+        } else {
+            let buffer = &self.buffers[leaf.buffer_idx];
+            buffer.widget_tree.is_some() || leaf.cached_layout.is_some()
+        };
+        if !ui_available {
+            return false;
+        }
+
+        let status_row = rect.row + rect.height - 1.0;
+        precise_row >= status_row
+            && precise_row < status_row + 1.0
+            && precise_col >= rect.col
+            && precise_col < rect.col + STATUS_TOGGLE_WIDTH
+    }
+
     fn route_pointer_event_to_tile<R>(
         &mut self,
         tile_id: TileId,
+        border_inset: u16,
         persist_selection: bool,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
         let previous_tile = self.active_tile;
         let switched = tile_id != previous_tile;
+        let previous_viewport = self
+            .tile_content_area(previous_tile, border_inset)
+            .map(|(_, _, width, height)| (width, height));
 
         if switched {
             self.switch_active_tile(tile_id);
+        }
+        if let Some((width, height)) = self
+            .tile_content_area(tile_id, border_inset)
+            .map(|(_, _, width, height)| (width, height))
+        {
+            self.set_layout_viewport(width, height);
         }
 
         let result = f(self);
 
         if switched && !persist_selection && self.tile_root.find_leaf(previous_tile).is_some() {
             self.switch_active_tile(previous_tile);
+            if let Some((width, height)) = previous_viewport {
+                self.set_layout_viewport(width, height);
+            }
         }
 
         result
+    }
+
+    fn toggle_active_buffer_view_mode(&mut self) {
+        let ui_available = self.active_buffer_has_ui();
+        let next_mode = self.active_buffer().view_mode.toggle_primary();
+
+        if next_mode == ViewMode::UiOnly && !ui_available {
+            self.show_transient_message("No UI in this buffer");
+            return;
+        }
+
+        self.active_buffer_mut().view_mode = next_mode;
+        self.show_transient_message(format!("view: {}", next_mode.label()));
+        if next_mode == ViewMode::UiOnly {
+            self.active_buffer_mut().scroll_top = 0;
+            self.active_leaf_mut().widget_scroll_top = 0;
+        }
+    }
+
+    fn toggle_active_buffer_view_mode_from_indicator(&mut self) {
+        let next_mode = match self.active_buffer().view_mode {
+            ViewMode::Both => ViewMode::UiOnly,
+            other => other.toggle_primary(),
+        };
+        self.set_active_buffer_view_mode(next_mode);
+    }
+
+    fn set_active_buffer_view_mode(&mut self, mode: ViewMode) {
+        let ui_available = self.active_buffer_has_ui();
+        if matches!(mode, ViewMode::UiOnly | ViewMode::Both) && !ui_available {
+            self.show_transient_message("No UI in this buffer");
+            return;
+        }
+
+        self.active_buffer_mut().view_mode = mode;
+        self.show_transient_message(format!("view: {}", mode.label()));
+        if mode == ViewMode::UiOnly {
+            self.active_buffer_mut().scroll_top = 0;
+            self.active_leaf_mut().widget_scroll_top = 0;
+        }
     }
 
     fn begin_tile_resize_drag(
@@ -622,6 +731,38 @@ impl Editor {
 
     pub fn mark_needs_redraw(&mut self) {
         self.needs_redraw = true;
+    }
+
+    pub fn show_transient_message(&mut self, message: impl Into<String>) {
+        self.minibuffer = Some(message.into());
+        self.minibuffer_expires_at = Some(Instant::now() + Duration::from_secs(1));
+        self.mark_needs_redraw();
+    }
+
+    pub fn show_sticky_message(&mut self, message: impl Into<String>) {
+        self.minibuffer = Some(message.into());
+        self.minibuffer_expires_at = None;
+        self.mark_needs_redraw();
+    }
+
+    pub fn clear_minibuffer_message(&mut self) {
+        self.minibuffer = None;
+        self.minibuffer_expires_at = None;
+    }
+
+    pub fn update_timers(&mut self) {
+        if self
+            .minibuffer_expires_at
+            .is_some_and(|expires_at| Instant::now() >= expires_at)
+        {
+            self.clear_minibuffer_message();
+            self.mark_needs_redraw();
+        }
+
+        if self.eval_flash.as_ref().is_some_and(|flash| flash.expires_at < Instant::now()) {
+            self.eval_flash = None;
+            self.mark_needs_redraw();
+        }
     }
 
     pub fn should_quit(&self) -> bool {
@@ -745,6 +886,12 @@ impl Editor {
         self.runtime.current_layout.clone()
     }
 
+    pub fn active_buffer_has_ui(&self) -> bool {
+        self.active_buffer().widget_tree.is_some()
+            || self.runtime.current_widget_tree().is_some()
+            || self.widget_layout().is_some()
+    }
+
     pub fn widget_layout_revision(&self) -> u64 {
         self.runtime.layout_revision()
     }
@@ -760,6 +907,15 @@ impl Editor {
 
     pub fn set_layout_aspect(&mut self, aspect: f32) {
         self.runtime.set_layout_aspect(aspect);
+    }
+
+    pub fn set_text_measurer(
+        &mut self,
+        measurer: Box<dyn crate::layout::TextMeasurer>,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        self.runtime.set_text_measurer(measurer, cell_w, cell_h);
     }
 
     /// Sync the Runtime's current layout to the active tile leaf's cached_layout.
@@ -1095,7 +1251,12 @@ impl Editor {
                 self.active_leaf_mut().active_widget_gesture = None;
                 if widgets_visible {
                     // Try click-to-activate on focusable widgets first
-                    if self.try_click_focusable_widget(mouse, content_col, content_row) {
+                    if self.try_click_focusable_widget(
+                        precise_col,
+                        precise_row,
+                        content_col,
+                        content_row,
+                    ) {
                         return;
                     }
                     if self.try_handle_widget_double_click(
@@ -1311,14 +1472,19 @@ impl Editor {
     /// Maximum horizontal scroll: how far right content extends past the viewport.
     fn max_horizontal_scroll(&self, viewport_width: u16) -> u16 {
         let vp = viewport_width as usize;
-        // Walk the layout tree to find the rightmost edge of any descendant,
-        // since the root rect is clamped to viewport width by LayoutEngine.
-        let layout_width = self
-            .runtime
-            .current_layout
-            .as_ref()
-            .map(|l| max_layout_right_edge(l) as usize)
-            .unwrap_or(0);
+        // Only count widget width when this buffer actually owns visible UI.
+        // Runtime layout is global and may still reflect another buffer/tree.
+        let layout_width = if self.active_buffer().view_mode != ViewMode::TextOnly
+            && self.active_buffer().widget_tree.is_some()
+        {
+            self.runtime
+                .current_layout
+                .as_ref()
+                .map(|l| max_layout_right_edge(l) as usize)
+                .unwrap_or(0)
+        } else {
+            0
+        };
         // Include text line width only if text is visible
         let max_line = if self.active_buffer().view_mode == ViewMode::UiOnly {
             0
@@ -1326,7 +1492,7 @@ impl Editor {
             self.active_buffer()
                 .lines
                 .iter()
-                .map(|l| l.len())
+                .map(|l| l.chars().count())
                 .max()
                 .unwrap_or(0)
         };
@@ -1388,7 +1554,7 @@ impl Editor {
         let _ = self.runtime.eval_str(&init_src);
         self.refresh_runtime_side_effects();
         if let Some(status) = self.runtime.take_status_message() {
-            self.minibuffer = Some(status);
+            self.show_transient_message(status);
         }
     }
 
@@ -1398,15 +1564,15 @@ impl Editor {
             return;
         }
         self.sync_runtime_context();
-        self.minibuffer = None;
+        self.clear_minibuffer_message();
         let code = format!("({fn_name})");
         match self.runtime.eval_str(&code) {
-            Ok(Some(result)) => self.minibuffer = Some(format_value_for_minibuffer(&result)),
-            Ok(None) => self.minibuffer = Some("No result".to_string()),
-            Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
+            Ok(Some(result)) => self.show_transient_message(format_value_for_minibuffer(&result)),
+            Ok(None) => self.show_transient_message("No result"),
+            Err(e) => self.show_transient_message(format!("Error: {e:?}")),
         }
         if let Some(status) = self.runtime.take_status_message() {
-            self.minibuffer = Some(status);
+            self.show_transient_message(status);
         }
         self.refresh_runtime_side_effects();
         self.sync_runtime_context();
@@ -1418,7 +1584,7 @@ impl Editor {
             self.start_eval_flash();
         }
         self.sync_runtime_context();
-        self.minibuffer = None;
+        self.clear_minibuffer_message();
 
         let source = match fn_name {
             "eval-sexp" => {
@@ -1430,18 +1596,18 @@ impl Editor {
         };
 
         if source.trim().is_empty() {
-            self.minibuffer = Some("No s-expression at cursor".to_string());
+            self.show_transient_message("No s-expression at cursor");
             self.completion = None;
             return;
         }
 
         match self.runtime.eval_str(&source) {
-            Ok(Some(result)) => self.minibuffer = Some(format_value_for_minibuffer(&result)),
-            Ok(None) => self.minibuffer = Some("No result".to_string()),
-            Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
+            Ok(Some(result)) => self.show_transient_message(format_value_for_minibuffer(&result)),
+            Ok(None) => self.show_transient_message("No result"),
+            Err(e) => self.show_transient_message(format!("Error: {e:?}")),
         }
         if let Some(status) = self.runtime.take_status_message() {
-            self.minibuffer = Some(status);
+            self.show_transient_message(status);
         }
         self.refresh_runtime_side_effects();
         self.sync_runtime_context();
@@ -1734,10 +1900,10 @@ impl Editor {
         if let Some(path) = self.runtime.take_pending_open_file() {
             match self.open_file_buffer(&path) {
                 Ok(_) => {
-                    self.minibuffer = Some(format!("Opened {path}"));
+                    self.show_transient_message(format!("Opened {path}"));
                     self.clear_widget_focus();
                 }
-                Err(e) => self.minibuffer = Some(format!("Error: {e:?}")),
+                Err(e) => self.show_transient_message(format!("Error: {e:?}")),
             }
         }
 
@@ -1820,18 +1986,18 @@ impl Editor {
 
         if let Some(path) = self.runtime.take_pending_save_as() {
             match self.active_buffer_mut().save_as(path) {
-                Ok(path) => self.minibuffer = Some(format!("Saved {}", path.display())),
-                Err(error) => self.minibuffer = Some(format!("Error: {error}")),
+                Ok(path) => self.show_transient_message(format!("Saved {}", path.display())),
+                Err(error) => self.show_transient_message(format!("Error: {error}")),
             }
         } else if self.runtime.take_pending_save() {
             match self.save_active_buffer() {
-                Ok(path) => self.minibuffer = Some(format!("Saved {}", path.display())),
-                Err(error) => self.minibuffer = Some(format!("Error: {error:?}")),
+                Ok(path) => self.show_transient_message(format!("Saved {}", path.display())),
+                Err(error) => self.show_transient_message(format!("Error: {error:?}")),
             }
         } else if self.runtime.take_pending_load() {
             match self.load_active_buffer() {
-                Ok(path) => self.minibuffer = Some(format!("Loaded {}", path.display())),
-                Err(error) => self.minibuffer = Some(format!("Error: {error:?}")),
+                Ok(path) => self.show_transient_message(format!("Loaded {}", path.display())),
+                Err(error) => self.show_transient_message(format!("Error: {error:?}")),
             }
         }
         self.completion = None;
@@ -1887,15 +2053,21 @@ impl Editor {
         }
 
         if self.runtime.take_pending_cycle_view_mode() {
-            let new_mode = self.active_buffer().view_mode.cycle();
-            self.active_buffer_mut().view_mode = new_mode;
-            self.minibuffer = Some(format!("view: {}", new_mode.label()));
-            // Reset scroll when entering UI-only mode so text scroll doesn't
-            // offset the widget viewport past its content.
-            if new_mode == ViewMode::UiOnly {
-                self.active_leaf_mut().widget_scroll_top = 0;
+            self.toggle_active_buffer_view_mode();
+        }
+
+        if let Some(mode) = self.runtime.take_pending_set_view_mode() {
+            let parsed_mode = match mode.as_str() {
+                "ui" => Some(ViewMode::UiOnly),
+                "text" => Some(ViewMode::TextOnly),
+                "both" => Some(ViewMode::Both),
+                _ => None,
+            };
+            if let Some(mode) = parsed_mode {
+                self.set_active_buffer_view_mode(mode);
+            } else {
+                self.show_transient_message(format!("Unknown view mode: {mode}"));
             }
-            self.mark_needs_redraw();
         }
 
         self.sync_layout_to_active_leaf();

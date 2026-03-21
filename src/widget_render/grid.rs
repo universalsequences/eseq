@@ -1,5 +1,5 @@
 use super::{Align, WidgetDefinition, resolve_align};
-use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::vm::Value;
 
 pub struct GridWidget;
@@ -31,6 +31,7 @@ impl WidgetDefinition for GridWidget {
         node: &Value,
         children: &[Value],
         constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let cols = get_prop_num(node, "cols")
@@ -130,12 +131,12 @@ impl WidgetDefinition for GridWidget {
                 let slot_col = area.col + col * col_width;
                 let slot_row = area.row + row * row_height;
                 let child_col = match h_align {
-                    Align::Start | Align::Stretch => slot_col,
+                    Align::Start | Align::Stretch | Align::Baseline => slot_col,
                     Align::Center => slot_col + (col_width - child_width) / 2.0,
                     Align::End => slot_col + col_width - child_width,
                 };
                 let child_row = match v_align {
-                    Align::Start | Align::Stretch => slot_row,
+                    Align::Start | Align::Stretch | Align::Baseline => slot_row,
                     Align::Center => slot_row + (row_height - child_height) / 2.0,
                     Align::End => slot_row + row_height - child_height,
                 };

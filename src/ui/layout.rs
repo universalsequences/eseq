@@ -36,18 +36,62 @@ pub struct LayoutNode {
     pub focusable: bool,
 }
 
-pub struct LayoutEngine {
+/// Trait for measuring proportional text width in pixels.
+/// Implemented by the Metal backend wrapping `ProportionalGlyphAtlas`.
+/// `None` in TUI mode — labels fall back to monospace char-count measurement.
+pub trait TextMeasurer {
+    fn measure_text_px(&self, text: &str, font_size: f32) -> f32;
+    fn line_height_px(&self, font_size: f32) -> f32;
+}
+
+/// Context passed to `WidgetDefinition::measure()` for proportional text support.
+pub struct MeasureCtx<'a> {
+    pub text_measurer: Option<&'a dyn TextMeasurer>,
+    /// Monospace cell width in pixels (for converting proportional px → cell units).
+    pub cell_w: f32,
+    /// Monospace cell height in pixels.
+    pub cell_h: f32,
+    /// Font size inherited from ancestor containers (logical points).
+    /// Labels use this as their default when no explicit `:font-size` is set.
+    pub inherited_font_size: f32,
+}
+
+pub struct LayoutEngine<'a> {
     pub terminal_cols: u16,
     pub terminal_rows: u16,
     pub aspect: f32,
+    pub text_measurer: Option<&'a dyn TextMeasurer>,
+    pub cell_w: f32,
+    pub cell_h: f32,
 }
 
-impl LayoutEngine {
+impl<'a> LayoutEngine<'a> {
     pub fn new(cols: u16, rows: u16, aspect: f32) -> Self {
         Self {
             terminal_cols: cols,
             terminal_rows: rows,
             aspect,
+            text_measurer: None,
+            cell_w: 1.0,
+            cell_h: 1.0,
+        }
+    }
+
+    pub fn with_text_measurer(
+        cols: u16,
+        rows: u16,
+        aspect: f32,
+        text_measurer: &'a dyn TextMeasurer,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> Self {
+        Self {
+            terminal_cols: cols,
+            terminal_rows: rows,
+            aspect,
+            text_measurer: Some(text_measurer),
+            cell_w,
+            cell_h,
         }
     }
 
@@ -61,6 +105,7 @@ impl LayoutEngine {
                 max_height: f32::MAX,
                 aspect: self.aspect,
             },
+            14.0,
         )?;
         let mut layout = self.build_layout_node(
             tree,
@@ -70,22 +115,43 @@ impl LayoutEngine {
                 width: size.width,
                 height: size.height,
             },
+            14.0,
         );
         let mut next_widget_id = 1;
         assign_widget_ids(&mut layout, &mut next_widget_id);
         Some(layout)
     }
 
-    fn measure(&self, node: &Value, constraints: Constraints) -> Option<Size> {
+    fn measure(
+        &self,
+        node: &Value,
+        constraints: Constraints,
+        inherited_font_size: f32,
+    ) -> Option<Size> {
         let widget_type = get_widget_type(node)?;
         let children = get_children(node);
+
+        // If this node sets :font-size, children inherit it.
+        let font_size = get_prop_num(node, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(inherited_font_size);
+
+        let ctx = MeasureCtx {
+            text_measurer: self.text_measurer,
+            cell_w: self.cell_w,
+            cell_h: self.cell_h,
+            inherited_font_size: font_size,
+        };
 
         let size = if let Some(definition) = widget_render::widget_definition(&widget_type) {
             definition.measure(
                 node,
                 &children,
                 constraints,
-                &mut |child, child_constraints| self.measure(child, child_constraints),
+                &ctx,
+                &mut |child, child_constraints| {
+                    self.measure(child, child_constraints, font_size)
+                },
             )?
         } else {
             measure_builtin_leaf(node, &widget_type, constraints.aspect)
@@ -94,11 +160,31 @@ impl LayoutEngine {
         Some(clamp_size(size, constraints))
     }
 
-    fn build_layout_node(&self, node: &Value, rect: Rect) -> LayoutNode {
+    fn build_layout_node(
+        &self,
+        node: &Value,
+        rect: Rect,
+        inherited_font_size: f32,
+    ) -> LayoutNode {
         let widget_type = get_widget_type(node).unwrap_or_default();
         let children_values = get_children(node);
-        let children = self.layout_children(node, rect, &children_values);
-        let props = collect_props(node);
+
+        // Resolve font-size: explicit on this node, or inherited from parent.
+        let font_size = get_prop_num(node, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(inherited_font_size);
+
+        let children = self.layout_children_with_font(node, rect, &children_values, font_size);
+        let mut props = collect_props(node);
+
+        // Inject inherited font-size into props so the rendering path can use it.
+        if !props.contains_key("font-size") && (inherited_font_size - 14.0).abs() > 0.01 {
+            props.insert(
+                "font-size".to_string(),
+                Value::Number(inherited_font_size as f64),
+            );
+        }
+
         let focusable = matches!(props.get("focusable"), Some(Value::Bool(true)));
         LayoutNode {
             widget_id: 0,
@@ -110,10 +196,21 @@ impl LayoutEngine {
         }
     }
 
-    fn layout_children(&self, node: &Value, area: Rect, children: &[Value]) -> Vec<LayoutNode> {
+    fn layout_children_with_font(
+        &self,
+        node: &Value,
+        area: Rect,
+        children: &[Value],
+        inherited_font_size: f32,
+    ) -> Vec<LayoutNode> {
         let Some(widget_type) = get_widget_type(node) else {
             return vec![];
         };
+
+        // If this container sets :font-size, children inherit it.
+        let font_size = get_prop_num(node, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(inherited_font_size);
 
         widget_render::widget_definition(&widget_type)
             .map(|definition| {
@@ -122,12 +219,10 @@ impl LayoutEngine {
                     area,
                     children,
                     &mut |child, mut child_constraints| {
-                        // Always use the engine's aspect — it's a backend property,
-                        // not something containers should override.
                         child_constraints.aspect = self.aspect;
-                        self.measure(child, child_constraints)
+                        self.measure(child, child_constraints, font_size)
                     },
-                    &mut |child, rect| self.build_layout_node(child, rect),
+                    &mut |child, rect| self.build_layout_node(child, rect, font_size),
                 )
             })
             .unwrap_or_default()

@@ -1,6 +1,7 @@
 use super::{Align, Justify, WidgetDefinition, distribute_justify, resolve_align, resolve_justify};
 use crate::layout::{
-    Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num, shrink_constraints,
+    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_widget_type,
+    shrink_constraints,
 };
 use crate::vm::Value;
 
@@ -26,6 +27,7 @@ impl WidgetDefinition for HStackWidget {
         node: &Value,
         children: &[Value],
         constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
@@ -96,6 +98,32 @@ impl WidgetDefinition for HStackWidget {
         let (start_offset, effective_gap) =
             distribute_justify(justify, justify_remaining, count, gap);
 
+        // For baseline alignment, compute the baseline offset for each child.
+        // Labels: baseline = ascent ratio × height (~0.75 of line height).
+        // Non-text widgets: center them vertically on the baseline.
+        let baseline_offset = |child: &Value, size: &Size| -> f32 {
+            let is_label = get_widget_type(child)
+                .map(|t| t == "label")
+                .unwrap_or(false);
+            if is_label {
+                // Ascent ≈ 75% of line height for most fonts.
+                size.height * 0.75
+            } else {
+                // Center non-text widgets on the baseline.
+                size.height * 0.5
+            }
+        };
+
+        // For baseline mode: find the maximum baseline offset.
+        let max_baseline = if align == Align::Baseline {
+            measured
+                .iter()
+                .map(|(child, size, _)| baseline_offset(child, size))
+                .fold(0.0_f32, f32::max)
+        } else {
+            0.0
+        };
+
         // Pass 2: position children
         let mut cursor_col = area.col + padding + start_offset;
         measured
@@ -116,6 +144,11 @@ impl WidgetDefinition for HStackWidget {
                     Align::Start | Align::Stretch => area.row + padding,
                     Align::Center => area.row + padding + (inner_height - child_height) / 2.0,
                     Align::End => area.row + padding + inner_height - child_height,
+                    Align::Baseline => {
+                        // Shift child down so its baseline aligns with max_baseline.
+                        let child_bl = baseline_offset(child, &size);
+                        area.row + padding + (max_baseline - child_bl)
+                    }
                 };
                 let rect = Rect {
                     row,

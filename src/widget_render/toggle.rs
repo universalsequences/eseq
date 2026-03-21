@@ -6,7 +6,7 @@ use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     get_bool_prop, metal_widget_instance, ndc_bounds, resolve_named_color, styled_cell,
 };
-use crate::layout::{Constraints, LayoutNode, Rect, Size};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size};
 use crate::theme;
 use crate::vm::Value;
 
@@ -15,28 +15,37 @@ pub struct ToggleWidget;
 pub static TOGGLE_WIDGET: ToggleWidget = ToggleWidget;
 
 fn on_color(props: &HashMap<String, Value>) -> crate::backend::Color {
-    resolve_named_color(props, "color", theme::WIDGET_TOGGLE_ON)
+    resolve_named_color(props, "color", theme::WIDGET_TOGGLE_ON())
 }
 
 fn off_color(props: &HashMap<String, Value>) -> crate::backend::Color {
-    resolve_named_color(props, "off-color", theme::WIDGET_TOGGLE_OFF)
+    resolve_named_color(props, "off-color", theme::WIDGET_TOGGLE_OFF())
 }
 
-/// TUI render for toggle: "[×]" or "[ ]"
+fn knob_on_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "knob-color", theme::WIDGET_TOGGLE_KNOB_ON())
+}
+
+fn knob_off_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "off-knob-color", theme::WIDGET_TOGGLE_KNOB_OFF())
+}
+
+/// TUI render for toggle: "(●)" or "(○)"
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let on = get_bool_prop(props, "value", false);
-
-    let (text, fg) = if on {
-        ("[×]", on_color(props))
+    let track = if on { on_color(props) } else { off_color(props) };
+    let knob = if on {
+        knob_on_color(props)
     } else {
-        ("[ ]", off_color(props))
+        knob_off_color(props)
     };
 
     let row_u16 = rect.row.round() as u16;
     let col_u16 = rect.col.round() as u16;
     let width_u16 = rect.width.round() as u16;
+    let glyphs = [('(', track), (if on { '●' } else { '○' }, knob), (')', track)];
 
-    for (i, ch) in text.chars().enumerate() {
+    for (i, (ch, fg)) in glyphs.into_iter().enumerate() {
         let col = col_u16 + i as u16;
         if col >= col_u16 + width_u16 {
             break;
@@ -71,10 +80,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float knobDeriv = max(fwidth(knobDist), 0.001);
     float knobMask = smoothstep(knobDeriv, -knobDeriv, knobDist);
 
-    // Knob: dark when on (contrast against bright fill), light when off
-    float3 knobColor = mix(float3(0.7, 0.7, 0.72), float3(0.08, 0.08, 0.08), on);
+    float4 knobColor = mix(in.color_d, in.color_c, on);
     float3 rgb = mix(bg.rgb, borderColor, borderMask);
-    rgb = mix(rgb, knobColor, knobMask);
+    rgb = mix(rgb, knobColor.rgb, knobMask);
 
     return float4(rgb, outerMask);
 }
@@ -90,6 +98,7 @@ impl WidgetDefinition for ToggleWidget {
         _node: &Value,
         _children: &[Value],
         _constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         Some(Size {
@@ -159,6 +168,8 @@ impl WidgetDefinition for ToggleWidget {
                 orientation: 0.0,
                 color_a: on_color(&node.props).to_rgba(),
                 color_b: off_color(&node.props).to_rgba(),
+                color_c: knob_on_color(&node.props).to_rgba(),
+                color_d: knob_off_color(&node.props).to_rgba(),
                 corner_radius: 0.0,
                 pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
             },
@@ -189,10 +200,15 @@ mod tests {
             &mut buf,
         );
 
-        assert_eq!(buf.get(0, 0).unwrap().style.fg, theme::WIDGET_TOGGLE_ON);
+        assert_eq!(buf.get(0, 0).unwrap().style.fg, theme::WIDGET_TOGGLE_ON());
+        assert_eq!(buf.get(0, 1).unwrap().style.fg, theme::WIDGET_TOGGLE_KNOB_ON());
 
         props.insert("value".to_string(), Value::Bool(false));
         props.insert("off-color".to_string(), Value::Keyword("red".to_string()));
+        props.insert(
+            "off-knob-color".to_string(),
+            Value::Keyword("blue".to_string()),
+        );
         tui_render(
             &props,
             Rect {
@@ -204,6 +220,7 @@ mod tests {
             &mut buf,
         );
 
-        assert_eq!(buf.get(0, 0).unwrap().style.fg, theme::RED);
+        assert_eq!(buf.get(0, 0).unwrap().style.fg, theme::RED());
+        assert_eq!(buf.get(0, 1).unwrap().style.fg, theme::BLUE());
     }
 }

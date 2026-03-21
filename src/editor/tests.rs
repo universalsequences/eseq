@@ -132,7 +132,7 @@
     }
 
     #[test]
-    fn hover_scroll_routes_to_hovered_tile_without_changing_selection() {
+    fn hover_scroll_switches_focus_to_hovered_tile() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
         editor.open_scratch_buffer("*left*", &vec!["left"; 40].join("\n"));
@@ -168,9 +168,59 @@
             .expect("right tile")
             .buffer_idx;
 
-        assert_eq!(editor.active_tile, left_tile, "hover scroll should not change selection");
+        assert_eq!(editor.active_tile, right_tile, "hover scroll should focus hovered tile");
         assert_eq!(editor.buffers[left_buffer_idx].scroll_top, 0);
         assert_eq!(editor.buffers[right_buffer_idx].scroll_top, 3);
+    }
+
+    #[test]
+    fn clicking_inactive_tile_uses_target_tile_viewport_for_hit_testing() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*left*", "(label :text \"left\")");
+        let right_tile = editor
+            .split_active_tile(SplitDir::Vertical, editor.active_buffer_idx())
+            .expect("split should create a second tile");
+
+        editor.switch_active_tile(right_tile);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def enabled (state true))
+                (effect
+                  (toggle :bind enabled))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(8, 4);
+        editor.switch_active_tile(editor.tile_root.leaf_ids()[0]);
+        editor.update_tile_rects(90, 30);
+
+        let right_rect = editor.tile_rect(right_tile).expect("right tile rect");
+        let (content_col, content_row, _, _) = editor
+            .tile_content_area(right_tile, 1)
+            .expect("right tile content area");
+        let precise_col = (right_rect.col + 1.5).max(content_col as f32);
+        let precise_row = (right_rect.row + 1.5).max(content_row as f32);
+
+        editor.handle_tiled_mouse_precise(
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                precise_col.floor() as u16,
+                precise_row.floor() as u16,
+            ),
+            precise_col,
+            precise_row,
+            1,
+        );
+
+        assert_eq!(editor.active_tile, right_tile, "click should select hovered tile");
+        assert_eq!(
+            editor.runtime.eval_str("enabled").unwrap(),
+            Some(Value::Bool(false)),
+            "first click in newly selected tile should hit the widget under the pointer"
+        );
     }
 
     #[test]
@@ -525,7 +575,7 @@
     }
 
     #[test]
-    fn movement_clears_minibuffer_message() {
+fn movement_clears_minibuffer_message() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
         editor.open_scratch_buffer("*test*", "abc");
@@ -534,8 +584,23 @@
 
         editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
-        assert_eq!(editor.minibuffer, None);
-    }
+    assert_eq!(editor.minibuffer, None);
+}
+
+#[test]
+fn transient_minibuffer_message_expires_without_input() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+
+    editor.show_transient_message("view: text");
+    editor.minibuffer_expires_at = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+    editor.clear_needs_redraw();
+
+    editor.update_timers();
+
+    assert_eq!(editor.minibuffer, None);
+    assert!(editor.needs_redraw());
+}
 
     #[test]
     fn quit_does_not_prompt_for_dirty_scratch_buffer() {
@@ -1474,8 +1539,8 @@
         }
     }
 
-    #[test]
-    fn widget_tree_survives_buffer_switch() {
+#[test]
+fn widget_tree_survives_buffer_switch() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
         editor.set_layout_viewport(20, 6);
@@ -1507,7 +1572,51 @@
             "widget layout should be restored after switching back. widget_tree={:?}",
             editor.active_buffer().widget_tree.is_some()
         );
-    }
+}
+
+#[test]
+fn cycle_view_mode_toggles_between_text_and_ui_when_ui_exists() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor.active_buffer_mut().widget_tree = Some(Value::String("ui".to_string()));
+
+    editor.runtime_mut().eval_str("(cycle-view-mode)").unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.active_buffer().view_mode, super::ViewMode::UiOnly);
+
+    editor.runtime_mut().eval_str("(cycle-view-mode)").unwrap();
+    editor.refresh_runtime_side_effects();
+    assert_eq!(editor.active_buffer().view_mode, super::ViewMode::TextOnly);
+}
+
+#[test]
+fn cycle_view_mode_stays_in_text_when_no_ui_exists() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+
+    editor.runtime_mut().eval_str("(cycle-view-mode)").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().view_mode, super::ViewMode::TextOnly);
+    assert_eq!(editor.minibuffer.as_deref(), Some("No UI in this buffer"));
+}
+
+#[test]
+fn set_view_mode_supports_both_as_secondary_mode() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().widget_tree = Some(Value::String("ui".to_string()));
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(set-view-mode "both")"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().view_mode, super::ViewMode::Both);
+}
 
     #[test]
     fn first_layout_buffer_stays_interactive_after_second_layout_buffer_eval() {
@@ -2132,6 +2241,38 @@
         );
         assert_eq!(super::get_map_field_number(&action, "delta-lanes"), Some(0.0));
         assert!(super::get_map_field_number(&action, "delta-time").unwrap_or(0.0) > 0.0);
+    }
+
+    #[test]
+    fn text_buffer_horizontal_scroll_ignores_stale_widget_layout_width() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "short line");
+
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (effect
+                  (h-stack
+                    (label "left")
+                    (box :width 120 (label ""))))
+                "#,
+            )
+            .unwrap();
+        editor.refresh_runtime_side_effects();
+
+        editor.active_buffer_mut().widget_tree = None;
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollRight, 10, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+
+        assert_eq!(editor.widget_scroll_left(), 0);
     }
 
     #[test]

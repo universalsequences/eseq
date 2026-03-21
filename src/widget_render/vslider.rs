@@ -6,7 +6,7 @@ use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     get_f32_prop, metal_widget_instance, ndc_bounds, resolve_named_color, styled_cell,
 };
-use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 
@@ -15,7 +15,7 @@ pub struct VerticalSliderWidget;
 pub static VSLIDER_WIDGET: VerticalSliderWidget = VerticalSliderWidget;
 
 fn fill_color(props: &HashMap<String, Value>) -> crate::backend::Color {
-    resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED)
+    resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED())
 }
 
 /// TUI render for vertical slider: fill from bottom up, dots above.
@@ -48,7 +48,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             } else {
                 // Dot every other row for subtle track
                 let ch = if row_offset % 2 == 0 { '\u{2022}' } else { ' ' };
-                buf.set(row, col, styled_cell(ch, theme::WIDGET_SLIDER_TRACK, None));
+                buf.set(row, col, styled_cell(ch, theme::WIDGET_SLIDER_TRACK(), None));
             }
         }
     }
@@ -114,6 +114,7 @@ impl WidgetDefinition for VerticalSliderWidget {
         node: &Value,
         _children: &[Value],
         _constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         Some(Size {
@@ -193,7 +194,9 @@ impl WidgetDefinition for VerticalSliderWidget {
                 value_t: t,
                 orientation: 0.0,
                 color_a: fill_color(&node.props).to_rgba(),
-                color_b: theme::WIDGET_SLIDER_TRACK.to_rgba(),
+                color_b: theme::WIDGET_SLIDER_TRACK().to_rgba(),
+                color_c: [0.0; 4],
+                color_d: [0.0; 4],
                 corner_radius: 0.0,
                 pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
             },

@@ -1,6 +1,6 @@
 use crate::backend::{
-    Cell, CellStyle, Color, CompletionEntry, CompletionFrame, RenderFrame, TileFrame,
-    TiledRenderFrame,
+    Cell, CellStyle, Color, CompletionEntry, CompletionFrame, RenderFrame, StatusIndicator,
+    TileFrame, TiledRenderFrame,
 };
 use crate::buffer::Buffer;
 use crate::editor::{Editor, ViewMode};
@@ -10,26 +10,18 @@ use crate::theme;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-// ── Semantic region colors (re-exported from theme) ──────────────────────────
-
-pub const BG_REGION: Color = theme::BG_REGION;
-pub const BG_SEXP: Color = theme::BG_SEXP;
-pub const BG_EVAL_FLASH: Color = theme::BG_EVAL_FLASH;
-pub const BG_MATCH_PAREN: Color = theme::BG_MATCH_PAREN;
-pub const FG_MATCH_PAREN: Color = theme::FG_MATCH_PAREN;
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Maps a token class to its foreground color.
 pub fn token_color(class: TokenClass) -> Color {
     match class {
-        TokenClass::Comment => theme::SYN_COMMENT,
-        TokenClass::String => theme::SYN_STRING,
-        TokenClass::Number => theme::SYN_NUMBER,
-        TokenClass::Keyword => theme::SYN_KEYWORD,
-        TokenClass::Builtin => theme::SYN_BUILTIN,
-        TokenClass::Special => theme::SYN_SPECIAL,
-        TokenClass::Delimiter => theme::SYN_DELIMITER,
+        TokenClass::Comment => theme::SYN_COMMENT(),
+        TokenClass::String => theme::SYN_STRING(),
+        TokenClass::Number => theme::SYN_NUMBER(),
+        TokenClass::Keyword => theme::SYN_KEYWORD(),
+        TokenClass::Builtin => theme::SYN_BUILTIN(),
+        TokenClass::Special => theme::SYN_SPECIAL(),
+        TokenClass::Delimiter => theme::SYN_DELIMITER(),
     }
 }
 
@@ -38,7 +30,7 @@ fn token_fg(col: usize, spans: Option<&Vec<TokenSpan>>) -> Color {
     spans
         .and_then(|ss| ss.iter().find(|s| col >= s.start && col < s.end))
         .map(|s| token_color(s.class))
-        .unwrap_or(theme::FG)
+        .unwrap_or(theme::FG())
 }
 
 /// Returns true if `(row, col)` falls inside a highlighted range.
@@ -59,6 +51,166 @@ fn in_range(
     col >= start && col < end
 }
 
+fn status_cell(ch: char, fg: Color, bg: Option<Color>, bold: bool) -> Cell {
+    Cell {
+        ch,
+        style: CellStyle { fg, bg, bold },
+    }
+}
+
+fn push_status_text(cells: &mut Vec<Cell>, text: &str, fg: Color, bg: Option<Color>, bold: bool) {
+    cells.extend(text.chars().map(|ch| status_cell(ch, fg, bg, bold)));
+}
+
+fn push_status_chip(cells: &mut Vec<Cell>, text: &str, fg: Color, bg: Color, bold: bool) {
+    push_status_text(cells, text, fg, Some(bg), bold);
+}
+
+fn finalize_status_cells(mut cells: Vec<Cell>, width: usize) -> Vec<Cell> {
+    if cells.len() > width {
+        cells.truncate(width);
+    }
+    while cells.len() < width {
+        cells.push(status_cell(
+            ' ',
+            theme::STATUS_FG(),
+            Some(theme::STATUS_BG()),
+            false,
+        ));
+    }
+    cells
+}
+
+fn status_space() -> Cell {
+    status_cell(' ', theme::STATUS_FG(), Some(theme::STATUS_BG()), false)
+}
+
+fn join_status_sections(mut left: Vec<Cell>, right: Vec<Cell>, width: usize) -> Vec<Cell> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    if left.len() + right.len() >= width {
+        let right_budget = right.len().min(width / 3);
+        let left_budget = width.saturating_sub(right_budget);
+        left.truncate(left_budget);
+        let mut cells = left;
+        let right_tail = right
+            .into_iter()
+            .rev()
+            .take(width.saturating_sub(cells.len()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev();
+        cells.extend(right_tail);
+        return finalize_status_cells(cells, width);
+    }
+
+    let gap = width - left.len() - right.len();
+    left.extend(std::iter::repeat_with(status_space).take(gap));
+    left.extend(right);
+    finalize_status_cells(left, width)
+}
+
+fn build_message_status_row(message: &str, width: usize) -> (Vec<Cell>, StatusIndicator, String) {
+    let mut cells = Vec::new();
+    push_status_chip(
+        &mut cells,
+        " :: ",
+        theme::STATUS_ACCENT(),
+        theme::STATUS_BG(),
+        true,
+    );
+    push_status_text(
+        &mut cells,
+        message,
+        theme::STATUS_FG(),
+        Some(theme::STATUS_BG()),
+        false,
+    );
+    (
+        finalize_status_cells(cells, width),
+        StatusIndicator { toggle_cols: None },
+        format!("msg:{message}"),
+    )
+}
+
+fn build_buffer_status_row(
+    buffer: &Buffer,
+    ui_available: bool,
+    cursor_row: usize,
+    cursor_col: usize,
+    width: usize,
+) -> (Vec<Cell>, StatusIndicator, String) {
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    let mut toggle_cols = None;
+
+    if ui_available {
+        let start = left.len();
+        let (fg, bg) = match buffer.view_mode {
+            ViewMode::UiOnly => (theme::STATUS_UI_FG(), theme::STATUS_UI_BG()),
+            ViewMode::Both => (theme::STATUS_MIX_FG(), theme::STATUS_MIX_BG()),
+            ViewMode::TextOnly => (theme::STATUS_UI_BG(), theme::STATUS_CHIP_MUTED()),
+        };
+        push_status_chip(&mut left, " <> ", fg, bg, true);
+        toggle_cols = Some((start, left.len()));
+        left.push(status_space());
+    }
+
+    if buffer.dirty {
+        push_status_chip(&mut left, " + ", theme::STATUS_DIRTY_FG(), theme::STATUS_DIRTY_BG(), true);
+        left.push(status_space());
+    }
+
+    if buffer.read_only {
+        push_status_chip(&mut left, " ro ", theme::STATUS_FG(), theme::STATUS_CHIP_BG(), false);
+        left.push(status_space());
+    }
+
+    left.push(status_space());
+    push_status_text(
+        &mut left,
+        &buffer.name,
+        theme::STATUS_FG(),
+        Some(theme::STATUS_BG()),
+        true,
+    );
+
+    push_status_chip(
+        &mut right,
+        &format!(" {} ", buffer.mode.name()),
+        theme::STATUS_FG(),
+        theme::STATUS_MODE_BG(),
+        false,
+    );
+    right.push(status_space());
+    push_status_chip(
+        &mut right,
+        &format!(" {}:{} ", cursor_row + 1, cursor_col + 1),
+        theme::STATUS_FG(),
+        theme::STATUS_POS_BG(),
+        false,
+    );
+
+    let signature = format!(
+        "buf:{}:{}:{}:{}:{}:{}:{}",
+        buffer.name,
+        buffer.mode.name(),
+        buffer.dirty,
+        buffer.read_only,
+        ui_available,
+        buffer.view_mode.label(),
+        cursor_row * 10000 + cursor_col
+    );
+
+    (
+        join_status_sections(left, right, width),
+        StatusIndicator { toggle_cols },
+        signature,
+    )
+}
+
 // ── Frame builder ─────────────────────────────────────────────────────────────
 
 /// Build a backend-agnostic `RenderFrame` from the current editor state.
@@ -72,7 +224,9 @@ pub fn build_render_frame(
     viewport_height: usize,
 ) -> RenderFrame {
     editor.set_layout_viewport(viewport_width as u16, viewport_height as u16);
-    editor.active_buffer_mut().adjust_scroll(viewport_height);
+    if editor.active_buffer().view_mode != ViewMode::UiOnly {
+        editor.active_buffer_mut().adjust_scroll(viewport_height);
+    }
 
     let region_range = editor.active_region_range();
     let sexp_range = editor.active_sexp_range();
@@ -99,17 +253,17 @@ pub fn build_render_frame(
             for col in 0..line_len + 1 {
                 let mut fg = token_fg(col, row_spans);
                 let mut bg = if in_range(row, col, eval_flash_range, line_len) {
-                    Some(BG_EVAL_FLASH)
+                    Some(theme::BG_EVAL_FLASH())
                 } else if in_range(row, col, sexp_range, line_len) {
-                    Some(BG_SEXP)
+                    Some(theme::BG_SEXP())
                 } else if in_range(row, col, region_range, line_len) {
-                    Some(BG_REGION)
+                    Some(theme::BG_REGION())
                 } else {
                     None
                 };
                 if match_col == Some(col) {
-                    bg = Some(BG_MATCH_PAREN);
-                    fg = FG_MATCH_PAREN;
+                    bg = Some(theme::BG_MATCH_PAREN());
+                    fg = theme::FG_MATCH_PAREN();
                 }
                 cells.push(Cell {
                     style: CellStyle {
@@ -134,30 +288,24 @@ pub fn build_render_frame(
         None
     };
 
-    // Status bar text
+    // Status bar
     let buf = editor.active_buffer();
-    let status = if let Some(prompt) = editor.minibuffer_prompt() {
-        format!(" {prompt}")
-    } else if let Some(prompt) = editor.prompt_text() {
-        prompt
-    } else if let Some(msg) = &editor.minibuffer {
-        format!(" {msg}")
-    } else {
-        let dirty = if buf.dirty { "**" } else { "  " };
-        let ro = if buf.read_only { "[RO] " } else { "" };
-        let mode_name = buf.mode.name();
-        let view_tag = match buf.view_mode {
-            ViewMode::UiOnly => " [UI]",
-            ViewMode::TextOnly => " [TEXT]",
-            ViewMode::Both => "",
+    let (status_cells, status_indicator, status_signature) =
+        if let Some(prompt) = editor.minibuffer_prompt() {
+            build_message_status_row(&format!(" {prompt}"), viewport_width)
+        } else if let Some(prompt) = editor.prompt_text() {
+            build_message_status_row(&prompt, viewport_width)
+        } else if let Some(msg) = &editor.minibuffer {
+            build_message_status_row(&format!(" {msg}"), viewport_width)
+        } else {
+            build_buffer_status_row(
+                buf,
+                editor.active_buffer_has_ui(),
+                cursor_row,
+                cursor_col,
+                viewport_width,
+            )
         };
-        format!(
-            " {dirty} {ro}{}  ({mode_name}){view_tag}  L{} C{}",
-            buf.name,
-            cursor_row + 1,
-            cursor_col + 1
-        )
-    };
 
     let completion = build_completion(editor, cursor_row, cursor_col, scroll_top);
 
@@ -174,7 +322,7 @@ pub fn build_render_frame(
         region_range.hash(&mut hasher);
         sexp_range.hash(&mut hasher);
         eval_flash_range.hash(&mut hasher);
-        status.hash(&mut hasher);
+        status_signature.hash(&mut hasher);
         completion
             .as_ref()
             .map(|comp| {
@@ -212,7 +360,8 @@ pub fn build_render_frame(
         cursor: frame_cursor,
         buffer_name: buf.name.clone(),
         dirty: buf.dirty,
-        status,
+        status_cells,
+        status_indicator,
         completion,
         text_cache_key,
         widget_layout_cache_key: editor.widget_layout_revision(),
@@ -273,7 +422,7 @@ fn build_tiled_render_frame_impl(
         .map(|(tile_id, rect)| {
             let leaf = editor.tile_root.find_leaf(*tile_id).unwrap();
             let buf = &editor.buffers[leaf.buffer_idx];
-            let frame_key = (buf.revision, leaf.layout_revision, buf.scroll_top);
+            let frame_key = (buf.revision, leaf.layout_revision, buf.scroll_top, buf.view_mode);
             let cached = leaf
                 .cached_inactive_frame
                 .as_ref()
@@ -438,19 +587,12 @@ fn build_inactive_tile_frame_from_parts(
         None
     };
 
-    let dirty_marker = if buffer.dirty { "**" } else { "  " };
-    let ro = if buffer.read_only { "[RO] " } else { "" };
-    let mode_name = buffer.mode.name();
-    let view_tag = match buffer.view_mode {
-        ViewMode::UiOnly => " [UI]",
-        ViewMode::TextOnly => " [TEXT]",
-        ViewMode::Both => "",
-    };
-    let status = format!(
-        " {dirty_marker} {ro}{}  ({mode_name}){view_tag}  L{} C{}",
-        buffer.name,
-        cursor_row + 1,
-        cursor_col + 1
+    let (status_cells, status_indicator, status_signature) = build_buffer_status_row(
+        buffer,
+        buffer.widget_tree.is_some() || cached_layout.is_some(),
+        cursor_row,
+        cursor_col,
+        viewport_width,
     );
 
     let text_cache_key = {
@@ -460,6 +602,7 @@ fn build_inactive_tile_frame_from_parts(
         viewport_width.hash(&mut hasher);
         viewport_height.hash(&mut hasher);
         scroll_top.hash(&mut hasher);
+        status_signature.hash(&mut hasher);
         hasher.finish()
     };
 
@@ -468,7 +611,8 @@ fn build_inactive_tile_frame_from_parts(
         cursor,
         buffer_name: buffer.name.clone(),
         dirty: buffer.dirty,
-        status,
+        status_cells,
+        status_indicator,
         completion: None,
         text_cache_key,
         widget_layout_cache_key: layout_revision,

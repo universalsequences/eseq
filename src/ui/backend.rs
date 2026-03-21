@@ -108,6 +108,12 @@ pub struct CompletionFrame {
     pub doc: Option<(String, Vec<String>)>,
 }
 
+#[derive(Clone, Debug)]
+pub struct StatusIndicator {
+    /// Columns in the status row occupied by the UI toggle affordance.
+    pub toggle_cols: Option<(usize, usize)>,
+}
+
 // ── RenderFrame ───────────────────────────────────────────────────────────────
 
 /// A complete snapshot of everything a backend needs to draw one frame.
@@ -125,8 +131,10 @@ pub struct RenderFrame {
     pub buffer_name: String,
     /// True when the buffer has unsaved changes.
     pub dirty: bool,
-    /// Status bar / minibuffer text (already formatted).
-    pub status: String,
+    /// Styled cells for the status bar / minibuffer row.
+    pub status_cells: Vec<Cell>,
+    /// Metadata for manually rendered status affordances.
+    pub status_indicator: StatusIndicator,
     /// Optional completion popup to overlay on top of the text area.
     pub completion: Option<CompletionFrame>,
     /// Revision token for the text/editor portion of the frame. Backends can

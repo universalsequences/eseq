@@ -64,6 +64,7 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
     );
 
     loop {
+        editor.update_timers();
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
                 Event::Key(key) => editor.handle_key(key),
@@ -114,6 +115,15 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
     );
     let mut backend = MetalBackend::new()?;
     backend.initialize()?;
+
+    // Set up proportional text measurement for widget layout.
+    {
+        let (cell_w, cell_h) = backend.cell_dimensions();
+        if let Some(measurer) = backend.create_text_measurer() {
+            editor.set_text_measurer(measurer, cell_w, cell_h);
+        }
+    }
+
     let frame_interval = Duration::from_secs_f64(1.0 / 30.0);
     let mut last_render_at = Instant::now() - frame_interval;
     let mut pending_drag: Option<(Event, (f32, f32))> = None;
@@ -123,6 +133,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
     let mut scroll_accum_x: f32 = 0.0;
 
     loop {
+        editor.update_timers();
         let (cols, rows) = backend.viewport_size();
         // Set aspect ratio for uniform spacing (cell_h / cell_w)
         let (cell_w, cell_h) = backend.cell_dimensions();

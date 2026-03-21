@@ -10,7 +10,7 @@ use super::{
     resolve_named_color, styled_cell,
     time_view::{TimeRuler, TimeRulerMode, TimeViewport},
 };
-use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 
@@ -89,6 +89,7 @@ impl WidgetDefinition for TimelineWidget {
         node: &Value,
         _children: &[Value],
         constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let width = get_prop_num(node, "width")
@@ -113,7 +114,7 @@ impl WidgetDefinition for TimelineWidget {
             let row = rect.row.round() as u16 + row_offset;
             for col_offset in 0..(rect.width.round() as u16) {
                 let col = rect.col.round() as u16 + col_offset;
-                buf.set(row, col, styled_cell(' ', theme::FG, Some(theme::BG)));
+                buf.set(row, col, styled_cell(' ', theme::FG(), Some(theme::BG())));
             }
         }
 
@@ -124,7 +125,7 @@ impl WidgetDefinition for TimelineWidget {
                 buf.set(
                     header_row,
                     col,
-                    styled_cell(' ', theme::FG, Some(theme::STATUS_BG)),
+                    styled_cell(' ', theme::FG(), Some(theme::STATUS_BG())),
                 );
             }
             for (absolute_col, is_major) in view.grid_columns() {
@@ -135,11 +136,11 @@ impl WidgetDefinition for TimelineWidget {
                         styled_cell(
                             '|',
                             if is_major {
-                                theme::PURPLE
+                                theme::PURPLE()
                             } else {
-                                theme::BRIGHT_BLACK
+                                theme::BRIGHT_BLACK()
                             },
-                            Some(theme::STATUS_BG),
+                            Some(theme::STATUS_BG()),
                         ),
                     );
                 }
@@ -153,7 +154,7 @@ impl WidgetDefinition for TimelineWidget {
                     buf.set(
                         header_row,
                         col,
-                        styled_cell(ch, theme::FG, Some(theme::STATUS_BG)),
+                        styled_cell(ch, theme::FG(), Some(theme::STATUS_BG())),
                     );
                 }
             }
@@ -165,11 +166,11 @@ impl WidgetDefinition for TimelineWidget {
                 let col = content.col.round() as u16 + col_offset;
                 let lane = view.lane_at_row(row as f32);
                 let bg = if lane % 2 == 0 {
-                    theme::BLACK
+                    theme::BLACK()
                 } else {
-                    theme::BG
+                    theme::BG()
                 };
-                buf.set(row, col, styled_cell(' ', theme::FG, Some(bg)));
+                buf.set(row, col, styled_cell(' ', theme::FG(), Some(bg)));
             }
         }
 
@@ -182,7 +183,7 @@ impl WidgetDefinition for TimelineWidget {
                     styled_cell(
                         '|',
                         if is_major {
-                            theme::BRIGHT_BLACK
+                            theme::BRIGHT_BLACK()
                         } else {
                             crate::backend::Color::from_hex(0x33, 0x33, 0x38)
                         },
@@ -197,12 +198,12 @@ impl WidgetDefinition for TimelineWidget {
                 buf.set(
                     rect.row.round() as u16,
                     playhead_col,
-                    styled_cell('|', theme::YELLOW, Some(theme::STATUS_BG)),
+                    styled_cell('|', theme::YELLOW(), Some(theme::STATUS_BG())),
                 );
             }
             for row_offset in 0..(content.height.round() as u16) {
                 let row = content.row.round() as u16 + row_offset;
-                buf.set(row, playhead_col, styled_cell('|', theme::YELLOW, None));
+                buf.set(row, playhead_col, styled_cell('|', theme::YELLOW(), None));
             }
         }
 
@@ -211,8 +212,8 @@ impl WidgetDefinition for TimelineWidget {
                 continue;
             };
             if view.sidebar_width > 0.0 {
-                let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK);
-                let label_fg = lane.label_fg.unwrap_or(theme::FG);
+                let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
+                let label_fg = lane.label_fg.unwrap_or(theme::FG());
                 for row in row_start..row_end {
                     for col_offset in 0..(view.sidebar_width.round() as u16) {
                         let col = rect.col.round() as u16 + col_offset;
@@ -233,7 +234,7 @@ impl WidgetDefinition for TimelineWidget {
                         buf.set(
                             row,
                             divider_col,
-                            styled_cell('│', theme::BRIGHT_BLACK, Some(sidebar_bg)),
+                            styled_cell('│', theme::BRIGHT_BLACK(), Some(sidebar_bg)),
                         );
                     }
                 }
@@ -245,9 +246,9 @@ impl WidgetDefinition for TimelineWidget {
                 continue;
             };
             let item_color = if item.selected {
-                theme::PURPLE
+                theme::PURPLE()
             } else {
-                item.color.unwrap_or(theme::WHITE)
+                item.color.unwrap_or(theme::WHITE())
             };
             for row_offset in 0..(item_rect.height.round() as u16) {
                 let row = item_rect.row.round() as u16 + row_offset;
@@ -401,7 +402,7 @@ fn build_metal_primitives(
                 width: rect.width,
                 height: 1.0,
             },
-            color: theme::STATUS_BG,
+            color: theme::STATUS_BG(),
         }));
         for (x, _) in view.metal_grid_lines() {
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
@@ -409,7 +410,7 @@ fn build_metal_primitives(
                 y: rect.row,
                 width: 0.125,
                 height: 1.0,
-                color: theme::BRIGHT_BLACK,
+                color: theme::BRIGHT_BLACK(),
             }));
         }
         for (absolute_col, label) in view.time_ruler_labels() {
@@ -417,8 +418,8 @@ fn build_metal_primitives(
                 row: rect.row / aspect,
                 col: absolute_col as i32 + 1,
                 text: label,
-                fg: theme::FG_MUTED,
-                bg: theme::STATUS_BG,
+                fg: theme::FG_MUTED(),
+                bg: theme::STATUS_BG(),
             }));
         }
     }
@@ -429,7 +430,7 @@ fn build_metal_primitives(
         };
         if view.sidebar_width > 0.0 {
             let lane = &view.lanes[lane_index];
-            let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK);
+            let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                 x: rect.col,
                 y: row_start,
@@ -440,7 +441,7 @@ fn build_metal_primitives(
             // Lane label text
             let label = lane.label.as_deref().unwrap_or("");
             if !label.is_empty() {
-                let label_fg = lane.label_fg.unwrap_or(theme::FG);
+                let label_fg = lane.label_fg.unwrap_or(theme::FG());
                 primitives.push(MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
                     row: row_start / aspect,
                     col: rect.col.round() as i32,
@@ -456,7 +457,7 @@ fn build_metal_primitives(
                     y: row_start,
                     width: 0.125,
                     height: lane_height,
-                    color: theme::BRIGHT_BLACK,
+                    color: theme::BRIGHT_BLACK(),
                 }));
             }
         }
@@ -466,9 +467,9 @@ fn build_metal_primitives(
             width: content.width,
             height: lane_height,
             color: if lane_index % 2 == 0 {
-                theme::BLACK
+                theme::BLACK()
             } else {
-                theme::BG
+                theme::BG()
             },
         }));
     }
@@ -480,7 +481,7 @@ fn build_metal_primitives(
             width: 0.125,
             height: content.height,
             color: if is_major {
-                theme::BRIGHT_BLACK
+                theme::BRIGHT_BLACK()
             } else {
                 crate::backend::Color::from_hex(0x33, 0x33, 0x38)
             },
@@ -494,7 +495,7 @@ fn build_metal_primitives(
                 y: rect.row,
                 width: 0.125,
                 height: 1.0,
-                color: theme::YELLOW,
+                color: theme::YELLOW(),
             }));
         }
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
@@ -502,7 +503,7 @@ fn build_metal_primitives(
             y: content.row,
             width: 0.125,
             height: content.height,
-            color: theme::YELLOW,
+            color: theme::YELLOW(),
         }));
     }
 
@@ -511,9 +512,9 @@ fn build_metal_primitives(
             continue;
         };
         let item_color = if item.selected {
-            theme::PURPLE
+            theme::PURPLE()
         } else {
-            item.color.unwrap_or(theme::WHITE)
+            item.color.unwrap_or(theme::WHITE())
         };
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x,
@@ -1319,7 +1320,7 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
                     resolve_named_color(
                         &HashMap::from([("color".to_string(), value.clone())]),
                         "color",
-                        theme::WIDGET_SLIDER_FILLED,
+                        theme::WIDGET_SLIDER_FILLED(),
                     )
                 }),
             })
@@ -1391,7 +1392,7 @@ fn as_color(value: &Value) -> Option<crate::backend::Color> {
     Some(resolve_named_color(
         &HashMap::from([("color".to_string(), Value::Keyword(name))]),
         "color",
-        theme::FG,
+        theme::FG(),
     ))
 }
 

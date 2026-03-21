@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    styled_cell,
+    resolve_named_color, styled_cell,
     time_view::{TimeRuler, TimeRulerMode, TimeViewport},
 };
 #[cfg(target_os = "macos")]
@@ -20,7 +20,7 @@ use crate::audio::sample::{
     MinMaxPair as WaveformBucket, SampleBuffer, WaveformMipLevel as WaveformLevel,
     get_registered_sample,
 };
-use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 
@@ -30,6 +30,26 @@ pub static WAVEFORM_WIDGET: WaveformWidget = WaveformWidget;
 
 const WAVEFORM_BODY_TOP_INSET: f32 = 0.45;
 const WAVEFORM_BODY_BOTTOM_INSET: f32 = 0.25;
+
+fn waveform_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "waveform-color", theme::WHITE())
+}
+
+fn selection_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "selection-color", theme::YELLOW())
+}
+
+fn cursor_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "cursor-color", theme::YELLOW())
+}
+
+fn playhead_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "playhead-color", theme::GREEN())
+}
+
+fn background_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "background-color", theme::BLACK())
+}
 
 #[derive(Clone)]
 struct WaveformBuffer {
@@ -73,6 +93,7 @@ impl WidgetDefinition for WaveformWidget {
         node: &Value,
         _children: &[Value],
         constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let width = get_prop_num(node, "width")
@@ -83,7 +104,6 @@ impl WidgetDefinition for WaveformWidget {
             .map(f64_to_f32)
             .unwrap_or(6.0)
             .max(1.0);
-        println!("MEASURING WAVEVFORM={}", height);
         Some(Size { width, height })
     }
 
@@ -98,7 +118,7 @@ impl WidgetDefinition for WaveformWidget {
             let row = rect.row.round() as u16 + row_offset;
             for col_offset in 0..(rect.width.round() as u16) {
                 let col = rect.col.round() as u16 + col_offset;
-                buf.set(row, col, styled_cell(' ', theme::FG, Some(theme::BG)));
+                buf.set(row, col, styled_cell(' ', theme::FG(), Some(theme::BG())));
             }
         }
 
@@ -109,7 +129,7 @@ impl WidgetDefinition for WaveformWidget {
                 buf.set(
                     header_row,
                     col,
-                    styled_cell(' ', theme::FG, Some(theme::STATUS_BG)),
+                    styled_cell(' ', theme::FG(), Some(theme::STATUS_BG())),
                 );
             }
             for (absolute_col, is_major) in view.grid_columns() {
@@ -119,11 +139,11 @@ impl WidgetDefinition for WaveformWidget {
                     styled_cell(
                         '|',
                         if is_major {
-                            theme::PURPLE
+                            theme::PURPLE()
                         } else {
-                            theme::BRIGHT_BLACK
+                            theme::BRIGHT_BLACK()
                         },
-                        Some(theme::STATUS_BG),
+                        Some(theme::STATUS_BG()),
                     ),
                 );
             }
@@ -136,7 +156,7 @@ impl WidgetDefinition for WaveformWidget {
                     buf.set(
                         header_row,
                         col,
-                        styled_cell(ch, theme::FG, Some(theme::STATUS_BG)),
+                        styled_cell(ch, theme::FG(), Some(theme::STATUS_BG())),
                     );
                 }
             }
@@ -146,7 +166,11 @@ impl WidgetDefinition for WaveformWidget {
             let row = content.row.round() as u16 + row_offset;
             for col_offset in 0..(content.width.round() as u16) {
                 let col = content.col.round() as u16 + col_offset;
-                buf.set(row, col, styled_cell(' ', theme::FG, Some(theme::BLACK)));
+                buf.set(
+                    row,
+                    col,
+                    styled_cell(' ', theme::FG(), Some(background_color(props))),
+                );
             }
         }
 
@@ -159,7 +183,7 @@ impl WidgetDefinition for WaveformWidget {
                     styled_cell(
                         ':',
                         if is_major {
-                            theme::FG_MUTED
+                            theme::FG_MUTED()
                         } else {
                             crate::backend::Color::from_hex(0x4a, 0x4a, 0x50)
                         },
@@ -176,12 +200,12 @@ impl WidgetDefinition for WaveformWidget {
             .max(content.row)
             .round() as u16;
         for col in content_left..=content_right {
-            buf.set(content_top, col, styled_cell('-', theme::FG_MUTED, None));
-            buf.set(content_bottom, col, styled_cell('-', theme::FG_MUTED, None));
+            buf.set(content_top, col, styled_cell('-', theme::FG_MUTED(), None));
+            buf.set(content_bottom, col, styled_cell('-', theme::FG_MUTED(), None));
         }
         for row in content_top..=content_bottom {
-            buf.set(row, content_left, styled_cell('|', theme::FG_MUTED, None));
-            buf.set(row, content_right, styled_cell('|', theme::FG_MUTED, None));
+            buf.set(row, content_left, styled_cell('|', theme::FG_MUTED(), None));
+            buf.set(row, content_right, styled_cell('|', theme::FG_MUTED(), None));
         }
 
         let zero_row =
@@ -191,7 +215,7 @@ impl WidgetDefinition for WaveformWidget {
             buf.set(
                 zero_row,
                 col,
-                styled_cell('-', theme::WHITE, Some(theme::BLACK)),
+                styled_cell('-', waveform_color(props), Some(background_color(props))),
             );
         }
 
@@ -204,7 +228,7 @@ impl WidgetDefinition for WaveformWidget {
                     buf.set(
                         row,
                         col,
-                        styled_cell(' ', theme::FG, Some(theme::STATUS_BG)),
+                        styled_cell(' ', theme::FG(), Some(selection_color(props))),
                     );
                 }
             }
@@ -221,7 +245,7 @@ impl WidgetDefinition for WaveformWidget {
                 };
                 let col = content.col.round() as u16 + offset as u16;
                 for row in top..=bottom {
-                    buf.set(row, col, styled_cell('|', theme::CYAN, None));
+                    buf.set(row, col, styled_cell('|', waveform_color(props), None));
                 }
             }
         }
@@ -229,13 +253,13 @@ impl WidgetDefinition for WaveformWidget {
         if let Some(cursor_col) = view.playhead_col(view.cursor_time) {
             for row_offset in 0..(content.height.round() as u16) {
                 let row = content.row.round() as u16 + row_offset;
-                buf.set(row, cursor_col, styled_cell('|', theme::YELLOW, None));
+                buf.set(row, cursor_col, styled_cell('|', cursor_color(props), None));
             }
         }
         if let Some(playhead_col) = view.playhead_col(view.playhead_time) {
             for row_offset in 0..(content.height.round() as u16) {
                 let row = content.row.round() as u16 + row_offset;
-                buf.set(row, playhead_col, styled_cell('|', theme::GREEN, None));
+                buf.set(row, playhead_col, styled_cell('|', playhead_color(props), None));
             }
         }
     }
@@ -338,17 +362,14 @@ impl WidgetDefinition for WaveformWidget {
         &self,
         _widget_type: &str,
         node: &LayoutNode,
-        viewport: super::WidgetViewport,
+        _viewport: super::WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        build_metal_primitives(node, viewport)
+        build_metal_primitives(node)
     }
 }
 
 #[cfg(target_os = "macos")]
-fn build_metal_primitives(
-    node: &LayoutNode,
-    viewport: super::WidgetViewport,
-) -> Vec<MetalPrimitive> {
+fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
     if node.widget_type != "waveform" {
         return Vec::new();
     }
@@ -364,7 +385,7 @@ fn build_metal_primitives(
     let mut primitives = Vec::new();
     primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
         rect,
-        color: theme::BG,
+        color: theme::BG(),
     }));
 
     if view.header_height > 0.0 {
@@ -375,7 +396,7 @@ fn build_metal_primitives(
                 width: rect.width,
                 height: view.header_height.min(rect.height),
             },
-            color: theme::STATUS_BG,
+            color: theme::STATUS_BG(),
         }));
         for (x, is_major) in view
             .time_viewport()
@@ -387,9 +408,9 @@ fn build_metal_primitives(
                 width: 0.125,
                 height: view.header_height.min(rect.height),
                 color: if is_major {
-                    theme::PURPLE
+                    theme::PURPLE()
                 } else {
-                    theme::BRIGHT_BLACK
+                    theme::BRIGHT_BLACK()
                 },
             }));
         }
@@ -398,8 +419,8 @@ fn build_metal_primitives(
                 row: metal_header_text_row(rect, view.header_height),
                 col: absolute_col as i32 + 1,
                 text: label,
-                fg: theme::FG,
-                bg: theme::STATUS_BG,
+                fg: theme::FG(),
+                bg: theme::STATUS_BG(),
             }));
         }
     }
@@ -414,7 +435,7 @@ fn build_metal_primitives(
             width: 0.125,
             height: content.height,
             color: if is_major {
-                theme::FG_MUTED
+                theme::FG_MUTED()
             } else {
                 crate::backend::Color::from_hex(0x4a, 0x4a, 0x50)
             },
@@ -437,8 +458,8 @@ fn build_metal_primitives(
             selection_end: selection.map(|(_, end)| end).unwrap_or(0.0),
             playhead_position: playhead.unwrap_or(0.0),
             show_playhead: playhead.is_some(),
-            waveform_color: theme::WHITE,
-            selection_color: theme::YELLOW,
+            waveform_color: waveform_color(&node.props),
+            selection_color: selection_color(&node.props),
         }));
     }
 
@@ -1113,5 +1134,49 @@ mod tests {
             has_waveform,
             "expected waveform stroke cells to be rendered"
         );
+    }
+
+    #[test]
+    fn tui_render_uses_color_props_for_waveform_and_background() {
+        let props = HashMap::from([
+            ("buffer".to_string(), sample_buffer_value()),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(1.0)),
+            (
+                "waveform-color".to_string(),
+                Value::Keyword("purple".to_string()),
+            ),
+            (
+                "background-color".to_string(),
+                Value::Keyword("status-bg".to_string()),
+            ),
+        ]);
+        let mut buf = CellBuffer::new(40, 12);
+        WAVEFORM_WIDGET.tui_render(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 40.0,
+                height: 12.0,
+            },
+            &mut buf,
+        );
+
+        let has_custom_waveform = buf
+            .cells
+            .iter()
+            .flatten()
+            .flatten()
+            .any(|cell| cell.ch == '|' && cell.style.fg == theme::PURPLE());
+        let has_custom_background = buf
+            .cells
+            .iter()
+            .flatten()
+            .flatten()
+            .any(|cell| cell.style.bg == Some(theme::STATUS_BG()));
+
+        assert!(has_custom_waveform, "expected waveform color override");
+        assert!(has_custom_background, "expected background color override");
     }
 }

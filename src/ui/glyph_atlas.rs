@@ -17,7 +17,7 @@ mod inner {
     use objc2::runtime::ProtocolObject;
     use objc2_core_foundation::{CFRetained, CFString, CGFloat, CGPoint, CGSize};
     use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph};
-    use objc2_core_text::{CTFont, CTFontOrientation};
+    use objc2_core_text::{CTFont, CTFontOrientation, CTFontUIFontType};
     use objc2_metal::{
         MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLTexture, MTLTextureDescriptor,
     };
@@ -231,6 +231,269 @@ mod inner {
                 GlyphEntry {
                     uv_min: [ax as f32 / s, ay as f32 / s],
                     uv_max: [(ax + cell_w) as f32 / s, (ay + cell_h) as f32 / s],
+                },
+            );
+            Some(())
+        }
+    }
+
+    // ── Proportional glyph atlas ────────────────────────────────────────────
+
+    const PROP_ATLAS_SIZE: usize = 2048;
+
+    /// Per-character entry with individual glyph metrics for proportional fonts.
+    #[derive(Clone, Copy, Debug)]
+    pub struct ProportionalGlyphEntry {
+        pub uv_min: [f32; 2],
+        pub uv_max: [f32; 2],
+        /// Horizontal advance in pixels.
+        pub advance: f32,
+        /// Rasterized bitmap width in pixels.
+        pub raster_w: usize,
+        /// Rasterized bitmap height in pixels.
+        pub raster_h: usize,
+    }
+
+    pub struct ProportionalGlyphAtlas {
+        pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
+        allocator: AtlasAllocator,
+        glyphs: HashMap<(char, u16), ProportionalGlyphEntry>,
+        base_font: CFRetained<CTFont>,
+        sized_fonts: HashMap<u16, CFRetained<CTFont>>,
+        line_metrics: HashMap<u16, (f32, f32, f32)>,
+        scale: f64,
+    }
+
+    impl ProportionalGlyphAtlas {
+        pub fn new(
+            device: &ProtocolObject<dyn MTLDevice>,
+            base_font_size: f64,
+            scale: f64,
+        ) -> Option<Self> {
+            let base_font = unsafe {
+                CTFont::new_ui_font_for_language(
+                    CTFontUIFontType::System,
+                    base_font_size,
+                    None,
+                )
+            }?;
+
+            let texture = {
+                let desc = MTLTextureDescriptor::new();
+                unsafe {
+                    desc.setPixelFormat(MTLPixelFormat::R8Unorm);
+                    desc.setWidth(PROP_ATLAS_SIZE);
+                    desc.setHeight(PROP_ATLAS_SIZE);
+                }
+                device.newTextureWithDescriptor(&desc)?
+            };
+
+            let size_tenths = (base_font_size * 10.0).round() as u16;
+            let ascent = unsafe { base_font.ascent() } as f32;
+            let descent = unsafe { base_font.descent() } as f32;
+            let leading = unsafe { base_font.leading() } as f32;
+
+            let mut sized_fonts = HashMap::new();
+            sized_fonts.insert(size_tenths, base_font.clone());
+            let mut line_metrics = HashMap::new();
+            line_metrics.insert(size_tenths, (ascent, descent, leading));
+
+            Some(Self {
+                texture,
+                scale,
+                allocator: AtlasAllocator::new(Size::new(
+                    PROP_ATLAS_SIZE as i32,
+                    PROP_ATLAS_SIZE as i32,
+                )),
+                glyphs: HashMap::new(),
+                base_font,
+                sized_fonts,
+                line_metrics,
+            })
+        }
+
+        fn sized_font(&mut self, size_tenths: u16) -> &CTFont {
+            if !self.sized_fonts.contains_key(&size_tenths) {
+                let size = (size_tenths as f64 / 10.0) * self.scale;
+                let font = unsafe {
+                    self.base_font
+                        .copy_with_attributes(size, std::ptr::null(), None)
+                };
+                let ascent = unsafe { font.ascent() } as f32;
+                let descent = unsafe { font.descent() } as f32;
+                let leading = unsafe { font.leading() } as f32;
+                self.line_metrics
+                    .insert(size_tenths, (ascent, descent, leading));
+                self.sized_fonts.insert(size_tenths, font);
+            }
+            &self.sized_fonts[&size_tenths]
+        }
+
+        pub fn line_height(&mut self, size_tenths: u16) -> f32 {
+            self.sized_font(size_tenths);
+            let (a, d, l) = self.line_metrics[&size_tenths];
+            (a + d + l).ceil()
+        }
+
+        pub fn ascent(&mut self, size_tenths: u16) -> f32 {
+            self.sized_font(size_tenths);
+            self.line_metrics[&size_tenths].0
+        }
+
+        pub fn descent(&mut self, size_tenths: u16) -> f32 {
+            self.sized_font(size_tenths);
+            self.line_metrics[&size_tenths].1
+        }
+
+        pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
+            let mut width = 0.0_f32;
+            for ch in text.chars() {
+                if let Some(entry) = self.get_or_rasterize(ch, size_tenths) {
+                    width += entry.advance;
+                }
+            }
+            width
+        }
+
+        pub fn get_or_rasterize(
+            &mut self,
+            ch: char,
+            size_tenths: u16,
+        ) -> Option<&ProportionalGlyphEntry> {
+            let key = (ch, size_tenths);
+            if !self.glyphs.contains_key(&key) {
+                self.rasterize(ch, size_tenths)?;
+            }
+            self.glyphs.get(&key)
+        }
+
+        fn rasterize(&mut self, ch: char, size_tenths: u16) -> Option<()> {
+            if ch as u32 > 0xFFFF {
+                return None;
+            }
+
+            let line_h = self.line_height(size_tenths);
+            let descent = self.descent(size_tenths);
+            let font = &self.sized_fonts[&size_tenths];
+
+            // ── Glyph ID ────────────────────────────────────────────────────
+            let chars: [u16; 1] = [ch as u16];
+            let mut glyph: [CGGlyph; 1] = [0];
+            unsafe {
+                font.glyphs_for_characters(
+                    NonNull::new(chars.as_ptr() as *mut _).unwrap(),
+                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
+                    1,
+                );
+            }
+
+            // ── Per-glyph advance ───────────────────────────────────────────
+            let mut adv = CGSize {
+                width: 0.0,
+                height: 0.0,
+            };
+            unsafe {
+                font.advances_for_glyphs(
+                    CTFontOrientation::Default,
+                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
+                    &mut adv,
+                    1,
+                );
+            }
+            let advance = adv.width as f32;
+
+            if advance <= 0.0 {
+                self.glyphs.insert(
+                    (ch, size_tenths),
+                    ProportionalGlyphEntry {
+                        uv_min: [0.0, 0.0],
+                        uv_max: [0.0, 0.0],
+                        advance,
+                        raster_w: 0,
+                        raster_h: 0,
+                    },
+                );
+                return Some(());
+            }
+
+            // Full line-height bitmap with shared baseline (like monospace).
+            let raster_h = line_h as usize;
+            let raster_w = (adv.width.ceil() as usize) + 4; // padding for smoothing
+
+            let mut pixels = vec![0u8; raster_w * raster_h];
+            {
+                let gray = CGColorSpace::new_device_gray()?;
+                let ctx = unsafe {
+                    CGBitmapContextCreate(
+                        pixels.as_mut_ptr() as *mut _,
+                        raster_w,
+                        raster_h,
+                        8,
+                        raster_w,
+                        Some(&gray),
+                        0,
+                    )
+                }?;
+
+                // Enable font smoothing for crisp, professional text.
+                CGContext::set_allows_font_smoothing(Some(&ctx), true);
+                CGContext::set_should_smooth_fonts(Some(&ctx), true);
+                CGContext::set_should_antialias(Some(&ctx), true);
+
+                let white: [CGFloat; 2] = [1.0, 1.0];
+                unsafe { CGContext::set_fill_color(Some(&ctx), white.as_ptr()) };
+
+                // Draw at shared baseline (CoreText Y-up: y=descent from bottom).
+                let pos = CGPoint {
+                    x: 2.0, // center in padding
+                    y: descent as f64,
+                };
+                unsafe {
+                    font.draw_glyphs(
+                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
+                        NonNull::new(&pos as *const _ as *mut _).unwrap(),
+                        1,
+                        &ctx,
+                    );
+                }
+            }
+
+            // ── Pack into atlas ─────────────────────────────────────────────
+            let alloc = self
+                .allocator
+                .allocate(Size::new(raster_w as i32, raster_h as i32))?;
+            let r = alloc.rectangle;
+            let (ax, ay) = (r.min.x as usize, r.min.y as usize);
+
+            unsafe {
+                self.texture
+                    .replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                        MTLRegion {
+                            origin: MTLOrigin { x: ax, y: ay, z: 0 },
+                            size: MTLSize {
+                                width: raster_w,
+                                height: raster_h,
+                                depth: 1,
+                            },
+                        },
+                        0,
+                        NonNull::new(pixels.as_ptr() as *mut core::ffi::c_void).unwrap(),
+                        raster_w,
+                    );
+            }
+
+            let s = PROP_ATLAS_SIZE as f32;
+            self.glyphs.insert(
+                (ch, size_tenths),
+                ProportionalGlyphEntry {
+                    uv_min: [ax as f32 / s, ay as f32 / s],
+                    uv_max: [
+                        (ax + raster_w) as f32 / s,
+                        (ay + raster_h) as f32 / s,
+                    ],
+                    advance,
+                    raster_w,
+                    raster_h,
                 },
             );
             Some(())

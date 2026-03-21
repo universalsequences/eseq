@@ -7,7 +7,8 @@ use std::sync::Arc;
 use crate::audio::register_audio_natives;
 use crate::host::{BufferId, HostCommand};
 use crate::layout::{
-    LayoutEngine, LayoutNode, format_layout_tree_lines, reuse_layout_node, same_layout_geometry,
+    LayoutEngine, LayoutNode, TextMeasurer, format_layout_tree_lines, reuse_layout_node,
+    same_layout_geometry,
 };
 use crate::reactive::ReactiveRegistry;
 use crate::vm::{VM, Value, register_core_natives};
@@ -52,6 +53,7 @@ pub(crate) struct RuntimeBridgeState {
     pub current_line_text: String,
     pub buffer_names: Vec<String>,
     pub pending_cycle_view_mode: bool,
+    pub pending_set_view_mode: Option<String>,
     pub current_view_mode: String,
     // Tiling operations
     pub pending_split_right: bool,
@@ -227,6 +229,10 @@ impl NativeContext {
         self.shared.borrow_mut().pending_cycle_view_mode = true;
     }
 
+    pub fn set_view_mode(&mut self, mode: String) {
+        self.shared.borrow_mut().pending_set_view_mode = Some(mode);
+    }
+
     pub fn current_view_mode(&self) -> String {
         self.shared.borrow().current_view_mode.clone()
     }
@@ -248,6 +254,9 @@ pub struct Runtime {
     layout_cols: u16,
     layout_rows: u16,
     layout_aspect: f32,
+    layout_cell_w: f32,
+    layout_cell_h: f32,
+    text_measurer: Option<Box<dyn TextMeasurer>>,
 }
 
 impl Default for Runtime {
@@ -278,7 +287,12 @@ impl Runtime {
             layout_cols: 80,
             layout_rows: 24,
             layout_aspect: 1.0,
+            layout_cell_w: 1.0,
+            layout_cell_h: 1.0,
+            text_measurer: None,
         };
+        runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
+        crate::theme::set_current(crate::theme::default_theme());
         register_audio_natives(&mut runtime);
         runtime
     }
@@ -346,6 +360,7 @@ impl Runtime {
         }
         let result = self.vm.eval_str(src);
         if result.is_ok() {
+            self.sync_theme_from_vm();
             self.invalidate_symbol_cache();
             self.flush_widget_trees();
         }
@@ -354,6 +369,9 @@ impl Runtime {
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
         self.vm.set_global_value(name, value);
+        if name == "THEME" {
+            self.sync_theme_from_vm();
+        }
         self.invalidate_symbol_cache();
     }
 
@@ -368,11 +386,17 @@ impl Runtime {
         } else {
             self.vm.writable_reactive_namespaces.remove(name);
         }
+        if name == "THEME" {
+            self.sync_theme_from_vm();
+        }
         self.invalidate_symbol_cache();
     }
 
     pub fn set_reactive(&mut self, namespace: &str, field: &str, value: Value) {
         self.reactive_registry.set(namespace, field, value);
+        if namespace == "THEME" {
+            self.sync_theme_from_registry();
+        }
     }
 
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
@@ -391,6 +415,23 @@ impl Runtime {
 
     pub fn layout_aspect(&self) -> f32 {
         self.layout_aspect
+    }
+
+    /// Set the text measurer for proportional font layout (Metal backend).
+    /// Also stores cell dimensions for pixel↔cell conversion.
+    pub fn set_text_measurer(
+        &mut self,
+        measurer: Box<dyn TextMeasurer>,
+        cell_w: f32,
+        cell_h: f32,
+    ) {
+        self.text_measurer = Some(measurer);
+        self.layout_cell_w = cell_w;
+        self.layout_cell_h = cell_h;
+        // Force relayout with the new measurer.
+        self.current_layout = None;
+        self.dirty_widget_ids.clear();
+        self.relayout_current_tree();
     }
 
     pub fn set_layout_aspect(&mut self, aspect: f32) {
@@ -412,6 +453,7 @@ impl Runtime {
         self.vm.set_current_effect_owner(current_buffer_id);
         let result = self.vm.invoke(callable, args);
         if result.is_ok() {
+            self.sync_theme_from_vm();
             self.flush_widget_trees();
         }
         result
@@ -426,7 +468,20 @@ impl Runtime {
         }
 
         if self.vm.apply_reactive_changes(dirty).is_ok() {
+            self.sync_theme_from_vm();
             self.flush_widget_trees();
+        }
+    }
+
+    fn sync_theme_from_vm(&mut self) {
+        if let Some(value) = self.vm.global_value("THEME") {
+            crate::theme::sync_from_value(&value);
+        }
+    }
+
+    fn sync_theme_from_registry(&mut self) {
+        if let Some(value) = self.reactive_registry.namespace_value("THEME") {
+            crate::theme::sync_from_value(&value);
         }
     }
 
@@ -626,6 +681,10 @@ impl Runtime {
         pending
     }
 
+    pub(crate) fn take_pending_set_view_mode(&mut self) -> Option<String> {
+        self.shared.borrow_mut().pending_set_view_mode.take()
+    }
+
     pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {
         std::mem::take(&mut self.rendered_layouts)
     }
@@ -711,7 +770,18 @@ impl Runtime {
             }
             return;
         }
-        let engine = LayoutEngine::new(self.layout_cols, self.layout_rows, self.layout_aspect);
+        let engine = if let Some(measurer) = self.text_measurer.as_deref() {
+            LayoutEngine::with_text_measurer(
+                self.layout_cols,
+                self.layout_rows,
+                self.layout_aspect,
+                measurer,
+                self.layout_cell_w,
+                self.layout_cell_h,
+            )
+        } else {
+            LayoutEngine::new(self.layout_cols, self.layout_rows, self.layout_aspect)
+        };
         if let Some(layout) = engine.layout(tree) {
             let geometry_changed = self
                 .current_layout

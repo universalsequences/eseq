@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent};
 
 use crate::layout::LayoutNode;
 use crate::widget_render::{WidgetKeyEvent, handle_event, map_key_event};
@@ -8,7 +8,8 @@ use super::Editor;
 impl Editor {
     pub(super) fn try_click_focusable_widget(
         &mut self,
-        mouse: MouseEvent,
+        precise_col: f32,
+        precise_row: f32,
         content_col: u16,
         content_row: u16,
     ) -> bool {
@@ -18,12 +19,12 @@ impl Editor {
         let Some(layout) = self.runtime.current_layout.clone() else {
             return false;
         };
-        if mouse.column < content_col || mouse.row < content_row {
+        if precise_col < content_col as f32 || precise_row < content_row as f32 {
             return false;
         }
         let scroll_top = self.active_leaf().widget_scroll_top as f32;
-        let local_row = (mouse.row - content_row) as f32 + scroll_top;
-        let local_col = (mouse.column - content_col) as f32;
+        let local_row = precise_row - content_row as f32 + scroll_top;
+        let local_col = precise_col - content_col as f32;
 
         // Find the focusable widget at this position
         let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();

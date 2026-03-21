@@ -1,6 +1,6 @@
 use super::{Align, Justify, WidgetDefinition, distribute_justify, resolve_align, resolve_justify};
 use crate::layout::{
-    Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num, shrink_constraints,
+    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, shrink_constraints,
 };
 use crate::vm::Value;
 
@@ -26,6 +26,7 @@ impl WidgetDefinition for VStackWidget {
         node: &Value,
         children: &[Value],
         constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
@@ -113,7 +114,7 @@ impl WidgetDefinition for VStackWidget {
                     size.width
                 };
                 let col = match align {
-                    Align::Start | Align::Stretch => area.col + padding,
+                    Align::Start | Align::Stretch | Align::Baseline => area.col + padding,
                     Align::Center => area.col + padding + (inner_width - child_width) / 2.0,
                     Align::End => area.col + padding + inner_width - child_width,
                 };

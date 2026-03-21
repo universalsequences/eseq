@@ -53,18 +53,13 @@
 
 (effect
   (v-stack
-    (label "waveform demo")
-    (label (fmt "last action: {}" last-action))
+    
     (if sample
       (v-stack
-        (label
-          (fmt
-            "loaded sample.wav: {} frames @ {} Hz, duration {:.3}s"
-            sample.frames
-            sample.sample-rate
-            sample.duration))
+        :gap 2
+        (label "Waveform" :font-size 32)
         (waveform
-          :height 14
+          :height 6
           :header-height 0.5
           :focusable true
           :buffer sample

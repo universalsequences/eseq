@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
 use crate::backend::{Cell, CellStyle, Color};
-use crate::layout::{Constraints, LayoutNode, Rect, Size, get_map};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, get_map};
 use crate::theme;
 use crate::vm::Value;
 
@@ -29,6 +29,9 @@ pub enum Align {
     Center,
     End,
     Stretch,
+    /// Align children by their text baseline. Non-text widgets align to the
+    /// bottom of the baseline row.
+    Baseline,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +55,7 @@ pub fn resolve_align(node: &Value, key: &str, default: Align) -> Align {
             "center" => Align::Center,
             "end" => Align::End,
             "stretch" => Align::Stretch,
+            "baseline" => Align::Baseline,
             _ => default,
         },
         _ => default,
@@ -161,6 +165,8 @@ pub struct WidgetInstance {
     pub orientation: f32,
     pub color_a: [f32; 4],
     pub color_b: [f32; 4],
+    pub color_c: [f32; 4],
+    pub color_d: [f32; 4],
     pub corner_radius: f32,
     pub pixel_aspect: f32,
 }
@@ -204,6 +210,19 @@ pub struct MetalGlyphRunPrimitive {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
+pub struct MetalProportionalTextPrimitive {
+    /// Position in cell-space (fractional allowed).
+    pub row: f32,
+    pub col: f32,
+    pub text: String,
+    /// Font size in points.
+    pub font_size: f32,
+    pub fg: Color,
+    pub bg: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub struct MetalWaveformPrimitive {
     pub rect: Rect,
     pub sample_key: String,
@@ -225,6 +244,7 @@ pub enum MetalPrimitive {
     Rect(MetalRectPrimitive),
     Quad(MetalQuadPrimitive),
     GlyphRun(MetalGlyphRunPrimitive),
+    ProportionalText(MetalProportionalTextPrimitive),
     Waveform(MetalWaveformPrimitive),
     WidgetInstance {
         widget_type: String,
@@ -290,6 +310,7 @@ pub trait WidgetDefinition: Sync {
         node: &Value,
         children: &[Value],
         constraints: Constraints,
+        ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size>;
     fn layout_children(
@@ -461,6 +482,18 @@ fn collect_metal_primitives_recursive(
     _max_rows: u16,
     primitives: &mut Vec<MetalPrimitive>,
 ) {
+    // If a container node is focused, emit a background highlight rect.
+    // This renders before children (correct z-order: highlight under content).
+    if node.focusable
+        && viewport.focused_widget_id == Some(node.widget_id)
+        && is_layout_widget_type(&node.widget_type)
+    {
+        primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
+            rect: node.rect,
+            color: crate::theme::STATUS_BG(),
+        }));
+    }
+
     // No scroll adjustment or clipping here — the Metal backend applies
     // scroll offsets via offset_primitive and clips via scissor rects.
     primitives.extend(widget_primitives_for_node(node, viewport));
@@ -555,18 +588,7 @@ pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -
 
 pub fn resolve_named_color(props: &HashMap<String, Value>, key: &str, default: Color) -> Color {
     match props.get(key) {
-        Some(Value::String(name)) | Some(Value::Keyword(name)) => match name.as_str() {
-            "primary" | "accent" => theme::GREEN,
-            "secondary" => theme::RED,
-            "red" => theme::RED,
-            "green" | "cyan" => theme::GREEN,
-            "yellow" | "orange" => theme::YELLOW,
-            "blue" | "purple" => theme::BLUE,
-            "magenta" => theme::MAGENTA,
-            "white" => theme::WHITE,
-            "gray" | "grey" | "dim" => theme::BRIGHT_BLACK,
-            _ => default,
-        },
+        Some(value) => theme::parse_color_value(value).unwrap_or(default),
         _ => default,
     }
 }

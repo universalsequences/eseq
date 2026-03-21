@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
 use super::{
-    CellBuffer, MetalGlyphRunPrimitive, MetalPrimitive, MetalRectPrimitive, WidgetDefinition,
-    resolve_named_color, styled_cell,
+    CellBuffer, MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive,
+    WidgetDefinition, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
 use crate::layout::{
-    Constraints, Rect, Size, f64_to_f32, get_prop_num, get_prop_str, usize_to_f32,
+    Constraints, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_prop_str, usize_to_f32,
 };
 use crate::theme;
 use crate::vm::Value;
@@ -16,7 +16,7 @@ pub struct LabelWidget;
 pub static LABEL_WIDGET: LabelWidget = LabelWidget;
 
 fn resolve_color(props: &HashMap<String, Value>) -> Color {
-    resolve_named_color(props, "color", theme::WIDGET_LABEL_FG)
+    resolve_named_color(props, "color", theme::WIDGET_LABEL_FG())
 }
 
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -52,7 +52,7 @@ impl WidgetDefinition for LabelWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["text", "width"]
+        &["text", "width", "font-size"]
     }
 
     fn measure(
@@ -60,8 +60,29 @@ impl WidgetDefinition for LabelWidget {
         node: &Value,
         _children: &[Value],
         _constraints: Constraints,
+        ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
+        // If a TextMeasurer is available (Metal backend), use proportional measurement.
+        if let Some(measurer) = ctx.text_measurer {
+            let text = get_prop_str(node, "text").unwrap_or_default();
+            let font_size = get_prop_num(node, "font-size")
+                .map(f64_to_f32)
+                .unwrap_or(ctx.inherited_font_size);
+            let px_width = if let Some(explicit_w) = get_prop_num(node, "width") {
+                // Explicit width is in cell units, convert to pixels.
+                f64_to_f32(explicit_w) * ctx.cell_w
+            } else {
+                measurer.measure_text_px(&text, font_size)
+            };
+            let px_height = measurer.line_height_px(font_size);
+            return Some(Size {
+                width: px_width / ctx.cell_w,
+                height: px_height / ctx.cell_h,
+            });
+        }
+
+        // TUI fallback: monospace char-count measurement.
         Some(Size {
             width: get_prop_num(node, "width")
                 .map(f64_to_f32)
@@ -90,19 +111,28 @@ impl WidgetDefinition for LabelWidget {
         };
         let fg = resolve_color(&node.props);
         let bg = if viewport.focused_widget_id == Some(node.widget_id) && node.focusable {
-            theme::STATUS_BG
+            theme::STATUS_BG()
         } else {
-            theme::BG
+            theme::BG()
         };
+        let font_size = node
+            .props
+            .get("font-size")
+            .and_then(|v| match v {
+                Value::Number(n) => Some(*n as f32),
+                _ => None,
+            })
+            .unwrap_or(14.0);
         vec![
             MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
                 color: bg,
             }),
-            MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
+            MetalPrimitive::ProportionalText(MetalProportionalTextPrimitive {
                 row: node.rect.row,
-                col: node.rect.col.round() as i32,
+                col: node.rect.col,
                 text: text.clone(),
+                font_size,
                 fg,
                 bg,
             }),

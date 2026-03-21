@@ -11,12 +11,13 @@ mod inner {
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
     use objc2_app_kit::NSView;
-    use objc2_core_foundation::CGSize;
+    use objc2_core_foundation::{CFRetained, CGSize};
+    use objc2_core_text::{CTFont, CTFontUIFontType};
     use objc2_foundation::NSString;
     use objc2_metal::{
-        MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
-        MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat,
-        MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+        MTLBlendFactor, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
+        MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction,
+        MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
         MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLScissorRect,
         MTLStoreAction, MTLTexture,
     };
@@ -36,10 +37,104 @@ mod inner {
 
     use crate::audio::sample::get_registered_sample;
     use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
-    use crate::glyph_atlas::GlyphAtlas;
-    use crate::layout::Rect;
+    use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas};
+    use crate::layout::{Rect, TextMeasurer};
     use crate::theme;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
+
+    /// Lightweight TextMeasurer that queries font metrics from CoreText
+    /// without needing a GPU atlas. Used by the layout engine for proportional text.
+    pub(crate) struct PropTextMeasurer {
+        base_font: CFRetained<CTFont>,
+        sized_fonts: std::cell::RefCell<HashMap<u16, CFRetained<CTFont>>>,
+        /// Display scale factor for logical → physical point conversion.
+        scale: f64,
+    }
+
+    impl PropTextMeasurer {
+        pub(crate) fn new(base_font_size: f64, scale: f64) -> Option<Self> {
+            let base_font = unsafe {
+                CTFont::new_ui_font_for_language(
+                    CTFontUIFontType::System,
+                    base_font_size,
+                    None,
+                )
+            }?;
+            Some(Self {
+                base_font,
+                sized_fonts: std::cell::RefCell::new(HashMap::new()),
+                scale,
+            })
+        }
+
+        fn sized_font(&self, size_tenths: u16) -> CFRetained<CTFont> {
+            let mut cache = self.sized_fonts.borrow_mut();
+            if let Some(font) = cache.get(&size_tenths) {
+                return font.clone();
+            }
+            // Convert logical points to physical points.
+            let size = (size_tenths as f64 / 10.0) * self.scale;
+            let font = unsafe {
+                self.base_font
+                    .copy_with_attributes(size, std::ptr::null(), None)
+            };
+            cache.insert(size_tenths, font.clone());
+            font
+        }
+    }
+
+    impl TextMeasurer for PropTextMeasurer {
+        fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
+            use objc2_core_foundation::CGSize;
+            use objc2_core_graphics::CGGlyph;
+            use objc2_core_text::CTFontOrientation;
+
+            if text.is_empty() {
+                return 0.0;
+            }
+
+            let size_tenths = (font_size * 10.0).round() as u16;
+            let font = self.sized_font(size_tenths);
+            let mut total = 0.0_f32;
+            for ch in text.chars() {
+                if ch as u32 > 0xFFFF {
+                    continue;
+                }
+                let chars: [u16; 1] = [ch as u16];
+                let mut glyph: [CGGlyph; 1] = [0];
+                unsafe {
+                    font.glyphs_for_characters(
+                        NonNull::new(chars.as_ptr() as *mut _).unwrap(),
+                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
+                        1,
+                    );
+                }
+                let mut adv = CGSize {
+                    width: 0.0,
+                    height: 0.0,
+                };
+                unsafe {
+                    font.advances_for_glyphs(
+                        CTFontOrientation::Default,
+                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
+                        &mut adv,
+                        1,
+                    );
+                }
+                total += adv.width as f32;
+            }
+            total
+        }
+
+        fn line_height_px(&self, font_size: f32) -> f32 {
+            let size_tenths = (font_size * 10.0).round() as u16;
+            let font = self.sized_font(size_tenths);
+            let ascent = unsafe { font.ascent() } as f32;
+            let descent = unsafe { font.descent() } as f32;
+            let leading = unsafe { font.leading() } as f32;
+            (ascent + descent + leading).ceil()
+        }
+    }
 
     // ── Shader source ─────────────────────────────────────────────────────────
     //
@@ -87,6 +182,36 @@ fragment float4 frag(
 }
 "#;
 
+    /// Fragment shader for proportional text — identical to the main text shader
+    /// but uses bilinear filtering instead of nearest-neighbor. Proportional glyphs
+    /// land on sub-pixel boundaries, so linear filtering produces smooth edges.
+    /// Fragment shader for proportional text. Uses linear filtering and alpha
+    /// blending so that glyph quads overlay each other without clipping.
+    /// The background rect is drawn separately; glyphs are composited on top.
+    const PROP_FRAG_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct Varyings {
+    float4 position [[position]];
+    float2 uv;
+    float4 fg;
+    float4 bg;
+};
+
+fragment float4 prop_frag(
+    Varyings              in    [[stage_in]],
+    texture2d<float>      atlas [[texture(0)]])
+{
+    constexpr sampler s(filter::linear);
+    float coverage = atlas.sample(s, in.uv).r;
+    // Output foreground color with coverage as alpha.
+    // The pipeline uses standard alpha blending (srcAlpha, 1-srcAlpha)
+    // so glyphs composite over the background rect without clipping neighbors.
+    return float4(in.fg.rgb, coverage);
+}
+"#;
+
     // ── Widget shader source ────────────────────────────────────────────────
     //
     // SDF-based rendering for sliders and toggles. Each widget is one instanced
@@ -106,6 +231,8 @@ struct WidgetInstance {
     float         orientation;
     packed_float4 color_a;
     packed_float4 color_b;
+    packed_float4 color_c;
+    packed_float4 color_d;
     float         corner_radius;
     float         pixel_aspect;
 };
@@ -116,6 +243,8 @@ struct WidgetVaryings {
     float  value_t    [[flat]];
     float4 color_a    [[flat]];
     float4 color_b    [[flat]];
+    float4 color_c    [[flat]];
+    float4 color_d    [[flat]];
     float  aspect     [[flat]];
 };
 
@@ -158,6 +287,8 @@ vertex WidgetVaryings widget_vert(
     out.value_t = inst.value_t;
     out.color_a = inst.color_a;
     out.color_b = inst.color_b;
+    out.color_c = inst.color_c;
+    out.color_d = inst.color_d;
     out.aspect = inst.pixel_aspect;
     return out;
 }
@@ -412,14 +543,17 @@ fragment float4 waveform_frag(
         device: Retained<ProtocolObject<dyn MTLDevice>>,
         command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
         layer: Retained<CAMetalLayer>,
-        // Text render pipeline (compiled from SHADER_SRC)
+        // Text render pipeline (compiled from SHADER_SRC, nearest-neighbor filtering)
         pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        // Proportional text pipeline (linear filtering for sub-pixel positioned glyphs)
+        prop_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         // Per-widget-type GPU pipelines (hslider, vslider, toggle)
         widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
-        // Glyph atlas
+        // Glyph atlases
         atlas: Option<GlyphAtlas>,
+        prop_atlas: Option<ProportionalGlyphAtlas>,
         cached_text_key: Option<u64>,
         cached_text_quads: Vec<Vertex>,
         cached_text_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
@@ -437,6 +571,7 @@ fragment float4 waveform_frag(
         cursor_cell: (u16, u16),
         cursor_pos: (f32, f32),
         last_precise_mouse: Option<(f32, f32)>,
+        last_window_bg: Option<Color>,
     }
 
     impl MetalBackend {
@@ -452,10 +587,12 @@ fragment float4 waveform_frag(
                 command_queue,
                 layer,
                 pipeline: None,
+                prop_pipeline: None,
                 widget_pipelines: HashMap::new(),
                 waveform_pipeline: None,
                 waveform_buffers: HashMap::new(),
                 atlas: None,
+                prop_atlas: None,
                 cached_text_key: None,
                 cached_text_quads: Vec::new(),
                 cached_text_buffer: None,
@@ -472,6 +609,7 @@ fragment float4 waveform_frag(
                 cursor_cell: (0, 0),
                 cursor_pos: (0.0, 0.0),
                 last_precise_mouse: None,
+                last_window_bg: None,
             })
         }
 
@@ -487,11 +625,66 @@ fragment float4 waveform_frag(
             self.pending_scroll.pop_front()
         }
 
+        /// Create a TextMeasurer for the proportional font. Called once after
+        /// atlas initialization to hand off to the layout engine.
+        pub fn create_text_measurer(&self) -> Option<Box<dyn TextMeasurer>> {
+            let scale = self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor())
+                .unwrap_or(1.0);
+            let measurer = PropTextMeasurer::new(14.0 * scale, scale)?;
+            Some(Box::new(measurer))
+        }
+
         pub fn cell_dimensions(&self) -> (f32, f32) {
             self.atlas
                 .as_ref()
                 .map(|a| (a.cell_w.max(1) as f32, a.cell_h.max(1) as f32))
                 .unwrap_or((8.0, 16.0))
+        }
+
+        fn sync_window_theme(&mut self) {
+            let Some(window) = self.window.as_ref() else {
+                return;
+            };
+
+            let bg = theme::BG();
+            if self.last_window_bg == Some(bg) {
+                return;
+            }
+            self.last_window_bg = Some(bg);
+
+            if let Ok(handle) = window.window_handle()
+                && let RawWindowHandle::AppKit(appkit) = handle.as_raw()
+            {
+                unsafe {
+                    use objc2_app_kit::{NSAppearance, NSAppearanceCustomization, NSColor};
+
+                    let ns_view = appkit.ns_view.as_ptr() as *mut NSView;
+                    let ns_view = &*ns_view;
+                    let ns_window = ns_view.window().expect("view must have a window");
+                    let color = NSColor::colorWithRed_green_blue_alpha(
+                        bg.r as f64,
+                        bg.g as f64,
+                        bg.b as f64,
+                        1.0,
+                    );
+                    ns_window.setBackgroundColor(Some(&color));
+                    ns_window.setTitlebarAppearsTransparent(true);
+
+                    let appearance_name = if color_luma(bg) > 0.55 {
+                        "NSAppearanceNameVibrantLight"
+                    } else {
+                        "NSAppearanceNameVibrantDark"
+                    };
+                    if let Some(appearance) =
+                        NSAppearance::appearanceNamed(&NSString::from_str(appearance_name))
+                    {
+                        ns_window.setAppearance(Some(&appearance));
+                    }
+                }
+            }
         }
 
         fn ensure_waveform_buffer(
@@ -587,6 +780,8 @@ fragment float4 waveform_frag(
 
         /// Render a tiled frame with per-tile scissor clipping.
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
+            self.sync_window_theme();
+
             let Some(pipeline) = self.pipeline.clone() else {
                 return Ok(());
             };
@@ -617,9 +812,9 @@ fragment float4 waveform_frag(
             attach.setTexture(Some(&texture));
             attach.setLoadAction(MTLLoadAction::Clear);
             attach.setClearColor(MTLClearColor {
-                red: theme::BG.r as f64,
-                green: theme::BG.g as f64,
-                blue: theme::BG.b as f64,
+                red: theme::BG().r as f64,
+                green: theme::BG().g as f64,
+                blue: theme::BG().b as f64,
                 alpha: 1.0,
             });
             attach.setStoreAction(MTLStoreAction::Store);
@@ -742,6 +937,23 @@ fragment float4 waveform_frag(
                         build_widget_primitive_quads(&offset_prims, atlas, vp_w, vp_h)
                     };
                     draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
+
+                    // Proportional text: separate atlas + linear-filtering pipeline.
+                    if let (Some(prop_atlas), Some(prop_pipe)) =
+                        (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+                    {
+                        let prop_verts = build_proportional_text_quads(
+                            &offset_prims,
+                            prop_atlas,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                        let prop_tex = prop_atlas.texture.clone();
+                        draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
+                    }
+
                     if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
                         let waveforms = collect_waveform_primitives(&offset_prims);
                         self.draw_waveform_primitives(
@@ -796,8 +1008,7 @@ fragment float4 waveform_frag(
                     });
                     let mut status_verts = Vec::new();
                     let status_row = row_off + tile_h.saturating_sub(1);
-                    let status_fg = to_rgba(theme::STATUS_FG);
-                    let status_bg = to_rgba(theme::STATUS_BG);
+                    let status_bg = to_rgba(theme::STATUS_BG());
                     let sx0 = ndc_x(col_off as f32 * cell_w);
                     let sx1 = ndc_x((col_off + tile_w) as f32 * cell_w);
                     let sy0 = ndc_y(status_row as f32 * cell_h);
@@ -816,9 +1027,25 @@ fragment float4 waveform_frag(
                         sb(sx0, sy1),
                         sb(sx1, sy1),
                     ]);
-                    for (i, ch) in tile.frame.status.chars().enumerate() {
+                    push_horizontal_rule(
+                        &mut status_verts,
+                        col_off as f32 * cell_w,
+                        status_row as f32 * cell_h,
+                        tile_w as f32 * cell_w,
+                        1.0,
+                        theme::STATUS_EDGE(),
+                        vp_w,
+                        vp_h,
+                    );
+                    for (i, cell) in tile.frame.status_cells.iter().enumerate() {
                         let ch_col = col_off + i;
-                        if ch_col >= col_off + tile_w || ch == ' ' {
+                        if ch_col >= col_off + tile_w {
+                            continue;
+                        }
+                        let fg = to_rgba(cell.style.fg);
+                        let bg = to_rgba(cell.style.bg.unwrap_or(theme::STATUS_BG()));
+                        let ch = cell.ch;
+                        if ch == ' ' {
                             continue;
                         }
                         {
@@ -832,8 +1059,8 @@ fragment float4 waveform_frag(
                                     cell_h,
                                     vp_w,
                                     vp_h,
-                                    fg: status_fg,
-                                    bg: status_bg,
+                                    fg,
+                                    bg,
                                 },
                                 &mut status_verts,
                             );
@@ -845,7 +1072,7 @@ fragment float4 waveform_frag(
                 // ── Thin pixel borders (drawn AFTER content, on top) ─────────
                 if has_multiple_tiles {
                     let border_color = if tile.is_active {
-                        theme::PURPLE
+                        theme::PURPLE()
                     } else {
                         Color::DARK_GRAY
                     };
@@ -921,9 +1148,9 @@ fragment float4 waveform_frag(
                 if let Some(tile) = tiled.tiles.iter().find(|t| t.is_active) {
                     let col_off = tile.rect.col.round() as usize;
                     let row_off = tile.rect.row.round() as usize;
-                    let sel_bg = to_rgba(theme::COMP_SELECTED_BG);
-                    let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG);
-                    let pop_fg = to_rgba(theme::COMP_FG);
+                    let sel_bg = to_rgba(theme::COMP_SELECTED_BG());
+                    let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
+                    let pop_fg = to_rgba(theme::COMP_FG());
                     let popup_col = col_off + comp.anchor.1;
                     let popup_row = row_off + comp.anchor.0 + 1;
                     let label_w = comp
@@ -1008,24 +1235,6 @@ fragment float4 waveform_frag(
                     let ns_view = &*ns_view;
                     ns_view.setWantsLayer(true);
                     ns_view.setLayer(Some(&self.layer));
-
-                    // Dark titlebar matching app background
-                    use objc2_app_kit::{NSAppearance, NSAppearanceCustomization, NSColor};
-                    let ns_window = ns_view.window().expect("view must have a window");
-                    let bg = crate::theme::BG;
-                    let color = NSColor::colorWithRed_green_blue_alpha(
-                        bg.r as f64,
-                        bg.g as f64,
-                        bg.b as f64,
-                        1.0,
-                    );
-                    ns_window.setBackgroundColor(Some(&color));
-                    ns_window.setTitlebarAppearsTransparent(true);
-                    if let Some(appearance) = NSAppearance::appearanceNamed(&NSString::from_str(
-                        "NSAppearanceNameVibrantDark",
-                    )) {
-                        ns_window.setAppearance(Some(&appearance));
-                    }
                 }
             }
             // Set drawableSize to physical pixels so the Metal texture is full-res
@@ -1036,6 +1245,7 @@ fragment float4 waveform_frag(
             });
             self.event_loop = Some(event_loop);
             self.window = Some(window);
+            self.sync_window_theme();
 
             // ── Glyph atlas ──────────────────────────────────────────────────
             let scale = self
@@ -1044,6 +1254,7 @@ fragment float4 waveform_frag(
                 .map(|w| w.scale_factor())
                 .unwrap_or(1.0);
             self.atlas = GlyphAtlas::new(&self.device, "JetBrainsMono-Regular", 14.0 * scale);
+            self.prop_atlas = ProportionalGlyphAtlas::new(&self.device, 14.0 * scale, scale);
 
             // ── Render pipeline ──────────────────────────────────────────────
             let src = NSString::from_str(SHADER_SRC);
@@ -1070,6 +1281,43 @@ fragment float4 waveform_frag(
                     .newRenderPipelineStateWithDescriptor_error(&desc)
                     .map_err(|_| BackendError::MetalError)?,
             );
+
+            // ── Proportional text pipeline (linear filtering) ────────────────
+            {
+                // Compile the proportional fragment shader alongside the shared
+                // vertex shader (reuse from the main library).
+                // Compile PROP_FRAG_SRC as its own library,
+                // reuse the vertex function from the main library.
+                let prop_lib = self
+                    .device
+                    .newLibraryWithSource_options_error(&NSString::from_str(PROP_FRAG_SRC), None)
+                    .map_err(|_| BackendError::MetalError)?;
+                let prop_frag_fn = prop_lib
+                    .newFunctionWithName(&NSString::from_str("prop_frag"))
+                    .ok_or(BackendError::MetalError)?;
+
+                let prop_desc = MTLRenderPipelineDescriptor::new();
+                prop_desc.setVertexFunction(Some(&vert_fn));
+                prop_desc.setFragmentFunction(Some(&prop_frag_fn));
+                let prop_attach =
+                    unsafe { prop_desc.colorAttachments().objectAtIndexedSubscript(0) };
+                prop_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                // Enable alpha blending: src * srcAlpha + dst * (1 - srcAlpha).
+                // This lets glyph quads overlap without clipping each other.
+                prop_attach.setBlendingEnabled(true);
+                prop_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                prop_attach
+                    .setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                prop_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                prop_attach
+                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+
+                self.prop_pipeline = Some(
+                    self.device
+                        .newRenderPipelineStateWithDescriptor_error(&prop_desc)
+                        .map_err(|_| BackendError::MetalError)?,
+                );
+            }
 
             // ── Widget render pipelines (one per widget type) ────────────────
             // Each widget gets its own fragment shader but shares the vertex
@@ -1345,6 +1593,8 @@ fragment float4 waveform_frag(
         }
 
         fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError> {
+            self.sync_window_theme();
+
             let (Some(pipeline), Some(atlas)) = (&self.pipeline, &mut self.atlas) else {
                 return Ok(());
             };
@@ -1422,9 +1672,9 @@ fragment float4 waveform_frag(
             attach.setTexture(Some(&texture));
             attach.setLoadAction(MTLLoadAction::Clear);
             attach.setClearColor(MTLClearColor {
-                red: theme::BG.r as f64,
-                green: theme::BG.g as f64,
-                blue: theme::BG.b as f64,
+                red: theme::BG().r as f64,
+                green: theme::BG().g as f64,
+                blue: theme::BG().b as f64,
                 alpha: 1.0,
             });
             attach.setStoreAction(MTLStoreAction::Store);
@@ -1460,6 +1710,41 @@ fragment float4 waveform_frag(
                         0,
                         primitive_quads.len() as _,
                     );
+                }
+            }
+
+            // Proportional text: separate atlas + linear-filtering pipeline.
+            if let (Some(prop_atlas), Some(prop_pipe)) =
+                (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+            {
+                let prop_verts = build_proportional_text_quads(
+                    &primitive_scene,
+                    prop_atlas,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+                if !prop_verts.is_empty() {
+                    let byte_len = std::mem::size_of_val(prop_verts.as_slice());
+                    if let Some(pvbuf) = unsafe {
+                        self.device.newBufferWithBytes_length_options(
+                            NonNull::new(prop_verts.as_ptr() as *mut _).unwrap(),
+                            byte_len,
+                            MTLResourceOptions(0),
+                        )
+                    } {
+                        enc.setRenderPipelineState(prop_pipe);
+                        unsafe {
+                            enc.setVertexBuffer_offset_atIndex(Some(&pvbuf), 0, 0);
+                            enc.setFragmentTexture_atIndex(Some(&prop_atlas.texture), 0);
+                            enc.drawPrimitives_vertexStart_vertexCount(
+                                MTLPrimitiveType::Triangle,
+                                0,
+                                prop_verts.len() as _,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -1605,6 +1890,79 @@ fragment float4 waveform_frag(
         ]);
     }
 
+    /// Build vertices for proportional text primitives.
+    /// Each glyph is rendered as a separate quad with alpha blending.
+    fn build_proportional_text_quads(
+        primitives: &[widget_render::MetalPrimitive],
+        prop_atlas: &mut ProportionalGlyphAtlas,
+        mono_cell_w: f32,
+        mono_cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<Vertex> {
+        let mut verts = Vec::new();
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+
+        for prim in primitives {
+            let widget_render::MetalPrimitive::ProportionalText(run) = prim else {
+                continue;
+            };
+
+            let size_tenths = (run.font_size * 10.0).round() as u16;
+            let fg = run.fg.to_rgba();
+            let bg = [0.0, 0.0, 0.0, 0.0]; // Transparent — alpha blending handles bg
+
+            let base_x_px = run.col * mono_cell_w;
+            let base_y_px = run.row * mono_cell_h;
+            let mut pen_x = base_x_px;
+
+            for ch in run.text.chars() {
+                let Some(entry) = prop_atlas.get_or_rasterize(ch, size_tenths) else {
+                    continue;
+                };
+                let advance = entry.advance;
+
+                if entry.raster_w == 0 || entry.raster_h == 0 {
+                    pen_x += advance;
+                    continue;
+                }
+
+                let [u0, v0] = entry.uv_min;
+                let [u1, v1] = entry.uv_max;
+
+                // Glyph bitmap starts 2px before pen (padding), spans full line height.
+                let gx0 = pen_x - 2.0;
+                let gy0 = base_y_px;
+                let gx1 = gx0 + entry.raster_w as f32;
+                let gy1 = gy0 + entry.raster_h as f32;
+
+                let x0 = ndc_x(gx0);
+                let x1 = ndc_x(gx1);
+                let y0 = ndc_y(gy0);
+                let y1 = ndc_y(gy1);
+
+                let gv = |px, py, u, v| Vertex {
+                    position: [px, py],
+                    uv: [u, v],
+                    fg,
+                    bg,
+                };
+                verts.extend_from_slice(&[
+                    gv(x0, y0, u0, v0),
+                    gv(x0, y1, u0, v1),
+                    gv(x1, y0, u1, v0),
+                    gv(x1, y0, u1, v0),
+                    gv(x0, y1, u0, v1),
+                    gv(x1, y1, u1, v1),
+                ]);
+
+                pen_x += advance;
+            }
+        }
+        verts
+    }
+
     // ── Quad builder ──────────────────────────────────────────────────────────
 
     /// Convert a `RenderFrame` into a flat list of triangle vertices.
@@ -1653,12 +2011,12 @@ fragment float4 waveform_frag(
                 // Cursor inverts fg/bg; otherwise use cell style.
                 let (fg, bg) = if is_cursor {
                     let cell_fg = cell.style.fg;
-                    let cell_bg = cell.style.bg.unwrap_or(theme::BG);
+                    let cell_bg = cell.style.bg.unwrap_or(theme::BG());
                     (to_rgba(cell_bg), to_rgba(cell_fg))
                 } else {
                     (
                         to_rgba(cell.style.fg),
-                        to_rgba(cell.style.bg.unwrap_or(theme::BG)),
+                        to_rgba(cell.style.bg.unwrap_or(theme::BG())),
                     )
                 };
 
@@ -1708,8 +2066,7 @@ fragment float4 waveform_frag(
             // Skip status bar for offset tiles — handled by tiled renderer
             return verts;
         };
-        let status_fg = to_rgba(theme::STATUS_FG);
-        let status_bg = to_rgba(theme::STATUS_BG);
+        let status_bg = to_rgba(theme::STATUS_BG());
 
         // ── Completion popup ─────────────────────────────────────────────────
         if let Some(comp) = &frame.completion {
@@ -1723,9 +2080,9 @@ fragment float4 waveform_frag(
             let popup_col = comp.anchor.1;
             let popup_row = comp.anchor.0 + 1; // one row below the cursor
 
-            let sel_bg = to_rgba(theme::COMP_SELECTED_BG);
-            let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG);
-            let pop_fg = to_rgba(theme::COMP_FG);
+            let sel_bg = to_rgba(theme::COMP_SELECTED_BG());
+            let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
+            let pop_fg = to_rgba(theme::COMP_FG());
 
             let x0 = ndc_x(popup_col as f32 * cell_w);
             let x1 = ndc_x((popup_col + label_w) as f32 * cell_w);
@@ -1779,9 +2136,9 @@ fragment float4 waveform_frag(
                 let doc_col = popup_col + label_w + 1;
                 let doc_w: usize = 44;
                 let doc_h = comp.entries.len().max(4);
-                let doc_bg = to_rgba(theme::COMP_DOC_BG);
-                let doc_fg = to_rgba(theme::COMP_DOC_FG);
-                let title_fg = to_rgba(theme::COMP_DOC_TITLE_FG);
+                let doc_bg = to_rgba(theme::COMP_DOC_BG());
+                let doc_fg = to_rgba(theme::COMP_DOC_FG());
+                let title_fg = to_rgba(theme::COMP_DOC_TITLE_FG());
 
                 // Background for the whole panel.
                 let dx0 = ndc_x(doc_col as f32 * cell_w);
@@ -1876,15 +2233,28 @@ fragment float4 waveform_frag(
             sb(sx0, sy1),
             sb(sx1, sy1),
         ]);
+        push_horizontal_rule(
+            &mut verts,
+            0.0,
+            status_row as f32 * cell_h,
+            total_cols as f32 * cell_w,
+            1.0,
+            theme::STATUS_EDGE(),
+            vp_w,
+            vp_h,
+        );
 
-        // Render each character in frame.status.
-        for (col, ch) in frame.status.chars().enumerate() {
+        // Render each styled character in the status row.
+        for (col, cell) in frame.status_cells.iter().enumerate() {
             if col >= total_cols {
                 break;
             }
+            let ch = cell.ch;
             if ch == ' ' {
                 continue;
             }
+            let fg = to_rgba(cell.style.fg);
+            let bg = to_rgba(cell.style.bg.unwrap_or(theme::STATUS_BG()));
 
             rasterize_char(
                 atlas,
@@ -1895,8 +2265,8 @@ fragment float4 waveform_frag(
                     cell_h,
                     vp_w,
                     vp_h,
-                    fg: status_fg,
-                    bg: status_bg,
+                    fg,
+                    bg,
                 },
                 &mut verts,
             );
@@ -1945,6 +2315,8 @@ fragment float4 waveform_frag(
                         );
                     }
                 }
+                // Proportional text is rendered in a separate pass with its own atlas.
+                widget_render::MetalPrimitive::ProportionalText(_) => {}
                 widget_render::MetalPrimitive::Waveform(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
             }
@@ -1996,6 +2368,39 @@ fragment float4 waveform_frag(
         ]);
     }
 
+    fn push_horizontal_rule(
+        verts: &mut Vec<Vertex>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: Color,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let rgba = color.to_rgba();
+        let x0 = ndc_x(x);
+        let x1 = ndc_x(x + width);
+        let y0 = ndc_y(y);
+        let y1 = ndc_y(y + height);
+        let v = |px, py| Vertex {
+            position: [px, py],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        };
+        verts.extend_from_slice(&[
+            v(x0, y0),
+            v(x0, y1),
+            v(x1, y0),
+            v(x1, y0),
+            v(x0, y1),
+            v(x1, y1),
+        ]);
+    }
+
     fn push_solid_quad_vertices(
         quad: widget_render::MetalQuadPrimitive,
         cell_w: f32,
@@ -2025,6 +2430,10 @@ fragment float4 waveform_frag(
             v(x0, y1),
             v(x1, y1),
         ]);
+    }
+
+    fn color_luma(color: Color) -> f32 {
+        0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
     }
 
     fn group_widget_instances(
@@ -2074,6 +2483,11 @@ fragment float4 waveform_frag(
                 g.col += col_off;
                 g.row += row_off as f32;
                 widget_render::MetalPrimitive::GlyphRun(g)
+            }
+            widget_render::MetalPrimitive::ProportionalText(mut p) => {
+                p.col += col_off as f32;
+                p.row += row_off as f32;
+                widget_render::MetalPrimitive::ProportionalText(p)
             }
             widget_render::MetalPrimitive::Waveform(mut w) => {
                 w.rect.col += col_off as f32;
