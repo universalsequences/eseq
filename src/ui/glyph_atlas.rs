@@ -237,39 +237,20 @@ mod inner {
         }
     }
 
-    // ── Proportional glyph atlas ────────────────────────────────────────────
+    // ── Shared font cache for proportional text ────────────────────────────
 
-    const PROP_ATLAS_SIZE: usize = 2048;
-
-    /// Per-character entry with individual glyph metrics for proportional fonts.
-    #[derive(Clone, Copy, Debug)]
-    pub struct ProportionalGlyphEntry {
-        pub uv_min: [f32; 2],
-        pub uv_max: [f32; 2],
-        /// Horizontal advance in pixels.
-        pub advance: f32,
-        /// Rasterized bitmap width in pixels.
-        pub raster_w: usize,
-        /// Rasterized bitmap height in pixels.
-        pub raster_h: usize,
-    }
-
-    pub struct ProportionalGlyphAtlas {
-        pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
-        allocator: AtlasAllocator,
-        glyphs: HashMap<(char, u16), ProportionalGlyphEntry>,
+    /// Caches sized CTFont instances and their line metrics.
+    /// Shared between `ProportionalGlyphAtlas` (rasterization) and
+    /// `PropTextMeasurer` (layout-only measurement).
+    pub struct SizedFontCache {
         base_font: CFRetained<CTFont>,
         sized_fonts: HashMap<u16, CFRetained<CTFont>>,
         line_metrics: HashMap<u16, (f32, f32, f32)>,
         scale: f64,
     }
 
-    impl ProportionalGlyphAtlas {
-        pub fn new(
-            device: &ProtocolObject<dyn MTLDevice>,
-            base_font_size: f64,
-            scale: f64,
-        ) -> Option<Self> {
+    impl SizedFontCache {
+        pub fn new(base_font_size: f64, scale: f64) -> Option<Self> {
             let base_font = unsafe {
                 CTFont::new_ui_font_for_language(
                     CTFontUIFontType::System,
@@ -277,16 +258,6 @@ mod inner {
                     None,
                 )
             }?;
-
-            let texture = {
-                let desc = MTLTextureDescriptor::new();
-                unsafe {
-                    desc.setPixelFormat(MTLPixelFormat::R8Unorm);
-                    desc.setWidth(PROP_ATLAS_SIZE);
-                    desc.setHeight(PROP_ATLAS_SIZE);
-                }
-                device.newTextureWithDescriptor(&desc)?
-            };
 
             let size_tenths = (base_font_size * 10.0).round() as u16;
             let ascent = unsafe { base_font.ascent() } as f32;
@@ -299,20 +270,14 @@ mod inner {
             line_metrics.insert(size_tenths, (ascent, descent, leading));
 
             Some(Self {
-                texture,
-                scale,
-                allocator: AtlasAllocator::new(Size::new(
-                    PROP_ATLAS_SIZE as i32,
-                    PROP_ATLAS_SIZE as i32,
-                )),
-                glyphs: HashMap::new(),
                 base_font,
                 sized_fonts,
                 line_metrics,
+                scale,
             })
         }
 
-        fn sized_font(&mut self, size_tenths: u16) -> &CTFont {
+        pub fn sized_font(&mut self, size_tenths: u16) -> &CTFont {
             if !self.sized_fonts.contains_key(&size_tenths) {
                 let size = (size_tenths as f64 / 10.0) * self.scale;
                 let font = unsafe {
@@ -345,6 +310,111 @@ mod inner {
             self.line_metrics[&size_tenths].1
         }
 
+        /// Measure the advance width of a single character at the given size.
+        pub fn char_advance(&mut self, ch: char, size_tenths: u16) -> f32 {
+            if ch as u32 > 0xFFFF {
+                return 0.0;
+            }
+            let font = self.sized_font(size_tenths);
+            let chars: [u16; 1] = [ch as u16];
+            let mut glyph: [CGGlyph; 1] = [0];
+            unsafe {
+                font.glyphs_for_characters(
+                    NonNull::new(chars.as_ptr() as *mut _).unwrap(),
+                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
+                    1,
+                );
+            }
+            let mut adv = CGSize {
+                width: 0.0,
+                height: 0.0,
+            };
+            unsafe {
+                font.advances_for_glyphs(
+                    CTFontOrientation::Default,
+                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
+                    &mut adv,
+                    1,
+                );
+            }
+            adv.width as f32
+        }
+
+        /// Measure the total advance width of a string.
+        pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
+            let mut total = 0.0_f32;
+            for ch in text.chars() {
+                total += self.char_advance(ch, size_tenths);
+            }
+            total
+        }
+    }
+
+    // ── Proportional glyph atlas ────────────────────────────────────────────
+
+    const PROP_ATLAS_SIZE: usize = 2048;
+
+    /// Per-character entry with individual glyph metrics for proportional fonts.
+    #[derive(Clone, Copy, Debug)]
+    pub struct ProportionalGlyphEntry {
+        pub uv_min: [f32; 2],
+        pub uv_max: [f32; 2],
+        /// Horizontal advance in pixels.
+        pub advance: f32,
+        /// Rasterized bitmap width in pixels.
+        pub raster_w: usize,
+        /// Rasterized bitmap height in pixels.
+        pub raster_h: usize,
+    }
+
+    pub struct ProportionalGlyphAtlas {
+        pub texture: Retained<ProtocolObject<dyn MTLTexture>>,
+        allocator: AtlasAllocator,
+        glyphs: HashMap<(char, u16), ProportionalGlyphEntry>,
+        pub fonts: SizedFontCache,
+    }
+
+    impl ProportionalGlyphAtlas {
+        pub fn new(
+            device: &ProtocolObject<dyn MTLDevice>,
+            base_font_size: f64,
+            scale: f64,
+        ) -> Option<Self> {
+            let fonts = SizedFontCache::new(base_font_size, scale)?;
+
+            let texture = {
+                let desc = MTLTextureDescriptor::new();
+                unsafe {
+                    desc.setPixelFormat(MTLPixelFormat::R8Unorm);
+                    desc.setWidth(PROP_ATLAS_SIZE);
+                    desc.setHeight(PROP_ATLAS_SIZE);
+                }
+                device.newTextureWithDescriptor(&desc)?
+            };
+
+            Some(Self {
+                texture,
+                allocator: AtlasAllocator::new(Size::new(
+                    PROP_ATLAS_SIZE as i32,
+                    PROP_ATLAS_SIZE as i32,
+                )),
+                glyphs: HashMap::new(),
+                fonts,
+            })
+        }
+
+        pub fn line_height(&mut self, size_tenths: u16) -> f32 {
+            self.fonts.line_height(size_tenths)
+        }
+
+        pub fn ascent(&mut self, size_tenths: u16) -> f32 {
+            self.fonts.ascent(size_tenths)
+        }
+
+        pub fn descent(&mut self, size_tenths: u16) -> f32 {
+            self.fonts.descent(size_tenths)
+        }
+
         pub fn measure_text(&mut self, text: &str, size_tenths: u16) -> f32 {
             let mut width = 0.0_f32;
             for ch in text.chars() {
@@ -372,9 +442,10 @@ mod inner {
                 return None;
             }
 
-            let line_h = self.line_height(size_tenths);
-            let descent = self.descent(size_tenths);
-            let font = &self.sized_fonts[&size_tenths];
+            let line_h = self.fonts.line_height(size_tenths);
+            let descent = self.fonts.descent(size_tenths);
+            let advance = self.fonts.char_advance(ch, size_tenths);
+            let font = self.fonts.sized_font(size_tenths);
 
             // ── Glyph ID ────────────────────────────────────────────────────
             let chars: [u16; 1] = [ch as u16];
@@ -386,21 +457,6 @@ mod inner {
                     1,
                 );
             }
-
-            // ── Per-glyph advance ───────────────────────────────────────────
-            let mut adv = CGSize {
-                width: 0.0,
-                height: 0.0,
-            };
-            unsafe {
-                font.advances_for_glyphs(
-                    CTFontOrientation::Default,
-                    NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                    &mut adv,
-                    1,
-                );
-            }
-            let advance = adv.width as f32;
 
             if advance <= 0.0 {
                 self.glyphs.insert(
@@ -418,7 +474,7 @@ mod inner {
 
             // Full line-height bitmap with shared baseline (like monospace).
             let raster_h = line_h as usize;
-            let raster_w = (adv.width.ceil() as usize) + 4; // padding for smoothing
+            let raster_w = (advance.ceil() as usize) + 4; // padding for smoothing
 
             let mut pixels = vec![0u8; raster_w * raster_h];
             {

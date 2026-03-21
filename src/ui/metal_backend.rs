@@ -11,8 +11,7 @@ mod inner {
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
     use objc2_app_kit::NSView;
-    use objc2_core_foundation::{CFRetained, CGSize};
-    use objc2_core_text::{CTFont, CTFontUIFontType};
+    use objc2_core_foundation::CGSize;
     use objc2_foundation::NSString;
     use objc2_metal::{
         MTLBlendFactor, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
@@ -37,102 +36,38 @@ mod inner {
 
     use crate::audio::sample::get_registered_sample;
     use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
-    use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas};
+    use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{Rect, TextMeasurer};
     use crate::theme;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
-    /// Lightweight TextMeasurer that queries font metrics from CoreText
-    /// without needing a GPU atlas. Used by the layout engine for proportional text.
+    /// Lightweight TextMeasurer that delegates to `SizedFontCache` for font
+    /// metrics without needing a GPU atlas. Used by the layout engine.
     pub(crate) struct PropTextMeasurer {
-        base_font: CFRetained<CTFont>,
-        sized_fonts: std::cell::RefCell<HashMap<u16, CFRetained<CTFont>>>,
-        /// Display scale factor for logical → physical point conversion.
-        scale: f64,
+        fonts: std::cell::RefCell<SizedFontCache>,
     }
 
     impl PropTextMeasurer {
         pub(crate) fn new(base_font_size: f64, scale: f64) -> Option<Self> {
-            let base_font = unsafe {
-                CTFont::new_ui_font_for_language(
-                    CTFontUIFontType::System,
-                    base_font_size,
-                    None,
-                )
-            }?;
+            let fonts = SizedFontCache::new(base_font_size, scale)?;
             Some(Self {
-                base_font,
-                sized_fonts: std::cell::RefCell::new(HashMap::new()),
-                scale,
+                fonts: std::cell::RefCell::new(fonts),
             })
-        }
-
-        fn sized_font(&self, size_tenths: u16) -> CFRetained<CTFont> {
-            let mut cache = self.sized_fonts.borrow_mut();
-            if let Some(font) = cache.get(&size_tenths) {
-                return font.clone();
-            }
-            // Convert logical points to physical points.
-            let size = (size_tenths as f64 / 10.0) * self.scale;
-            let font = unsafe {
-                self.base_font
-                    .copy_with_attributes(size, std::ptr::null(), None)
-            };
-            cache.insert(size_tenths, font.clone());
-            font
         }
     }
 
     impl TextMeasurer for PropTextMeasurer {
         fn measure_text_px(&self, text: &str, font_size: f32) -> f32 {
-            use objc2_core_foundation::CGSize;
-            use objc2_core_graphics::CGGlyph;
-            use objc2_core_text::CTFontOrientation;
-
             if text.is_empty() {
                 return 0.0;
             }
-
             let size_tenths = (font_size * 10.0).round() as u16;
-            let font = self.sized_font(size_tenths);
-            let mut total = 0.0_f32;
-            for ch in text.chars() {
-                if ch as u32 > 0xFFFF {
-                    continue;
-                }
-                let chars: [u16; 1] = [ch as u16];
-                let mut glyph: [CGGlyph; 1] = [0];
-                unsafe {
-                    font.glyphs_for_characters(
-                        NonNull::new(chars.as_ptr() as *mut _).unwrap(),
-                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                        1,
-                    );
-                }
-                let mut adv = CGSize {
-                    width: 0.0,
-                    height: 0.0,
-                };
-                unsafe {
-                    font.advances_for_glyphs(
-                        CTFontOrientation::Default,
-                        NonNull::new(glyph.as_mut_ptr()).unwrap(),
-                        &mut adv,
-                        1,
-                    );
-                }
-                total += adv.width as f32;
-            }
-            total
+            self.fonts.borrow_mut().measure_text(text, size_tenths)
         }
 
         fn line_height_px(&self, font_size: f32) -> f32 {
             let size_tenths = (font_size * 10.0).round() as u16;
-            let font = self.sized_font(size_tenths);
-            let ascent = unsafe { font.ascent() } as f32;
-            let descent = unsafe { font.descent() } as f32;
-            let leading = unsafe { font.leading() } as f32;
-            (ascent + descent + leading).ceil()
+            self.fonts.borrow_mut().line_height(size_tenths)
         }
     }
 

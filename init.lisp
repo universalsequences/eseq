@@ -57,186 +57,93 @@
 ;; ── Theme helpers ───────────────────────────────────────────────────────────
 
 (def light-theme ()
-  ;; Adapted from folke/tokyonight.nvim's `tokyonight-day` palette.
-  (set! THEME.bg "#e1e2e7")
-  (set! THEME.fg "#3760bf")
-  (set! THEME.fg_muted "#848cb5")
-  (set! THEME.black "#dcdcde")
-  (set! THEME.red "#f52a65")
-  (set! THEME.green "#587539")
-  (set! THEME.yellow "#8c6c3e")
-  (set! THEME.blue "#2e7de9")
-  (set! THEME.magenta "#9854f1")
-  (set! THEME.cyan "#007197")
-  (set! THEME.white "#3760bf")
-  (set! THEME.bright_black "#a1a6c5")
-  (set! THEME.bright_red "#c64343")
-  (set! THEME.bright_yellow "#a27629")
-  (set! THEME.purple "#7847bd")
-  (set! THEME.cursor "#2e7de9")
-  (set! THEME.syn_comment "#848cb5")
-  (set! THEME.syn_string "#587539")
-  (set! THEME.syn_number "#b15c00")
-  (set! THEME.syn_keyword "#9854f1")
-  (set! THEME.syn_builtin "#2e7de9")
-  (set! THEME.syn_special "#007197")
-  (set! THEME.syn_delimiter "#8990b3")
-  (set! THEME.bg_region "#b6d6fd")
-  (set! THEME.bg_sexp "#d7d8df")
-  (set! THEME.bg_eval_flash "#c4d6b0")
-  (set! THEME.bg_match_paren "#2e7de9")
-  (set! THEME.fg_match_paren "#e1e2e7")
-  (set! THEME.status_fg "#3760bf")
-  (set! THEME.status_bg "#dcdcde")
-  (set! THEME.status_edge "#c4c8da")
-  (set! THEME.status_chip_bg "#d5d6db")
-  (set! THEME.status_mode_bg "#cbdaf6")
-  (set! THEME.status_chip_muted "#d9dadf")
-  (set! THEME.status_ui_bg "#2e7de9")
-  (set! THEME.status_ui_fg "#e1e2e7")
-  (set! THEME.status_mix_bg "#2e7de9")
-  (set! THEME.status_mix_fg "#e1e2e7")
-  (set! THEME.status_dirty_bg "#b15c00")
-  (set! THEME.status_dirty_fg "#f7efe4")
-  (set! THEME.status_pos_bg "#d5d6db")
-  (set! THEME.status_accent "#007197")
-  (set! THEME.comp_selected_bg "#cbdaf6")
-  (set! THEME.comp_unselected_bg "#dcdcde")
-  (set! THEME.comp_fg "#3760bf")
-  (set! THEME.comp_doc_bg "#d5d6db")
-  (set! THEME.comp_doc_fg "#3760bf")
-  (set! THEME.comp_doc_title_fg "#2e7de9")
-  (set! THEME.widget_label_fg "#3760bf")
-  (set! THEME.widget_slider_filled "#2e7de9")
-  (set! THEME.widget_slider_track "#a8aecb")
-  (set! THEME.widget_knob_filled "#9854f1")
-  (set! THEME.widget_knob_track "#a8aecb")
-  (set! THEME.widget_toggle_on "#2e7de9")
-  (set! THEME.widget_toggle_off "#8990b3")
-  (set! THEME.widget_toggle_knob_on "#ffffff")
-  (set! THEME.widget_toggle_knob_off "#f1f3f7")
+  (apply-theme (dict
+    :bg "#e1e2e7" :fg "#3760bf" :fg_muted "#848cb5"
+    :black "#dcdcde" :red "#f52a65" :green "#587539"
+    :yellow "#8c6c3e" :blue "#2e7de9" :magenta "#9854f1"
+    :cyan "#007197" :white "#3760bf"
+    :bright_black "#a1a6c5" :bright_red "#c64343" :bright_yellow "#a27629"
+    :purple "#7847bd" :cursor "#2e7de9"
+    :syn_comment "#848cb5" :syn_string "#587539" :syn_number "#b15c00"
+    :syn_keyword "#9854f1" :syn_builtin "#2e7de9" :syn_special "#007197"
+    :syn_delimiter "#8990b3"
+    :bg_region "#b6d6fd" :bg_sexp "#d7d8df" :bg_eval_flash "#c4d6b0"
+    :bg_match_paren "#2e7de9" :fg_match_paren "#e1e2e7"
+    :status_fg "#3760bf" :status_bg "#dcdcde" :status_edge "#c4c8da"
+    :status_chip_bg "#d5d6db" :status_mode_bg "#cbdaf6"
+    :status_chip_muted "#d9dadf"
+    :status_ui_bg "#2e7de9" :status_ui_fg "#e1e2e7"
+    :status_mix_bg "#2e7de9" :status_mix_fg "#e1e2e7"
+    :status_dirty_bg "#b15c00" :status_dirty_fg "#f7efe4"
+    :status_pos_bg "#d5d6db" :status_accent "#007197"
+    :comp_selected_bg "#cbdaf6" :comp_unselected_bg "#dcdcde"
+    :comp_fg "#3760bf" :comp_doc_bg "#d5d6db"
+    :comp_doc_fg "#3760bf" :comp_doc_title_fg "#2e7de9"
+    :widget_label_fg "#3760bf"
+    :widget_slider_filled "#2e7de9" :widget_slider_track "#a8aecb"
+    :widget_knob_filled "#9854f1" :widget_knob_track "#a8aecb"
+    :widget_toggle_on "#2e7de9" :widget_toggle_off "#8990b3"
+    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#f1f3f7"))
   (status "TokyoNight Day theme applied"))
 
 (def tokyonight-storm-theme ()
-  ;; Adapted from folke/tokyonight.nvim's `storm` palette.
-  (set! THEME.bg "#24283b")
-  (set! THEME.fg "#c0caf5")
-  (set! THEME.fg_muted "#565f89")
-  (set! THEME.black "#1f2335")
-  (set! THEME.red "#f7768e")
-  (set! THEME.green "#9ece6a")
-  (set! THEME.yellow "#e0af68")
-  (set! THEME.blue "#7aa2f7")
-  (set! THEME.magenta "#bb9af7")
-  (set! THEME.cyan "#7dcfff")
-  (set! THEME.white "#c0caf5")
-  (set! THEME.bright_black "#545c7e")
-  (set! THEME.bright_red "#db4b4b")
-  (set! THEME.bright_yellow "#ff9e64")
-  (set! THEME.purple "#9d7cd8")
-  (set! THEME.cursor "#7aa2f7")
-  (set! THEME.syn_comment "#565f89")
-  (set! THEME.syn_string "#9ece6a")
-  (set! THEME.syn_number "#ff9e64")
-  (set! THEME.syn_keyword "#bb9af7")
-  (set! THEME.syn_builtin "#7aa2f7")
-  (set! THEME.syn_special "#7dcfff")
-  (set! THEME.syn_delimiter "#545c7e")
-  (set! THEME.bg_region "#292e42")
-  (set! THEME.bg_sexp "#292e42")
-  (set! THEME.bg_eval_flash "#394b70")
-  (set! THEME.bg_match_paren "#7aa2f7")
-  (set! THEME.fg_match_paren "#1f2335")
-  (set! THEME.status_fg "#c0caf5")
-  (set! THEME.status_bg "#1f2335")
-  (set! THEME.status_edge "#292e42")
-  (set! THEME.status_chip_bg "#292e42")
-  (set! THEME.status_mode_bg "#394b70")
-  (set! THEME.status_chip_muted "#292e42")
-  (set! THEME.status_ui_bg "#7aa2f7")
-  (set! THEME.status_ui_fg "#1f2335")
-  (set! THEME.status_mix_bg "#7aa2f7")
-  (set! THEME.status_mix_fg "#1f2335")
-  (set! THEME.status_dirty_bg "#db4b4b")
-  (set! THEME.status_dirty_fg "#c0caf5")
-  (set! THEME.status_pos_bg "#292e42")
-  (set! THEME.status_accent "#7dcfff")
-  (set! THEME.comp_selected_bg "#292e42")
-  (set! THEME.comp_unselected_bg "#1f2335")
-  (set! THEME.comp_fg "#c0caf5")
-  (set! THEME.comp_doc_bg "#1b1e2d")
-  (set! THEME.comp_doc_fg "#c0caf5")
-  (set! THEME.comp_doc_title_fg "#7aa2f7")
-  (set! THEME.widget_label_fg "#c0caf5")
-  (set! THEME.widget_slider_filled "#7aa2f7")
-  (set! THEME.widget_slider_track "#394b70")
-  (set! THEME.widget_knob_filled "#bb9af7")
-  (set! THEME.widget_knob_track "#545c7e")
-  (set! THEME.widget_toggle_on "#7aa2f7")
-  (set! THEME.widget_toggle_off "#545c7e")
-  (set! THEME.widget_toggle_knob_on "#c0caf5")
-  (set! THEME.widget_toggle_knob_off "#c0caf5")
+  (apply-theme (dict
+    :bg "#24283b" :fg "#c0caf5" :fg_muted "#565f89"
+    :black "#1f2335" :red "#f7768e" :green "#9ece6a"
+    :yellow "#e0af68" :blue "#7aa2f7" :magenta "#bb9af7"
+    :cyan "#7dcfff" :white "#c0caf5"
+    :bright_black "#545c7e" :bright_red "#db4b4b" :bright_yellow "#ff9e64"
+    :purple "#9d7cd8" :cursor "#7aa2f7"
+    :syn_comment "#565f89" :syn_string "#9ece6a" :syn_number "#ff9e64"
+    :syn_keyword "#bb9af7" :syn_builtin "#7aa2f7" :syn_special "#7dcfff"
+    :syn_delimiter "#545c7e"
+    :bg_region "#292e42" :bg_sexp "#292e42" :bg_eval_flash "#394b70"
+    :bg_match_paren "#7aa2f7" :fg_match_paren "#1f2335"
+    :status_fg "#c0caf5" :status_bg "#1f2335" :status_edge "#292e42"
+    :status_chip_bg "#292e42" :status_mode_bg "#394b70"
+    :status_chip_muted "#292e42"
+    :status_ui_bg "#7aa2f7" :status_ui_fg "#1f2335"
+    :status_mix_bg "#7aa2f7" :status_mix_fg "#1f2335"
+    :status_dirty_bg "#db4b4b" :status_dirty_fg "#c0caf5"
+    :status_pos_bg "#292e42" :status_accent "#7dcfff"
+    :comp_selected_bg "#292e42" :comp_unselected_bg "#1f2335"
+    :comp_fg "#c0caf5" :comp_doc_bg "#1b1e2d"
+    :comp_doc_fg "#c0caf5" :comp_doc_title_fg "#7aa2f7"
+    :widget_label_fg "#c0caf5"
+    :widget_slider_filled "#7aa2f7" :widget_slider_track "#394b70"
+    :widget_knob_filled "#bb9af7" :widget_knob_track "#545c7e"
+    :widget_toggle_on "#7aa2f7" :widget_toggle_off "#545c7e"
+    :widget_toggle_knob_on "#c0caf5" :widget_toggle_knob_off "#c0caf5"))
   (status "TokyoNight Storm theme applied"))
 
 (def aura-theme ()
-  ;; Adapted from the Aura palette used across its editor/terminal ports.
-  (set! THEME.bg "#15141b")
-  (set! THEME.fg "#edecee")
-  (set! THEME.fg_muted "#6d6d6d")
-  (set! THEME.black "#110f18")
-  (set! THEME.red "#ff6767")
-  (set! THEME.green "#61ffca")
-  (set! THEME.yellow "#ffca85")
-  (set! THEME.blue "#82e2ff")
-  (set! THEME.magenta "#f694ff")
-  (set! THEME.cyan "#61ffca")
-  (set! THEME.white "#edecee")
-  (set! THEME.bright_black "#6d6d6d")
-  (set! THEME.bright_red "#ff6767")
-  (set! THEME.bright_yellow "#ffca85")
-  (set! THEME.purple "#a277ff")
-  (set! THEME.cursor "#a277ff")
-  (set! THEME.syn_comment "#6d6d6d")
-  (set! THEME.syn_string "#61ffca")
-  (set! THEME.syn_number "#ffca85")
-  (set! THEME.syn_keyword "#a277ff")
-  (set! THEME.syn_builtin "#82e2ff")
-  (set! THEME.syn_special "#f694ff")
-  (set! THEME.syn_delimiter "#6d6d6d")
-  (set! THEME.bg_region "#29263c")
-  (set! THEME.bg_sexp "#28253c")
-  (set! THEME.bg_eval_flash "#3d375e")
-  (set! THEME.bg_match_paren "#a277ff")
-  (set! THEME.fg_match_paren "#15141b")
-  (set! THEME.status_fg "#adacae")
-  (set! THEME.status_bg "#121016")
-  (set! THEME.status_edge "#3b334b")
-  (set! THEME.status_chip_bg "#2e2b38")
-  (set! THEME.status_mode_bg "#3b334b")
-  (set! THEME.status_chip_muted "#2e2b38")
-  (set! THEME.status_ui_bg "#a277ff")
-  (set! THEME.status_ui_fg "#15141b")
-  (set! THEME.status_mix_bg "#82e2ff")
-  (set! THEME.status_mix_fg "#15141b")
-  (set! THEME.status_dirty_bg "#ff6767")
-  (set! THEME.status_dirty_fg "#15141b")
-  (set! THEME.status_pos_bg "#2e2b38")
-  (set! THEME.status_accent "#61ffca")
-  (set! THEME.comp_selected_bg "#2e2b38")
-  (set! THEME.comp_unselected_bg "#15141b")
-  (set! THEME.comp_fg "#edecee")
-  (set! THEME.comp_doc_bg "#15141b")
-  (set! THEME.comp_doc_fg "#cdccce")
-  (set! THEME.comp_doc_title_fg "#a277ff")
-  (set! THEME.widget_label_fg "#edecee")
-  (set! THEME.widget_slider_filled "#a277ff")
-  (set! THEME.widget_slider_track "#6d6d6d")
-  (set! THEME.widget_knob_filled "#a277ff")
-  (set! THEME.widget_knob_track "#6d6d6d")
-  (set! THEME.widget_toggle_on "#a277ff")
-  (set! THEME.widget_toggle_off "#6d6d6d")
-  (set! THEME.widget_toggle_knob_on "#ffffff")
-  (set! THEME.widget_toggle_knob_off "#edecee")
+  (apply-theme (dict
+    :bg "#15141b" :fg "#edecee" :fg_muted "#6d6d6d"
+    :black "#110f18" :red "#ff6767" :green "#61ffca"
+    :yellow "#ffca85" :blue "#82e2ff" :magenta "#f694ff"
+    :cyan "#61ffca" :white "#edecee"
+    :bright_black "#6d6d6d" :bright_red "#ff6767" :bright_yellow "#ffca85"
+    :purple "#a277ff" :cursor "#a277ff"
+    :syn_comment "#6d6d6d" :syn_string "#61ffca" :syn_number "#ffca85"
+    :syn_keyword "#a277ff" :syn_builtin "#82e2ff" :syn_special "#f694ff"
+    :syn_delimiter "#6d6d6d"
+    :bg_region "#29263c" :bg_sexp "#28253c" :bg_eval_flash "#3d375e"
+    :bg_match_paren "#a277ff" :fg_match_paren "#15141b"
+    :status_fg "#adacae" :status_bg "#121016" :status_edge "#3b334b"
+    :status_chip_bg "#2e2b38" :status_mode_bg "#3b334b"
+    :status_chip_muted "#2e2b38"
+    :status_ui_bg "#a277ff" :status_ui_fg "#15141b"
+    :status_mix_bg "#82e2ff" :status_mix_fg "#15141b"
+    :status_dirty_bg "#ff6767" :status_dirty_fg "#15141b"
+    :status_pos_bg "#2e2b38" :status_accent "#61ffca"
+    :comp_selected_bg "#2e2b38" :comp_unselected_bg "#15141b"
+    :comp_fg "#edecee" :comp_doc_bg "#15141b"
+    :comp_doc_fg "#cdccce" :comp_doc_title_fg "#a277ff"
+    :widget_label_fg "#edecee"
+    :widget_slider_filled "#a277ff" :widget_slider_track "#6d6d6d"
+    :widget_knob_filled "#a277ff" :widget_knob_track "#6d6d6d"
+    :widget_toggle_on "#a277ff" :widget_toggle_off "#6d6d6d"
+    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#edecee"))
   (status "Aura theme applied"))
 
 (bind-key "C-x C-e" "eval-sexp")
@@ -299,7 +206,7 @@
           (all-widgets (cons header
                          (cons parent
                            (append dir-widgets file-widgets)))))
-      (render-widget (v-stack :gap 0.125 :padding 0.5 :align :stretch all-widgets))
+      (render-widget (v-stack :font-size 18 :gap 0.125 :padding 0.5 :align :stretch all-widgets))
       (status (fmt "{} entries" (len dired-entries))))))
 
 ;; Navigate to parent directory

@@ -83,6 +83,7 @@ macro_rules! theme_slots {
 
         pub fn sync_from_value(value: &Value) {
             let mut theme = current();
+            let prev = theme;
             if let Value::Map(map) = value {
                 $(
                     if let Some(value) = map.get(stringify!($field)) {
@@ -92,7 +93,9 @@ macro_rules! theme_slots {
                     }
                 )+
             }
-            set_current(theme);
+            if theme != prev {
+                set_current(theme);
+            }
         }
 
         pub fn named_color(name: &str) -> Option<Color> {
@@ -184,16 +187,38 @@ fn active_theme() -> &'static RwLock<Theme> {
     ACTIVE_THEME.get_or_init(|| RwLock::new(default_theme()))
 }
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonically increasing generation counter — bumped on every `set_current`.
+static THEME_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// Per-thread snapshot of the theme, refreshed when the generation changes.
+    static CACHED_THEME: std::cell::Cell<(u64, Theme)> = std::cell::Cell::new((0, default_theme()));
+}
+
+/// Read the theme, using a thread-local cache to avoid lock contention.
+/// The cache is invalidated whenever `set_current` is called.
 pub fn current() -> Theme {
-    *active_theme()
-        .read()
-        .expect("theme lock should not be poisoned")
+    let current_gen = THEME_GENERATION.load(Ordering::Relaxed);
+    CACHED_THEME.with(|cell| {
+        let (cached_gen, cached_theme) = cell.get();
+        if cached_gen == current_gen {
+            return cached_theme;
+        }
+        let theme = *active_theme()
+            .read()
+            .expect("theme lock should not be poisoned");
+        cell.set((current_gen, theme));
+        theme
+    })
 }
 
 pub fn set_current(theme: Theme) {
     *active_theme()
         .write()
         .expect("theme lock should not be poisoned") = theme;
+    THEME_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn parse_color_value(value: &Value) -> Option<Color> {

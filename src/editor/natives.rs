@@ -700,6 +700,19 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             Ok(Value::String(s.trim().to_string()))
         },
     );
+
+    runtime.register_native_with_docs(
+        "apply-theme",
+        "(apply-theme map)",
+        "Apply a theme from a map of field name → color entries. Only fields present in the map are updated.",
+        |args, _ctx| {
+            let Some(value @ Value::Map(_)) = args.first() else {
+                return Err("apply-theme expects a map".to_string());
+            };
+            crate::theme::sync_from_value(value);
+            Ok(Value::Bool(true))
+        },
+    );
 }
 
 pub(super) fn extract_suggested_name(payload: &Value) -> Option<String> {
