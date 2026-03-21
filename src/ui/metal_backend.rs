@@ -34,8 +34,8 @@ mod inner {
         window::Window,
     };
 
-    use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
     use crate::audio::sample::get_registered_sample;
+    use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
     use crate::glyph_atlas::GlyphAtlas;
     use crate::layout::Rect;
     use crate::theme;
@@ -235,22 +235,34 @@ fragment float4 waveform_frag(
 
     float2 uv = in.uv;
     float2 content_uv = uv;
-    float4 color = float4(0.08, 0.08, 0.10, 1.0);
+    float3 rgb = float3(0.08, 0.08, 0.10);
+    float alpha = 0.0;
 
     bool has_selection = in.selection_end > in.selection_start + 0.001;
     if (has_selection &&
         content_uv.x >= in.selection_start &&
         content_uv.x <= in.selection_end) {
-        color.rgb = mix(color.rgb, in.selection_color.rgb, 0.30);
+        rgb = mix(rgb, in.selection_color.rgb, 0.30);
+        alpha = max(alpha, 0.22);
     }
 
     float center_line = 1.0 - smoothstep(0.0, 0.004, abs(content_uv.y - 0.5));
-    color.rgb = mix(color.rgb, float3(0.3, 0.3, 0.35), center_line * 0.20);
+    rgb = mix(rgb, float3(0.3, 0.3, 0.35), center_line * 0.20);
+    alpha = max(alpha, center_line * 0.18);
 
-    float start_boundary = 1.0 - smoothstep(0.0, 0.004, abs(content_uv.x - in.selection_start));
-    float end_boundary = 1.0 - smoothstep(0.0, 0.004, abs(content_uv.x - in.selection_end));
-    float boundary_mask = has_selection ? max(start_boundary, end_boundary) : 0.0;
-    color.rgb = mix(color.rgb, in.selection_color.rgb, boundary_mask * 0.85);
+    float boundary_width = max(fwidth(content_uv.x) * 0.9, 0.0015);
+    float boundary_aa = max(fwidth(content_uv.x) * 0.75, 0.00075);
+    float start_dist = abs(content_uv.x - in.selection_start);
+    float end_dist = abs(content_uv.x - in.selection_end);
+    float start_boundary = has_selection
+        ? 1.0 - smoothstep(boundary_width, boundary_width + boundary_aa, start_dist)
+        : 0.0;
+    float end_boundary = has_selection
+        ? 1.0 - smoothstep(boundary_width, boundary_width + boundary_aa, end_dist)
+        : 0.0;
+    float boundary_mask = max(start_boundary, end_boundary);
+    rgb = mix(rgb, in.selection_color.rgb, boundary_mask * 0.85);
+    alpha = max(alpha, boundary_mask * 0.75);
 
     float sample_t = clamp(mix(in.sample_start, in.sample_end, content_uv.x), 0.0, 1.0);
     float exact_idx = sample_t * float(in.bucket_count - 1);
@@ -299,23 +311,41 @@ fragment float4 waveform_frag(
     float lower_edge = 1.0 - smoothstep(0.0, edge_aa * 1.5, abs(content_uv.y - y_min));
     float edge_alpha = max(upper_edge, lower_edge);
 
-    float3 fill_color = mix(color.rgb, in.waveform_color.rgb, 0.88);
+    float3 fill_color = mix(rgb, in.waveform_color.rgb, 0.88);
     float3 edge_color = mix(in.waveform_color.rgb, float3(1.0, 1.0, 1.0), 0.15);
-    color.rgb = mix(color.rgb, fill_color, fill_alpha);
-    color.rgb = mix(color.rgb, edge_color, edge_alpha * 0.9);
+    rgb = mix(rgb, fill_color, fill_alpha);
+    rgb = mix(rgb, edge_color, edge_alpha * 0.9);
+    alpha = max(alpha, fill_alpha);
+    alpha = max(alpha, edge_alpha * 0.9);
 
     if (in.show_playhead == 1) {
         float playhead_dist = abs(content_uv.x - in.playhead_position);
         float playhead_width = 0.003;
         float playhead_aa = max(fwidth(content_uv.x) * 1.5, 0.001);
         float playhead_alpha = 1.0 - smoothstep(playhead_width - playhead_aa, playhead_width + playhead_aa, playhead_dist);
-        color.rgb = mix(color.rgb, float3(0.2, 0.9, 1.0), playhead_alpha * 0.95);
+        bool playhead_overlaps_selection_boundary =
+            has_selection && (playhead_dist <= boundary_width + boundary_aa) &&
+            (abs(in.playhead_position - in.selection_start) <= boundary_width + boundary_aa ||
+             abs(in.playhead_position - in.selection_end) <= boundary_width + boundary_aa);
+        float3 playhead_color = playhead_overlaps_selection_boundary
+            ? in.selection_color.rgb
+            : float3(0.2, 0.9, 1.0);
+        float playhead_mix = playhead_overlaps_selection_boundary
+            ? max(playhead_alpha, boundary_mask)
+            : playhead_alpha * 0.95;
+        rgb = mix(rgb, playhead_color, playhead_mix);
+        alpha = max(alpha, playhead_mix);
     }
 
     float border = min(min(content_uv.x, 1.0 - content_uv.x), min(content_uv.y, 1.0 - content_uv.y));
     float border_mask = 1.0 - smoothstep(0.0, 0.004, border);
-    color.rgb = mix(color.rgb, float3(0.22, 0.22, 0.25), border_mask * 0.8);
-    return color;
+    rgb = mix(rgb, float3(0.22, 0.22, 0.25), border_mask * 0.8);
+    alpha = max(alpha, border_mask * 0.7);
+
+    if (alpha < 0.001) {
+        discard_fragment();
+    }
+    return float4(rgb, alpha);
 }
 "#;
 
@@ -526,7 +556,8 @@ fragment float4 waveform_frag(
                     sample_start: primitive.sample_start,
                     sample_end: primitive.sample_end,
                     bucket_count: primitive.bucket_count.min(bucket_count),
-                    aspect_ratio: (primitive.rect.width * cell_w / (primitive.rect.height * cell_h))
+                    aspect_ratio: (primitive.rect.width * cell_w
+                        / (primitive.rect.height * cell_h))
                         .max(0.0001),
                     selection_start: primitive.selection_start,
                     selection_end: primitive.selection_end,
@@ -664,34 +695,6 @@ fragment float4 waveform_frag(
                     build_text_quads_offset(&tile.frame, atlas, vp_w, vp_h, offset)
                 };
                 draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &text_verts);
-
-                // ── Cursor ───────────────────────────────────────────────────
-                if tile.is_active {
-                    if let Some((vis_row, vis_col)) = tile.frame.cursor {
-                        let mut cursor_verts = Vec::new();
-                        push_solid_rect_vertices(
-                            Rect {
-                                row: (row_off + vis_row) as f32,
-                                col: (col_off + vis_col) as f32,
-                                width: 1.0,
-                                height: 1.0,
-                            },
-                            theme::CURSOR,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                            &mut cursor_verts,
-                        );
-                        draw_text_verts(
-                            &enc,
-                            &self.device,
-                            &pipeline,
-                            &atlas_texture,
-                            &cursor_verts,
-                        );
-                    }
-                }
 
                 // ── Widget primitives (clipped to content area, above status) ─
                 // Collect with LOCAL coords (no offset) so scroll/clip logic works,
@@ -1909,16 +1912,17 @@ fragment float4 waveform_frag(
         vp_h: f32,
     ) -> Vec<Vertex> {
         let cell_w = atlas.cell_w as f32;
+        let cell_h = atlas.cell_h as f32;
         let mut verts = Vec::new();
         for primitive in primitives {
             match primitive {
                 widget_render::MetalPrimitive::Rect(rect) => {
                     push_solid_rect_vertices(
-                        rect.rect, rect.color, cell_w, cell_w, vp_w, vp_h, &mut verts,
+                        rect.rect, rect.color, cell_w, cell_h, vp_w, vp_h, &mut verts,
                     );
                 }
                 widget_render::MetalPrimitive::Quad(quad) => {
-                    push_solid_quad_vertices(*quad, cell_w, cell_w, vp_w, vp_h, &mut verts);
+                    push_solid_quad_vertices(*quad, cell_w, cell_h, vp_w, vp_h, &mut verts);
                 }
                 widget_render::MetalPrimitive::GlyphRun(run) => {
                     for (idx, ch) in run.text.chars().enumerate() {

@@ -66,9 +66,8 @@ impl Editor {
         if !self.is_double_click_candidate(node.widget_id, precise_col, precise_row) {
             return false;
         }
-        let aspect = self.runtime.layout_aspect();
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
-        let scrolled_row = (local_row + self.total_scroll_top()) * aspect;
+        let scrolled_row = local_row + self.total_scroll_top();
         let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) else {
             return false;
         };
@@ -134,9 +133,8 @@ impl Editor {
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
             return;
         };
-        let aspect = self.runtime.layout_aspect();
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
-        let scrolled_row = (local_row + self.total_scroll_top()) * aspect;
+        let scrolled_row = local_row + self.total_scroll_top();
         let gesture_data = begin_widget_gesture_data(&node, scrolled_col, scrolled_row);
         if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
             self.active_leaf_mut().active_widget_gesture = Some(WidgetGesture {
@@ -165,11 +163,9 @@ impl Editor {
             && widget_render::widget_captures_drag(&node.widget_type)
         {
             // Clamp drag to widget bounds in terminal-cell screen space
-            let aspect = self.runtime.layout_aspect();
             let scroll = self.total_scroll_top();
-            // Convert widget rect from uniform units to terminal-cell screen position
-            let screen_row = node.rect.row / aspect - scroll;
-            let screen_height = node.rect.height / aspect;
+            let screen_row = node.rect.row - scroll;
+            let screen_height = node.rect.height;
             let clamped_col = end.0.clamp(
                 content_col as f32 + node.rect.col,
                 content_col as f32 + node.rect.col + (node.rect.width - 1.0).max(0.0),
@@ -217,25 +213,23 @@ impl Editor {
         }
     }
 
-    /// Hit-test the widget layout tree using f32 coordinates in uniform units.
-    /// Takes local terminal-cell coords (relative to content area), converts to
-    /// uniform units, adds scroll, and does a precise rect-contains walk.
+    /// Hit-test the widget layout tree using f32 coordinates in layout row/col units.
+    /// Takes local terminal-cell coords (relative to content area), adds scroll,
+    /// and does a precise rect-contains walk.
     pub(super) fn widget_node_at_local(
         &mut self,
         local_col: f32,
         local_row: f32,
     ) -> Option<LayoutNode> {
         let layout = self.runtime.current_layout.as_ref()?;
-        let aspect = self.runtime.layout_aspect();
         let widget_scroll = self.widget_scroll_top() as f32;
         let text_scroll = self.active_buffer().scroll_top as f32;
         let hscroll = self.active_leaf().widget_scroll_left as f32;
 
-        // Convert terminal-cell local coords to uniform units for layout comparison
-        let uniform_col = local_col + hscroll;
-        let uniform_row = (local_row + widget_scroll + text_scroll) * aspect;
+        let layout_col = local_col + hscroll;
+        let layout_row = local_row + widget_scroll + text_scroll;
 
-        hit_test_layout(layout, uniform_row, uniform_col).cloned()
+        hit_test_layout(layout, layout_row, layout_col).cloned()
     }
 
     pub(super) fn widget_node_at_screen(
@@ -299,14 +293,12 @@ impl Editor {
     ) -> Option<crate::widget_render::EventOutput> {
         let total_scroll_top = self.total_scroll_top();
         let total_scroll_left = self.active_leaf().widget_scroll_left as f32;
-        let aspect = self.runtime.layout_aspect();
-        // Convert terminal-cell coords to uniform units for widget handlers
         let local_col = precise_col - content_col as f32 + total_scroll_left;
-        let local_row = (precise_row - content_row as f32 + total_scroll_top) * aspect;
+        let local_row = precise_row - content_row as f32 + total_scroll_top;
         let drag_start = drag_start.map(|(start_col, start_row)| {
             (
                 start_col - content_col as f32 + total_scroll_left,
-                (start_row - content_row as f32 + total_scroll_top) * aspect,
+                start_row - content_row as f32 + total_scroll_top,
             )
         });
         let leaf = self.active_leaf();
@@ -361,9 +353,8 @@ impl Editor {
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
             return;
         };
-        let aspect = self.runtime.layout_aspect();
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
-        let scrolled_row = (local_row + self.total_scroll_top()) * aspect;
+        let scrolled_row = local_row + self.total_scroll_top();
         let Some(widget_event) = map_magnify_event(&node, scrolled_col, scrolled_row, delta) else {
             return;
         };
@@ -388,9 +379,8 @@ impl Editor {
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
             return false;
         };
-        let aspect = self.runtime.layout_aspect();
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
-        let scrolled_row = (local_row + self.total_scroll_top()) * aspect;
+        let scrolled_row = local_row + self.total_scroll_top();
         let Some(widget_event) =
             map_scroll_gesture_event(&node, scrolled_col, scrolled_row, delta_x, delta_y)
         else {

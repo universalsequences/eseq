@@ -132,6 +132,48 @@
     }
 
     #[test]
+    fn hover_scroll_routes_to_hovered_tile_without_changing_selection() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*left*", &vec!["left"; 40].join("\n"));
+        let right_tile = editor
+            .split_active_tile(SplitDir::Vertical, editor.active_buffer_idx())
+            .expect("split should create a second tile");
+        editor.switch_active_tile(right_tile);
+        editor.open_scratch_buffer("*right*", &vec!["right"; 40].join("\n"));
+
+        let left_tile = editor.tile_root.leaf_ids()[0];
+        editor.switch_active_tile(left_tile);
+        editor.update_tile_rects(90, 30);
+
+        let right_rect = editor.tile_rect(right_tile).expect("right tile rect");
+        let hover_col = right_rect.col + 2.0;
+        let hover_row = right_rect.row + 2.0;
+
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::ScrollDown, hover_col as u16, hover_row as u16),
+            hover_col,
+            hover_row,
+            1,
+        );
+
+        let left_buffer_idx = editor
+            .tile_root
+            .find_leaf(left_tile)
+            .expect("left tile")
+            .buffer_idx;
+        let right_buffer_idx = editor
+            .tile_root
+            .find_leaf(right_tile)
+            .expect("right tile")
+            .buffer_idx;
+
+        assert_eq!(editor.active_tile, left_tile, "hover scroll should not change selection");
+        assert_eq!(editor.buffers[left_buffer_idx].scroll_top, 0);
+        assert_eq!(editor.buffers[right_buffer_idx].scroll_top, 3);
+    }
+
+    #[test]
     fn ctrl_a_moves_to_start_of_line() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -681,6 +723,100 @@
         let value = editor.runtime.eval_str("level").unwrap().unwrap();
         match value {
             Value::Number(n) => assert!(n > 90.0),
+            _ => panic!("expected numeric slider state"),
+        }
+    }
+
+    #[test]
+    fn widget_mouse_hit_testing_ignores_layout_aspect_scaling() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_aspect(2.35);
+        editor.set_layout_viewport(24, 10);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def level (state 0))
+                (effect
+                  (v-stack
+                    (label :text "a")
+                    (label :text "b")
+                    (label :text "c")
+                    (hslider
+                      :min 0
+                      :max 100
+                      :bind level)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(24, 10);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 12, 3),
+            0,
+            0,
+            24,
+            10,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 15, 3),
+            0,
+            0,
+            24,
+            10,
+        );
+
+        let value = editor.runtime.eval_str("level").unwrap().unwrap();
+        match value {
+            Value::Number(n) => assert!(n > 80.0, "expected drag on visual slider row to hit, got {n}"),
+            _ => panic!("expected numeric slider state"),
+        }
+    }
+
+    #[test]
+    fn widget_mouse_hit_testing_does_not_trigger_from_aspect_shifted_row() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_aspect(2.35);
+        editor.set_layout_viewport(24, 10);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def level (state 0))
+                (effect
+                  (v-stack
+                    (label :text "a")
+                    (label :text "b")
+                    (label :text "c")
+                    (hslider
+                      :min 0
+                      :max 100
+                      :bind level)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(24, 10);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 15, 7),
+            0,
+            0,
+            24,
+            10,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 15, 7),
+            0,
+            0,
+            24,
+            10,
+        );
+
+        let value = editor.runtime.eval_str("level").unwrap().unwrap();
+        match value {
+            Value::Number(n) => assert_eq!(n, 0.0),
             _ => panic!("expected numeric slider state"),
         }
     }

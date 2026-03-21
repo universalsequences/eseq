@@ -28,6 +28,9 @@ pub struct WaveformWidget;
 
 pub static WAVEFORM_WIDGET: WaveformWidget = WaveformWidget;
 
+const WAVEFORM_BODY_TOP_INSET: f32 = 0.45;
+const WAVEFORM_BODY_BOTTOM_INSET: f32 = 0.25;
+
 #[derive(Clone)]
 struct WaveformBuffer {
     sample: Arc<SampleBuffer>,
@@ -78,8 +81,9 @@ impl WidgetDefinition for WaveformWidget {
             .clamp(1.0, constraints.max_width.max(1.0));
         let height = get_prop_num(node, "height")
             .map(f64_to_f32)
-            .unwrap_or(8.0)
+            .unwrap_or(6.0)
             .max(1.0);
+        println!("MEASURING WAVEVFORM={}", height);
         Some(Size { width, height })
     }
 
@@ -350,13 +354,9 @@ fn build_metal_primitives(
     }
 
     let rect = node.rect;
-    let aspect = if viewport.cell_w > 0.0 {
-        viewport.cell_h / viewport.cell_w
-    } else {
-        1.0
-    };
     let view = WaveformView::from_props(&node.props, rect);
     let content = view.content_rect();
+    let waveform_rect = view.waveform_body_rect();
     if content.width == 0.0 || content.height == 0.0 {
         return Vec::new();
     }
@@ -395,7 +395,7 @@ fn build_metal_primitives(
         }
         for (absolute_col, label) in view.time_ruler_labels() {
             primitives.push(MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
-                row: rect.row - 3.5,
+                row: metal_header_text_row(rect, view.header_height),
                 col: absolute_col as i32 + 1,
                 text: label,
                 fg: theme::FG,
@@ -426,12 +426,7 @@ fn build_metal_primitives(
         let playhead = view.normalized_playhead();
         let level = view.best_level(buffer);
         primitives.push(MetalPrimitive::Waveform(MetalWaveformPrimitive {
-            rect: Rect {
-                col: content.col,
-                row: content.row - 3.0,
-                width: content.width,
-                height: content.height / 2.5,
-            },
+            rect: waveform_rect,
             sample_key: buffer.sample.cache_key(),
             sample_start: (view.view_start / buffer.sample.duration_seconds).clamp(0.0, 1.0) as f32,
             sample_end: ((view.view_start + view.view_duration) / buffer.sample.duration_seconds)
@@ -448,6 +443,12 @@ fn build_metal_primitives(
     }
 
     primitives
+}
+
+#[cfg(target_os = "macos")]
+fn metal_header_text_row(rect: Rect, header_height: f32) -> f32 {
+    let usable_header_height = header_height.min(rect.height).max(0.0);
+    rect.row + ((usable_header_height - 1.0) / 2.0).max(0.0)
 }
 
 impl WaveformView {
@@ -559,6 +560,18 @@ impl WaveformView {
         Some((self.selection_start?, self.selection_end?))
     }
 
+    fn waveform_body_rect(&self) -> Rect {
+        let content = self.content_rect();
+        let top_inset = WAVEFORM_BODY_TOP_INSET.min(content.height.max(0.0));
+        let bottom_inset = WAVEFORM_BODY_BOTTOM_INSET.min((content.height - top_inset).max(0.0));
+        Rect {
+            row: content.row + top_inset,
+            col: content.col,
+            width: content.width,
+            height: (content.height - top_inset - bottom_inset).max(0.0),
+        }
+    }
+
     fn hit_test(&self, local_col: f32, local_row: f32) -> Option<HitRegion> {
         if local_col < self.rect.col || local_row < self.rect.row {
             return None;
@@ -570,6 +583,10 @@ impl WaveformView {
         }
         if local_row < self.rect.row + self.header_height {
             return Some(HitRegion::Header);
+        }
+        let waveform = self.waveform_body_rect();
+        if local_row < waveform.row || local_row >= waveform.row + waveform.height {
+            return None;
         }
         Some(HitRegion::Content {
             time: self.time_at_col(local_col),

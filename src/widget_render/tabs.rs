@@ -17,6 +17,10 @@ pub static TABS_WIDGET: TabsWidget = TabsWidget;
 /// Height of the tab bar header (text row + underline row)
 const HEADER_HEIGHT: f32 = 2.0;
 
+fn header_height(aspect: f32) -> f32 {
+    aspect * HEADER_HEIGHT
+}
+
 fn get_items(props: &HashMap<String, Value>) -> Vec<String> {
     match props.get("items") {
         Some(Value::List(list)) => list
@@ -100,8 +104,7 @@ impl WidgetDefinition for TabsWidget {
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let _ = node;
-        // Header = HEADER_HEIGHT text rows, each row = aspect units tall
-        let header_h = constraints.aspect * HEADER_HEIGHT;
+        let header_h = header_height(constraints.aspect);
         let inner = Constraints {
             min_width: constraints.min_width,
             max_width: constraints.max_width,
@@ -136,26 +139,19 @@ impl WidgetDefinition for TabsWidget {
             .map(crate::layout::f64_to_f32)
             .unwrap_or(0.0) as usize;
 
-        // Header height: measure a child to discover the aspect, then compute
-        // a fixed header. A 1-row widget measures to height=aspect, so
-        // header = aspect * HEADER_HEIGHT. We derive aspect from the child.
-        let probe_constraints = Constraints {
+        let child_constraints = Constraints {
             min_width: 0.0,
             max_width: area.width,
             min_height: 0.0,
             max_height: area.height,
-            aspect: 1.0, // overridden by layout engine
+            aspect: 1.0,
         };
-        // Measure any child just to learn the aspect (via a known 1-row widget)
-        let child_h = children
-            .get(selected)
-            .and_then(|c| measure_child(c, probe_constraints))
-            .map(|s| s.height)
-            .unwrap_or(0.0);
-        // Derive header: measure() computed total = header + child, so if area
-        // matches, header = area - child. But clamp to minimum HEADER_HEIGHT
-        // so the header never disappears when the window is small.
-        let header_h = (area.height - child_h).clamp(HEADER_HEIGHT, area.height);
+        let tallest_child_height = children
+            .iter()
+            .filter_map(|child| measure_child(child, child_constraints))
+            .map(|size| size.height)
+            .fold(0.0_f32, f32::max);
+        let header_h = (area.height - tallest_child_height).clamp(HEADER_HEIGHT, area.height);
         let child_h = (area.height - header_h).max(0.0);
 
         let child_area = Rect {
@@ -237,7 +233,7 @@ impl WidgetDefinition for TabsWidget {
 
         // Only render the header portion (HEADER_HEIGHT text rows)
         let padding = get_f32_prop(&node.props, "padding", 0.0);
-        let header_h = aspect * HEADER_HEIGHT;
+        let header_h = header_height(aspect);
         let header_rect = Rect {
             row: node.rect.row,
             col: node.rect.col,

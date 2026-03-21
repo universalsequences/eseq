@@ -110,12 +110,12 @@ impl WidgetDefinition for HorizontalSliderWidget {
         &self,
         node: &Value,
         _children: &[Value],
-        constraints: Constraints,
+        _constraints: Constraints,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         Some(Size {
             width: get_prop_num(node, "width").map(f64_to_f32).unwrap_or(16.0),
-            height: constraints.aspect,
+            height: 1.0,
         })
     }
 
@@ -180,7 +180,7 @@ impl WidgetDefinition for HorizontalSliderWidget {
         };
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
-        let px_h = node.rect.height * viewport.cell_w;
+        let px_h = node.rect.height * viewport.cell_h;
         metal_widget_instance(
             widget_type,
             super::WidgetInstance {

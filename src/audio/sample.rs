@@ -296,8 +296,18 @@ mod tests {
         assert_eq!(sample.frames, 4);
         assert!(sample.peaks.len() >= 2);
         assert_eq!(sample.peaks[0].samples_per_bucket, 1);
-        assert!(sample.peaks[0].buckets.iter().any(|bucket| bucket.max > 0.4));
-        assert!(sample.peaks[0].buckets.iter().any(|bucket| bucket.min < -0.4));
+        assert!(
+            sample.peaks[0]
+                .buckets
+                .iter()
+                .any(|bucket| bucket.max > 0.4)
+        );
+        assert!(
+            sample.peaks[0]
+                .buckets
+                .iter()
+                .any(|bucket| bucket.min < -0.4)
+        );
         let _ = fs::remove_file(path);
     }
 

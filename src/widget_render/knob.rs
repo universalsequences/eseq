@@ -111,16 +111,17 @@ impl WidgetDefinition for KnobWidget {
         &self,
         node: &Value,
         _children: &[Value],
-        _constraints: Constraints,
+        constraints: Constraints,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let size = get_prop_num(node, "size")
             .map(f64_to_f32)
             .unwrap_or(2.0)
             .max(1.0);
+        let aspect = constraints.aspect.max(f32::EPSILON);
         Some(Size {
             width: size,
-            height: size,
+            height: size / aspect,
         })
     }
 
@@ -179,7 +180,7 @@ impl WidgetDefinition for KnobWidget {
     ) -> Vec<MetalPrimitive> {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
-        let px_h = node.rect.height * viewport.cell_w;
+        let px_h = node.rect.height * viewport.cell_h;
         metal_widget_instance(
             widget_type,
             super::WidgetInstance {

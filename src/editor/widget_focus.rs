@@ -21,10 +21,8 @@ impl Editor {
         if mouse.column < content_col || mouse.row < content_row {
             return false;
         }
-        let aspect = self.runtime.layout_aspect();
         let scroll_top = self.active_leaf().widget_scroll_top as f32;
-        // Convert terminal-cell mouse position to uniform units for rect comparison
-        let local_row = ((mouse.row - content_row) as f32 + scroll_top) * aspect;
+        let local_row = (mouse.row - content_row) as f32 + scroll_top;
         let local_col = (mouse.column - content_col) as f32;
 
         // Find the focusable widget at this position
@@ -150,9 +148,7 @@ impl Editor {
         if viewport_height == 0 {
             return;
         }
-        // focused_row is in uniform units; convert to terminal cells for scroll comparison
-        let aspect = self.runtime.layout_aspect();
-        let focused_terminal_row = (focused_row / aspect).round() as u16;
+        let focused_terminal_row = focused_row.round() as u16;
         let leaf = self.active_leaf_mut();
         if focused_terminal_row < leaf.widget_scroll_top {
             leaf.widget_scroll_top = focused_terminal_row;

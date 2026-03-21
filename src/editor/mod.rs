@@ -417,36 +417,123 @@ impl Editor {
 
         // Find which tile this mouse event targets
         if let Some(tile_id) = self.tile_at_screen(screen_col, screen_row) {
-            // Switch active tile on click
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                self.switch_active_tile(tile_id);
-            }
+            self.route_pointer_event_to_tile(
+                tile_id,
+                matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)),
+                |editor| {
+                    let Some((content_col, content_row, content_width, content_height)) =
+                        editor.tile_content_area(tile_id, border_inset)
+                    else {
+                        return;
+                    };
 
-            // Get tile rect and compute content area
-            if let Some(rect) = self.tile_rect(tile_id) {
-                let border = border_inset as f32;
-                let content_col = (rect.col + border).round() as u16;
-                let content_row = (rect.row + border).round() as u16;
-                let content_width = (rect.width - border * 2.0).max(0.0).round() as u16;
-                let leaf = self.tile_root.find_leaf(tile_id).unwrap();
-                let show_status = leaf.show_status;
-                let content_height = if show_status {
-                    (rect.height - border * 2.0 - 1.0).max(0.0).round() as u16 // borders + status
-                } else {
-                    (rect.height - border * 2.0).max(0.0).round() as u16
-                };
-
-                self.handle_mouse_precise(
-                    mouse,
-                    content_col,
-                    content_row,
-                    content_width,
-                    content_height,
-                    precise_col,
-                    precise_row,
-                );
-            }
+                    editor.handle_mouse_precise(
+                        mouse,
+                        content_col,
+                        content_row,
+                        content_width,
+                        content_height,
+                        precise_col,
+                        precise_row,
+                    );
+                },
+            );
         }
+    }
+
+    pub fn handle_tiled_touchpad_magnify(
+        &mut self,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+        delta: f64,
+    ) {
+        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+            return;
+        };
+        self.route_pointer_event_to_tile(tile_id, false, |editor| {
+            let Some((content_col, content_row, _, _)) =
+                editor.tile_content_area(tile_id, border_inset)
+            else {
+                return;
+            };
+            editor.handle_touchpad_magnify(
+                content_col,
+                content_row,
+                precise_col,
+                precise_row,
+                delta,
+            );
+        });
+    }
+
+    pub fn handle_tiled_touchpad_scroll(
+        &mut self,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> bool {
+        let Some(tile_id) = self.tile_at_screen(precise_col, precise_row) else {
+            return false;
+        };
+        self.route_pointer_event_to_tile(tile_id, false, |editor| {
+            let Some((content_col, content_row, _, _)) =
+                editor.tile_content_area(tile_id, border_inset)
+            else {
+                return false;
+            };
+            editor.handle_touchpad_scroll(
+                content_col,
+                content_row,
+                precise_col,
+                precise_row,
+                delta_x,
+                delta_y,
+            )
+        })
+    }
+
+    fn tile_content_area(
+        &self,
+        tile_id: TileId,
+        border_inset: u16,
+    ) -> Option<(u16, u16, u16, u16)> {
+        let rect = self.tile_rect(tile_id)?;
+        let border = border_inset as f32;
+        let content_col = (rect.col + border).round() as u16;
+        let content_row = (rect.row + border).round() as u16;
+        let content_width = (rect.width - border * 2.0).max(0.0).round() as u16;
+        let show_status = self.tile_root.find_leaf(tile_id)?.show_status;
+        let content_height = if show_status {
+            (rect.height - border * 2.0 - 1.0).max(0.0).round() as u16
+        } else {
+            (rect.height - border * 2.0).max(0.0).round() as u16
+        };
+        Some((content_col, content_row, content_width, content_height))
+    }
+
+    fn route_pointer_event_to_tile<R>(
+        &mut self,
+        tile_id: TileId,
+        persist_selection: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_tile = self.active_tile;
+        let switched = tile_id != previous_tile;
+
+        if switched {
+            self.switch_active_tile(tile_id);
+        }
+
+        let result = f(self);
+
+        if switched && !persist_selection && self.tile_root.find_leaf(previous_tile).is_some() {
+            self.switch_active_tile(previous_tile);
+        }
+
+        result
     }
 
     fn begin_tile_resize_drag(
@@ -1156,13 +1243,12 @@ impl Editor {
                 }
                 if !text_visible {
                     // UI-only: scroll widget viewport, clamped to widget bounds
-                    let aspect = self.runtime.layout_aspect();
                     let max_scroll = self
                         .runtime
                         .current_layout
                         .as_ref()
                         .map(|l| {
-                            (((l.rect.row + l.rect.height) / aspect).ceil() as u16)
+                            ((l.rect.row + l.rect.height).ceil() as u16)
                                 .saturating_sub(content_height)
                         })
                         .unwrap_or(0);

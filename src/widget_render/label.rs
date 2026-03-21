@@ -59,7 +59,7 @@ impl WidgetDefinition for LabelWidget {
         &self,
         node: &Value,
         _children: &[Value],
-        constraints: Constraints,
+        _constraints: Constraints,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         Some(Size {
@@ -70,7 +70,7 @@ impl WidgetDefinition for LabelWidget {
                         .map(|text| usize_to_f32(text.chars().count()))
                         .unwrap_or(0.0)
                 }),
-            height: constraints.aspect,
+            height: 1.0,
         })
     }
 
@@ -94,18 +94,13 @@ impl WidgetDefinition for LabelWidget {
         } else {
             theme::BG
         };
-        let aspect = if viewport.cell_w > 0.0 {
-            viewport.cell_h / viewport.cell_w
-        } else {
-            1.0
-        };
         vec![
             MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
                 color: bg,
             }),
             MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
-                row: node.rect.row / aspect,
+                row: node.rect.row,
                 col: node.rect.col.round() as i32,
                 text: text.clone(),
                 fg,

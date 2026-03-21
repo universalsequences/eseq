@@ -163,83 +163,63 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
 
         // Process touchpad gestures (Metal-specific, not crossterm events)
         while let Some((delta, (precise_col, precise_row))) = backend.take_pending_magnify() {
-            if let Some(tile_id) = editor.tile_at_screen(precise_col, precise_row) {
-                if let Some(rect) = editor.tile_rect(tile_id) {
-                    editor.handle_touchpad_magnify(
-                        rect.col.round() as u16,
-                        rect.row.round() as u16,
-                        precise_col,
-                        precise_row,
-                        delta,
-                    );
-                }
-            }
+            editor.handle_tiled_touchpad_magnify(precise_col, precise_row, 0, delta);
         }
         while let Some(((delta_x, delta_y), (precise_col, precise_row))) =
             backend.take_pending_scroll()
         {
-            if let Some(tile_id) = editor.tile_at_screen(precise_col, precise_row) {
-                if let Some(rect) = editor.tile_rect(tile_id) {
-                    // First try widget-level scroll (timeline etc.)
-                    let widget_handled = editor.handle_touchpad_scroll(
-                        rect.col.round() as u16,
-                        rect.row.round() as u16,
-                        precise_col,
-                        precise_row,
-                        delta_x,
-                        delta_y,
-                    );
-                    if widget_handled {
-                        continue;
-                    }
-                    // Accumulate pixel deltas for text buffer scrolling.
-                    // Only emit ScrollUp/Down after accumulating ~1 line of pixels.
-                    scroll_accum_y += delta_y;
-                    let line_px = backend.viewport_size().1.max(1) as f32 / (rows.max(1) as f32); // approx pixels per cell row
-                    let threshold = line_px.max(20.0); // at least 20px per scroll step
-                    while scroll_accum_y > threshold {
-                        scroll_accum_y -= threshold;
-                        let mouse = crossterm::event::MouseEvent {
-                            kind: crossterm::event::MouseEventKind::ScrollUp,
-                            column: precise_col as u16,
-                            row: precise_row as u16,
-                            modifiers: crossterm::event::KeyModifiers::NONE,
-                        };
-                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-                    }
-                    while scroll_accum_y < -threshold {
-                        scroll_accum_y += threshold;
-                        let mouse = crossterm::event::MouseEvent {
-                            kind: crossterm::event::MouseEventKind::ScrollDown,
-                            column: precise_col as u16,
-                            row: precise_row as u16,
-                            modifiers: crossterm::event::KeyModifiers::NONE,
-                        };
-                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-                    }
-                    // Horizontal scroll accumulation
-                    scroll_accum_x += delta_x;
-                    while scroll_accum_x > threshold {
-                        scroll_accum_x -= threshold;
-                        let mouse = crossterm::event::MouseEvent {
-                            kind: crossterm::event::MouseEventKind::ScrollLeft,
-                            column: precise_col as u16,
-                            row: precise_row as u16,
-                            modifiers: crossterm::event::KeyModifiers::NONE,
-                        };
-                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-                    }
-                    while scroll_accum_x < -threshold {
-                        scroll_accum_x += threshold;
-                        let mouse = crossterm::event::MouseEvent {
-                            kind: crossterm::event::MouseEventKind::ScrollRight,
-                            column: precise_col as u16,
-                            row: precise_row as u16,
-                            modifiers: crossterm::event::KeyModifiers::NONE,
-                        };
-                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-                    }
-                }
+            // First try widget-level scroll (timeline etc.) in the hovered tile.
+            let widget_handled =
+                editor.handle_tiled_touchpad_scroll(precise_col, precise_row, 0, delta_x, delta_y);
+            if widget_handled {
+                continue;
+            }
+            // Accumulate pixel deltas for text buffer scrolling.
+            // Only emit ScrollUp/Down after accumulating ~1 line of pixels.
+            scroll_accum_y += delta_y;
+            let line_px = backend.viewport_size().1.max(1) as f32 / (rows.max(1) as f32); // approx pixels per cell row
+            let threshold = line_px.max(20.0); // at least 20px per scroll step
+            while scroll_accum_y > threshold {
+                scroll_accum_y -= threshold;
+                let mouse = crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::ScrollUp,
+                    column: precise_col as u16,
+                    row: precise_row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+            }
+            while scroll_accum_y < -threshold {
+                scroll_accum_y += threshold;
+                let mouse = crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::ScrollDown,
+                    column: precise_col as u16,
+                    row: precise_row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+            }
+            // Horizontal scroll accumulation
+            scroll_accum_x += delta_x;
+            while scroll_accum_x > threshold {
+                scroll_accum_x -= threshold;
+                let mouse = crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::ScrollLeft,
+                    column: precise_col as u16,
+                    row: precise_row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+            }
+            while scroll_accum_x < -threshold {
+                scroll_accum_x += threshold;
+                let mouse = crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::ScrollRight,
+                    column: precise_col as u16,
+                    row: precise_row as u16,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                };
+                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
             }
         }
 
@@ -987,6 +967,90 @@ mod tests {
     }
 
     #[test]
+    fn test_grid_defaults_to_child_sized_cells() {
+        let tree = run_prog(
+            r#"
+            (grid :cols 4
+              (knob :size 1 :value 0)
+              (knob :size 1 :value 0)
+              (knob :size 1 :value 0)
+              (knob :size 1 :value 0))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+
+        assert_eq!(lines[0], ":grid  row=0 col=0 w=4 h=1");
+        assert_eq!(lines[1], "  :knob  row=0 col=0 w=1 h=1  value=0");
+        assert_eq!(lines[2], "  :knob  row=0 col=1 w=1 h=1  value=0");
+        assert_eq!(lines[3], "  :knob  row=0 col=2 w=1 h=1  value=0");
+        assert_eq!(lines[4], "  :knob  row=0 col=3 w=1 h=1  value=0");
+    }
+
+    #[test]
+    fn test_grid_preserves_child_size_inside_explicit_slots() {
+        let tree = run_prog(
+            r#"
+            (grid :cols 2 :col-width 4 :row-height 4
+              (knob :size 1 :value 0)
+              (knob :size 2 :value 0))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+
+        assert_eq!(lines[0], ":grid  row=0 col=0 w=8 h=4");
+        assert_eq!(lines[1], "  :knob  row=0 col=0 w=1 h=1  value=0");
+        assert_eq!(lines[2], "  :knob  row=0 col=4 w=2 h=2  value=0");
+    }
+
+    #[test]
+    fn test_knob_size_respects_layout_aspect() {
+        let tree = run_prog(r#"(knob :size 2 :value 0)"#).unwrap().unwrap();
+
+        let layout = LayoutEngine::new(80, 24, 2.0)
+            .layout(&tree)
+            .expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+
+        assert_eq!(lines[0], ":knob  row=0 col=0 w=2 h=1  value=0");
+    }
+
+    #[test]
+    fn test_tabs_do_not_add_extra_top_gap_for_shorter_selected_tab() {
+        let tree = run_prog(
+            r#"
+            (tabs :items (list "A" "B") :value 0
+              (label "short")
+              (v-stack
+                (label "one")
+                (label "two")
+                (label "three")))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+
+        assert_eq!(lines[0], ":tabs  row=0 col=0 w=80 h=5  value=0");
+        assert!(lines[1].contains("row=2 col=0"), "{}", lines[1]);
+    }
+
+    #[test]
     fn test_reactive_namespace_reads_transparently() {
         let mut runtime = Runtime::new();
         runtime.register_reactive(
@@ -1153,6 +1217,95 @@ mod tests {
                 "  :label  row=0 col=7 w=2 h=1  text=\"16\"".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn waveform_layout_reserves_requested_height_in_vstack() {
+        let tree = run_prog(
+            r#"
+            (v-stack
+              (label "waveform demo")
+              (label "last action: nil")
+              (label "loaded sample")
+              (waveform
+                :height 6
+                :header-height 0.5
+                :view-start 0
+                :view-duration 1
+                :buffer
+                  (dict
+                    :sample-rate 48000
+                    :channels 1
+                    :frames 8
+                    :duration 1
+                    :peaks
+                      (list
+                        (dict
+                          :samples-per-bucket 1
+                          :buckets
+                            (list
+                              (dict :min -0.5 :max 0.5)
+                              (dict :min -0.25 :max 0.25))))))
+              (hslider :min 0 :max 100 :value 50))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let layout = LayoutEngine::new(120, 40, 1.0)
+            .layout(&tree)
+            .expect("layout");
+        let lines = format_layout_tree_lines(&layout, 0);
+
+        assert_eq!(lines[0], ":v-stack  row=0 col=0 w=120 h=10");
+        assert_eq!(
+            lines[1],
+            "  :label  row=0 col=0 w=13 h=1  text=\"waveform demo\""
+        );
+        assert_eq!(
+            lines[2],
+            "  :label  row=1 col=0 w=16 h=1  text=\"last action: nil\""
+        );
+        assert_eq!(
+            lines[3],
+            "  :label  row=2 col=0 w=13 h=1  text=\"loaded sample\""
+        );
+        assert_eq!(lines[4], "  :waveform  row=3 col=0 w=120 h=6");
+        assert_eq!(
+            lines[5],
+            "  :hslider  row=9 col=0 w=16 h=1  value=50  min=0  max=100"
+        );
+    }
+
+    #[test]
+    fn waveform_layout_child_rows_match_measured_height() {
+        let tree = run_prog(
+            r#"
+            (v-stack
+              (label "a")
+              (label "b")
+              (label "c")
+              (waveform :height 6 :view-start 0 :view-duration 1)
+              (hslider :min 0 :max 100 :value 50))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let layout = LayoutEngine::new(120, 40, 1.0)
+            .layout(&tree)
+            .expect("layout");
+
+        assert_eq!(layout.children.len(), 5);
+        assert_eq!(layout.children[0].widget_type, "label");
+        assert_eq!(layout.children[0].rect.row, 0.0);
+        assert_eq!(layout.children[1].rect.row, 1.0);
+        assert_eq!(layout.children[2].rect.row, 2.0);
+        assert_eq!(layout.children[3].widget_type, "waveform");
+        assert_eq!(layout.children[3].rect.row, 3.0);
+        assert_eq!(layout.children[3].rect.height, 6.0);
+        assert_eq!(layout.children[4].widget_type, "hslider");
+        assert_eq!(layout.children[4].rect.row, 9.0);
     }
 
     #[test]

@@ -184,7 +184,7 @@ impl WidgetDefinition for VerticalSliderWidget {
         };
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;
-        let px_h = node.rect.height * viewport.cell_w;
+        let px_h = node.rect.height * viewport.cell_h;
         metal_widget_instance(
             widget_type,
             super::WidgetInstance {

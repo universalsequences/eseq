@@ -585,14 +585,16 @@ pub fn styled_cell(ch: char, fg: Color, bg: Option<Color>) -> Cell {
 
 #[cfg(target_os = "macos")]
 pub fn ndc_bounds(rect: Rect, viewport: WidgetViewport) -> ([f32; 2], [f32; 2]) {
-    let unit_px = viewport.cell_w;
     let ndc_x = |px: f32| px / viewport.vp_w * 2.0 - 1.0;
     let ndc_y = |px: f32| 1.0 - px / viewport.vp_h * 2.0;
     (
-        [ndc_x(rect.col * unit_px), ndc_y(rect.row * unit_px)],
         [
-            ndc_x((rect.col + rect.width) * unit_px),
-            ndc_y((rect.row + rect.height) * unit_px),
+            ndc_x(rect.col * viewport.cell_w),
+            ndc_y(rect.row * viewport.cell_h),
+        ],
+        [
+            ndc_x((rect.col + rect.width) * viewport.cell_w),
+            ndc_y((rect.row + rect.height) * viewport.cell_h),
         ],
     )
 }
