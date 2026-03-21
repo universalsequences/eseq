@@ -2049,6 +2049,10 @@ impl Editor {
             }
         }
 
+        if let Some(theme_map) = self.runtime.take_pending_apply_theme() {
+            self.runtime.apply_theme_map(theme_map);
+        }
+
         if self.runtime.take_pending_cycle_view_mode() {
             self.toggle_active_buffer_view_mode();
         }

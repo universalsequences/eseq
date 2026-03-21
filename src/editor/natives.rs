@@ -705,11 +705,11 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "apply-theme",
         "(apply-theme map)",
         "Apply a theme from a map of field name → color entries. Only fields present in the map are updated.",
-        |args, _ctx| {
-            let Some(value @ Value::Map(_)) = args.first() else {
+        |args, ctx| {
+            let Some(Value::Map(_)) = args.first() else {
                 return Err("apply-theme expects a map".to_string());
             };
-            crate::theme::sync_from_value(value);
+            ctx.apply_theme(args.into_iter().next().unwrap());
             Ok(Value::Bool(true))
         },
     );

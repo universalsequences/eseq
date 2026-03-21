@@ -64,6 +64,8 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_set_window_buffer: Option<String>,
     pub pending_window_hide_status: bool,
     pub pending_resize_window: Option<f64>,
+    /// Theme map to apply (from `apply-theme` native).
+    pub pending_apply_theme: Option<Value>,
 }
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
@@ -235,6 +237,10 @@ impl NativeContext {
 
     pub fn current_view_mode(&self) -> String {
         self.shared.borrow().current_view_mode.clone()
+    }
+
+    pub fn apply_theme(&mut self, map: Value) {
+        self.shared.borrow_mut().pending_apply_theme = Some(map);
     }
 }
 
@@ -687,6 +693,20 @@ impl Runtime {
 
     pub(crate) fn take_pending_set_view_mode(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_set_view_mode.take()
+    }
+
+    pub(crate) fn take_pending_apply_theme(&mut self) -> Option<Value> {
+        self.shared.borrow_mut().pending_apply_theme.take()
+    }
+
+    /// Apply a theme map by updating each reactive THEME field and syncing the
+    /// global theme. This ensures the reactive namespace stays in sync.
+    pub(crate) fn apply_theme_map(&mut self, map: Value) {
+        if let Value::Map(ref entries) = map {
+            for (field, value) in entries {
+                self.set_reactive("THEME", field, value.borrow().clone());
+            }
+        }
     }
 
     pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {
