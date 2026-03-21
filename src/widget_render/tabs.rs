@@ -6,7 +6,7 @@ use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_f32_prop,
     styled_cell,
 };
-use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size};
+use crate::layout::{Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size};
 use crate::theme;
 use crate::vm::Value;
 
@@ -269,7 +269,7 @@ impl WidgetDefinition for TabsWidget {
                     row: header_rect.row,
                     col: tab_col + text_pad,
                     text: label.clone(),
-                    font_size: 14.0,
+                    font_size: DEFAULT_FONT_SIZE,
                     fg,
                     bg: theme::BG(),
                 },

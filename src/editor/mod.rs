@@ -49,6 +49,15 @@ impl ViewMode {
             ViewMode::TextOnly => "text",
         }
     }
+
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "ui" => Some(ViewMode::UiOnly),
+            "text" => Some(ViewMode::TextOnly),
+            "both" => Some(ViewMode::Both),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -606,20 +615,8 @@ impl Editor {
     }
 
     fn toggle_active_buffer_view_mode(&mut self) {
-        let ui_available = self.active_buffer_has_ui();
         let next_mode = self.active_buffer().view_mode.toggle_primary();
-
-        if next_mode == ViewMode::UiOnly && !ui_available {
-            self.show_transient_message("No UI in this buffer");
-            return;
-        }
-
-        self.active_buffer_mut().view_mode = next_mode;
-        self.show_transient_message(format!("view: {}", next_mode.label()));
-        if next_mode == ViewMode::UiOnly {
-            self.active_buffer_mut().scroll_top = 0;
-            self.active_leaf_mut().widget_scroll_top = 0;
-        }
+        self.set_active_buffer_view_mode(next_mode);
     }
 
     fn toggle_active_buffer_view_mode_from_indicator(&mut self) {
@@ -2056,17 +2053,11 @@ impl Editor {
             self.toggle_active_buffer_view_mode();
         }
 
-        if let Some(mode) = self.runtime.take_pending_set_view_mode() {
-            let parsed_mode = match mode.as_str() {
-                "ui" => Some(ViewMode::UiOnly),
-                "text" => Some(ViewMode::TextOnly),
-                "both" => Some(ViewMode::Both),
-                _ => None,
-            };
-            if let Some(mode) = parsed_mode {
+        if let Some(mode_str) = self.runtime.take_pending_set_view_mode() {
+            if let Some(mode) = ViewMode::from_label(&mode_str) {
                 self.set_active_buffer_view_mode(mode);
             } else {
-                self.show_transient_message(format!("Unknown view mode: {mode}"));
+                self.show_transient_message(format!("Unknown view mode: {mode_str}"));
             }
         }
 

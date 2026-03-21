@@ -473,16 +473,20 @@ impl Runtime {
         }
     }
 
-    fn sync_theme_from_vm(&mut self) {
-        if let Some(value) = self.vm.global_value("THEME") {
-            crate::theme::sync_from_value(&value);
+    fn sync_theme(&mut self, value: Option<Value>) {
+        if let Some(v) = value {
+            crate::theme::sync_from_value(&v);
         }
     }
 
+    fn sync_theme_from_vm(&mut self) {
+        let value = self.vm.global_value("THEME");
+        self.sync_theme(value);
+    }
+
     fn sync_theme_from_registry(&mut self) {
-        if let Some(value) = self.reactive_registry.namespace_value("THEME") {
-            crate::theme::sync_from_value(&value);
-        }
+        let value = self.reactive_registry.namespace_value("THEME");
+        self.sync_theme(value);
     }
 
     pub fn global_names(&self) -> &[String] {

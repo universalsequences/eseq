@@ -673,7 +673,7 @@ fragment float4 waveform_frag(
                     ns_window.setBackgroundColor(Some(&color));
                     ns_window.setTitlebarAppearsTransparent(true);
 
-                    let appearance_name = if color_luma(bg) > 0.55 {
+                    let appearance_name = if bg.luma() > 0.55 {
                         "NSAppearanceNameVibrantLight"
                     } else {
                         "NSAppearanceNameVibrantDark"
@@ -2432,9 +2432,6 @@ fragment float4 waveform_frag(
         ]);
     }
 
-    fn color_luma(color: Color) -> f32 {
-        0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
-    }
 
     fn group_widget_instances(
         primitives: &[widget_render::MetalPrimitive],

@@ -6,7 +6,8 @@ use super::{
 };
 use crate::backend::Color;
 use crate::layout::{
-    Constraints, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_prop_str, usize_to_f32,
+    Constraints, DEFAULT_FONT_SIZE, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    get_prop_str, usize_to_f32,
 };
 use crate::theme;
 use crate::vm::Value;
@@ -122,7 +123,7 @@ impl WidgetDefinition for LabelWidget {
                 Value::Number(n) => Some(*n as f32),
                 _ => None,
             })
-            .unwrap_or(14.0);
+            .unwrap_or(DEFAULT_FONT_SIZE);
         vec![
             MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,

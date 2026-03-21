@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use crate::vm::{Value, format_lisp_value};
 use crate::widget_render;
 
+/// Default font size (in points) used when no explicit font-size is specified.
+pub const DEFAULT_FONT_SIZE: f32 = 14.0;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
     pub row: f32,
@@ -105,7 +108,7 @@ impl<'a> LayoutEngine<'a> {
                 max_height: f32::MAX,
                 aspect: self.aspect,
             },
-            14.0,
+            DEFAULT_FONT_SIZE,
         )?;
         let mut layout = self.build_layout_node(
             tree,
@@ -115,7 +118,7 @@ impl<'a> LayoutEngine<'a> {
                 width: size.width,
                 height: size.height,
             },
-            14.0,
+            DEFAULT_FONT_SIZE,
         );
         let mut next_widget_id = 1;
         assign_widget_ids(&mut layout, &mut next_widget_id);
@@ -178,7 +181,7 @@ impl<'a> LayoutEngine<'a> {
         let mut props = collect_props(node);
 
         // Inject inherited font-size into props so the rendering path can use it.
-        if !props.contains_key("font-size") && (inherited_font_size - 14.0).abs() > 0.01 {
+        if !props.contains_key("font-size") && (inherited_font_size - DEFAULT_FONT_SIZE).abs() > 0.01 {
             props.insert(
                 "font-size".to_string(),
                 Value::Number(inherited_font_size as f64),

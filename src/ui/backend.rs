@@ -48,6 +48,11 @@ impl Color {
     pub const MAGENTA: Self = Self::rgb(0.8, 0.0, 0.8);
     pub const LIGHT_BLUE: Self = Self::rgb(0.6, 0.8, 1.0);
     pub const GRAY: Self = Self::rgb(0.5, 0.5, 0.5);
+
+    /// Relative luminance (ITU-R BT.709).
+    pub fn luma(self) -> f32 {
+        0.2126 * self.r + 0.7152 * self.g + 0.0722 * self.b
+    }
 }
 
 // ── Cell styling ─────────────────────────────────────────────────────────────
