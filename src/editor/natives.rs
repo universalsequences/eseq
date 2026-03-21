@@ -376,12 +376,13 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             let Some(Value::String(path)) = args.first() else {
                 return Err("list-directory expects a path string".to_string());
             };
-            let entries = std::fs::read_dir(path)
-                .map_err(|e| format!("list-directory: {e}"))?;
+            let entries = std::fs::read_dir(path).map_err(|e| format!("list-directory: {e}"))?;
             let mut result = Vec::new();
             for entry in entries {
                 let entry = entry.map_err(|e| format!("list-directory: {e}"))?;
-                let metadata = entry.metadata().map_err(|e| format!("list-directory: {e}"))?;
+                let metadata = entry
+                    .metadata()
+                    .map_err(|e| format!("list-directory: {e}"))?;
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_dir = metadata.is_dir();
                 let size = metadata.len();
@@ -409,8 +410,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "(current-directory)",
         "Return the current working directory as a string.",
         |_args, _ctx| {
-            let cwd = std::env::current_dir()
-                .map_err(|e| format!("current-directory: {e}"))?;
+            let cwd = std::env::current_dir().map_err(|e| format!("current-directory: {e}"))?;
             Ok(Value::String(cwd.display().to_string()))
         },
     );
@@ -420,8 +420,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "(path-join a b)",
         "Join two path components.",
         |args, _ctx| {
-            let (Some(Value::String(a)), Some(Value::String(b))) =
-                (args.first(), args.get(1))
+            let (Some(Value::String(a)), Some(Value::String(b))) = (args.first(), args.get(1))
             else {
                 return Err("path-join expects two strings".to_string());
             };
@@ -492,8 +491,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             let Some(Value::String(path)) = args.first() else {
                 return Err("read-file-to-string expects a string".to_string());
             };
-            let contents = std::fs::read_to_string(path)
-                .map_err(|e| format!("read-file-to-string: {e}"))?;
+            let contents =
+                std::fs::read_to_string(path).map_err(|e| format!("read-file-to-string: {e}"))?;
             Ok(Value::String(contents))
         },
     );
@@ -639,8 +638,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "(string-starts-with? s prefix)",
         "Return true if string starts with prefix.",
         |args, _ctx| {
-            let (Some(Value::String(s)), Some(Value::String(prefix))) =
-                (args.first(), args.get(1))
+            let (Some(Value::String(s)), Some(Value::String(prefix))) = (args.first(), args.get(1))
             else {
                 return Err("string-starts-with? expects two strings".to_string());
             };
@@ -653,8 +651,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "(string-ends-with? s suffix)",
         "Return true if string ends with suffix.",
         |args, _ctx| {
-            let (Some(Value::String(s)), Some(Value::String(suffix))) =
-                (args.first(), args.get(1))
+            let (Some(Value::String(s)), Some(Value::String(suffix))) = (args.first(), args.get(1))
             else {
                 return Err("string-ends-with? expects two strings".to_string());
             };

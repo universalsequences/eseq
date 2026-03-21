@@ -3,6 +3,7 @@ pub struct Parser {
     pos: usize,
 }
 
+#[derive(Debug)]
 pub enum ParserError {
     ErrorParsingNumber,
     ExpectedLeftParen,
@@ -167,9 +168,6 @@ impl Parser {
                         };
                         tokens.push(Token::Keyword(name));
                     }
-                    _ if next.is_alphabetic() || next.is_ascii_punctuation() => {
-                        tokens.push(self.parse_symbol()?);
-                    }
                     _ if next.is_ascii_digit()
                         || (next == '-'
                             && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit()))
@@ -177,6 +175,9 @@ impl Parser {
                             && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit())) =>
                     {
                         tokens.push(self.parse_number()?);
+                    }
+                    _ if next.is_alphabetic() || next.is_ascii_punctuation() => {
+                        tokens.push(self.parse_symbol()?);
                     }
                     _ => {
                         self.next();
@@ -345,5 +346,44 @@ impl ASTParser {
             expressions.push(self.parse_expression()?);
         }
         Ok(expressions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_str(input: &str) -> Vec<Expression> {
+        let tokens = Parser::new(input.to_string()).parse().unwrap();
+        let mut ast = ASTParser::new(tokens);
+        ast.parse().unwrap()
+    }
+
+    #[test]
+    fn negative_number_literal() {
+        let exprs = parse_str("(foo :min -10 :max 10)");
+        let Expression::List(list) = &exprs[0] else {
+            panic!("expected list");
+        };
+        assert!(matches!(&list[0], Expression::Symbol(s) if s == "foo"));
+        assert!(matches!(&list[1], Expression::Keyword(k) if k == "min"));
+        assert!(matches!(&list[2], Expression::Number(n) if *n == -10.0));
+        assert!(matches!(&list[3], Expression::Keyword(k) if k == "max"));
+        assert!(matches!(&list[4], Expression::Number(n) if *n == 10.0));
+    }
+
+    #[test]
+    fn negative_float_literal() {
+        let exprs = parse_str("-3.14");
+        assert!(matches!(&exprs[0], Expression::Number(n) if (*n - -3.14).abs() < 0.001));
+    }
+
+    #[test]
+    fn bare_minus_is_symbol() {
+        let exprs = parse_str("(- 1 2)");
+        let Expression::List(list) = &exprs[0] else {
+            panic!("expected list");
+        };
+        assert!(matches!(&list[0], Expression::Symbol(s) if s == "-"));
     }
 }

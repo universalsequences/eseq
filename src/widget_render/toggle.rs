@@ -6,8 +6,8 @@ use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     get_bool_prop, metal_widget_instance, ndc_bounds, resolve_named_color, styled_cell,
 };
-use crate::theme;
 use crate::layout::{Constraints, LayoutNode, Rect, Size};
+use crate::theme;
 use crate::vm::Value;
 
 pub struct ToggleWidget;
@@ -32,12 +32,16 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
         ("[ ]", off_color(props))
     };
 
+    let row_u16 = rect.row.round() as u16;
+    let col_u16 = rect.col.round() as u16;
+    let width_u16 = rect.width.round() as u16;
+
     for (i, ch) in text.chars().enumerate() {
-        let col = rect.col + i as u16;
-        if col >= rect.col + rect.width {
+        let col = col_u16 + i as u16;
+        if col >= col_u16 + width_u16 {
             break;
         }
-        buf.set(rect.row, col, styled_cell(ch, fg, None));
+        buf.set(row_u16, col, styled_cell(ch, fg, None));
     }
 }
 
@@ -52,7 +56,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float2 sdfSize = float2(aspect, 1.0);
     float cornerRadius = 1.0;
 
-    float3 borderColor = float3(0.5, 0.5, 0.55);
+    float3 borderColor = float3(0.25, 0.25, 0.28);
     float outerMask;
     float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
     if (outerMask <= 0.001) { discard_fragment(); }
@@ -67,7 +71,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float knobDeriv = max(fwidth(knobDist), 0.001);
     float knobMask = smoothstep(knobDeriv, -knobDeriv, knobDist);
 
-    float3 knobColor = float3(0.96, 0.96, 0.98);
+    // Knob: dark when on (contrast against bright fill), light when off
+    float3 knobColor = mix(float3(0.7, 0.7, 0.72), float3(0.08, 0.08, 0.08), on);
     float3 rgb = mix(bg.rgb, borderColor, borderMask);
     rgb = mix(rgb, knobColor, knobMask);
 
@@ -84,12 +89,12 @@ impl WidgetDefinition for ToggleWidget {
         &self,
         _node: &Value,
         _children: &[Value],
-        _constraints: Constraints,
+        constraints: Constraints,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         Some(Size {
-            width: 4,
-            height: 1,
+            width: 4.0,
+            height: constraints.aspect,
         })
     }
 
@@ -110,7 +115,7 @@ impl WidgetDefinition for ToggleWidget {
             MouseEventKind::Down(MouseButton::Left) => {
                 MouseEventOutcome::Dispatch(WidgetEvent::Activate)
             }
-            _ => MouseEventOutcome::Consume,
+            _ => MouseEventOutcome::Ignore,
         }
     }
 
@@ -139,22 +144,25 @@ impl WidgetDefinition for ToggleWidget {
         viewport: super::WidgetViewport,
     ) -> Vec<MetalPrimitive> {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
-        let px_w = node.rect.width as f32 * viewport.cell_w;
-        let px_h = node.rect.height as f32 * viewport.cell_h;
-        metal_widget_instance(widget_type, super::WidgetInstance {
-            ndc_min,
-            ndc_max,
-            value_t: if get_bool_prop(&node.props, "value", false) {
-                1.0
-            } else {
-                0.0
+        let px_w = node.rect.width * viewport.cell_w;
+        let px_h = node.rect.height * viewport.cell_w;
+        metal_widget_instance(
+            widget_type,
+            super::WidgetInstance {
+                ndc_min,
+                ndc_max,
+                value_t: if get_bool_prop(&node.props, "value", false) {
+                    1.0
+                } else {
+                    0.0
+                },
+                orientation: 0.0,
+                color_a: on_color(&node.props).to_rgba(),
+                color_b: off_color(&node.props).to_rgba(),
+                corner_radius: 0.0,
+                pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
             },
-            orientation: 0.0,
-            color_a: on_color(&node.props).to_rgba(),
-            color_b: off_color(&node.props).to_rgba(),
-            corner_radius: 0.0,
-            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-        })
+        )
     }
 }
 
@@ -173,10 +181,10 @@ mod tests {
         tui_render(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 4,
-                height: 1,
+                row: 0.0,
+                col: 0.0,
+                width: 4.0,
+                height: 1.0,
             },
             &mut buf,
         );
@@ -188,10 +196,10 @@ mod tests {
         tui_render(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 4,
-                height: 1,
+                row: 0.0,
+                col: 0.0,
+                width: 4.0,
+                height: 1.0,
             },
             &mut buf,
         );

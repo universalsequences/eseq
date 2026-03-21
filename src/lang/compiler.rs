@@ -111,6 +111,7 @@ fn is_widget_name(name: &str) -> bool {
             | "h-stack"
             | "box"
             | "grid"
+            | "tabs"
     )
 }
 
@@ -147,7 +148,11 @@ fn extract_if_statement(list: &[Expression]) -> Option<(Expression, Expression, 
 
 fn extract_match_statement(
     list: &[Expression],
-) -> Option<(Expression, Vec<(Expression, Expression)>, Option<Expression>)> {
+) -> Option<(
+    Expression,
+    Vec<(Expression, Expression)>,
+    Option<Expression>,
+)> {
     let (Some(Expression::Symbol(s)), Some(value)) = (list.first(), list.get(1)) else {
         return None;
     };
@@ -177,6 +182,16 @@ fn extract_boolean_chain<'a>(list: &'a [Expression], name: &str) -> Option<&'a [
         return None;
     };
     (symbol == name).then_some(&list[1..])
+}
+
+fn extract_zip_sources(source: &Expression) -> Option<Vec<Expression>> {
+    let Expression::List(items) = source else {
+        return None;
+    };
+    let Some(Expression::Symbol(name)) = items.first() else {
+        return None;
+    };
+    (name == "zip").then(|| items[1..].to_vec())
 }
 
 impl Compiler {
@@ -277,19 +292,21 @@ impl Compiler {
         stages: &[Expression],
         thread_last: bool,
     ) -> Result<Expression, CompilerError> {
-        stages.iter().try_fold(initial.clone(), |acc, stage| match stage {
-            Expression::Symbol(name) => Ok(Expression::List(vec![
-                Expression::Symbol(name.clone()),
-                acc,
-            ])),
-            Expression::List(items) if !items.is_empty() => {
-                let mut rewritten = items.clone();
-                let insert_idx = if thread_last { rewritten.len() } else { 1 };
-                rewritten.insert(insert_idx, acc);
-                Ok(Expression::List(rewritten))
-            }
-            _ => Err(CompilerError::InvalidArg),
-        })
+        stages
+            .iter()
+            .try_fold(initial.clone(), |acc, stage| match stage {
+                Expression::Symbol(name) => Ok(Expression::List(vec![
+                    Expression::Symbol(name.clone()),
+                    acc,
+                ])),
+                Expression::List(items) if !items.is_empty() => {
+                    let mut rewritten = items.clone();
+                    let insert_idx = if thread_last { rewritten.len() } else { 1 };
+                    rewritten.insert(insert_idx, acc);
+                    Ok(Expression::List(rewritten))
+                }
+                _ => Err(CompilerError::InvalidArg),
+            })
     }
 
     fn desugar_and(&mut self, exprs: &[Expression]) -> Result<Expression, CompilerError> {
@@ -575,9 +592,49 @@ impl Compiler {
             "__each_index".to_string()
         };
 
+        let mut zip_bind_sources = HashMap::new();
+        let positional_zip_bindings = if let (Expression::List(pattern), Some(zip_sources)) =
+            (&args[0], extract_zip_sources(source))
+        {
+            if pattern.len() > zip_sources.len()
+                || !pattern
+                    .iter()
+                    .all(|field| matches!(field, Expression::Symbol(_)))
+            {
+                return Err(CompilerError::InvalidArg);
+            }
+
+            let mut bindings = Vec::with_capacity(pattern.len());
+            for (field, zip_source) in pattern.iter().zip(zip_sources.iter()) {
+                let Expression::Symbol(name) = field else {
+                    return Err(CompilerError::InvalidArg);
+                };
+                zip_bind_sources.insert(name.clone(), zip_source.clone());
+                bindings.push(Expression::List(vec![
+                    Expression::Symbol(name.clone()),
+                    Expression::List(vec![
+                        Expression::Symbol("nth".to_string()),
+                        zip_source.clone(),
+                        Expression::Symbol(index_name.clone()),
+                    ]),
+                ]));
+            }
+            Some(bindings)
+        } else {
+            None
+        };
+
         let rewritten_body = body
             .iter()
-            .map(|expr| self.rewrite_each_bind_expr(expr, source, &item_name, &index_name))
+            .map(|expr| {
+                self.rewrite_each_bind_expr(
+                    expr,
+                    source,
+                    &item_name,
+                    &index_name,
+                    &zip_bind_sources,
+                )
+            })
             .collect::<Vec<_>>();
 
         let mut lambda_args = vec![Expression::Symbol(item_name.clone())];
@@ -587,7 +644,19 @@ impl Compiler {
             lambda_args.push(Expression::Symbol(index_name.clone()));
         }
 
-        let rewritten_body = if needs_destructure {
+        let rewritten_body = if let Some(bindings) = positional_zip_bindings {
+            vec![Expression::List(vec![
+                Expression::Symbol("let".to_string()),
+                Expression::List(bindings),
+                if rewritten_body.len() == 1 {
+                    rewritten_body[0].clone()
+                } else {
+                    let mut exprs = vec![Expression::Symbol("do".to_string())];
+                    exprs.extend(rewritten_body.iter().cloned());
+                    Expression::List(exprs)
+                },
+            ])]
+        } else if needs_destructure {
             vec![Expression::List(vec![
                 Expression::Symbol("let".to_string()),
                 Expression::List(vec![Expression::List(vec![
@@ -620,6 +689,7 @@ impl Compiler {
         source: &Expression,
         item_name: &str,
         index_name: &str,
+        zip_bind_sources: &HashMap<String, Expression>,
     ) -> Expression {
         let Expression::List(items) = expr else {
             return expr.clone();
@@ -628,12 +698,27 @@ impl Compiler {
         if let Some(Expression::Symbol(name)) = items.first()
             && is_widget_name(name)
         {
-            return self.rewrite_each_widget_bind(items, source, item_name, index_name);
+            return self.rewrite_each_widget_bind(
+                items,
+                source,
+                item_name,
+                index_name,
+                zip_bind_sources,
+            );
         }
 
         Expression::List(
-            items.iter()
-                .map(|item| self.rewrite_each_bind_expr(item, source, item_name, index_name))
+            items
+                .iter()
+                .map(|item| {
+                    self.rewrite_each_bind_expr(
+                        item,
+                        source,
+                        item_name,
+                        index_name,
+                        zip_bind_sources,
+                    )
+                })
                 .collect(),
         )
     }
@@ -644,15 +729,15 @@ impl Compiler {
         source: &Expression,
         item_name: &str,
         index_name: &str,
+        zip_bind_sources: &HashMap<String, Expression>,
     ) -> Expression {
         let mut out = Vec::with_capacity(items.len() + 4);
         let mut idx = 0;
         while idx < items.len() {
             match (items.get(idx), items.get(idx + 1)) {
-                (
-                    Some(Expression::Keyword(key)),
-                    Some(Expression::Symbol(target)),
-                ) if key == "bind" && target == item_name => {
+                (Some(Expression::Keyword(key)), Some(Expression::Symbol(target)))
+                    if key == "bind" && target == item_name =>
+                {
                     out.push(Expression::Keyword("value".to_string()));
                     out.push(Expression::Symbol(target.clone()));
                     out.push(Expression::Keyword("on-change".to_string()));
@@ -672,8 +757,37 @@ impl Compiler {
                     ]));
                     idx += 2;
                 }
+                (Some(Expression::Keyword(key)), Some(Expression::Symbol(target)))
+                    if key == "bind" && zip_bind_sources.contains_key(target) =>
+                {
+                    let zip_source = zip_bind_sources.get(target).expect("checked above").clone();
+                    out.push(Expression::Keyword("value".to_string()));
+                    out.push(Expression::Symbol(target.clone()));
+                    out.push(Expression::Keyword("on-change".to_string()));
+                    out.push(Expression::List(vec![
+                        Expression::Symbol("lambda".to_string()),
+                        Expression::List(vec![Expression::Symbol("v".to_string())]),
+                        Expression::List(vec![
+                            Expression::Symbol("set!".to_string()),
+                            zip_source.clone(),
+                            Expression::List(vec![
+                                Expression::Symbol("set-nth".to_string()),
+                                zip_source,
+                                Expression::Symbol(index_name.to_string()),
+                                Expression::Symbol("v".to_string()),
+                            ]),
+                        ]),
+                    ]));
+                    idx += 2;
+                }
                 (Some(item), _) => {
-                    out.push(self.rewrite_each_bind_expr(item, source, item_name, index_name));
+                    out.push(self.rewrite_each_bind_expr(
+                        item,
+                        source,
+                        item_name,
+                        index_name,
+                        zip_bind_sources,
+                    ));
                     idx += 1;
                 }
                 _ => break,
@@ -682,7 +796,11 @@ impl Compiler {
         Expression::List(out)
     }
 
-    fn compile_widget_call(&mut self, widget_name: &str, list: &[Expression]) -> Result<(), CompilerError> {
+    fn compile_widget_call(
+        &mut self,
+        widget_name: &str,
+        list: &[Expression],
+    ) -> Result<(), CompilerError> {
         let mut idx = 1;
         let mut arity = 0;
         while idx < list.len() {
@@ -956,18 +1074,22 @@ impl Compiler {
     ) -> Result<(), CompilerError> {
         let match_value_symbol = Expression::Symbol("__eseq_match_value".to_string());
         let default_expr = default.unwrap_or(Expression::Symbol("nil".to_string()));
-        let nested_ifs = branches.into_iter().rev().fold(default_expr, |else_body, (pattern, body)| {
-            Expression::List(vec![
-                Expression::Symbol("if".to_string()),
-                Expression::List(vec![
-                    Expression::Symbol("=".to_string()),
-                    match_value_symbol.clone(),
-                    pattern,
-                ]),
-                body,
-                else_body,
-            ])
-        });
+        let nested_ifs =
+            branches
+                .into_iter()
+                .rev()
+                .fold(default_expr, |else_body, (pattern, body)| {
+                    Expression::List(vec![
+                        Expression::Symbol("if".to_string()),
+                        Expression::List(vec![
+                            Expression::Symbol("=".to_string()),
+                            match_value_symbol.clone(),
+                            pattern,
+                        ]),
+                        body,
+                        else_body,
+                    ])
+                });
         let desugared = Expression::List(vec![
             Expression::Symbol("let".to_string()),
             Expression::List(vec![Expression::List(vec![match_value_symbol, value])]),
@@ -1036,7 +1158,9 @@ impl Compiler {
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         if let Some(Expression::Symbol(widget_name)) = list.first()
             && is_widget_name(widget_name)
-            && list.iter().any(|expr| matches!(expr, Expression::Keyword(key) if key == "bind"))
+            && list
+                .iter()
+                .any(|expr| matches!(expr, Expression::Keyword(key) if key == "bind"))
         {
             return self.compile_widget_call(widget_name, list);
         }

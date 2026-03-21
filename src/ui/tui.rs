@@ -24,7 +24,9 @@ fn brighten_rcolor(color: RColor, amount: f32) -> RColor {
         RColor::Rgb(r, g, b) => {
             let brighten = |channel: u8| -> u8 {
                 let channel = channel as f32;
-                (channel + (255.0 - channel) * amount).round().clamp(0.0, 255.0) as u8
+                (channel + (255.0 - channel) * amount)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
             };
             RColor::Rgb(brighten(r), brighten(g), brighten(b))
         }
@@ -87,8 +89,7 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
         .map(|row| cells_to_line(row))
         .collect();
 
-    let text_widget =
-        Paragraph::new(text_lines).block(Block::default().borders(Borders::ALL));
+    let text_widget = Paragraph::new(text_lines).block(Block::default().borders(Borders::ALL));
     frame.render_widget(text_widget, chunks[0]);
 
     // ── Cursor ────────────────────────────────────────────────────────────────
@@ -103,21 +104,30 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
     }
 
     // ── Status bar ────────────────────────────────────────────────────────────
-    let status_widget = Paragraph::new(render_frame.status.clone())
-        .style(Style::default().bg(to_rcolor(crate::theme::STATUS_BG)).fg(to_rcolor(crate::theme::STATUS_FG)));
+    let status_widget = Paragraph::new(render_frame.status.clone()).style(
+        Style::default()
+            .bg(to_rcolor(crate::theme::STATUS_BG))
+            .fg(to_rcolor(crate::theme::STATUS_FG)),
+    );
     frame.render_widget(status_widget, chunks[1]);
 
     // ── Widget overlay (with scroll offset) ─────────────────────────────────
     let wscroll = render_frame.widget_scroll_top;
     if let Some(ref layout) = render_frame.widget_layout {
         let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
-        let total_h = layout.rect.row + layout.rect.height;
-        let total_w = layout.rect.col + layout.rect.width;
+        let total_h = (layout.rect.row + layout.rect.height).ceil() as u16;
+        let total_w = (layout.rect.col + layout.rect.width).ceil() as u16;
         let buf_h = total_h.max(inner.height);
         let buf_w = total_w.max(inner.width);
         let mut cell_buf = widget_render::CellBuffer::new(buf_w, buf_h);
         widget_render::render_widget_tree(layout, &mut cell_buf);
-        blit_cell_buffer_scrolled(&cell_buf, frame, inner, wscroll, render_frame.widget_scroll_left);
+        blit_cell_buffer_scrolled(
+            &cell_buf,
+            frame,
+            inner,
+            wscroll,
+            render_frame.widget_scroll_left,
+        );
     }
 
     // ── Focus highlight ──────────────────────────────────────────────────────
@@ -128,15 +138,21 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
             if node.widget_type != "timeline" {
                 let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
                 let buf = frame.buffer_mut();
-                for row in node.rect.row..node.rect.row + node.rect.height {
-                    let vis_row = row as i32 - wscroll as i32;
+                let row_start = node.rect.row.floor() as i32;
+                let row_end = (node.rect.row + node.rect.height).ceil() as i32;
+                for row in row_start..row_end {
+                    let vis_row = row - wscroll as i32;
                     if vis_row < 0 || vis_row >= inner.height as i32 {
                         continue;
                     }
                     let y = inner.y + vis_row as u16;
-                    for col in node.rect.col..node.rect.col + node.rect.width {
+                    let col_start = node.rect.col.floor() as u16;
+                    let col_end = (node.rect.col + node.rect.width).ceil() as u16;
+                    for col in col_start..col_end {
                         let x = inner.x + col;
-                        if x >= inner.right() { break; }
+                        if x >= inner.right() {
+                            break;
+                        }
                         let cell = &mut buf[(x, y)];
                         let style = cell.style();
                         let fg = style.fg.map(|color| brighten_rcolor(color, 0.25));
@@ -224,7 +240,11 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                 frame.render_widget(Clear, doc_area);
                 frame.render_widget(
                     Paragraph::new(doc_lines)
-                        .style(Style::default().bg(to_rcolor(crate::theme::COMP_DOC_BG)).fg(to_rcolor(crate::theme::COMP_DOC_FG)))
+                        .style(
+                            Style::default()
+                                .bg(to_rcolor(crate::theme::COMP_DOC_BG))
+                                .fg(to_rcolor(crate::theme::COMP_DOC_FG)),
+                        )
                         .wrap(Wrap { trim: false }),
                     doc_area,
                 );
@@ -293,17 +313,23 @@ pub fn render_tiled(frame: &mut Frame, tiled: &TiledRenderFrame) {
     // Render each tile
     for tile in &tiled.tiles {
         let tile_area = Rect::new(
-            tile.rect.col,
-            tile.rect.row,
-            tile.rect.width,
-            tile.rect.height,
+            tile.rect.col.round() as u16,
+            tile.rect.row.round() as u16,
+            tile.rect.width.round() as u16,
+            tile.rect.height.round() as u16,
         );
 
         if tile_area.width < 3 || tile_area.height < 3 {
             continue; // too small to render
         }
 
-        render_tile_in_area(frame, &tile.frame, tile_area, tile.is_active, tile.show_status);
+        render_tile_in_area(
+            frame,
+            &tile.frame,
+            tile_area,
+            tile.is_active,
+            tile.show_status,
+        );
     }
 
     // Completion popup (rendered last, on top of everything, in active tile's coord space)
@@ -313,7 +339,14 @@ pub fn render_tiled(frame: &mut Frame, tiled: &TiledRenderFrame) {
             .tiles
             .iter()
             .find(|t| t.is_active)
-            .map(|t| Rect::new(t.rect.col, t.rect.row, t.rect.width, t.rect.height))
+            .map(|t| {
+                Rect::new(
+                    t.rect.col.round() as u16,
+                    t.rect.row.round() as u16,
+                    t.rect.width.round() as u16,
+                    t.rect.height.round() as u16,
+                )
+            })
             .unwrap_or(area);
 
         render_completion_popup(frame, comp, active_tile_area);
@@ -386,13 +419,19 @@ fn render_tile_in_area(
     let wscroll = render_frame.widget_scroll_top;
     if let Some(ref layout) = render_frame.widget_layout {
         let inner = content_area.inner(ratatui::layout::Margin::new(1, 1));
-        let total_h = layout.rect.row + layout.rect.height;
-        let total_w = layout.rect.col + layout.rect.width;
+        let total_h = (layout.rect.row + layout.rect.height).ceil() as u16;
+        let total_w = (layout.rect.col + layout.rect.width).ceil() as u16;
         let buf_h = total_h.max(inner.height);
         let buf_w = total_w.max(inner.width);
         let mut cell_buf = widget_render::CellBuffer::new(buf_w, buf_h);
         widget_render::render_widget_tree(layout, &mut cell_buf);
-        blit_cell_buffer_scrolled(&cell_buf, frame, inner, wscroll, render_frame.widget_scroll_left);
+        blit_cell_buffer_scrolled(
+            &cell_buf,
+            frame,
+            inner,
+            wscroll,
+            render_frame.widget_scroll_left,
+        );
     }
 
     // ── Focus highlight ────────────────────────────────────────────────────
@@ -403,13 +442,17 @@ fn render_tile_in_area(
             if node.widget_type != "timeline" {
                 let inner = content_area.inner(ratatui::layout::Margin::new(1, 1));
                 let buf = frame.buffer_mut();
-                for row in node.rect.row..node.rect.row + node.rect.height {
-                    let vis_row = row as i32 - wscroll as i32;
+                let row_start = node.rect.row.floor() as i32;
+                let row_end = (node.rect.row + node.rect.height).ceil() as i32;
+                for row in row_start..row_end {
+                    let vis_row = row - wscroll as i32;
                     if vis_row < 0 || vis_row >= inner.height as i32 {
                         continue;
                     }
                     let y = inner.y + vis_row as u16;
-                    for col in node.rect.col..node.rect.col + node.rect.width {
+                    let col_start = node.rect.col.floor() as u16;
+                    let col_end = (node.rect.col + node.rect.width).ceil() as u16;
+                    for col in col_start..col_end {
                         let x = inner.x + col;
                         if x >= inner.right() {
                             break;

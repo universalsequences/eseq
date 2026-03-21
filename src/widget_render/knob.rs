@@ -6,8 +6,8 @@ use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     get_f32_prop, metal_widget_instance, ndc_bounds, styled_cell,
 };
+use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
-use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_u16, get_prop_num};
 use crate::vm::Value;
 
 pub struct KnobWidget;
@@ -55,23 +55,28 @@ fn normalized_value(props: &HashMap<String, Value>) -> f32 {
 }
 
 fn knob_t_from_local_row(node: &LayoutNode, local_row: f32) -> f32 {
-    let denom = node.rect.height.saturating_sub(1).max(1) as f32;
-    let offset = (local_row - node.rect.row as f32) / denom;
+    let denom = (node.rect.height - 1.0).max(1.0);
+    let offset = (local_row - node.rect.row) / denom;
     (1.0 - offset).clamp(0.0, 1.0)
 }
 
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let t = normalized_value(props);
-    let size = rect.width.min(rect.height).max(1) as f32;
+    let size = rect.width.min(rect.height).max(1.0);
     let outer_radius = 0.48 * size;
     let fill_radius = (0.10 + 0.38 * t) * size;
-    let center_x = rect.col as f32 + rect.width as f32 * 0.5;
-    let center_y = rect.row as f32 + rect.height as f32 * 0.5;
+    let center_x = rect.col + rect.width * 0.5;
+    let center_y = rect.row + rect.height * 0.5;
 
-    for row_offset in 0..rect.height {
-        for col_offset in 0..rect.width {
-            let sample_x = rect.col as f32 + col_offset as f32 + 0.5;
-            let sample_y = rect.row as f32 + row_offset as f32 + 0.5;
+    let row_u16 = rect.row.round() as u16;
+    let col_u16 = rect.col.round() as u16;
+    let height_u16 = rect.height.round() as u16;
+    let width_u16 = rect.width.round() as u16;
+
+    for row_offset in 0..height_u16 {
+        for col_offset in 0..width_u16 {
+            let sample_x = rect.col + col_offset as f32 + 0.5;
+            let sample_y = rect.row + row_offset as f32 + 0.5;
             let dx = sample_x - center_x;
             let dy = sample_y - center_y;
             let dist = (dx * dx + dy * dy).sqrt();
@@ -84,7 +89,11 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             } else {
                 ('○', theme::WIDGET_KNOB_TRACK)
             };
-            buf.set(rect.row + row_offset, rect.col + col_offset, styled_cell(ch, fg, None));
+            buf.set(
+                row_u16 + row_offset,
+                col_u16 + col_offset,
+                styled_cell(ch, fg, None),
+            );
         }
     }
 }
@@ -105,7 +114,10 @@ impl WidgetDefinition for KnobWidget {
         _constraints: Constraints,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
-        let size = get_prop_num(node, "size").map(f64_to_u16).unwrap_or(2).max(1);
+        let size = get_prop_num(node, "size")
+            .map(f64_to_f32)
+            .unwrap_or(2.0)
+            .max(1.0);
         Some(Size {
             width: size,
             height: size,
@@ -131,7 +143,7 @@ impl WidgetDefinition for KnobWidget {
                     node, local_row,
                 )))
             }
-            _ => MouseEventOutcome::Consume,
+            _ => MouseEventOutcome::Ignore,
         }
     }
 
@@ -166,17 +178,20 @@ impl WidgetDefinition for KnobWidget {
         viewport: super::WidgetViewport,
     ) -> Vec<MetalPrimitive> {
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
-        let px_w = node.rect.width as f32 * viewport.cell_w;
-        let px_h = node.rect.height as f32 * viewport.cell_h;
-        metal_widget_instance(widget_type, super::WidgetInstance {
-            ndc_min,
-            ndc_max,
-            value_t: normalized_value(&node.props),
-            orientation: 0.0,
-            color_a: theme::WIDGET_KNOB_FILLED.to_rgba(),
-            color_b: theme::WIDGET_KNOB_TRACK.to_rgba(),
-            corner_radius: 0.0,
-            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-        })
+        let px_w = node.rect.width * viewport.cell_w;
+        let px_h = node.rect.height * viewport.cell_w;
+        metal_widget_instance(
+            widget_type,
+            super::WidgetInstance {
+                ndc_min,
+                ndc_max,
+                value_t: normalized_value(&node.props),
+                orientation: 0.0,
+                color_a: theme::WIDGET_KNOB_FILLED.to_rgba(),
+                color_b: theme::WIDGET_KNOB_TRACK.to_rgba(),
+                corner_radius: 0.0,
+                pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+            },
+        )
     }
 }

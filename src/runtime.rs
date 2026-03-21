@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::audio::register_audio_natives;
 use crate::host::{BufferId, HostCommand};
 use crate::layout::{
     LayoutEngine, LayoutNode, format_layout_tree_lines, reuse_layout_node, same_layout_geometry,
@@ -38,7 +39,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_set_read_only: Option<bool>,
     pub current_buffer_mode: String,
     pub pending_mode_defs: Vec<(String, bool, Option<String>)>, // (name, read_only, on_enter)
-    pub pending_mode_bindings: Vec<(String, String, String)>,    // (mode, key, handler)
+    pub pending_mode_bindings: Vec<(String, String, String)>,   // (mode, key, handler)
     pub pending_set_mode: Option<String>,
     pub pending_open_file: Option<String>,
     pub pending_widget_tree: Option<Value>,
@@ -169,10 +170,7 @@ impl NativeContext {
     }
 
     pub fn render_widget(&mut self, tree: Value) {
-        self.shared
-            .borrow_mut()
-            .pending_widget_tree
-            .replace(tree);
+        self.shared.borrow_mut().pending_widget_tree.replace(tree);
     }
 
     pub fn goto_line(&mut self, line: usize) {
@@ -249,6 +247,7 @@ pub struct Runtime {
     current_widget_tree: Option<Value>,
     layout_cols: u16,
     layout_rows: u16,
+    layout_aspect: f32,
 }
 
 impl Default for Runtime {
@@ -263,7 +262,7 @@ impl Runtime {
         let mut vm = VM::new(vec![]);
         register_core_natives(&mut vm);
         register_widget_natives(&mut vm);
-        Self {
+        let mut runtime = Self {
             vm,
             shared,
             symbol_metadata: HashMap::new(),
@@ -278,7 +277,10 @@ impl Runtime {
             current_widget_tree: None,
             layout_cols: 80,
             layout_rows: 24,
-        }
+            layout_aspect: 1.0,
+        };
+        register_audio_natives(&mut runtime);
+        runtime
     }
 
     pub fn with_init_source(init: impl AsRef<str>) -> Self {
@@ -382,6 +384,20 @@ impl Runtime {
         self.layout_cols = cols;
         self.layout_rows = rows;
         // Viewport changes invalidate layout geometry even if the widget tree is unchanged.
+        self.current_layout = None;
+        self.dirty_widget_ids.clear();
+        self.relayout_current_tree();
+    }
+
+    pub fn layout_aspect(&self) -> f32 {
+        self.layout_aspect
+    }
+
+    pub fn set_layout_aspect(&mut self, aspect: f32) {
+        if (self.layout_aspect - aspect).abs() < f32::EPSILON {
+            return;
+        }
+        self.layout_aspect = aspect;
         self.current_layout = None;
         self.dirty_widget_ids.clear();
         self.relayout_current_tree();
@@ -686,7 +702,8 @@ impl Runtime {
         if let Some(existing) = self.current_layout.as_ref()
             && let Some(updated) = reuse_layout_node(existing.as_ref(), tree, &mut dirty_widget_ids)
         {
-            self.rendered_layouts.push(format_layout_tree_lines(&updated, 0));
+            self.rendered_layouts
+                .push(format_layout_tree_lines(&updated, 0));
             self.current_layout = Some(Arc::new(updated));
             self.dirty_widget_ids = dirty_widget_ids;
             if !self.dirty_widget_ids.is_empty() {
@@ -694,13 +711,14 @@ impl Runtime {
             }
             return;
         }
-        let engine = LayoutEngine::new(self.layout_cols, self.layout_rows);
+        let engine = LayoutEngine::new(self.layout_cols, self.layout_rows, self.layout_aspect);
         if let Some(layout) = engine.layout(tree) {
             let geometry_changed = self
                 .current_layout
                 .as_ref()
                 .is_none_or(|existing| !same_layout_geometry(existing.as_ref(), &layout));
-            self.rendered_layouts.push(format_layout_tree_lines(&layout, 0));
+            self.rendered_layouts
+                .push(format_layout_tree_lines(&layout, 0));
             self.current_layout = Some(Arc::new(layout));
             if geometry_changed {
                 self.dirty_widget_ids.clear();

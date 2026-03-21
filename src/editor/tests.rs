@@ -66,6 +66,72 @@
     }
 
     #[test]
+    fn dragging_vertical_tile_border_updates_split_ratio() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(+ 1 2)");
+        editor.split_active_tile(SplitDir::Vertical, 0);
+        editor.update_tile_rects(100, 40);
+
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 10),
+            50.0,
+            10.0,
+            1,
+        );
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 70, 10),
+            70.0,
+            10.0,
+            1,
+        );
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 70, 10),
+            70.0,
+            10.0,
+            1,
+        );
+
+        let super::TileNode::Split(split) = &editor.tile_root else {
+            panic!("expected root split");
+        };
+        assert!((split.ratio - 0.7).abs() < 0.05, "ratio was {}", split.ratio);
+    }
+
+    #[test]
+    fn dragging_horizontal_tile_border_updates_split_ratio() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(+ 1 2)");
+        editor.split_active_tile(SplitDir::Horizontal, 0);
+        editor.update_tile_rects(80, 40);
+
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 20, 19),
+            20.0,
+            19.0,
+            1,
+        );
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 20, 8),
+            20.0,
+            8.0,
+            1,
+        );
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 20, 8),
+            20.0,
+            8.0,
+            1,
+        );
+
+        let super::TileNode::Split(split) = &editor.tile_root else {
+            panic!("expected root split");
+        };
+        assert!((split.ratio - (8.0 / 39.0)).abs() < 0.05, "ratio was {}", split.ratio);
+    }
+
+    #[test]
     fn ctrl_a_moves_to_start_of_line() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -928,6 +994,67 @@
         match &*items[0].borrow() {
             Value::Number(n) => assert!(*n > 20.0),
             _ => panic!("expected numeric step"),
+        }
+    }
+
+    #[test]
+    fn mouse_updates_zipped_destructured_each_bindings() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(20, 12);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (defstate toggles (list true true))
+                (defstate levels (list 20 30))
+                (effect
+                  (h-stack :gap 1
+                    (each (zip toggles levels) |(enabled level)|
+                      (v-stack :gap 1
+                        (toggle :bind enabled)
+                        (vslider :min 0 :max 100 :bind level)))))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(20, 12);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1),
+            1,
+            1,
+            20,
+            12,
+        );
+
+        let toggles = editor.runtime.eval_str("toggles").unwrap().unwrap();
+        let Value::List(toggle_items) = toggles else {
+            panic!("expected toggle list");
+        };
+        assert_eq!(*toggle_items[0].borrow(), Value::Bool(false));
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 6),
+            1,
+            1,
+            20,
+            12,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 3),
+            1,
+            1,
+            20,
+            12,
+        );
+
+        let levels = editor.runtime.eval_str("levels").unwrap().unwrap();
+        let Value::List(level_items) = levels else {
+            panic!("expected level list");
+        };
+        match &*level_items[0].borrow() {
+            Value::Number(n) => assert!(*n > 20.0),
+            _ => panic!("expected numeric level"),
         }
     }
 

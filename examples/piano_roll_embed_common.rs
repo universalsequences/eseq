@@ -4,7 +4,10 @@ use std::io;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
+    MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use eseqlisp::backend::Backend;
 use eseqlisp::frame;
@@ -161,26 +164,13 @@ pub fn run_metal() -> Result<(), eseqlisp::backend::BackendError> {
         }
 
         while let Some((delta, (precise_col, precise_row))) = backend.take_pending_magnify() {
-            editor.handle_touchpad_magnify(
-                0,
-                0,
-                precise_col,
-                precise_row,
-                delta,
-            );
+            editor.handle_touchpad_magnify(0, 0, precise_col, precise_row, delta);
         }
 
         while let Some(((delta_x, delta_y), (precise_col, precise_row))) =
             backend.take_pending_scroll()
         {
-            editor.handle_touchpad_scroll(
-                0,
-                0,
-                precise_col,
-                precise_row,
-                delta_x,
-                delta_y,
-            );
+            editor.handle_touchpad_scroll(0, 0, precise_col, precise_row, delta_x, delta_y);
         }
 
         if last_render_at.elapsed() >= frame_interval {
@@ -288,10 +278,18 @@ fn sync_pattern_state(editor: &mut Editor, host: &Rc<RefCell<PatternHost>>) {
     runtime.set_reactive("PATTERN", "items", host.items_value());
     runtime.set_reactive("PATTERN", "selection", host.selection_value());
     runtime.set_reactive("PATTERN", "playing", Value::Bool(host.playing));
-    runtime.set_reactive("PATTERN", "playhead_time", Value::Number(host.playhead_time));
+    runtime.set_reactive(
+        "PATTERN",
+        "playhead_time",
+        Value::Number(host.playhead_time),
+    );
     runtime.set_reactive("PATTERN", "tempo", Value::Number(host.tempo));
     runtime.set_reactive("PATTERN", "view_start", Value::Number(host.view_start));
-    runtime.set_reactive("PATTERN", "view_duration", Value::Number(host.view_duration));
+    runtime.set_reactive(
+        "PATTERN",
+        "view_duration",
+        Value::Number(host.view_duration),
+    );
     runtime.set_reactive("PATTERN", "lane_scroll", Value::Number(host.lane_scroll));
     runtime.set_reactive("PATTERN", "tool", Value::Keyword(host.tool.clone()));
     runtime.set_reactive("PATTERN", "cursor_time", Value::Number(host.cursor_time));

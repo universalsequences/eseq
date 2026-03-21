@@ -17,6 +17,7 @@ pub use ui::theme;
 pub use ui::tui;
 
 // ── Root-level modules ───────────────────────────────────────────────────
+pub mod audio;
 pub mod buffer;
 pub mod editor;
 pub mod host;
@@ -123,6 +124,13 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
 
     loop {
         let (cols, rows) = backend.viewport_size();
+        // Set aspect ratio for uniform spacing (cell_h / cell_w)
+        let (cell_w, cell_h) = backend.cell_dimensions();
+        if cell_w > 0.0 {
+            editor.set_layout_aspect(cell_h / cell_w);
+        }
+        // Update tile rects once per iteration (not per-event)
+        editor.update_tile_rects(cols as u16, rows as u16);
         let redraw_pending = editor.needs_redraw() || pending_drag.is_some();
         let timeout = if redraw_pending {
             frame_interval.saturating_sub(last_render_at.elapsed())
@@ -135,10 +143,12 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                 let (precise_col, precise_row) = backend
                     .take_last_precise_mouse()
                     .unwrap_or((mouse.column as f32, mouse.row as f32));
-                if matches!(mouse.kind, crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)) {
+                if matches!(
+                    mouse.kind,
+                    crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)
+                ) {
                     pending_drag = Some((Event::Mouse(mouse), (precise_col, precise_row)));
                 } else {
-                    editor.update_tile_rects(cols as u16, rows as u16);
                     editor.handle_tiled_mouse_precise(
                         mouse,
                         precise_col,
@@ -153,32 +163,39 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
 
         // Process touchpad gestures (Metal-specific, not crossterm events)
         while let Some((delta, (precise_col, precise_row))) = backend.take_pending_magnify() {
-            // Find tile under pointer and compute content coords
-            editor.update_tile_rects(cols as u16, rows as u16);
-            if let Some(tile_id) = editor.tile_at_screen(precise_col as u16, precise_row as u16) {
+            if let Some(tile_id) = editor.tile_at_screen(precise_col, precise_row) {
                 if let Some(rect) = editor.tile_rect(tile_id) {
                     editor.handle_touchpad_magnify(
-                        rect.col, rect.row,
-                        precise_col, precise_row, delta,
+                        rect.col.round() as u16,
+                        rect.row.round() as u16,
+                        precise_col,
+                        precise_row,
+                        delta,
                     );
                 }
             }
         }
-        while let Some(((delta_x, delta_y), (precise_col, precise_row))) = backend.take_pending_scroll() {
-            editor.update_tile_rects(cols as u16, rows as u16);
-            if let Some(tile_id) = editor.tile_at_screen(precise_col as u16, precise_row as u16) {
+        while let Some(((delta_x, delta_y), (precise_col, precise_row))) =
+            backend.take_pending_scroll()
+        {
+            if let Some(tile_id) = editor.tile_at_screen(precise_col, precise_row) {
                 if let Some(rect) = editor.tile_rect(tile_id) {
                     // First try widget-level scroll (timeline etc.)
-                    editor.handle_touchpad_scroll(
-                        rect.col, rect.row,
-                        precise_col, precise_row,
-                        delta_x, delta_y,
+                    let widget_handled = editor.handle_touchpad_scroll(
+                        rect.col.round() as u16,
+                        rect.row.round() as u16,
+                        precise_col,
+                        precise_row,
+                        delta_x,
+                        delta_y,
                     );
+                    if widget_handled {
+                        continue;
+                    }
                     // Accumulate pixel deltas for text buffer scrolling.
                     // Only emit ScrollUp/Down after accumulating ~1 line of pixels.
                     scroll_accum_y += delta_y;
-                    let line_px = backend.viewport_size().1.max(1) as f32
-                        / (rows.max(1) as f32); // approx pixels per cell row
+                    let line_px = backend.viewport_size().1.max(1) as f32 / (rows.max(1) as f32); // approx pixels per cell row
                     let threshold = line_px.max(20.0); // at least 20px per scroll step
                     while scroll_accum_y > threshold {
                         scroll_accum_y -= threshold;
@@ -188,9 +205,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                             row: precise_row as u16,
                             modifiers: crossterm::event::KeyModifiers::NONE,
                         };
-                        editor.handle_tiled_mouse_precise(
-                            mouse, precise_col, precise_row, 0,
-                        );
+                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                     }
                     while scroll_accum_y < -threshold {
                         scroll_accum_y += threshold;
@@ -200,9 +215,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                             row: precise_row as u16,
                             modifiers: crossterm::event::KeyModifiers::NONE,
                         };
-                        editor.handle_tiled_mouse_precise(
-                            mouse, precise_col, precise_row, 0,
-                        );
+                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                     }
                     // Horizontal scroll accumulation
                     scroll_accum_x += delta_x;
@@ -214,9 +227,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                             row: precise_row as u16,
                             modifiers: crossterm::event::KeyModifiers::NONE,
                         };
-                        editor.handle_tiled_mouse_precise(
-                            mouse, precise_col, precise_row, 0,
-                        );
+                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                     }
                     while scroll_accum_x < -threshold {
                         scroll_accum_x += threshold;
@@ -226,9 +237,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                             row: precise_row as u16,
                             modifiers: crossterm::event::KeyModifiers::NONE,
                         };
-                        editor.handle_tiled_mouse_precise(
-                            mouse, precise_col, precise_row, 0,
-                        );
+                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
                     }
                 }
             }
@@ -236,7 +245,6 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
 
         if last_render_at.elapsed() >= frame_interval {
             if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
-                editor.update_tile_rects(cols as u16, rows as u16);
                 editor.handle_tiled_mouse_precise(
                     mouse,
                     precise_col,
@@ -470,7 +478,10 @@ mod tests {
             (handle-timeline-action (dict :type :move-items-absolute :ids (list 10) :start 4 :lane 1))
         "#;
 
-        assert_eq!(run_prog(program), Ok(Some(Value::String("move".to_string()))));
+        assert_eq!(
+            run_prog(program),
+            Ok(Some(Value::String("move".to_string())))
+        );
     }
 
     #[test]
@@ -606,7 +617,9 @@ mod tests {
             .unwrap();
         // Simulate dired-refresh: set! global between two lets, use outer vars in inner let
         runtime.eval_str("(def my-global '())").unwrap();
-        runtime.eval_str("(def my-format (x) (str \"item-\" x))").unwrap();
+        runtime
+            .eval_str("(def my-format (x) (str \"item-\" x))")
+            .unwrap();
         let result = runtime.eval_str(
             "(def test-it ()
                (let ((entries (list 1 2 3 4 5))
@@ -826,31 +839,38 @@ mod tests {
     }
 
     #[test]
-    fn test_map_filter_reduce_helpers() {
+    fn test_map_filter_reduce_zip_builtins() {
         let program = r#"
             (def empty? (xs) (= (len xs) 0))
-            (def map (fn xs)
-              (if (empty? xs)
-                '()
-                (cons (fn (first xs))
-                      (map fn (rest xs)))))
-            (def filter (fn xs)
-              (if (empty? xs)
-                '()
-                (if (fn (first xs))
-                  (cons (first xs) (filter fn (rest xs)))
-                  (filter fn (rest xs)))))
-            (def reduce (fn acc xs)
-              (if (empty? xs)
-                acc
-                (reduce fn (fn acc (first xs)) (rest xs))))
             (list
               (map |x| (+ x 1) (list 1 2 3))
               (filter |x| (> x 1) (list 1 2 3))
-              (reduce |acc x| (+ acc x) 0 (list 1 2 3)))
+              (reduce |acc x| (+ acc x) 0 (list 1 2 3))
+              (zip (list 1 2 3) (list 4 5 6) (list 7 8)))
         "#;
         let value = run_prog(program).unwrap().unwrap();
-        assert_eq!(format_lisp_value(&value), "((2 3 4) (2 3) 6)");
+        assert_eq!(
+            format_lisp_value(&value),
+            "((2 3 4) (2 3) 6 ((1 4 7) (2 5 8)))"
+        );
+    }
+
+    #[test]
+    fn test_each_zip_tuple_destructuring_reads_positionally() {
+        let value = run_prog(
+            r#"
+            (let ((toggles (list true false true))
+                  (levels (list 10 20 30)))
+              (each (zip toggles levels) |(enabled level)|
+                (list enabled level)))
+        "#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            format_lisp_value(&value),
+            "((true 10) (false 20) (true 30))"
+        );
     }
 
     #[test]
@@ -910,7 +930,9 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
         let lines = format_layout_tree_lines(&layout, 0);
 
         assert_eq!(
@@ -940,7 +962,9 @@ mod tests {
         .unwrap()
         .unwrap();
 
-        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
         let lines = format_layout_tree_lines(&layout, 0);
 
         // The v-stack contains two 16-wide hsliders, so its width should be 16
@@ -985,7 +1009,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
         let lines = format_layout_tree_lines(&layout, 0);
         assert_eq!(
             lines,
@@ -1013,7 +1039,9 @@ mod tests {
             .eval_str(r#"(label (fmt "count: {}" APP.counter))"#)
             .unwrap()
             .unwrap();
-        let layout = LayoutEngine::new(80, 24).layout(&updated).expect("layout");
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&updated)
+            .expect("layout");
         let lines = format_layout_tree_lines(&layout, 0);
         assert_eq!(
             lines,
@@ -1063,7 +1091,9 @@ mod tests {
             .eval_str(r#"(label (fmt "doubled: {}" doubled))"#)
             .unwrap()
             .unwrap();
-        let layout = LayoutEngine::new(80, 24).layout(&value).expect("layout");
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&value)
+            .expect("layout");
         let lines = format_layout_tree_lines(&layout, 0);
         assert_eq!(
             lines,
@@ -1084,7 +1114,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
         let lines = format_layout_tree_lines(&layout, 0);
         assert_eq!(
             lines,
@@ -1107,7 +1139,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let layout = LayoutEngine::new(80, 24).layout(&tree).expect("layout");
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
         let lines = format_layout_tree_lines(&layout, 0);
         assert_eq!(
             lines,
@@ -1250,7 +1284,9 @@ mod tests {
             .eval_str(r#"(effect (hslider :min 0 :max 100 :value APP.x))"#)
             .unwrap();
         runtime
-            .eval_str(r#"(effect (h-stack (label "hello") (hslider :min 0 :max 100 :value APP.x)))"#)
+            .eval_str(
+                r#"(effect (h-stack (label "hello") (hslider :min 0 :max 100 :value APP.x)))"#,
+            )
             .unwrap();
 
         runtime.set_reactive("APP", "x", Value::Number(12.0));
@@ -1284,14 +1320,14 @@ mod tests {
             .unwrap();
 
         let initial = runtime.current_layout.as_ref().expect("layout").rect;
-        assert_eq!(initial.width, 40);
-        assert_eq!(initial.height, 8);
+        assert_eq!(initial.width, 40.0);
+        assert_eq!(initial.height, 8.0);
 
         runtime.set_layout_viewport(72, 18);
 
         let resized = runtime.current_layout.as_ref().expect("layout").rect;
-        assert_eq!(resized.width, 72);
-        assert_eq!(resized.height, 8);
+        assert_eq!(resized.width, 72.0);
+        assert_eq!(resized.height, 8.0);
     }
 
     #[test]
@@ -1323,7 +1359,13 @@ mod tests {
         let layout = runtime.current_layout.as_ref().expect("layout");
         assert_eq!(layout.widget_type, "h-stack");
         assert_eq!(layout.children.len(), 2);
-        assert_eq!(layout.children[0].props.get("value"), Some(&Value::Number(20.0)));
-        assert_eq!(layout.children[1].props.get("value"), Some(&Value::Number(50.0)));
+        assert_eq!(
+            layout.children[0].props.get("value"),
+            Some(&Value::Number(20.0))
+        );
+        assert_eq!(
+            layout.children[1].props.get("value"),
+            Some(&Value::Number(50.0))
+        );
     }
 }

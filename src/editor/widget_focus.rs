@@ -21,12 +21,14 @@ impl Editor {
         if mouse.column < content_col || mouse.row < content_row {
             return false;
         }
-        let scroll_top = self.active_leaf().widget_scroll_top;
-        let local_row = (mouse.row - content_row) + scroll_top;
-        let local_col = mouse.column - content_col;
+        let aspect = self.runtime.layout_aspect();
+        let scroll_top = self.active_leaf().widget_scroll_top as f32;
+        // Convert terminal-cell mouse position to uniform units for rect comparison
+        let local_row = ((mouse.row - content_row) as f32 + scroll_top) * aspect;
+        let local_col = (mouse.column - content_col) as f32;
 
         // Find the focusable widget at this position
-        let mut focusable_nodes: Vec<(u64, u16, u16, u16, u16)> = Vec::new();
+        let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
         collect_focusable_nodes(&layout, &mut focusable_nodes);
 
         for (id, row, col, width, height) in &focusable_nodes {
@@ -99,7 +101,7 @@ impl Editor {
         let Some(layout) = self.runtime.current_layout.clone() else {
             return;
         };
-        let mut focusable_nodes: Vec<(u64, u16, u16, u16, u16)> = Vec::new();
+        let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
         collect_focusable_nodes(&layout, &mut focusable_nodes);
         if focusable_nodes.is_empty() {
             return;
@@ -143,19 +145,20 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
-    pub(super) fn adjust_widget_scroll(&mut self, focused_row: u16) {
+    pub(super) fn adjust_widget_scroll(&mut self, focused_row: f32) {
         let viewport_height = self.runtime.layout_rows();
         if viewport_height == 0 {
             return;
         }
+        // focused_row is in uniform units; convert to terminal cells for scroll comparison
+        let aspect = self.runtime.layout_aspect();
+        let focused_terminal_row = (focused_row / aspect).round() as u16;
         let leaf = self.active_leaf_mut();
-        // Scroll up if focused row is above viewport
-        if focused_row < leaf.widget_scroll_top {
-            leaf.widget_scroll_top = focused_row;
+        if focused_terminal_row < leaf.widget_scroll_top {
+            leaf.widget_scroll_top = focused_terminal_row;
         }
-        // Scroll down if focused row is below viewport
-        if focused_row >= leaf.widget_scroll_top + viewport_height {
-            leaf.widget_scroll_top = focused_row - viewport_height + 1;
+        if focused_terminal_row >= leaf.widget_scroll_top + viewport_height {
+            leaf.widget_scroll_top = focused_terminal_row - viewport_height + 1;
         }
     }
 
@@ -223,7 +226,7 @@ impl Editor {
         let Some(layout) = self.runtime.current_layout.clone() else {
             return;
         };
-        let mut focusable_nodes: Vec<(u64, u16, u16, u16, u16)> = Vec::new();
+        let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
         collect_focusable_nodes(&layout, &mut focusable_nodes);
         if let Some((id, _, _, _, _)) = focusable_nodes.first() {
             self.active_leaf_mut().focused_widget_id = Some(*id);
@@ -238,10 +241,7 @@ pub(super) fn has_focusable_node(node: &LayoutNode) -> bool {
     node.children.iter().any(has_focusable_node)
 }
 
-pub(super) fn collect_focusable_nodes(
-    node: &LayoutNode,
-    out: &mut Vec<(u64, u16, u16, u16, u16)>,
-) {
+pub(super) fn collect_focusable_nodes(node: &LayoutNode, out: &mut Vec<(u64, f32, f32, f32, f32)>) {
     if node.focusable {
         out.push((
             node.widget_id,

@@ -46,34 +46,6 @@
 (def clear-hooks ()
   (host-command "clear-hooks"))
 
-(def empty? (xs)
-  (= (len xs) 0))
-
-(def map (fn xs)
-  (if (empty? xs)
-    '()
-    (cons (fn (first xs))
-          (map fn (rest xs)))))
-
-(def filter (fn xs)
-  (if (empty? xs)
-    '()
-    (if (fn (first xs))
-      (cons (first xs) (filter fn (rest xs)))
-      (filter fn (rest xs)))))
-
-(def reduce (fn acc xs)
-  (if (empty? xs)
-    acc
-    (reduce fn (fn acc (first xs)) (rest xs))))
-
-(def for-each (fn xs)
-  (if (empty? xs)
-    nil
-    (do
-      (fn (first xs))
-      (for-each fn (rest xs)))))
-
 ;; Switch to a buffer by name, creating it if it doesn't exist
 (def switch-or-create-buffer (name)
   (let ((bufs (buffer-list))

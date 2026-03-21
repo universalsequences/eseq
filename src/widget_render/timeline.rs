@@ -8,8 +8,9 @@ use super::{
     CellBuffer, EventOutput, MetalGlyphRunPrimitive, MetalPrimitive, MetalQuadPrimitive,
     MetalRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
     resolve_named_color, styled_cell,
+    time_view::{TimeRuler, TimeRulerMode, TimeViewport},
 };
-use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_u16, get_prop_num};
+use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 
@@ -46,26 +47,15 @@ enum TimelineTool {
 }
 
 #[derive(Clone)]
-struct TimelineTimeRuler {
-    mode: TimelineTimeRulerMode,
-    beats_per_bar: i64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TimelineTimeRulerMode {
-    BarsBeats,
-}
-
-#[derive(Clone)]
 struct TimelineView {
     rect: Rect,
-    header_height: u16,
-    sidebar_width: u16,
+    header_height: f32,
+    sidebar_width: f32,
     view_start: f64,
     view_duration: f64,
     zoom_min_duration: f64,
     zoom_max_duration: f64,
-    time_ruler: Option<TimelineTimeRuler>,
+    time_ruler: Option<TimeRuler>,
     playhead_time: Option<f64>,
     lane_scroll: f64,
     snap: f64,
@@ -102,32 +92,35 @@ impl WidgetDefinition for TimelineWidget {
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let width = get_prop_num(node, "width")
-            .map(f64_to_u16)
+            .map(f64_to_f32)
             .unwrap_or(constraints.max_width)
-            .clamp(1, constraints.max_width.max(1));
+            .clamp(1.0, constraints.max_width.max(1.0));
         let height = get_prop_num(node, "height")
-            .map(f64_to_u16)
-            .unwrap_or(8)
-            .max(1);
+            .map(f64_to_f32)
+            .unwrap_or(8.0)
+            .max(1.0);
         Some(Size { width, height })
     }
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         let view = TimelineView::from_props(props, rect);
         let content = view.content_rect();
-        if content.width == 0 || content.height == 0 {
+        if content.width == 0.0 || content.height == 0.0 {
             return;
         }
 
-        for row in rect.row..rect.row.saturating_add(rect.height) {
-            for col in rect.col..rect.col.saturating_add(rect.width) {
+        for row_offset in 0..(rect.height.round() as u16) {
+            let row = rect.row.round() as u16 + row_offset;
+            for col_offset in 0..(rect.width.round() as u16) {
+                let col = rect.col.round() as u16 + col_offset;
                 buf.set(row, col, styled_cell(' ', theme::FG, Some(theme::BG)));
             }
         }
 
-        if view.header_height > 0 {
-            let header_row = rect.row;
-            for col in rect.col..rect.col.saturating_add(rect.width) {
+        if view.header_height > 0.0 {
+            let header_row = rect.row.round() as u16;
+            for col_offset in 0..(rect.width.round() as u16) {
+                let col = rect.col.round() as u16 + col_offset;
                 buf.set(
                     header_row,
                     col,
@@ -135,7 +128,7 @@ impl WidgetDefinition for TimelineWidget {
                 );
             }
             for (absolute_col, is_major) in view.grid_columns() {
-                if header_row < rect.row + rect.height {
+                if header_row < (rect.row + rect.height).round() as u16 {
                     buf.set(
                         header_row,
                         absolute_col,
@@ -153,8 +146,8 @@ impl WidgetDefinition for TimelineWidget {
             }
             for (absolute_col, label) in view.time_ruler_labels() {
                 for (offset, ch) in label.chars().enumerate() {
-                    let col = absolute_col.saturating_add(1 + offset as u16);
-                    if col >= rect.col.saturating_add(rect.width) {
+                    let col = absolute_col + 1 + offset as u16;
+                    if col >= (rect.col + rect.width).round() as u16 {
                         break;
                     }
                     buf.set(
@@ -166,8 +159,10 @@ impl WidgetDefinition for TimelineWidget {
             }
         }
 
-        for row in content.row..content.row.saturating_add(content.height) {
-            for col in content.col..content.col.saturating_add(content.width) {
+        for row_offset in 0..(content.height.round() as u16) {
+            let row = content.row.round() as u16 + row_offset;
+            for col_offset in 0..(content.width.round() as u16) {
+                let col = content.col.round() as u16 + col_offset;
                 let lane = view.lane_at_row(row as f32);
                 let bg = if lane % 2 == 0 {
                     theme::BLACK
@@ -179,7 +174,8 @@ impl WidgetDefinition for TimelineWidget {
         }
 
         for (col, is_major) in view.grid_columns() {
-            for row in content.row..content.row.saturating_add(content.height) {
+            for row_offset in 0..(content.height.round() as u16) {
+                let row = content.row.round() as u16 + row_offset;
                 buf.set(
                     row,
                     col,
@@ -197,14 +193,15 @@ impl WidgetDefinition for TimelineWidget {
         }
 
         if let Some(playhead_col) = view.playhead_col() {
-            if view.header_height > 0 && rect.row < rect.row.saturating_add(rect.height) {
+            if view.header_height > 0.0 && rect.row < rect.row + rect.height {
                 buf.set(
-                    rect.row,
+                    rect.row.round() as u16,
                     playhead_col,
                     styled_cell('|', theme::YELLOW, Some(theme::STATUS_BG)),
                 );
             }
-            for row in content.row..content.row.saturating_add(content.height) {
+            for row_offset in 0..(content.height.round() as u16) {
+                let row = content.row.round() as u16 + row_offset;
                 buf.set(row, playhead_col, styled_cell('|', theme::YELLOW, None));
             }
         }
@@ -213,24 +210,26 @@ impl WidgetDefinition for TimelineWidget {
             let Some((row_start, row_end)) = view.visible_lane_rows(lane_index) else {
                 continue;
             };
-            if view.sidebar_width > 0 {
+            if view.sidebar_width > 0.0 {
                 let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK);
                 let label_fg = lane.label_fg.unwrap_or(theme::FG);
                 for row in row_start..row_end {
-                    for col in rect.col..rect.col.saturating_add(view.sidebar_width) {
+                    for col_offset in 0..(view.sidebar_width.round() as u16) {
+                        let col = rect.col.round() as u16 + col_offset;
                         buf.set(row, col, styled_cell(' ', label_fg, Some(sidebar_bg)));
                     }
                 }
                 let label = lane.label.as_deref().unwrap_or("");
                 for (idx, ch) in label.chars().take(view.sidebar_width as usize).enumerate() {
-                    let col = rect.col + idx as u16;
-                    if row_start < rect.row.saturating_add(rect.height) {
+                    let col = rect.col.round() as u16 + idx as u16;
+                    if row_start < (rect.row + rect.height).round() as u16 {
                         buf.set(row_start, col, styled_cell(ch, label_fg, Some(sidebar_bg)));
                     }
                 }
                 for row in row_start..row_end {
-                    let divider_col = rect.col + view.sidebar_width.saturating_sub(1);
-                    if divider_col < rect.col + rect.width {
+                    let divider_col = rect.col.round() as u16
+                        + (view.sidebar_width - 1.0).max(0.0).round() as u16;
+                    if divider_col < (rect.col + rect.width).round() as u16 {
                         buf.set(
                             row,
                             divider_col,
@@ -250,8 +249,10 @@ impl WidgetDefinition for TimelineWidget {
             } else {
                 item.color.unwrap_or(theme::WHITE)
             };
-            for row in item_rect.row..item_rect.row.saturating_add(item_rect.height) {
-                for col in item_rect.col..item_rect.col.saturating_add(item_rect.width) {
+            for row_offset in 0..(item_rect.height.round() as u16) {
+                let row = item_rect.row.round() as u16 + row_offset;
+                for col_offset in 0..(item_rect.width.round() as u16) {
+                    let col = item_rect.col.round() as u16 + col_offset;
                     buf.set(row, col, styled_cell(' ', item_color, Some(item_color)));
                 }
             }
@@ -346,14 +347,18 @@ impl WidgetDefinition for TimelineWidget {
             .map(WidgetEvent::Custom)
     }
 
+    fn captures_scroll_gesture(&self) -> bool {
+        true
+    }
+
     #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
-        _viewport: super::WidgetViewport,
+        viewport: super::WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        build_metal_primitives(node)
+        build_metal_primitives(node, viewport)
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
@@ -370,30 +375,38 @@ impl WidgetDefinition for TimelineWidget {
 }
 
 #[cfg(target_os = "macos")]
-fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
+fn build_metal_primitives(
+    node: &LayoutNode,
+    viewport: super::WidgetViewport,
+) -> Vec<MetalPrimitive> {
     if node.widget_type != "timeline" {
         return Vec::new();
     }
 
     let rect = node.rect;
+    let aspect = if viewport.cell_w > 0.0 {
+        viewport.cell_h / viewport.cell_w
+    } else {
+        1.0
+    };
     let view = TimelineView::from_props(&node.props, rect);
     let content = view.content_rect();
     let mut primitives = Vec::new();
 
-    if view.header_height > 0 {
+    if view.header_height > 0.0 {
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: Rect {
                 row: rect.row,
                 col: rect.col,
                 width: rect.width,
-                height: 1,
+                height: 1.0,
             },
             color: theme::STATUS_BG,
         }));
         for (x, _) in view.metal_grid_lines() {
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                 x: x - 0.0625,
-                y: rect.row as f32,
+                y: rect.row,
                 width: 0.125,
                 height: 1.0,
                 color: theme::BRIGHT_BLACK,
@@ -401,7 +414,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         }
         for (absolute_col, label) in view.time_ruler_labels() {
             primitives.push(MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
-                row: rect.row as i32,
+                row: rect.row / aspect,
                 col: absolute_col as i32 + 1,
                 text: label,
                 fg: theme::FG_MUTED,
@@ -414,13 +427,13 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         let Some((row_start, lane_height)) = view.metal_lane_rect(lane_index) else {
             continue;
         };
-        if view.sidebar_width > 0 {
+        if view.sidebar_width > 0.0 {
             let lane = &view.lanes[lane_index];
             let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK);
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                x: rect.col as f32,
+                x: rect.col,
                 y: row_start,
-                width: view.sidebar_width as f32,
+                width: view.sidebar_width,
                 height: lane_height,
                 color: sidebar_bg,
             }));
@@ -429,17 +442,17 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             if !label.is_empty() {
                 let label_fg = lane.label_fg.unwrap_or(theme::FG);
                 primitives.push(MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
-                    row: row_start.floor() as i32,
-                    col: rect.col as i32,
+                    row: row_start / aspect,
+                    col: rect.col.round() as i32,
                     text: label.chars().take(view.sidebar_width as usize).collect(),
                     fg: label_fg,
                     bg: sidebar_bg,
                 }));
             }
-            let divider_col = rect.col + view.sidebar_width.saturating_sub(1);
+            let divider_col = rect.col + (view.sidebar_width - 1.0).max(0.0);
             if divider_col < rect.col + rect.width {
                 primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                    x: divider_col as f32 + 0.4375,
+                    x: divider_col + 0.4375,
                     y: row_start,
                     width: 0.125,
                     height: lane_height,
@@ -448,9 +461,9 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             }
         }
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-            x: content.col as f32,
+            x: content.col,
             y: row_start,
-            width: content.width as f32,
+            width: content.width,
             height: lane_height,
             color: if lane_index % 2 == 0 {
                 theme::BLACK
@@ -463,9 +476,9 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
     for (x, is_major) in view.metal_grid_lines() {
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x: x - 0.0625,
-            y: content.row as f32,
+            y: content.row,
             width: 0.125,
-            height: content.height as f32,
+            height: content.height,
             color: if is_major {
                 theme::BRIGHT_BLACK
             } else {
@@ -475,10 +488,10 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
     }
 
     if let Some(playhead_x) = view.metal_playhead_x() {
-        if view.header_height > 0 {
+        if view.header_height > 0.0 {
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                 x: playhead_x - 0.0625,
-                y: rect.row as f32,
+                y: rect.row,
                 width: 0.125,
                 height: 1.0,
                 color: theme::YELLOW,
@@ -486,9 +499,9 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         }
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x: playhead_x - 0.0625,
-            y: content.row as f32,
+            y: content.row,
             width: 0.125,
-            height: content.height as f32,
+            height: content.height,
             color: theme::YELLOW,
         }));
     }
@@ -515,11 +528,23 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
 }
 
 impl TimelineView {
+    fn time_viewport(&self) -> TimeViewport {
+        TimeViewport {
+            rect: self.rect,
+            header_height: self.header_height,
+            sidebar_width: self.sidebar_width,
+            view_start: self.view_start,
+            view_duration: self.view_duration,
+            zoom_min_duration: self.zoom_min_duration,
+            zoom_max_duration: self.zoom_max_duration,
+        }
+    }
+
     fn from_props(props: &HashMap<String, Value>, rect: Rect) -> Self {
         Self {
             rect,
-            header_height: get_num(props, "header-height", 1.0).max(0.0) as u16,
-            sidebar_width: get_num(props, "sidebar-width", 0.0).max(0.0) as u16,
+            header_height: get_num(props, "header-height", 1.0).max(0.0) as f32,
+            sidebar_width: get_num(props, "sidebar-width", 0.0).max(0.0) as f32,
             view_start: get_num(props, "view-start", 0.0),
             view_duration: get_num(props, "view-duration", 16.0).max(0.0001),
             zoom_min_duration: get_num(props, "zoom-min-duration", 8.0).max(0.0001),
@@ -539,31 +564,12 @@ impl TimelineView {
     }
 
     fn content_rect(&self) -> Rect {
-        let top = self
-            .rect
-            .row
-            .saturating_add(self.header_height.min(self.rect.height));
-        let left = self
-            .rect
-            .col
-            .saturating_add(self.sidebar_width.min(self.rect.width));
-        Rect {
-            row: top,
-            col: left,
-            width: self
-                .rect
-                .width
-                .saturating_sub(self.sidebar_width.min(self.rect.width)),
-            height: self
-                .rect
-                .height
-                .saturating_sub(self.header_height.min(self.rect.height)),
-        }
+        self.time_viewport().content_rect()
     }
 
     fn visible_lane_rows(&self, lane_index: usize) -> Option<(u16, u16)> {
         let content = self.content_rect();
-        if content.height == 0 {
+        if content.height == 0.0 {
             return None;
         }
         let lane_scroll = self.lane_scroll.floor() as usize;
@@ -575,44 +581,37 @@ impl TimelineView {
         if visible_index >= lane_count {
             return None;
         }
-        let lane_height = (content.height / lane_count as u16).max(1);
-        let row_start = content
-            .row
-            .saturating_add((visible_index as u16).saturating_mul(lane_height));
+        let lane_height = (content.height / lane_count as f32).max(1.0);
+        let row_start = content.row + visible_index as f32 * lane_height;
         let row_end = if visible_index + 1 == lane_count {
-            content.row.saturating_add(content.height)
+            content.row + content.height
         } else {
-            row_start.saturating_add(lane_height)
+            row_start + lane_height
         };
-        Some((row_start, row_end.max(row_start.saturating_add(1))))
+        Some((
+            row_start.round() as u16,
+            row_end.max(row_start + 1.0).round() as u16,
+        ))
     }
 
     fn visible_lane_capacity(&self) -> usize {
         let content = self.content_rect();
-        let count = content.height.max(1) as usize;
+        let count = content.height.max(1.0) as usize;
         count.min(self.lanes.len().max(1))
     }
 
     fn lane_at_row(&self, local_row: f32) -> usize {
         let content = self.content_rect();
-        if content.height == 0 {
+        if content.height == 0.0 {
             return 0;
         }
-        let lane_height =
-            (content.height / self.visible_lane_capacity().max(1) as u16).max(1) as f32;
-        let relative = ((local_row - content.row as f32) / lane_height)
-            .floor()
-            .max(0.0) as usize;
+        let lane_height = (content.height / self.visible_lane_capacity().max(1) as f32).max(1.0);
+        let relative = ((local_row - content.row) / lane_height).floor().max(0.0) as usize;
         (self.lane_scroll.floor() as usize + relative).min(self.lanes.len().saturating_sub(1))
     }
 
     fn time_at_col(&self, local_col: f32) -> f64 {
-        let content = self.content_rect();
-        if content.width == 0 {
-            return self.view_start;
-        }
-        let t = ((local_col - content.col as f32) / content.width as f32).clamp(0.0, 1.0) as f64;
-        self.view_start + self.view_duration * t
+        self.time_viewport().time_at_col(local_col)
     }
 
     fn snap_time(&self, time: f64) -> f64 {
@@ -624,170 +623,46 @@ impl TimelineView {
     }
 
     fn playhead_col(&self) -> Option<u16> {
-        let playhead_time = self.playhead_time?;
-        if playhead_time < self.view_start || playhead_time > self.view_start + self.view_duration {
-            return None;
-        }
-        Some(self.col_for_time(playhead_time))
+        self.time_viewport().playhead_col(self.playhead_time)
     }
 
     fn grid_columns(&self) -> Vec<(u16, bool)> {
-        self.visible_grid_beats()
-            .into_iter()
-            .map(|(_, col, is_major)| (col, is_major))
-            .collect()
-    }
-
-    fn visible_grid_beats(&self) -> Vec<(i64, u16, bool)> {
-        let content = self.content_rect();
-        if content.width == 0 {
-            return Vec::new();
-        }
-        let pixels_per_step = content.width as f64 / self.view_duration.max(0.0001);
-        let grid_step = if pixels_per_step >= 6.0 {
-            1_i64
-        } else if pixels_per_step >= 3.0 {
-            2
-        } else if pixels_per_step >= 1.5 {
-            4
-        } else if pixels_per_step >= 0.75 {
-            8
-        } else {
-            16
-        };
-        let start = self.view_start.floor().max(0.0) as i64;
-        let end = (self.view_start + self.view_duration).ceil() as i64;
-        let mut cols = Vec::new();
-        let mut last = None;
-        for beat in start..=end {
-            if beat.rem_euclid(grid_step) != 0 {
-                continue;
-            }
-            let edge = self.edge_for_time(beat as f64);
-            let col = content
-                .col
-                .saturating_add(edge.min(content.width.saturating_sub(1)));
-            let is_major = beat.rem_euclid(4) == 0;
-            if last != Some(col) {
-                cols.push((beat, col, is_major));
-                last = Some(col);
-            }
-        }
-        cols
+        self.time_viewport().grid_columns(self.time_ruler.as_ref())
     }
 
     fn time_ruler_labels(&self) -> Vec<(u16, String)> {
-        let Some(ruler) = &self.time_ruler else {
-            return Vec::new();
-        };
-        let mut labels = Vec::new();
-        let mut last_end = None;
-        for (beat, col, _) in self.visible_grid_beats() {
-            let Some(label) = ruler.label_for_beat(beat) else {
-                continue;
-            };
-            let label_len = label.chars().count() as u16;
-            let min_col = self.content_rect().col;
-            let max_col = self.rect.col.saturating_add(self.rect.width);
-            let start_col = col.max(min_col);
-            let end_col = start_col.saturating_add(label_len);
-            if end_col > max_col {
-                continue;
-            }
-            if last_end.is_some_and(|last_end| start_col <= last_end) {
-                continue;
-            }
-            labels.push((start_col, label));
-            last_end = Some(end_col);
-        }
-        labels
+        self.time_viewport()
+            .time_ruler_labels(self.time_ruler.as_ref())
     }
 
     fn metal_grid_lines(&self) -> Vec<(f32, bool)> {
-        let content = self.content_rect();
-        if content.width == 0 {
-            return Vec::new();
-        }
-        let pixels_per_step = content.width as f64 / self.view_duration.max(0.0001);
-        let grid_step = if pixels_per_step >= 6.0 {
-            1_i64
-        } else if pixels_per_step >= 3.0 {
-            2
-        } else if pixels_per_step >= 1.5 {
-            4
-        } else if pixels_per_step >= 0.75 {
-            8
-        } else {
-            16
-        };
-        let start = self.view_start.floor().max(0.0) as i64;
-        let end = (self.view_start + self.view_duration).ceil() as i64;
-        let mut lines = Vec::new();
-        let mut last_x: Option<f32> = None;
-        for beat in start..=end {
-            if beat.rem_euclid(grid_step) != 0 {
-                continue;
-            }
-            let x = self.x_for_time(beat as f64);
-            if last_x.is_some_and(|last| (x - last).abs() < 0.01) {
-                continue;
-            }
-            lines.push((x, beat.rem_euclid(4) == 0));
-            last_x = Some(x);
-        }
-        lines
+        self.time_viewport()
+            .metal_grid_lines(self.time_ruler.as_ref())
     }
 
-    fn col_for_time(&self, time: f64) -> u16 {
-        let content = self.content_rect();
-        if content.width <= 1 {
-            return content.col;
-        }
-        let edge = self.edge_for_time(time);
-        content
-            .col
-            .saturating_add(edge.min(content.width.saturating_sub(1)))
-    }
-
-    fn edge_for_time(&self, time: f64) -> u16 {
-        let content = self.content_rect();
-        if content.width == 0 {
-            return 0;
-        }
-        let span = self.view_duration.max(0.0001);
-        let t = ((time - self.view_start) / span).clamp(0.0, 1.0);
-        (content.width as f64 * t).floor() as u16
+    fn edge_for_time(&self, time: f64) -> f32 {
+        self.time_viewport().edge_for_time(time)
     }
 
     fn x_for_time(&self, time: f64) -> f32 {
-        let content = self.content_rect();
-        if content.width == 0 {
-            return content.col as f32;
-        }
-        let span = self.view_duration.max(0.0001);
-        let t = ((time - self.view_start) / span).clamp(0.0, 1.0);
-        content.col as f32 + (content.width as f64 * t) as f32
+        self.time_viewport().x_for_time(time)
     }
 
     fn metal_playhead_x(&self) -> Option<f32> {
-        let playhead_time = self.playhead_time?;
-        if playhead_time < self.view_start || playhead_time > self.view_start + self.view_duration {
-            return None;
-        }
-        Some(self.x_for_time(playhead_time))
+        self.time_viewport().metal_playhead_x(self.playhead_time)
     }
 
     fn metal_lane_rect(&self, lane_index: usize) -> Option<(f32, f32)> {
         let content = self.content_rect();
-        if content.height == 0 {
+        if content.height == 0.0 {
             return None;
         }
         let lane_count = self.visible_lane_capacity().max(1) as f32;
-        let lane_height = content.height as f32 / lane_count;
-        let top = content.row as f32 + (lane_index as f32 - self.lane_scroll as f32) * lane_height;
+        let lane_height = content.height / lane_count;
+        let top = content.row + (lane_index as f32 - self.lane_scroll as f32) * lane_height;
         let bottom = top + lane_height;
-        let clip_top = content.row as f32;
-        let clip_bottom = content.row as f32 + content.height as f32;
+        let clip_top = content.row;
+        let clip_bottom = content.row + content.height;
         let visible_top = top.max(clip_top);
         let visible_bottom = bottom.min(clip_bottom);
         if visible_bottom <= visible_top {
@@ -818,46 +693,44 @@ impl TimelineView {
         }
         let start_edge = self.edge_for_time(item.start);
         let end_edge = self.edge_for_time(item.end);
-        let start_col = content
-            .col
-            .saturating_add(start_edge.min(content.width.saturating_sub(1)));
-        let width = end_edge.saturating_sub(start_edge).max(1);
+        let start_col = content.col + start_edge.min((content.width - 1.0).max(0.0));
+        let width = (end_edge - start_edge).max(1.0);
         Some(Rect {
-            row: row_start,
-            col: start_col.min(content.col.saturating_add(content.width.saturating_sub(1))),
+            row: row_start as f32,
+            col: start_col.min(content.col + (content.width - 1.0).max(0.0)),
             width: width.min(content.width),
-            height: row_end.saturating_sub(row_start).max(1),
+            height: ((row_end as f32) - (row_start as f32)).max(1.0),
         })
     }
 
     fn hit_test(&self, local_col: f32, local_row: f32) -> Option<HitRegion> {
-        if local_col < self.rect.col as f32 || local_row < self.rect.row as f32 {
+        if local_col < self.rect.col || local_row < self.rect.row {
             return None;
         }
-        if local_row < self.rect.row as f32 + self.header_height as f32 {
+        if local_row < self.rect.row + self.header_height {
             return Some(HitRegion::Header);
         }
         let lane = self.lane_at_row(local_row);
-        if local_col < self.rect.col as f32 + self.sidebar_width as f32 {
+        if local_col < self.rect.col + self.sidebar_width {
             return Some(HitRegion::Sidebar { lane });
         }
         for item in self.items.iter().rev() {
             let Some(rect) = self.item_rect(item) else {
                 continue;
             };
-            if local_row >= rect.row as f32
-                && local_row < (rect.row + rect.height) as f32
-                && local_col >= rect.col as f32
-                && local_col < (rect.col + rect.width) as f32
+            if local_row >= rect.row
+                && local_row < rect.row + rect.height
+                && local_col >= rect.col
+                && local_col < rect.col + rect.width
             {
-                if rect.width <= 1 {
+                if rect.width <= 1.0 {
                     return Some(HitRegion::ItemBody { item: item.clone() });
                 }
-                let edge_threshold = ((rect.width as f32 * 0.2).floor() as u16).clamp(1, 2) as f32;
-                if local_col <= rect.col as f32 + edge_threshold - 1.0 {
+                let edge_threshold = (rect.width * 0.2).floor().clamp(1.0, 2.0);
+                if local_col <= rect.col + edge_threshold - 1.0 {
                     return Some(HitRegion::ItemEdgeStart { item: item.clone() });
                 }
-                if local_col >= (rect.col + rect.width) as f32 - edge_threshold {
+                if local_col >= rect.col + rect.width - edge_threshold {
                     return Some(HitRegion::ItemEdgeEnd { item: item.clone() });
                 }
                 return Some(HitRegion::ItemBody { item: item.clone() });
@@ -1186,7 +1059,7 @@ impl TimelineView {
     ) -> Option<Value> {
         let hit = self.hit_test(local_col, local_row)?;
         let content = self.content_rect();
-        if content.width == 0 || content.height == 0 {
+        if content.width == 0.0 || content.height == 0.0 {
             return None;
         }
 
@@ -1204,9 +1077,9 @@ impl TimelineView {
         }
 
         let lane_capacity = self.visible_lane_capacity().max(1) as f32;
-        let lane_height = content.height as f32 / lane_capacity;
+        let lane_height = content.height / lane_capacity;
         let delta_time =
-            -(delta_x as f64 / content.width.max(1) as f64) * self.view_duration * 0.0625;
+            -(delta_x as f64 / content.width.max(1.0) as f64) * self.view_duration * 0.0625;
         let delta_lanes = if lane_height > 0.0 {
             -(delta_y / lane_height) as f64 * 0.0625
         } else {
@@ -1330,12 +1203,7 @@ impl TimelineView {
     }
 
     fn zoom_action(&self, anchor_time: f64, factor: f64) -> Option<Value> {
-        let min_duration = self.zoom_min_duration.min(self.zoom_max_duration);
-        let max_duration = self.zoom_max_duration.max(self.zoom_min_duration);
-        let next_duration = (self.view_duration / factor).clamp(min_duration, max_duration);
-        if (next_duration - self.view_duration).abs() < f64::EPSILON {
-            return None;
-        }
+        self.time_viewport().zoom_action(anchor_time, factor)?;
         Some(action_map(vec![
             ("type", keyword(":zoom-view")),
             ("anchor-time", Value::Number(anchor_time)),
@@ -1387,23 +1255,6 @@ impl TimelineView {
 
     fn scroll_time_step(&self) -> f64 {
         self.snap.max(1.0)
-    }
-}
-
-impl TimelineTimeRuler {
-    fn label_for_beat(&self, beat: i64) -> Option<String> {
-        match self.mode {
-            TimelineTimeRulerMode::BarsBeats => {
-                let beats_per_bar = self.beats_per_bar.max(1);
-                let bar = beat.div_euclid(beats_per_bar) + 1;
-                let beat_in_bar = beat.rem_euclid(beats_per_bar) + 1;
-                if beat_in_bar == 1 {
-                    Some(format!("{bar}"))
-                } else {
-                    Some(format!("{bar}.{beat_in_bar}"))
-                }
-            }
-        }
     }
 }
 
@@ -1483,16 +1334,17 @@ fn get_selection(props: &HashMap<String, Value>) -> Vec<Value> {
     items.iter().map(|item| item.borrow().clone()).collect()
 }
 
-fn get_time_ruler(map: &HashMap<String, Value>) -> Option<TimelineTimeRuler> {
+fn get_time_ruler(map: &HashMap<String, Value>) -> Option<TimeRuler> {
     let mode = map.get("mode").and_then(as_string)?;
     match mode.as_str() {
-        "bars-beats" => Some(TimelineTimeRuler {
-            mode: TimelineTimeRulerMode::BarsBeats,
-            beats_per_bar: map
-                .get("beats-per-bar")
-                .and_then(as_number)
-                .unwrap_or(4.0)
-                .max(1.0) as i64,
+        "bars-beats" => Some(TimeRuler {
+            mode: TimeRulerMode::BarsBeats {
+                beats_per_bar: map
+                    .get("beats-per-bar")
+                    .and_then(as_number)
+                    .unwrap_or(4.0)
+                    .max(1.0) as i64,
+            },
         }),
         _ => None,
     }
@@ -1632,10 +1484,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
 
@@ -1664,10 +1516,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let action = view
@@ -1702,10 +1554,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 129,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 129.0,
+                height: 8.0,
             },
         );
         let labels: Vec<String> = view
@@ -1731,10 +1583,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 18,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 18.0,
+                height: 8.0,
             },
         );
         let action = view
@@ -1766,10 +1618,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let action = view
@@ -1810,10 +1662,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let action = view
@@ -1855,10 +1707,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let (y, height) = view.metal_lane_rect(0).expect("partially visible top lane");
@@ -1878,10 +1730,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         assert!(
@@ -1902,10 +1754,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         assert!(
@@ -1931,10 +1783,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let action = view
@@ -1974,10 +1826,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let action = view
@@ -2017,10 +1869,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         assert!(
@@ -2048,10 +1900,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let gesture = view.begin_gesture(6.0, 2.0).expect("gesture");
@@ -2087,10 +1939,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let action = view
@@ -2145,10 +1997,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let gesture = map_value_raw(vec![
@@ -2193,10 +2045,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 32,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
             },
         );
         let action = view
@@ -2224,10 +2076,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 17,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 17.0,
+                height: 8.0,
             },
         );
         assert_eq!(view.playhead_col(), Some(8));
@@ -2252,10 +2104,10 @@ mod tests {
         let view = TimelineView::from_props(
             &props,
             Rect {
-                row: 0,
-                col: 0,
-                width: 17,
-                height: 8,
+                row: 0.0,
+                col: 0.0,
+                width: 17.0,
+                height: 8.0,
             },
         );
         let grid_col = view
@@ -2265,6 +2117,6 @@ mod tests {
             .expect("grid line at beat 8");
         let item = view.items.first().expect("item");
         let rect = view.item_rect(item).expect("item rect");
-        assert_eq!(rect.col, grid_col);
+        assert_eq!(rect.col.round() as u16, grid_col);
     }
 }

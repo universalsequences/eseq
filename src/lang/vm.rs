@@ -190,6 +190,25 @@ fn parse_fmt_placeholder(template: &str, start: usize) -> Option<(usize, Option<
     Some((digits_len + 4, Some(precision)))
 }
 
+fn is_falsey(value: &Value) -> bool {
+    match value {
+        Value::Bool(false) | Value::Nil => true,
+        Value::Number(n) => *n == 0.0,
+        Value::String(s) => s.is_empty(),
+        Value::List(items) => items.is_empty(),
+        _ => false,
+    }
+}
+
+fn list_from_values(values: impl IntoIterator<Item = Value>) -> Value {
+    Value::List(
+        values
+            .into_iter()
+            .map(|value| Rc::new(RefCell::new(value)))
+            .collect(),
+    )
+}
+
 impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", format_lisp_value(self))
@@ -366,12 +385,14 @@ pub fn register_core_natives(vm: &mut VM) {
     });
 
     // (list a b c) -> List
-    vm.register_native("list", |args| {
-        Value::List(
-            args.into_iter()
-                .map(|value| Rc::new(RefCell::new(value)))
-                .collect(),
-        )
+    vm.register_native("list", |args| list_from_values(args));
+
+    vm.register_native("empty?", |args| match args.first() {
+        Some(Value::List(items)) => Value::Bool(items.is_empty()),
+        Some(Value::String(s)) => Value::Bool(s.is_empty()),
+        Some(Value::Map(map)) => Value::Bool(map.is_empty()),
+        Some(Value::Nil) | None => Value::Bool(true),
+        _ => Value::Bool(false),
     });
 
     vm.register_native("set-nth", |args| {
@@ -420,6 +441,97 @@ pub fn register_core_natives(vm: &mut VM) {
             out.push(Rc::new(RefCell::new(result.unwrap_or(Value::Nil))));
         }
         Value::List(out)
+    });
+
+    vm.register_native_with_vm("map", |args, vm| {
+        let (Some(callback), Some(Value::List(items))) = (args.first().cloned(), args.get(1))
+        else {
+            return Value::List(vec![]);
+        };
+
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            let mapped = vm
+                .invoke(callback.clone(), vec![item.borrow().clone()])
+                .unwrap_or(Some(Value::Nil))
+                .unwrap_or(Value::Nil);
+            out.push(Rc::new(RefCell::new(mapped)));
+        }
+        Value::List(out)
+    });
+
+    vm.register_native_with_vm("filter", |args, vm| {
+        let (Some(callback), Some(Value::List(items))) = (args.first().cloned(), args.get(1))
+        else {
+            return Value::List(vec![]);
+        };
+
+        let mut out = Vec::new();
+        for item in items {
+            let item_value = item.borrow().clone();
+            let keep = vm
+                .invoke(callback.clone(), vec![item_value.clone()])
+                .unwrap_or(Some(Value::Nil))
+                .unwrap_or(Value::Nil);
+            if !is_falsey(&keep) {
+                out.push(Rc::new(RefCell::new(item_value)));
+            }
+        }
+        Value::List(out)
+    });
+
+    vm.register_native_with_vm("reduce", |args, vm| {
+        let (Some(callback), Some(mut acc), Some(Value::List(items))) =
+            (args.first().cloned(), args.get(1).cloned(), args.get(2))
+        else {
+            return Value::Nil;
+        };
+
+        for item in items {
+            acc = vm
+                .invoke(callback.clone(), vec![acc, item.borrow().clone()])
+                .unwrap_or(Some(Value::Nil))
+                .unwrap_or(Value::Nil);
+        }
+        acc
+    });
+
+    vm.register_native_with_vm("for-each", |args, vm| {
+        let (Some(callback), Some(Value::List(items))) = (args.first().cloned(), args.get(1))
+        else {
+            return Value::Nil;
+        };
+
+        for item in items {
+            let _ = vm.invoke(callback.clone(), vec![item.borrow().clone()]);
+        }
+        Value::Nil
+    });
+
+    vm.register_native("zip", |args| {
+        let lists = args
+            .iter()
+            .map(|arg| match arg {
+                Value::List(items) => Some(items),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let Some(lists) = lists else {
+            return Value::List(vec![]);
+        };
+        let Some(limit) = lists.iter().map(|items| items.len()).min() else {
+            return Value::List(vec![]);
+        };
+
+        let mut zipped = Vec::with_capacity(limit);
+        for idx in 0..limit {
+            let row = lists
+                .iter()
+                .map(|items| items[idx].borrow().clone())
+                .collect::<Vec<_>>();
+            zipped.push(Rc::new(RefCell::new(list_from_values(row))));
+        }
+        Value::List(zipped)
     });
 
     // (nth list idx) -> value or nil; idx is 0-based
@@ -1354,14 +1466,7 @@ impl VM {
                     if let Some(result) = stack.pop()
                         && let Some(frame) = frames.last_mut()
                     {
-                        let is_false = match &*result.borrow() {
-                            Value::Bool(r) => !r,
-                            Value::Nil => true,
-                            Value::Number(r) => *r == 0.0,
-                            Value::String(r) => r.is_empty(),
-                            Value::List(r) => r.is_empty(),
-                            _ => false,
-                        };
+                        let is_false = is_falsey(&result.borrow());
                         if is_false {
                             frame.pc += pc;
                         } else {
@@ -1411,12 +1516,12 @@ impl VM {
                     let field = self.chunks[self.current_chunk].strings[field_idx].clone();
                     let new_value = value.borrow().clone();
                     let owner_path = match &*target.borrow() {
-                        Value::Map(map) => map
-                            .get("__eseq_owner")
-                            .and_then(|entry| match &*entry.borrow() {
-                                Value::String(path) => Some(path.clone()),
-                                _ => None,
-                            }),
+                        Value::Map(map) => map.get("__eseq_owner").and_then(|entry| match &*entry
+                            .borrow()
+                        {
+                            Value::String(path) => Some(path.clone()),
+                            _ => None,
+                        }),
                         _ => None,
                     };
                     match &mut *target.borrow_mut() {
@@ -1424,10 +1529,7 @@ impl VM {
                             if let Some(slot) = map.get(&field) {
                                 *slot.borrow_mut() = new_value.clone();
                             } else {
-                                map.insert(
-                                    field.clone(),
-                                    Rc::new(RefCell::new(new_value.clone())),
-                                );
+                                map.insert(field.clone(), Rc::new(RefCell::new(new_value.clone())));
                             }
                         }
                         _ => return Err(VMError::IncorrectType),

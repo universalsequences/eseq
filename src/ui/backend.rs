@@ -155,15 +155,15 @@ pub struct RenderFrame {
 
 // ── Tiled rendering ──────────────────────────────────────────────────────────
 
-use crate::tile::TileId;
 use crate::layout::Rect;
+use crate::tile::TileId;
 
 /// One tile's worth of rendering data, positioned within the full screen.
 pub struct TileFrame {
     pub tile_id: TileId,
-    pub rect: Rect,       // screen position for this tile
-    pub is_active: bool,   // colored border for active tile
-    pub show_status: bool, // whether to render per-tile status bar
+    pub rect: Rect,         // screen position for this tile
+    pub is_active: bool,    // colored border for active tile
+    pub show_status: bool,  // whether to render per-tile status bar
     pub frame: RenderFrame, // the per-buffer frame
 }
 

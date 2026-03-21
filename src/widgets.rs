@@ -19,7 +19,9 @@ pub fn register_widget_natives(vm: &mut VM) {
         "h-stack",
         "box",
         "grid",
+        "tabs",
         "timeline",
+        "waveform",
     ] {
         let widget_type = widget.to_string();
         vm.register_native(widget, move |args| build_widget(&widget_type, args));
@@ -43,7 +45,10 @@ fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
             Value::String(text) => text.clone(),
             other => format_lisp_value(other),
         };
-        map.insert("text".to_string(), Rc::new(RefCell::new(Value::String(text))));
+        map.insert(
+            "text".to_string(),
+            Rc::new(RefCell::new(Value::String(text))),
+        );
         i = 1;
     }
 

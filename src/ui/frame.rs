@@ -4,7 +4,6 @@ use crate::backend::{
 };
 use crate::buffer::Buffer;
 use crate::editor::{Editor, ViewMode};
-use crate::layout::Rect;
 use crate::mode::{TokenClass, TokenSpan, highlight_line};
 use crate::text::matching_paren;
 use crate::theme;
@@ -94,8 +93,9 @@ pub fn build_render_frame(
             let row = scroll_top + i;
             let match_col = match_pos.and_then(|(mr, mc)| if mr == row { Some(mc) } else { None });
             let row_spans = highlight_spans.get(row);
-            let line_len = content.len();
-            let mut cells: Vec<Cell> = vec![];
+            let chars: Vec<char> = content.chars().collect();
+            let line_len = chars.len();
+            let mut cells: Vec<Cell> = Vec::with_capacity(line_len + 1);
             for col in 0..line_len + 1 {
                 let mut fg = token_fg(col, row_spans);
                 let mut bg = if in_range(row, col, eval_flash_range, line_len) {
@@ -117,7 +117,7 @@ pub fn build_render_frame(
                         fg,
                         bold: false,
                     },
-                    ch: content.chars().nth(col).unwrap_or(' '),
+                    ch: chars.get(col).copied().unwrap_or(' '),
                 });
             }
             cells
@@ -125,7 +125,10 @@ pub fn build_render_frame(
         .collect();
 
     // Cursor in visible-area coordinates
-    let cursor = if !buf.read_only && cursor_row >= scroll_top && cursor_row < scroll_top + viewport_height {
+    let cursor = if !buf.read_only
+        && cursor_row >= scroll_top
+        && cursor_row < scroll_top + viewport_height
+    {
         Some((cursor_row - scroll_top, cursor_col))
     } else {
         None
@@ -156,40 +159,7 @@ pub fn build_render_frame(
         )
     };
 
-    // Completion popup
-    let completion = editor.completion_state().map(|comp| {
-        let visible_count = comp.items.len().min(8);
-        let start = comp
-            .scroll
-            .min(comp.items.len().saturating_sub(visible_count));
-        let entries = comp
-            .items
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(visible_count)
-            .map(|(idx, item)| CompletionEntry {
-                label: item.label.clone(),
-                selected: idx == comp.selected,
-            })
-            .collect();
-        let doc = comp.items.get(comp.selected).map(|item| {
-            let title = item.signature.clone().unwrap_or_else(|| item.label.clone());
-            let body = item
-                .docs
-                .clone()
-                .unwrap_or_else(|| "No documentation.".to_string())
-                .lines()
-                .map(str::to_string)
-                .collect();
-            (title, body)
-        });
-        CompletionFrame {
-            entries,
-            anchor: (cursor_row.saturating_sub(scroll_top), cursor_col),
-            doc,
-        }
-    });
+    let completion = build_completion(editor, cursor_row, cursor_col, scroll_top);
 
     let text_cache_key = {
         let mut hasher = DefaultHasher::new();
@@ -287,52 +257,15 @@ fn build_tiled_render_frame_impl(
     total_height: usize,
     cell_borders: bool,
 ) -> TiledRenderFrame {
-    let total_area = Rect {
-        row: 0,
-        col: 0,
-        width: total_width as u16,
-        height: total_height as u16,
-    };
-    let tile_rects = editor.tile_root.compute_rects(total_area);
+    // Ensure cached rects are up to date, then reuse them.
+    editor.update_tile_rects(total_width as u16, total_height as u16);
+    let tile_rects: Vec<_> = editor.tile_rects().to_vec();
     let active_tile = editor.active_tile;
 
-    // Build completion popup from active tile
     let buf = editor.active_buffer();
     let (cursor_row, cursor_col) = buf.cursor;
     let scroll_top = buf.scroll_top;
-    let completion = editor.completion_state().map(|comp| {
-        let visible_count = comp.items.len().min(8);
-        let start = comp
-            .scroll
-            .min(comp.items.len().saturating_sub(visible_count));
-        let entries = comp
-            .items
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(visible_count)
-            .map(|(idx, item)| CompletionEntry {
-                label: item.label.clone(),
-                selected: idx == comp.selected,
-            })
-            .collect();
-        let doc = comp.items.get(comp.selected).map(|item| {
-            let title = item.signature.clone().unwrap_or_else(|| item.label.clone());
-            let body = item
-                .docs
-                .clone()
-                .unwrap_or_else(|| "No documentation.".to_string())
-                .lines()
-                .map(str::to_string)
-                .collect();
-            (title, body)
-        });
-        CompletionFrame {
-            entries,
-            anchor: (cursor_row.saturating_sub(scroll_top), cursor_col),
-            doc,
-        }
-    });
+    let completion = build_completion(editor, cursor_row, cursor_col, scroll_top);
 
     // Pre-collect per-tile metadata to avoid borrow conflicts
     let tile_info: Vec<_> = tile_rects
@@ -387,19 +320,19 @@ fn build_tiled_render_frame_impl(
         let inner_height;
         if cell_borders {
             // TUI: subtract 1-cell borders on each side
-            inner_width = (rect.width as usize).saturating_sub(2);
+            inner_width = (rect.width.round() as usize).saturating_sub(2);
             inner_height = if show_status {
-                (rect.height as usize).saturating_sub(3) // border top/bottom + status
+                (rect.height.round() as usize).saturating_sub(3) // border top/bottom + status
             } else {
-                (rect.height as usize).saturating_sub(2) // border top/bottom
+                (rect.height.round() as usize).saturating_sub(2) // border top/bottom
             };
         } else {
             // Metal: content fills full tile, status bar takes 1 row
-            inner_width = rect.width as usize;
+            inner_width = rect.width.round() as usize;
             inner_height = if show_status {
-                (rect.height as usize).saturating_sub(1) // status bar only
+                (rect.height.round() as usize).saturating_sub(1) // status bar only
             } else {
-                rect.height as usize
+                rect.height.round() as usize
             };
         }
 
@@ -478,8 +411,9 @@ fn build_inactive_tile_frame_from_parts(
         .enumerate()
         .map(|(i, content)| {
             let row_spans = highlight_spans.get(i);
-            let line_len = content.len();
-            let mut cells: Vec<Cell> = vec![];
+            let chars: Vec<char> = content.chars().collect();
+            let line_len = chars.len();
+            let mut cells: Vec<Cell> = Vec::with_capacity(line_len + 1);
             for col in 0..line_len + 1 {
                 let fg = token_fg(col, row_spans);
                 cells.push(Cell {
@@ -488,7 +422,7 @@ fn build_inactive_tile_frame_from_parts(
                         fg,
                         bold: false,
                     },
-                    ch: content.chars().nth(col).unwrap_or(' '),
+                    ch: chars.get(col).copied().unwrap_or(' '),
                 });
             }
             cells
@@ -561,4 +495,45 @@ fn apply_view_mode(mut frame: RenderFrame, mode: ViewMode) -> RenderFrame {
         ViewMode::Both => {}
     }
     frame
+}
+
+fn build_completion(
+    editor: &Editor,
+    cursor_row: usize,
+    cursor_col: usize,
+    scroll_top: usize,
+) -> Option<CompletionFrame> {
+    editor.completion_state().map(|comp| {
+        let visible_count = comp.items.len().min(8);
+        let start = comp
+            .scroll
+            .min(comp.items.len().saturating_sub(visible_count));
+        let entries = comp
+            .items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible_count)
+            .map(|(idx, item)| CompletionEntry {
+                label: item.label.clone(),
+                selected: idx == comp.selected,
+            })
+            .collect();
+        let doc = comp.items.get(comp.selected).map(|item| {
+            let title = item.signature.clone().unwrap_or_else(|| item.label.clone());
+            let body = item
+                .docs
+                .clone()
+                .unwrap_or_else(|| "No documentation.".to_string())
+                .lines()
+                .map(str::to_string)
+                .collect();
+            (title, body)
+        });
+        CompletionFrame {
+            entries,
+            anchor: (cursor_row.saturating_sub(scroll_top), cursor_col),
+            doc,
+        }
+    })
 }

@@ -1,28 +1,29 @@
 use std::collections::HashMap;
 
-use crate::widget_render;
 use crate::vm::{Value, format_lisp_value};
+use crate::widget_render;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rect {
-    pub row: u16,
-    pub col: u16,
-    pub width: u16,
-    pub height: u16,
+    pub row: f32,
+    pub col: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Size {
-    pub width: u16,
-    pub height: u16,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[derive(Clone, Copy)]
 pub struct Constraints {
-    pub min_width: u16,
-    pub max_width: u16,
-    pub min_height: u16,
-    pub max_height: u16,
+    pub min_width: f32,
+    pub max_width: f32,
+    pub min_height: f32,
+    pub max_height: f32,
+    pub aspect: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -38,13 +39,15 @@ pub struct LayoutNode {
 pub struct LayoutEngine {
     pub terminal_cols: u16,
     pub terminal_rows: u16,
+    pub aspect: f32,
 }
 
 impl LayoutEngine {
-    pub fn new(cols: u16, rows: u16) -> Self {
+    pub fn new(cols: u16, rows: u16, aspect: f32) -> Self {
         Self {
             terminal_cols: cols,
             terminal_rows: rows,
+            aspect,
         }
     }
 
@@ -52,17 +55,18 @@ impl LayoutEngine {
         let size = self.measure(
             tree,
             Constraints {
-                min_width: 0,
-                max_width: self.terminal_cols,
-                min_height: 0,
-                max_height: self.terminal_rows,
+                min_width: 0.0,
+                max_width: self.terminal_cols as f32,
+                min_height: 0.0,
+                max_height: f32::MAX,
+                aspect: self.aspect,
             },
         )?;
         let mut layout = self.build_layout_node(
             tree,
             Rect {
-                row: 0,
-                col: 0,
+                row: 0.0,
+                col: 0.0,
                 width: size.width,
                 height: size.height,
             },
@@ -77,11 +81,14 @@ impl LayoutEngine {
         let children = get_children(node);
 
         let size = if let Some(definition) = widget_render::widget_definition(&widget_type) {
-            definition.measure(node, &children, constraints, &mut |child, child_constraints| {
-                self.measure(child, child_constraints)
-            })?
+            definition.measure(
+                node,
+                &children,
+                constraints,
+                &mut |child, child_constraints| self.measure(child, child_constraints),
+            )?
         } else {
-            measure_builtin_leaf(node, &widget_type)
+            measure_builtin_leaf(node, &widget_type, constraints.aspect)
         };
 
         Some(clamp_size(size, constraints))
@@ -92,10 +99,7 @@ impl LayoutEngine {
         let children_values = get_children(node);
         let children = self.layout_children(node, rect, &children_values);
         let props = collect_props(node);
-        let focusable = matches!(
-            props.get("focusable"),
-            Some(Value::Bool(true))
-        );
+        let focusable = matches!(props.get("focusable"), Some(Value::Bool(true)));
         LayoutNode {
             widget_id: 0,
             widget_type,
@@ -117,7 +121,12 @@ impl LayoutEngine {
                     node,
                     area,
                     children,
-                    &mut |child, child_constraints| self.measure(child, child_constraints),
+                    &mut |child, mut child_constraints| {
+                        // Always use the engine's aspect — it's a backend property,
+                        // not something containers should override.
+                        child_constraints.aspect = self.aspect;
+                        self.measure(child, child_constraints)
+                    },
                     &mut |child, rect| self.build_layout_node(child, rect),
                 )
             })
@@ -125,22 +134,29 @@ impl LayoutEngine {
     }
 }
 
-pub fn hit_test_layout(node: &LayoutNode, row: u16, col: u16) -> Option<&LayoutNode> {
-    if !rect_contains(node.rect, row, col) {
-        return None;
-    }
-
+pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutNode> {
+    // Container nodes: always recurse into children — their rects may be
+    // clamped to the viewport while children extend beyond (scroll).
     for child in node.children.iter().rev() {
         if let Some(hit) = hit_test_layout(child, row, col) {
             return Some(hit);
         }
     }
 
-    if widget_render::is_layout_widget_type(&node.widget_type) {
-        None
-    } else {
-        Some(node)
+    // Check if point is within this widget's rect
+    if rect_contains(node.rect, row, col) {
+        // Leaf widgets are always hittable.
+        // Containers are hittable only if they handle mouse events
+        // (e.g. tabs has a clickable header area).
+        if !widget_render::is_layout_widget_type(&node.widget_type) {
+            return Some(node);
+        }
+        if node.props.contains_key("on-change") || node.props.contains_key("bind") {
+            return Some(node);
+        }
     }
+
+    None
 }
 
 pub fn reuse_layout_node(
@@ -171,7 +187,9 @@ pub fn reuse_layout_node(
         .children
         .iter()
         .zip(children_values.iter())
-        .map(|(child_layout, child_tree)| reuse_layout_node(child_layout, child_tree, dirty_widget_ids))
+        .map(|(child_layout, child_tree)| {
+            reuse_layout_node(child_layout, child_tree, dirty_widget_ids)
+        })
         .collect::<Option<Vec<_>>>()?;
 
     let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
@@ -196,11 +214,11 @@ pub fn same_layout_geometry(left: &LayoutNode, right: &LayoutNode) -> bool {
             .all(|(left_child, right_child)| same_layout_geometry(left_child, right_child))
 }
 
-fn rect_contains(rect: Rect, row: u16, col: u16) -> bool {
+fn rect_contains(rect: Rect, row: f32, col: f32) -> bool {
     row >= rect.row
         && col >= rect.col
-        && row < rect.row.saturating_add(rect.height)
-        && col < rect.col.saturating_add(rect.width)
+        && row < rect.row + rect.height
+        && col < rect.col + rect.width
 }
 
 fn assign_widget_ids(node: &mut LayoutNode, next_widget_id: &mut u64) {
@@ -290,14 +308,21 @@ pub(crate) fn format_layout_tree_lines(node: &LayoutNode, indent: usize) -> Vec<
 }
 
 fn format_layout_line(node: &LayoutNode, indent: usize) -> String {
+    let fmt = |v: f32| -> String {
+        if v.fract() == 0.0 {
+            format!("{v:.0}")
+        } else {
+            format!("{v:.2}")
+        }
+    };
     let mut line = format!(
         "{}:{}  row={} col={} w={} h={}",
         "  ".repeat(indent),
         node.widget_type,
-        node.rect.row,
-        node.rect.col,
-        node.rect.width,
-        node.rect.height
+        fmt(node.rect.row),
+        fmt(node.rect.col),
+        fmt(node.rect.width),
+        fmt(node.rect.height)
     );
 
     for key in ["text", "value", "min", "max"] {
@@ -338,16 +363,13 @@ fn clamp_size(size: Size, constraints: Constraints) -> Size {
     }
 }
 
-pub(crate) fn shrink_constraints(constraints: Constraints, padding: u16) -> Constraints {
+pub(crate) fn shrink_constraints(constraints: Constraints, padding: f32) -> Constraints {
     Constraints {
-        min_width: 0,
-        max_width: constraints
-            .max_width
-            .saturating_sub(padding.saturating_mul(2)),
-        min_height: 0,
-        max_height: constraints
-            .max_height
-            .saturating_sub(padding.saturating_mul(2)),
+        min_width: 0.0,
+        max_width: (constraints.max_width - padding * 2.0).max(0.0),
+        min_height: 0.0,
+        max_height: (constraints.max_height - padding * 2.0).max(0.0),
+        aspect: constraints.aspect,
     }
 }
 
@@ -412,33 +434,31 @@ pub(crate) fn get_prop_str(v: &Value, key: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn f64_to_u16(n: f64) -> u16 {
+pub(crate) fn f64_to_f32(n: f64) -> f32 {
     if !n.is_finite() || n <= 0.0 {
-        0
-    } else if n >= u16::MAX as f64 {
-        u16::MAX
+        0.0
     } else {
-        n as u16
+        n as f32
     }
 }
 
-pub(crate) fn saturating_usize_to_u16(value: usize) -> u16 {
-    value.min(u16::MAX as usize) as u16
+pub(crate) fn usize_to_f32(value: usize) -> f32 {
+    value as f32
 }
 
-fn measure_builtin_leaf(node: &Value, widget_type: &str) -> Size {
+fn measure_builtin_leaf(node: &Value, widget_type: &str, aspect: f32) -> Size {
     match widget_type {
         "knob" => Size {
-            width: 5,
-            height: 3,
+            width: 5.0,
+            height: 5.0,
         },
         "meter" => Size {
-            width: 2,
-            height: 8,
+            width: 2.0,
+            height: 8.0,
         },
         "text-input" => Size {
-            width: get_prop_num(node, "width").map(f64_to_u16).unwrap_or(20),
-            height: 1,
+            width: get_prop_num(node, "width").map(f64_to_f32).unwrap_or(20.0),
+            height: aspect,
         },
         "select" => {
             let width = match get_map(node).and_then(|map| map.get("options").cloned()) {
@@ -451,15 +471,18 @@ fn measure_builtin_leaf(node: &Value, widget_type: &str) -> Size {
                         _ => None,
                     })
                     .max()
-                    .map(saturating_usize_to_u16)
-                    .unwrap_or(8),
-                _ => 8,
+                    .map(usize_to_f32)
+                    .unwrap_or(8.0),
+                _ => 8.0,
             };
-            Size { width, height: 1 }
+            Size {
+                width,
+                height: aspect,
+            }
         }
         _ => Size {
-            width: 0,
-            height: 0,
+            width: 0.0,
+            height: 0.0,
         },
     }
 }

@@ -191,6 +191,11 @@ const ESEQLISP_BUILTINS: &[(&str, &str, &str)] = &[
         "Render evaluable Lisp source.",
     ),
     ("str", "(str value ...)", "Render values to a string."),
+    (
+        "zip",
+        "(zip xs ys ...)",
+        "Combine lists positionally, stopping at the shortest input.",
+    ),
 ];
 
 const DGENLISP_SPECIALS: &[(&str, &str, &str)] = &[

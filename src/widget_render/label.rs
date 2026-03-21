@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 
-use super::{CellBuffer, MetalGlyphRunPrimitive, MetalPrimitive, MetalRectPrimitive, WidgetDefinition, resolve_named_color, styled_cell};
-use crate::backend::Color;
-use crate::theme;
-use crate::layout::{
-    Constraints, Rect, Size, f64_to_u16, get_prop_num, get_prop_str, saturating_usize_to_u16,
+use super::{
+    CellBuffer, MetalGlyphRunPrimitive, MetalPrimitive, MetalRectPrimitive, WidgetDefinition,
+    resolve_named_color, styled_cell,
 };
+use crate::backend::Color;
+use crate::layout::{
+    Constraints, Rect, Size, f64_to_f32, get_prop_num, get_prop_str, usize_to_f32,
+};
+use crate::theme;
 use crate::vm::Value;
 
 pub struct LabelWidget;
@@ -23,20 +26,23 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     };
 
     let fg = resolve_color(props);
+    let row_u16 = rect.row.round() as u16;
+    let col_u16 = rect.col.round() as u16;
+    let width_u16 = rect.width.round() as u16;
 
     // If label has a width wider than text, fill with spaces for background
     for (i, ch) in text.chars().enumerate() {
-        let col = rect.col + i as u16;
-        if col >= rect.col + rect.width {
+        let col = col_u16 + i as u16;
+        if col >= col_u16 + width_u16 {
             break;
         }
-        buf.set(rect.row, col, styled_cell(ch, fg, None));
+        buf.set(row_u16, col, styled_cell(ch, fg, None));
     }
     // Fill remaining width with spaces (needed for focus highlight to look clean)
     let text_len = text.chars().count() as u16;
-    for i in text_len..rect.width {
-        let col = rect.col + i;
-        buf.set(rect.row, col, styled_cell(' ', fg, None));
+    for i in text_len..width_u16 {
+        let col = col_u16 + i;
+        buf.set(row_u16, col, styled_cell(' ', fg, None));
     }
 }
 
@@ -53,18 +59,18 @@ impl WidgetDefinition for LabelWidget {
         &self,
         node: &Value,
         _children: &[Value],
-        _constraints: Constraints,
+        constraints: Constraints,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         Some(Size {
             width: get_prop_num(node, "width")
-                .map(f64_to_u16)
+                .map(f64_to_f32)
                 .unwrap_or_else(|| {
                     get_prop_str(node, "text")
-                        .map(|text| saturating_usize_to_u16(text.chars().count()))
-                        .unwrap_or(0)
+                        .map(|text| usize_to_f32(text.chars().count()))
+                        .unwrap_or(0.0)
                 }),
-            height: 1,
+            height: constraints.aspect,
         })
     }
 
@@ -88,14 +94,19 @@ impl WidgetDefinition for LabelWidget {
         } else {
             theme::BG
         };
+        let aspect = if viewport.cell_w > 0.0 {
+            viewport.cell_h / viewport.cell_w
+        } else {
+            1.0
+        };
         vec![
             MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
                 color: bg,
             }),
             MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
-                row: node.rect.row as i32,
-                col: node.rect.col as i32,
+                row: node.rect.row / aspect,
+                col: node.rect.col.round() as i32,
                 text: text.clone(),
                 fg,
                 bg,

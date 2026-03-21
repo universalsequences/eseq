@@ -4,19 +4,21 @@ use crossterm::event::{MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
-    get_f32_prop, metal_widget_instance, ndc_bounds, styled_cell,
+    get_f32_prop, metal_widget_instance, ndc_bounds, resolve_named_color, styled_cell,
 };
+use crate::layout::{Constraints, LayoutNode, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
-use crate::layout::{
-    Constraints, LayoutNode, Rect, Size, f64_to_u16, get_prop_num,
-};
 use crate::vm::Value;
 
 pub struct VerticalSliderWidget;
 
 pub static VSLIDER_WIDGET: VerticalSliderWidget = VerticalSliderWidget;
 
-/// TUI render for vertical slider: fill from bottom up.
+fn fill_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED)
+}
+
+/// TUI render for vertical slider: fill from bottom up, dots above.
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let value = get_f32_prop(props, "value", 0.0);
     let min = get_f32_prop(props, "min", 0.0);
@@ -29,18 +31,24 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     };
     let t = t.clamp(0.0, 1.0);
 
-    let height = rect.height;
-    let filled = (t * height as f32).round() as u16;
-    let threshold = height.saturating_sub(filled);
+    let row_u16 = rect.row.round() as u16;
+    let col_u16 = rect.col.round() as u16;
+    let height_u16 = rect.height.round() as u16;
+    let width_u16 = rect.width.round() as u16;
 
-    for row_offset in 0..height {
-        let row = rect.row + row_offset;
-        for col_offset in 0..rect.width.min(2) {
-            let col = rect.col + col_offset;
+    let filled = (t * rect.height).round() as u16;
+    let threshold = height_u16.saturating_sub(filled);
+
+    for row_offset in 0..height_u16 {
+        let row = row_u16 + row_offset;
+        for col_offset in 0..width_u16.min(2) {
+            let col = col_u16 + col_offset;
             if row_offset >= threshold {
-                buf.set(row, col, styled_cell('\u{2588}', theme::WIDGET_SLIDER_FILLED, None));
+                buf.set(row, col, styled_cell('\u{2588}', fill_color(props), None));
             } else {
-                buf.set(row, col, styled_cell(' ', theme::WIDGET_SLIDER_TRACK, None));
+                // Dot every other row for subtle track
+                let ch = if row_offset % 2 == 0 { '\u{2022}' } else { ' ' };
+                buf.set(row, col, styled_cell(ch, theme::WIDGET_SLIDER_TRACK, None));
             }
         }
     }
@@ -52,24 +60,43 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 {
     float2 uv = in.uv;
     float aspect = in.aspect;
+    float t = in.value_t;
 
-    float2 localPos = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
-    float2 sdfSize = float2(aspect, 1.0);
-    float cornerRadius = min(aspect, 1.0);
+    // ── Fill bar: rounded rect from bottom up, horizontally inset ──
+    float xPad = 0.18;
+    float halfW = 0.5 - xPad;
+    float halfH = max(t * 0.5, 0.0);
+    float cr = 0.12;
+    cr = min(cr, min(halfW * aspect, max(halfH, 0.001)));
 
-    float3 borderColor = float3(0.45, 0.45, 0.5);
-    float outerMask;
-    float borderMask = compute_border_mask(localPos, sdfSize, cornerRadius, 1.5, outerMask);
-    if (outerMask <= 0.001) { discard_fragment(); }
+    float fillCenterY = 1.0 - t * 0.5;
+    float2 p = float2((uv.x - 0.5) * aspect, uv.y - fillCenterY);
+    float2 b = float2(halfW * aspect, halfH);
+    float2 q = abs(p) - b + cr;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - cr;
+    float aa = max(fwidth(d), 0.001);
+    float fillMask = smoothstep(aa, -aa, d) * step(0.005, t);
 
-    float threshold = 1.0 - in.value_t;
-    float fillDist = uv.y - threshold;
-    float fillDeriv = max(fwidth(fillDist), 0.001);
-    float edge = smoothstep(-fillDeriv, fillDeriv, fillDist);
-    float4 interior = mix(in.color_b, in.color_a, edge);
+    // ── Track dots: fixed grid, only visible above fill ──
+    float dotSpacing = 0.6 * aspect;
+    float dotR = 0.08 * aspect;
+    float dotMask = 0.0;
 
-    float3 final_rgb = mix(interior.rgb, borderColor, borderMask);
-    return float4(final_rgb, outerMask);
+    float snapY = round(uv.y / dotSpacing) * dotSpacing;
+    float fillTop = 1.0 - t;
+    float margin = dotSpacing * 0.4;
+    if (snapY < fillTop - margin && snapY > margin * 0.5 && snapY < 1.0 - margin * 0.5) {
+        float2 dp = float2((uv.x - 0.5) * aspect, uv.y - snapY);
+        float dd = length(dp) - dotR;
+        float da = max(fwidth(dd), 0.001);
+        dotMask = smoothstep(da, -da, dd);
+    }
+
+    // Composite
+    float3 rgb = in.color_a.rgb * fillMask + in.color_b.rgb * dotMask * (1.0 - fillMask);
+    float alpha = max(fillMask, dotMask);
+    if (alpha < 0.001) discard_fragment();
+    return float4(rgb, alpha);
 }
 "#;
 
@@ -90,8 +117,8 @@ impl WidgetDefinition for VerticalSliderWidget {
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         Some(Size {
-            width: 2,
-            height: get_prop_num(node, "height").map(f64_to_u16).unwrap_or(8),
+            width: 2.0,
+            height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(8.0),
         })
     }
 
@@ -111,12 +138,12 @@ impl WidgetDefinition for VerticalSliderWidget {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => MouseEventOutcome::Consume,
             MouseEventKind::Drag(MouseButton::Left) => {
-                let denom = node.rect.height.saturating_sub(1).max(1) as f32;
-                let offset = (local_row - node.rect.row as f32) / denom;
+                let denom = (node.rect.height - 1.0).max(1.0);
+                let offset = (local_row - node.rect.row) / denom;
                 let t = (1.0 - offset).clamp(0.0, 1.0);
                 MouseEventOutcome::Dispatch(WidgetEvent::SetNormalized(t))
             }
-            _ => MouseEventOutcome::Consume,
+            _ => MouseEventOutcome::Ignore,
         }
     }
 
@@ -156,17 +183,20 @@ impl WidgetDefinition for VerticalSliderWidget {
             0.0
         };
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
-        let px_w = node.rect.width as f32 * viewport.cell_w;
-        let px_h = node.rect.height as f32 * viewport.cell_h;
-        metal_widget_instance(widget_type, super::WidgetInstance {
-            ndc_min,
-            ndc_max,
-            value_t: t,
-            orientation: 0.0,
-            color_a: theme::WIDGET_SLIDER_FILLED.to_rgba(),
-            color_b: theme::WIDGET_SLIDER_TRACK.to_rgba(),
-            corner_radius: 0.0,
-            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-        })
+        let px_w = node.rect.width * viewport.cell_w;
+        let px_h = node.rect.height * viewport.cell_w;
+        metal_widget_instance(
+            widget_type,
+            super::WidgetInstance {
+                ndc_min,
+                ndc_max,
+                value_t: t,
+                orientation: 0.0,
+                color_a: fill_color(&node.props).to_rgba(),
+                color_b: theme::WIDGET_SLIDER_TRACK.to_rgba(),
+                corner_radius: 0.0,
+                pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+            },
+        )
     }
 }

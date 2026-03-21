@@ -17,8 +17,8 @@ mod inner {
         MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
         MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat,
         MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-        MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions,
-        MTLScissorRect, MTLStoreAction, MTLTexture,
+        MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLScissorRect,
+        MTLStoreAction, MTLTexture,
     };
     use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
     use winit::{
@@ -35,9 +35,10 @@ mod inner {
     };
 
     use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
-    use crate::theme;
+    use crate::audio::sample::get_registered_sample;
     use crate::glyph_atlas::GlyphAtlas;
     use crate::layout::Rect;
+    use crate::theme;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
     // ── Shader source ─────────────────────────────────────────────────────────
@@ -162,6 +163,162 @@ vertex WidgetVaryings widget_vert(
 }
 "#;
 
+    const WAVEFORM_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct WaveformInstance {
+    packed_float2 ndc_min;
+    packed_float2 ndc_max;
+    float sample_start;
+    float sample_end;
+    uint bucket_count;
+    float aspect_ratio;
+    float selection_start;
+    float selection_end;
+    float playhead_position;
+    int show_playhead;
+    packed_float4 waveform_color;
+    packed_float4 selection_color;
+};
+
+struct WaveformVaryings {
+    float4 position [[position]];
+    float2 uv;
+    float sample_start [[flat]];
+    float sample_end [[flat]];
+    uint bucket_count [[flat]];
+    float aspect_ratio [[flat]];
+    float selection_start [[flat]];
+    float selection_end [[flat]];
+    float playhead_position [[flat]];
+    int show_playhead [[flat]];
+    float4 waveform_color [[flat]];
+    float4 selection_color [[flat]];
+};
+
+vertex WaveformVaryings waveform_vert(
+    uint vid [[vertex_id]],
+    device const WaveformInstance* instances [[buffer(0)]])
+{
+    float2 corners[6] = {
+        float2(0, 0), float2(0, 1), float2(1, 0),
+        float2(1, 0), float2(0, 1), float2(1, 1)
+    };
+    float2 corner = corners[vid];
+    WaveformInstance inst = instances[0];
+    float2 ndc = mix(inst.ndc_min, inst.ndc_max, corner);
+
+    WaveformVaryings out;
+    out.position = float4(ndc, 0.0, 1.0);
+    out.uv = corner;
+    out.sample_start = inst.sample_start;
+    out.sample_end = inst.sample_end;
+    out.bucket_count = inst.bucket_count;
+    out.aspect_ratio = inst.aspect_ratio;
+    out.selection_start = inst.selection_start;
+    out.selection_end = inst.selection_end;
+    out.playhead_position = inst.playhead_position;
+    out.show_playhead = inst.show_playhead;
+    out.waveform_color = inst.waveform_color;
+    out.selection_color = inst.selection_color;
+    return out;
+}
+
+fragment float4 waveform_frag(
+    WaveformVaryings in [[stage_in]],
+    device const float* waveform_data [[buffer(1)]])
+{
+    if (in.bucket_count < 2) {
+        discard_fragment();
+    }
+
+    float2 uv = in.uv;
+    float2 content_uv = uv;
+    float4 color = float4(0.08, 0.08, 0.10, 1.0);
+
+    bool has_selection = in.selection_end > in.selection_start + 0.001;
+    if (has_selection &&
+        content_uv.x >= in.selection_start &&
+        content_uv.x <= in.selection_end) {
+        color.rgb = mix(color.rgb, in.selection_color.rgb, 0.30);
+    }
+
+    float center_line = 1.0 - smoothstep(0.0, 0.004, abs(content_uv.y - 0.5));
+    color.rgb = mix(color.rgb, float3(0.3, 0.3, 0.35), center_line * 0.20);
+
+    float start_boundary = 1.0 - smoothstep(0.0, 0.004, abs(content_uv.x - in.selection_start));
+    float end_boundary = 1.0 - smoothstep(0.0, 0.004, abs(content_uv.x - in.selection_end));
+    float boundary_mask = has_selection ? max(start_boundary, end_boundary) : 0.0;
+    color.rgb = mix(color.rgb, in.selection_color.rgb, boundary_mask * 0.85);
+
+    float sample_t = clamp(mix(in.sample_start, in.sample_end, content_uv.x), 0.0, 1.0);
+    float exact_idx = sample_t * float(in.bucket_count - 1);
+    float pixel_span = max(fwidth(exact_idx), 1.0);
+    float idx_left = clamp(exact_idx - pixel_span * 0.5, 0.0, float(in.bucket_count - 1));
+    float idx_right = clamp(exact_idx + pixel_span * 0.5, 0.0, float(in.bucket_count - 1));
+
+    int idx_a = clamp(int(floor(exact_idx)), 0, int(in.bucket_count - 1));
+    int idx_b = min(idx_a + 1, int(in.bucket_count - 1));
+    int idx_la = clamp(int(floor(idx_left)), 0, int(in.bucket_count - 1));
+    int idx_lb = min(idx_la + 1, int(in.bucket_count - 1));
+    int idx_ra = clamp(int(floor(idx_right)), 0, int(in.bucket_count - 1));
+    int idx_rb = min(idx_ra + 1, int(in.bucket_count - 1));
+
+    float frac = fract(exact_idx);
+    float frac_left = fract(idx_left);
+    float frac_right = fract(idx_right);
+
+    float min_center = mix(waveform_data[idx_a * 2], waveform_data[idx_b * 2], frac);
+    float max_center = mix(waveform_data[idx_a * 2 + 1], waveform_data[idx_b * 2 + 1], frac);
+    float min_left = mix(waveform_data[idx_la * 2], waveform_data[idx_lb * 2], frac_left);
+    float max_left = mix(waveform_data[idx_la * 2 + 1], waveform_data[idx_lb * 2 + 1], frac_left);
+    float min_right = mix(waveform_data[idx_ra * 2], waveform_data[idx_rb * 2], frac_right);
+    float max_right = mix(waveform_data[idx_ra * 2 + 1], waveform_data[idx_rb * 2 + 1], frac_right);
+
+    float min_val = min(min_center, min(min_left, min_right));
+    float max_val = max(max_center, max(max_left, max_right));
+    float amplitude = max(abs(min_val), abs(max_val));
+    amplitude = clamp(amplitude, 0.0, 1.0);
+    float y_min = 0.5 - amplitude * 0.5;
+    float y_max = 0.5 + amplitude * 0.5;
+
+    float min_thickness = 0.010;
+    if (y_max - y_min < min_thickness) {
+        float center = (y_min + y_max) * 0.5;
+        y_min = center - min_thickness * 0.5;
+        y_max = center + min_thickness * 0.5;
+    }
+
+    float edge_aa = max(length(float2(fwidth(content_uv.x), fwidth(content_uv.y))) * 1.5, 0.002);
+    float above_min = smoothstep(y_min - edge_aa, y_min + edge_aa, content_uv.y);
+    float below_max = smoothstep(y_max + edge_aa, y_max - edge_aa, content_uv.y);
+    float fill_alpha = above_min * below_max;
+
+    float upper_edge = 1.0 - smoothstep(0.0, edge_aa * 1.5, abs(content_uv.y - y_max));
+    float lower_edge = 1.0 - smoothstep(0.0, edge_aa * 1.5, abs(content_uv.y - y_min));
+    float edge_alpha = max(upper_edge, lower_edge);
+
+    float3 fill_color = mix(color.rgb, in.waveform_color.rgb, 0.88);
+    float3 edge_color = mix(in.waveform_color.rgb, float3(1.0, 1.0, 1.0), 0.15);
+    color.rgb = mix(color.rgb, fill_color, fill_alpha);
+    color.rgb = mix(color.rgb, edge_color, edge_alpha * 0.9);
+
+    if (in.show_playhead == 1) {
+        float playhead_dist = abs(content_uv.x - in.playhead_position);
+        float playhead_width = 0.003;
+        float playhead_aa = max(fwidth(content_uv.x) * 1.5, 0.001);
+        float playhead_alpha = 1.0 - smoothstep(playhead_width - playhead_aa, playhead_width + playhead_aa, playhead_dist);
+        color.rgb = mix(color.rgb, float3(0.2, 0.9, 1.0), playhead_alpha * 0.95);
+    }
+
+    float border = min(min(content_uv.x, 1.0 - content_uv.x), min(content_uv.y, 1.0 - content_uv.y));
+    float border_mask = 1.0 - smoothstep(0.0, 0.004, border);
+    color.rgb = mix(color.rgb, float3(0.22, 0.22, 0.25), border_mask * 0.8);
+    return color;
+}
+"#;
+
     // ── Vertex type ───────────────────────────────────────────────────────────
 
     /// One vertex of a cell quad.  Two triangles (6 vertices) form each cell.
@@ -176,6 +333,28 @@ vertex WidgetVaryings widget_vert(
         pub fg: [f32; 4],
         /// Background colour (RGBA linear 0..1).
         pub bg: [f32; 4],
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct WaveformInstance {
+        ndc_min: [f32; 2],
+        ndc_max: [f32; 2],
+        sample_start: f32,
+        sample_end: f32,
+        bucket_count: u32,
+        aspect_ratio: f32,
+        selection_start: f32,
+        selection_end: f32,
+        playhead_position: f32,
+        show_playhead: i32,
+        waveform_color: [f32; 4],
+        selection_color: [f32; 4],
+    }
+
+    struct WaveformGpuResource {
+        bucket_count: u32,
+        buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     }
 
     /// Layout + colour context threaded into `rasterize_char`.
@@ -207,6 +386,8 @@ vertex WidgetVaryings widget_vert(
         pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         // Per-widget-type GPU pipelines (hslider, vslider, toggle)
         widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
         // Glyph atlas
         atlas: Option<GlyphAtlas>,
         cached_text_key: Option<u64>,
@@ -242,6 +423,8 @@ vertex WidgetVaryings widget_vert(
                 layer,
                 pipeline: None,
                 widget_pipelines: HashMap::new(),
+                waveform_pipeline: None,
+                waveform_buffers: HashMap::new(),
                 atlas: None,
                 cached_text_key: None,
                 cached_text_quads: Vec::new(),
@@ -274,9 +457,115 @@ vertex WidgetVaryings widget_vert(
             self.pending_scroll.pop_front()
         }
 
+        pub fn cell_dimensions(&self) -> (f32, f32) {
+            self.atlas
+                .as_ref()
+                .map(|a| (a.cell_w.max(1) as f32, a.cell_h.max(1) as f32))
+                .unwrap_or((8.0, 16.0))
+        }
+
+        fn ensure_waveform_buffer(
+            &mut self,
+            sample_key: &str,
+            samples_per_bucket: u32,
+        ) -> Option<&WaveformGpuResource> {
+            let key = (sample_key.to_string(), samples_per_bucket);
+            if !self.waveform_buffers.contains_key(&key) {
+                let sample = get_registered_sample(sample_key)?;
+                let level = sample
+                    .levels()
+                    .iter()
+                    .find(|level| level.samples_per_bucket as u32 == samples_per_bucket)?;
+                let flattened = level.flattened_pairs();
+                let buffer = unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        NonNull::new(flattened.as_ptr() as *mut _)?,
+                        std::mem::size_of_val(flattened.as_slice()),
+                        MTLResourceOptions(0),
+                    )
+                }?;
+                self.waveform_buffers.insert(
+                    key.clone(),
+                    WaveformGpuResource {
+                        bucket_count: level.buckets.len() as u32,
+                        buffer,
+                    },
+                );
+            }
+            self.waveform_buffers.get(&key)
+        }
+
+        fn draw_waveform_primitives(
+            &mut self,
+            enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+            pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+            primitives: &[widget_render::MetalWaveformPrimitive],
+            cell_w: f32,
+            cell_h: f32,
+            vp_w: f32,
+            vp_h: f32,
+        ) {
+            for primitive in primitives {
+                let Some((waveform_buffer, bucket_count)) = self
+                    .ensure_waveform_buffer(&primitive.sample_key, primitive.samples_per_bucket)
+                    .map(|resource| (resource.buffer.clone(), resource.bucket_count))
+                else {
+                    continue;
+                };
+                let ndc_min = [
+                    (primitive.rect.col * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - ((primitive.rect.row + primitive.rect.height) * cell_h / vp_h) * 2.0,
+                ];
+                let ndc_max = [
+                    ((primitive.rect.col + primitive.rect.width) * cell_w / vp_w) * 2.0 - 1.0,
+                    1.0 - (primitive.rect.row * cell_h / vp_h) * 2.0,
+                ];
+                let instance = WaveformInstance {
+                    ndc_min,
+                    ndc_max,
+                    sample_start: primitive.sample_start,
+                    sample_end: primitive.sample_end,
+                    bucket_count: primitive.bucket_count.min(bucket_count),
+                    aspect_ratio: (primitive.rect.width * cell_w / (primitive.rect.height * cell_h))
+                        .max(0.0001),
+                    selection_start: primitive.selection_start,
+                    selection_end: primitive.selection_end,
+                    playhead_position: primitive.playhead_position,
+                    show_playhead: if primitive.show_playhead { 1 } else { 0 },
+                    waveform_color: primitive.waveform_color.to_rgba(),
+                    selection_color: primitive.selection_color.to_rgba(),
+                };
+                let Some(instance_buffer) = (unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        NonNull::new((&instance as *const WaveformInstance).cast_mut().cast())
+                            .unwrap(),
+                        std::mem::size_of::<WaveformInstance>(),
+                        MTLResourceOptions(0),
+                    )
+                }) else {
+                    continue;
+                };
+                enc.setRenderPipelineState(pipeline);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(Some(&instance_buffer), 0, 0);
+                    enc.setFragmentBuffer_offset_atIndex(Some(&waveform_buffer), 0, 1);
+                    enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 6);
+                }
+            }
+        }
+
         /// Render a tiled frame with per-tile scissor clipping.
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
-            let (Some(pipeline), Some(atlas)) = (&self.pipeline, &mut self.atlas) else {
+            let Some(pipeline) = self.pipeline.clone() else {
+                return Ok(());
+            };
+            let Some((cell_w, cell_h, atlas_texture)) = self.atlas.as_ref().map(|atlas| {
+                (
+                    atlas.cell_w as f32,
+                    atlas.cell_h as f32,
+                    atlas.texture.clone(),
+                )
+            }) else {
                 return Ok(());
             };
             let Some(drawable) = self.layer.nextDrawable() else {
@@ -285,8 +574,6 @@ vertex WidgetVaryings widget_vert(
             let texture = drawable.texture();
             let vp_w = texture.width() as f32;
             let vp_h = texture.height() as f32;
-            let cell_w = atlas.cell_w as f32;
-            let cell_h = atlas.cell_h as f32;
             let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
             let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
             let to_rgba = |c: Color| [c.r, c.g, c.b, c.a];
@@ -306,9 +593,12 @@ vertex WidgetVaryings widget_vert(
             });
             attach.setStoreAction(MTLStoreAction::Store);
 
-            let cmdbuf = self.command_queue.commandBuffer()
+            let cmdbuf = self
+                .command_queue
+                .commandBuffer()
                 .ok_or(BackendError::MetalError)?;
-            let enc = cmdbuf.renderCommandEncoderWithDescriptor(&desc)
+            let enc = cmdbuf
+                .renderCommandEncoderWithDescriptor(&desc)
                 .ok_or(BackendError::MetalError)?;
 
             // Helper: upload verts to a buffer and draw with text pipeline
@@ -317,33 +607,44 @@ vertex WidgetVaryings widget_vert(
                                    pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
                                    atlas_tex: &ProtocolObject<dyn MTLTexture>,
                                    verts: &[Vertex]| {
-                if verts.is_empty() { return; }
+                if verts.is_empty() {
+                    return;
+                }
                 let byte_len = std::mem::size_of_val(verts);
                 let Some(vbuf) = (unsafe {
                     device.newBufferWithBytes_length_options(
                         NonNull::new(verts.as_ptr() as *mut _).unwrap(),
-                        byte_len, MTLResourceOptions(0),
+                        byte_len,
+                        MTLResourceOptions(0),
                     )
-                }) else { return; };
+                }) else {
+                    return;
+                };
                 enc.setRenderPipelineState(pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(&vbuf), 0, 0);
                     enc.setFragmentTexture_atIndex(Some(atlas_tex), 0);
                     enc.drawPrimitives_vertexStart_vertexCount(
-                        MTLPrimitiveType::Triangle, 0, verts.len() as _,
+                        MTLPrimitiveType::Triangle,
+                        0,
+                        verts.len() as _,
                     );
                 }
             };
 
             // ── Per-tile rendering with scissor rect ─────────────────────────
             for tile in &tiled.tiles {
-                let col_off = tile.rect.col as usize;
-                let row_off = tile.rect.row as usize;
-                let tile_w = tile.rect.width as usize;
-                let tile_h = tile.rect.height as usize;
+                let col_off = tile.rect.col.round() as usize;
+                let row_off = tile.rect.row.round() as usize;
+                let tile_w = tile.rect.width.round() as usize;
+                let tile_h = tile.rect.height.round() as usize;
 
                 // Set scissor rect to clip to tile content area (exclude status row)
-                let scissor_rows = if tile.show_status { tile_h.saturating_sub(1) } else { tile_h };
+                let scissor_rows = if tile.show_status {
+                    tile_h.saturating_sub(1)
+                } else {
+                    tile_h
+                };
                 let scissor = MTLScissorRect {
                     x: (col_off as f32 * cell_w) as usize,
                     y: (row_off as f32 * cell_h) as usize,
@@ -358,20 +659,37 @@ vertex WidgetVaryings widget_vert(
                     col: col_off as i32 - hscroll,
                     row: row_off as i32,
                 };
-                let text_verts = build_text_quads_offset(
-                    &tile.frame, atlas, vp_w, vp_h, offset,
-                );
-                draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &text_verts);
+                let text_verts = {
+                    let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                    build_text_quads_offset(&tile.frame, atlas, vp_w, vp_h, offset)
+                };
+                draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &text_verts);
 
                 // ── Cursor ───────────────────────────────────────────────────
                 if tile.is_active {
                     if let Some((vis_row, vis_col)) = tile.frame.cursor {
                         let mut cursor_verts = Vec::new();
                         push_solid_rect_vertices(
-                            Rect { row: (row_off + vis_row) as u16, col: (col_off + vis_col) as u16, width: 1, height: 1 },
-                            theme::CURSOR, cell_w, cell_h, vp_w, vp_h, &mut cursor_verts,
+                            Rect {
+                                row: (row_off + vis_row) as f32,
+                                col: (col_off + vis_col) as f32,
+                                width: 1.0,
+                                height: 1.0,
+                            },
+                            theme::CURSOR,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            &mut cursor_verts,
                         );
-                        draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &cursor_verts);
+                        draw_text_verts(
+                            &enc,
+                            &self.device,
+                            &pipeline,
+                            &atlas_texture,
+                            &cursor_verts,
+                        );
                     }
                 }
 
@@ -379,11 +697,18 @@ vertex WidgetVaryings widget_vert(
                 // Collect with LOCAL coords (no offset) so scroll/clip logic works,
                 // then offset the resulting primitives to screen position.
                 if let Some(ref layout) = tile.frame.widget_layout {
-                    let inner_rows = tile.rect.height.saturating_sub(if tile.show_status { 1 } else { 0 });
+                    let inner_rows = (tile.rect.height - if tile.show_status { 1.0 } else { 0.0 })
+                        .max(0.0)
+                        .round() as u16;
                     let primitives = widget_render::collect_metal_primitives(
                         layout,
-                        WidgetViewport { cell_w, cell_h, vp_w, vp_h,
-                            focused_widget_id: tile.frame.focused_widget_id },
+                        WidgetViewport {
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            focused_widget_id: tile.frame.focused_widget_id,
+                        },
                         tile.frame.widget_scroll_top,
                         inner_rows,
                     );
@@ -394,29 +719,65 @@ vertex WidgetVaryings widget_vert(
                     let widget_scroll = tile.frame.widget_scroll_top as i32;
                     let widget_col_off = col_off as i32 - hscroll;
                     let widget_row_off = row_off as i32 - text_scroll - widget_scroll;
-                    let offset_prims: Vec<_> = primitives.into_iter()
-                        .map(|p| offset_primitive(p, widget_col_off, widget_row_off, cell_w, cell_h, vp_w, vp_h))
+                    let offset_prims: Vec<_> = primitives
+                        .into_iter()
+                        .map(|p| {
+                            offset_primitive(
+                                p,
+                                widget_col_off,
+                                widget_row_off,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            )
+                        })
                         .collect();
                     // Rect/Quad/GlyphRun primitives
-                    let prim_quads = build_widget_primitive_quads(&offset_prims, atlas, vp_w, vp_h);
-                    draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &prim_quads);
+                    let prim_quads = {
+                        let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                        build_widget_primitive_quads(&offset_prims, atlas, vp_w, vp_h)
+                    };
+                    draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
+                    if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
+                        let waveforms = collect_waveform_primitives(&offset_prims);
+                        self.draw_waveform_primitives(
+                            &enc,
+                            &waveform_pipeline,
+                            &waveforms,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
                     // Widget instances (sliders, toggles, knobs)
                     let batches = group_widget_instances(&offset_prims);
                     for (widget_type, instances) in &batches {
-                        let Some(wpipe) = self.widget_pipelines.get(widget_type) else { continue };
-                        if instances.is_empty() { continue; }
+                        let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                            continue;
+                        };
+                        if instances.is_empty() {
+                            continue;
+                        }
                         let byte_len = std::mem::size_of_val(instances.as_slice());
                         let Some(wbuf) = (unsafe {
                             self.device.newBufferWithBytes_length_options(
                                 NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                byte_len, MTLResourceOptions(0),
+                                byte_len,
+                                MTLResourceOptions(0),
                             )
-                        }) else { continue };
+                        }) else {
+                            continue;
+                        };
                         enc.setRenderPipelineState(wpipe);
                         unsafe {
                             enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
                             enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                MTLPrimitiveType::Triangle, 0, 6, instances.len() as _,
+                                MTLPrimitiveType::Triangle,
+                                0,
+                                6,
+                                instances.len() as _,
                             );
                         }
                     }
@@ -431,7 +792,7 @@ vertex WidgetVaryings widget_vert(
                         height: (tile_h as f32 * cell_h) as usize,
                     });
                     let mut status_verts = Vec::new();
-                    let status_row = row_off + tile_h - 1;
+                    let status_row = row_off + tile_h.saturating_sub(1);
                     let status_fg = to_rgba(theme::STATUS_FG);
                     let status_bg = to_rgba(theme::STATUS_BG);
                     let sx0 = ndc_x(col_off as f32 * cell_w);
@@ -439,30 +800,58 @@ vertex WidgetVaryings widget_vert(
                     let sy0 = ndc_y(status_row as f32 * cell_h);
                     let sy1 = ndc_y((status_row + 1) as f32 * cell_h);
                     let sb = |px, py| Vertex {
-                        position: [px, py], uv: [0.0, 0.0], fg: status_bg, bg: status_bg,
+                        position: [px, py],
+                        uv: [0.0, 0.0],
+                        fg: status_bg,
+                        bg: status_bg,
                     };
                     status_verts.extend_from_slice(&[
-                        sb(sx0, sy0), sb(sx0, sy1), sb(sx1, sy0),
-                        sb(sx1, sy0), sb(sx0, sy1), sb(sx1, sy1),
+                        sb(sx0, sy0),
+                        sb(sx0, sy1),
+                        sb(sx1, sy0),
+                        sb(sx1, sy0),
+                        sb(sx0, sy1),
+                        sb(sx1, sy1),
                     ]);
                     for (i, ch) in tile.frame.status.chars().enumerate() {
                         let ch_col = col_off + i;
-                        if ch_col >= col_off + tile_w || ch == ' ' { continue; }
-                        rasterize_char(
-                            atlas, ch, (ch_col as i32, status_row as i32),
-                            &CharCtx { cell_w, cell_h, vp_w, vp_h, fg: status_fg, bg: status_bg },
-                            &mut status_verts,
-                        );
+                        if ch_col >= col_off + tile_w || ch == ' ' {
+                            continue;
+                        }
+                        {
+                            let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                            rasterize_char(
+                                atlas,
+                                ch,
+                                (ch_col as i32, status_row as f32),
+                                &CharCtx {
+                                    cell_w,
+                                    cell_h,
+                                    vp_w,
+                                    vp_h,
+                                    fg: status_fg,
+                                    bg: status_bg,
+                                },
+                                &mut status_verts,
+                            );
+                        }
                     }
-                    draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &status_verts);
+                    draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &status_verts);
                 }
 
                 // ── Thin pixel borders (drawn AFTER content, on top) ─────────
                 if has_multiple_tiles {
-                    let border_color = if tile.is_active { theme::PURPLE } else { Color::DARK_GRAY };
+                    let border_color = if tile.is_active {
+                        theme::PURPLE
+                    } else {
+                        Color::DARK_GRAY
+                    };
                     let bc = to_rgba(border_color);
                     let bv = |px, py| Vertex {
-                        position: [px, py], uv: [0.0, 0.0], fg: bc, bg: bc,
+                        position: [px, py],
+                        uv: [0.0, 0.0],
+                        fg: bc,
+                        bg: bc,
                     };
                     let left_px = col_off as f32 * cell_w;
                     let right_px = (col_off + tile_w) as f32 * cell_w;
@@ -472,18 +861,46 @@ vertex WidgetVaryings widget_vert(
                     // Right edge
                     let (rx0, rx1) = (ndc_x(right_px - border_px), ndc_x(right_px));
                     let (ry0, ry1) = (ndc_y(top_px), ndc_y(bottom_px));
-                    bverts.extend_from_slice(&[bv(rx0,ry0),bv(rx0,ry1),bv(rx1,ry0),bv(rx1,ry0),bv(rx0,ry1),bv(rx1,ry1)]);
+                    bverts.extend_from_slice(&[
+                        bv(rx0, ry0),
+                        bv(rx0, ry1),
+                        bv(rx1, ry0),
+                        bv(rx1, ry0),
+                        bv(rx0, ry1),
+                        bv(rx1, ry1),
+                    ]);
                     // Left edge
                     let (lx0, lx1) = (ndc_x(left_px), ndc_x(left_px + border_px));
-                    bverts.extend_from_slice(&[bv(lx0,ry0),bv(lx0,ry1),bv(lx1,ry0),bv(lx1,ry0),bv(lx0,ry1),bv(lx1,ry1)]);
+                    bverts.extend_from_slice(&[
+                        bv(lx0, ry0),
+                        bv(lx0, ry1),
+                        bv(lx1, ry0),
+                        bv(lx1, ry0),
+                        bv(lx0, ry1),
+                        bv(lx1, ry1),
+                    ]);
                     // Top edge
                     let (tx0, tx1) = (ndc_x(left_px), ndc_x(right_px));
                     let (ty0, ty1) = (ndc_y(top_px), ndc_y(top_px + border_px));
-                    bverts.extend_from_slice(&[bv(tx0,ty0),bv(tx0,ty1),bv(tx1,ty0),bv(tx1,ty0),bv(tx0,ty1),bv(tx1,ty1)]);
+                    bverts.extend_from_slice(&[
+                        bv(tx0, ty0),
+                        bv(tx0, ty1),
+                        bv(tx1, ty0),
+                        bv(tx1, ty0),
+                        bv(tx0, ty1),
+                        bv(tx1, ty1),
+                    ]);
                     // Bottom edge
                     let (by0, by1) = (ndc_y(bottom_px - border_px), ndc_y(bottom_px));
-                    bverts.extend_from_slice(&[bv(tx0,by0),bv(tx0,by1),bv(tx1,by0),bv(tx1,by0),bv(tx0,by1),bv(tx1,by1)]);
-                    draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &bverts);
+                    bverts.extend_from_slice(&[
+                        bv(tx0, by0),
+                        bv(tx0, by1),
+                        bv(tx1, by0),
+                        bv(tx1, by0),
+                        bv(tx0, by1),
+                        bv(tx1, by1),
+                    ]);
+                    draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &bverts);
                 }
             }
 
@@ -492,20 +909,27 @@ vertex WidgetVaryings widget_vert(
                 // Reset scissor to full viewport
                 {
                     enc.setScissorRect(MTLScissorRect {
-                        x: 0, y: 0,
-                        width: vp_w as usize, height: vp_h as usize,
+                        x: 0,
+                        y: 0,
+                        width: vp_w as usize,
+                        height: vp_h as usize,
                     });
                 }
                 if let Some(tile) = tiled.tiles.iter().find(|t| t.is_active) {
-                    let col_off = tile.rect.col as usize;
-                    let row_off = tile.rect.row as usize;
+                    let col_off = tile.rect.col.round() as usize;
+                    let row_off = tile.rect.row.round() as usize;
                     let sel_bg = to_rgba(theme::COMP_SELECTED_BG);
                     let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG);
                     let pop_fg = to_rgba(theme::COMP_FG);
                     let popup_col = col_off + comp.anchor.1;
                     let popup_row = row_off + comp.anchor.0 + 1;
-                    let label_w = comp.entries.iter()
-                        .map(|e| e.label.len()).max().unwrap_or(0).max(12);
+                    let label_w = comp
+                        .entries
+                        .iter()
+                        .map(|e| e.label.len())
+                        .max()
+                        .unwrap_or(0)
+                        .max(12);
                     let mut popup_verts = Vec::new();
                     let x0 = ndc_x(popup_col as f32 * cell_w);
                     let x1 = ndc_x((popup_col + label_w) as f32 * cell_w);
@@ -515,21 +939,43 @@ vertex WidgetVaryings widget_vert(
                         let y1 = ndc_y((row + 1) as f32 * cell_h);
                         let bg = if entry.selected { sel_bg } else { unsel_bg };
                         let gv = |px, py| Vertex {
-                            position: [px, py], uv: [0.0, 0.0], fg: pop_fg, bg,
+                            position: [px, py],
+                            uv: [0.0, 0.0],
+                            fg: pop_fg,
+                            bg,
                         };
                         popup_verts.extend_from_slice(&[
-                            gv(x0,y0),gv(x0,y1),gv(x1,y0),gv(x1,y0),gv(x0,y1),gv(x1,y1),
+                            gv(x0, y0),
+                            gv(x0, y1),
+                            gv(x1, y0),
+                            gv(x1, y0),
+                            gv(x0, y1),
+                            gv(x1, y1),
                         ]);
                         for (j, ch) in entry.label.chars().enumerate() {
-                            if ch == ' ' { continue; }
-                            rasterize_char(
-                                atlas, ch, ((popup_col + j) as i32, row as i32),
-                                &CharCtx { cell_w, cell_h, vp_w, vp_h, fg: pop_fg, bg },
-                                &mut popup_verts,
-                            );
+                            if ch == ' ' {
+                                continue;
+                            }
+                            {
+                                let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                                rasterize_char(
+                                    atlas,
+                                    ch,
+                                    ((popup_col + j) as i32, row as f32),
+                                    &CharCtx {
+                                        cell_w,
+                                        cell_h,
+                                        vp_w,
+                                        vp_h,
+                                        fg: pop_fg,
+                                        bg,
+                                    },
+                                    &mut popup_verts,
+                                );
+                            }
                         }
                     }
-                    draw_text_verts(&enc, &self.device, pipeline, &atlas.texture, &popup_verts);
+                    draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &popup_verts);
                 }
             }
 
@@ -559,6 +1005,24 @@ vertex WidgetVaryings widget_vert(
                     let ns_view = &*ns_view;
                     ns_view.setWantsLayer(true);
                     ns_view.setLayer(Some(&self.layer));
+
+                    // Dark titlebar matching app background
+                    use objc2_app_kit::{NSAppearance, NSAppearanceCustomization, NSColor};
+                    let ns_window = ns_view.window().expect("view must have a window");
+                    let bg = crate::theme::BG;
+                    let color = NSColor::colorWithRed_green_blue_alpha(
+                        bg.r as f64,
+                        bg.g as f64,
+                        bg.b as f64,
+                        1.0,
+                    );
+                    ns_window.setBackgroundColor(Some(&color));
+                    ns_window.setTitlebarAppearsTransparent(true);
+                    if let Some(appearance) = NSAppearance::appearanceNamed(&NSString::from_str(
+                        "NSAppearanceNameVibrantDark",
+                    )) {
+                        ns_window.setAppearance(Some(&appearance));
+                    }
                 }
             }
             // Set drawableSize to physical pixels so the Metal texture is full-res
@@ -650,6 +1114,39 @@ vertex WidgetVaryings widget_vert(
                 self.widget_pipelines
                     .insert(widget_type.to_string(), pipeline_state);
             }
+
+            let waveform_src = NSString::from_str(WAVEFORM_SHADER_SRC);
+            let waveform_lib = self
+                .device
+                .newLibraryWithSource_options_error(&waveform_src, None)
+                .map_err(|_| BackendError::MetalError)?;
+            let waveform_vert = waveform_lib
+                .newFunctionWithName(&NSString::from_str("waveform_vert"))
+                .ok_or(BackendError::MetalError)?;
+            let waveform_frag = waveform_lib
+                .newFunctionWithName(&NSString::from_str("waveform_frag"))
+                .ok_or(BackendError::MetalError)?;
+            let waveform_desc = MTLRenderPipelineDescriptor::new();
+            waveform_desc.setVertexFunction(Some(&waveform_vert));
+            waveform_desc.setFragmentFunction(Some(&waveform_frag));
+            let waveform_attach =
+                unsafe { waveform_desc.colorAttachments().objectAtIndexedSubscript(0) };
+            waveform_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            waveform_attach.setBlendingEnabled(true);
+            {
+                use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                waveform_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                waveform_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                waveform_attach.setRgbBlendOperation(MTLBlendOperation::Add);
+                waveform_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                waveform_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                waveform_attach.setAlphaBlendOperation(MTLBlendOperation::Add);
+            }
+            self.waveform_pipeline = Some(
+                self.device
+                    .newRenderPipelineStateWithDescriptor_error(&waveform_desc)
+                    .map_err(|_| BackendError::MetalError)?,
+            );
 
             Ok(())
         }
@@ -808,10 +1305,8 @@ vertex WidgetVaryings widget_vert(
                                 }
                             }
                             MouseScrollDelta::PixelDelta(delta) => {
-                                pending_scroll.push_back((
-                                    (delta.x as f32, delta.y as f32),
-                                    *cursor_pos,
-                                ));
+                                pending_scroll
+                                    .push_back(((delta.x as f32, delta.y as f32), *cursor_pos));
                                 None
                             }
                         };
@@ -859,6 +1354,8 @@ vertex WidgetVaryings widget_vert(
             let texture = drawable.texture();
             let vp_w = texture.width() as f32;
             let vp_h = texture.height() as f32;
+            let cell_w = atlas.cell_w as f32;
+            let cell_h = atlas.cell_h as f32;
 
             // ── Build/cached text vertex data ───────────────────────────────
             let mut text_upload_bytes = 0;
@@ -899,8 +1396,7 @@ vertex WidgetVaryings widget_vert(
                     )
                 })
                 .unwrap_or_default();
-            let primitive_quads =
-                build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
+            let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
             let primitive_instance_batches = group_widget_instances(&primitive_scene);
 
             // ── Vertex buffer ────────────────────────────────────────────────
@@ -962,6 +1458,19 @@ vertex WidgetVaryings widget_vert(
                         primitive_quads.len() as _,
                     );
                 }
+            }
+
+            if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
+                let waveform_primitives = collect_waveform_primitives(&primitive_scene);
+                self.draw_waveform_primitives(
+                    &enc,
+                    &waveform_pipeline,
+                    &waveform_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
             }
 
             let mut widget_upload_bytes = 0;
@@ -1060,7 +1569,7 @@ vertex WidgetVaryings widget_vert(
     fn rasterize_char(
         atlas: &mut GlyphAtlas,
         ch: char,
-        (col, row): (i32, i32),
+        (col, row): (i32, f32),
         ctx: &CharCtx,
         out: &mut Vec<Vertex>,
     ) {
@@ -1074,8 +1583,8 @@ vertex WidgetVaryings widget_vert(
         let ndc_y = |px: f32| 1.0 - px / ctx.vp_h * 2.0;
         let x0 = ndc_x(col as f32 * ctx.cell_w);
         let x1 = ndc_x((col + 1) as f32 * ctx.cell_w);
-        let y0 = ndc_y(row as f32 * ctx.cell_h);
-        let y1 = ndc_y((row + 1) as f32 * ctx.cell_h);
+        let y0 = ndc_y(row * ctx.cell_h);
+        let y1 = ndc_y((row + 1.0) * ctx.cell_h);
 
         let gv = |px, py, u, v| Vertex {
             position: [px, py],
@@ -1174,7 +1683,7 @@ vertex WidgetVaryings widget_vert(
                 rasterize_char(
                     atlas,
                     cell.ch,
-                    (abs_col, abs_row),
+                    (abs_col, abs_row as f32),
                     &CharCtx {
                         cell_w,
                         cell_h,
@@ -1248,7 +1757,7 @@ vertex WidgetVaryings widget_vert(
                     rasterize_char(
                         atlas,
                         ch,
-                        (ch_col as i32, ch_row as i32),
+                        (ch_col as i32, ch_row as f32),
                         &CharCtx {
                             cell_w,
                             cell_h,
@@ -1301,7 +1810,7 @@ vertex WidgetVaryings widget_vert(
                         rasterize_char(
                             atlas,
                             ch,
-                            ((doc_col + j) as i32, title_row as i32),
+                            ((doc_col + j) as i32, title_row as f32),
                             &CharCtx {
                                 cell_w,
                                 cell_h,
@@ -1328,7 +1837,7 @@ vertex WidgetVaryings widget_vert(
                         rasterize_char(
                             atlas,
                             ch,
-                            ((doc_col + j) as i32, doc_row as i32),
+                            ((doc_col + j) as i32, doc_row as f32),
                             &CharCtx {
                                 cell_w,
                                 cell_h,
@@ -1377,7 +1886,7 @@ vertex WidgetVaryings widget_vert(
             rasterize_char(
                 atlas,
                 ch,
-                (col as i32, status_row as i32),
+                (col as i32, status_row as f32),
                 &CharCtx {
                     cell_w,
                     cell_h,
@@ -1400,15 +1909,16 @@ vertex WidgetVaryings widget_vert(
         vp_h: f32,
     ) -> Vec<Vertex> {
         let cell_w = atlas.cell_w as f32;
-        let cell_h = atlas.cell_h as f32;
         let mut verts = Vec::new();
         for primitive in primitives {
             match primitive {
                 widget_render::MetalPrimitive::Rect(rect) => {
-                    push_solid_rect_vertices(rect.rect, rect.color, cell_w, cell_h, vp_w, vp_h, &mut verts);
+                    push_solid_rect_vertices(
+                        rect.rect, rect.color, cell_w, cell_w, vp_w, vp_h, &mut verts,
+                    );
                 }
                 widget_render::MetalPrimitive::Quad(quad) => {
-                    push_solid_quad_vertices(*quad, cell_w, cell_h, vp_w, vp_h, &mut verts);
+                    push_solid_quad_vertices(*quad, cell_w, cell_w, vp_w, vp_h, &mut verts);
                 }
                 widget_render::MetalPrimitive::GlyphRun(run) => {
                     for (idx, ch) in run.text.chars().enumerate() {
@@ -1421,7 +1931,7 @@ vertex WidgetVaryings widget_vert(
                             (run.col + idx as i32, run.row),
                             &CharCtx {
                                 cell_w,
-                                cell_h,
+                                cell_h: atlas.cell_h as f32,
                                 vp_w,
                                 vp_h,
                                 fg: run.fg.to_rgba(),
@@ -1431,10 +1941,23 @@ vertex WidgetVaryings widget_vert(
                         );
                     }
                 }
+                widget_render::MetalPrimitive::Waveform(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
             }
         }
         verts
+    }
+
+    fn collect_waveform_primitives(
+        primitives: &[widget_render::MetalPrimitive],
+    ) -> Vec<widget_render::MetalWaveformPrimitive> {
+        primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                widget_render::MetalPrimitive::Waveform(waveform) => Some(waveform.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn push_solid_rect_vertices(
@@ -1448,10 +1971,10 @@ vertex WidgetVaryings widget_vert(
     ) {
         let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
         let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
-        let x0 = ndc_x(rect.col as f32 * cell_w);
-        let x1 = ndc_x((rect.col + rect.width) as f32 * cell_w);
-        let y0 = ndc_y(rect.row as f32 * cell_h);
-        let y1 = ndc_y((rect.row + rect.height) as f32 * cell_h);
+        let x0 = ndc_x(rect.col * cell_w);
+        let x1 = ndc_x((rect.col + rect.width) * cell_w);
+        let y0 = ndc_y(rect.row * cell_h);
+        let y1 = ndc_y((rect.row + rect.height) * cell_h);
         let rgba = color.to_rgba();
         let v = |px, py| Vertex {
             position: [px, py],
@@ -1534,8 +2057,8 @@ vertex WidgetVaryings widget_vert(
     ) -> widget_render::MetalPrimitive {
         match prim {
             widget_render::MetalPrimitive::Rect(mut r) => {
-                r.rect.col = (r.rect.col as i32 + col_off).max(0) as u16;
-                r.rect.row = (r.rect.row as i32 + row_off).max(0) as u16;
+                r.rect.col += col_off as f32;
+                r.rect.row += row_off as f32;
                 widget_render::MetalPrimitive::Rect(r)
             }
             widget_render::MetalPrimitive::Quad(mut q) => {
@@ -1545,17 +2068,28 @@ vertex WidgetVaryings widget_vert(
             }
             widget_render::MetalPrimitive::GlyphRun(mut g) => {
                 g.col += col_off;
-                g.row += row_off;
+                g.row += row_off as f32;
                 widget_render::MetalPrimitive::GlyphRun(g)
             }
-            widget_render::MetalPrimitive::WidgetInstance { widget_type, mut instance } => {
+            widget_render::MetalPrimitive::Waveform(mut w) => {
+                w.rect.col += col_off as f32;
+                w.rect.row += row_off as f32;
+                widget_render::MetalPrimitive::Waveform(w)
+            }
+            widget_render::MetalPrimitive::WidgetInstance {
+                widget_type,
+                mut instance,
+            } => {
                 let ndc_dx = (col_off as f32 * cell_w / vp_w) * 2.0;
                 let ndc_dy = -(row_off as f32 * cell_h / vp_h) * 2.0;
                 instance.ndc_min[0] += ndc_dx;
                 instance.ndc_max[0] += ndc_dx;
                 instance.ndc_min[1] += ndc_dy;
                 instance.ndc_max[1] += ndc_dy;
-                widget_render::MetalPrimitive::WidgetInstance { widget_type, instance }
+                widget_render::MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                }
             }
         }
     }

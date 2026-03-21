@@ -4,19 +4,104 @@ pub mod hslider;
 pub mod hstack;
 pub mod knob;
 pub mod label;
+pub mod tabs;
+pub mod time_view;
 pub mod timeline;
 pub mod toggle;
 pub mod vslider;
 pub mod vstack;
+pub mod waveform;
 
 use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
 use crate::backend::{Cell, CellStyle, Color};
-use crate::layout::{Constraints, LayoutNode, Rect, Size};
+use crate::layout::{Constraints, LayoutNode, Rect, Size, get_map};
 use crate::theme;
 use crate::vm::Value;
+
+// ── Flex-style alignment enums ──────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Align {
+    Start,
+    Center,
+    End,
+    Stretch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Justify {
+    Start,
+    Center,
+    End,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+pub fn resolve_align(node: &Value, key: &str, default: Align) -> Align {
+    let map = match get_map(node) {
+        Some(m) => m,
+        None => return default,
+    };
+    match map.get(key) {
+        Some(Value::Keyword(s)) | Some(Value::String(s)) => match s.as_str() {
+            "start" => Align::Start,
+            "center" => Align::Center,
+            "end" => Align::End,
+            "stretch" => Align::Stretch,
+            _ => default,
+        },
+        _ => default,
+    }
+}
+
+/// Computes (start_offset, effective_gap) for main-axis justify distribution.
+/// `remaining` is the leftover space after content + explicit gaps.
+/// `count` is the number of children. `gap` is the explicit gap between items.
+pub fn distribute_justify(justify: Justify, remaining: f32, count: usize, gap: f32) -> (f32, f32) {
+    match justify {
+        Justify::Start => (0.0, gap),
+        Justify::Center => (remaining / 2.0, gap),
+        Justify::End => (remaining, gap),
+        Justify::SpaceBetween => {
+            if count <= 1 {
+                (0.0, gap)
+            } else {
+                (0.0, gap + remaining / (count as f32 - 1.0))
+            }
+        }
+        Justify::SpaceAround => {
+            let space = remaining / count as f32;
+            (space / 2.0, gap + space)
+        }
+        Justify::SpaceEvenly => {
+            let space = remaining / (count as f32 + 1.0);
+            (space, gap + space)
+        }
+    }
+}
+
+pub fn resolve_justify(node: &Value, key: &str, default: Justify) -> Justify {
+    let map = match get_map(node) {
+        Some(m) => m,
+        None => return default,
+    };
+    match map.get(key) {
+        Some(Value::Keyword(s)) | Some(Value::String(s)) => match s.as_str() {
+            "start" => Justify::Start,
+            "center" => Justify::Center,
+            "end" => Justify::End,
+            "space-between" => Justify::SpaceBetween,
+            "space-around" => Justify::SpaceAround,
+            "space-evenly" => Justify::SpaceEvenly,
+            _ => default,
+        },
+        _ => default,
+    }
+}
 
 // ── Semantic events (backend-agnostic) ───────────────────────────────────────
 
@@ -110,7 +195,7 @@ pub struct MetalQuadPrimitive {
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct MetalGlyphRunPrimitive {
-    pub row: i32,
+    pub row: f32,
     pub col: i32,
     pub text: String,
     pub fg: Color,
@@ -119,10 +204,28 @@ pub struct MetalGlyphRunPrimitive {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
+pub struct MetalWaveformPrimitive {
+    pub rect: Rect,
+    pub sample_key: String,
+    pub sample_start: f32,
+    pub sample_end: f32,
+    pub samples_per_bucket: u32,
+    pub bucket_count: u32,
+    pub selection_start: f32,
+    pub selection_end: f32,
+    pub playhead_position: f32,
+    pub show_playhead: bool,
+    pub waveform_color: Color,
+    pub selection_color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub enum MetalPrimitive {
     Rect(MetalRectPrimitive),
     Quad(MetalQuadPrimitive),
     GlyphRun(MetalGlyphRunPrimitive),
+    Waveform(MetalWaveformPrimitive),
     WidgetInstance {
         widget_type: String,
         instance: WidgetInstance,
@@ -201,12 +304,7 @@ pub trait WidgetDefinition: Sync {
         vec![]
     }
     fn tui_render(&self, _props: &HashMap<String, Value>, _rect: Rect, _buf: &mut CellBuffer) {}
-    fn begin_gesture(
-        &self,
-        _node: &LayoutNode,
-        _local_col: f32,
-        _local_row: f32,
-    ) -> Option<Value> {
+    fn begin_gesture(&self, _node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
         None
     }
     fn mouse_event(
@@ -250,6 +348,9 @@ pub trait WidgetDefinition: Sync {
     ) -> Option<WidgetEvent> {
         None
     }
+    fn captures_scroll_gesture(&self) -> bool {
+        false
+    }
     fn captures_drag(&self) -> bool {
         false
     }
@@ -281,7 +382,9 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &vslider::VSLIDER_WIDGET,
     &toggle::TOGGLE_WIDGET,
     &knob::KNOB_WIDGET,
+    &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,
+    &waveform::WAVEFORM_WIDGET,
     &vstack::VSTACK_WIDGET,
     &hstack::HSTACK_WIDGET,
     &box_widget::BOX_WIDGET,
@@ -302,15 +405,16 @@ pub fn is_layout_widget_type(widget_type: &str) -> bool {
 }
 
 pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
+    // Always call tui_render (no-op for most containers)
+    if let Some(definition) = widget_definition(&node.widget_type) {
+        definition.tui_render(&node.props, node.rect, buf);
+    }
+
+    // Containers also recurse into children
     if is_layout_widget_type(&node.widget_type) {
         for child in &node.children {
             render_widget_tree(child, buf);
         }
-        return;
-    }
-
-    if let Some(definition) = widget_definition(&node.widget_type) {
-        definition.tui_render(&node.props, node.rect, buf);
     }
 }
 
@@ -379,7 +483,9 @@ pub fn map_mouse_event(
     gesture: Option<&Value>,
 ) -> MouseEventOutcome {
     widget_definition(&node.widget_type)
-        .map(|definition| definition.mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture))
+        .map(|definition| {
+            definition.mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture)
+        })
         .unwrap_or(MouseEventOutcome::Ignore)
 }
 
@@ -389,11 +495,7 @@ pub fn widget_captures_drag(widget_type: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn begin_widget_gesture(
-    node: &LayoutNode,
-    local_col: f32,
-    local_row: f32,
-) -> Option<Value> {
+pub fn begin_widget_gesture(node: &LayoutNode, local_col: f32, local_row: f32) -> Option<Value> {
     widget_definition(&node.widget_type)?.begin_gesture(node, local_col, local_row)
 }
 
@@ -429,6 +531,12 @@ pub fn map_scroll_gesture_event(
         .scroll_gesture_event(node, local_col, local_row, delta_x, delta_y)
 }
 
+pub fn captures_scroll_gesture(node: &LayoutNode) -> bool {
+    widget_definition(&node.widget_type)
+        .map(WidgetDefinition::captures_scroll_gesture)
+        .unwrap_or(false)
+}
+
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
@@ -448,6 +556,8 @@ pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -
 pub fn resolve_named_color(props: &HashMap<String, Value>, key: &str, default: Color) -> Color {
     match props.get(key) {
         Some(Value::String(name)) | Some(Value::Keyword(name)) => match name.as_str() {
+            "primary" | "accent" => theme::GREEN,
+            "secondary" => theme::RED,
             "red" => theme::RED,
             "green" | "cyan" => theme::GREEN,
             "yellow" | "orange" => theme::YELLOW,
@@ -475,16 +585,14 @@ pub fn styled_cell(ch: char, fg: Color, bg: Option<Color>) -> Cell {
 
 #[cfg(target_os = "macos")]
 pub fn ndc_bounds(rect: Rect, viewport: WidgetViewport) -> ([f32; 2], [f32; 2]) {
+    let unit_px = viewport.cell_w;
     let ndc_x = |px: f32| px / viewport.vp_w * 2.0 - 1.0;
     let ndc_y = |px: f32| 1.0 - px / viewport.vp_h * 2.0;
     (
+        [ndc_x(rect.col * unit_px), ndc_y(rect.row * unit_px)],
         [
-            ndc_x(rect.col as f32 * viewport.cell_w),
-            ndc_y(rect.row as f32 * viewport.cell_h),
-        ],
-        [
-            ndc_x((rect.col + rect.width) as f32 * viewport.cell_w),
-            ndc_y((rect.row + rect.height) as f32 * viewport.cell_h),
+            ndc_x((rect.col + rect.width) * unit_px),
+            ndc_y((rect.row + rect.height) * unit_px),
         ],
     )
 }

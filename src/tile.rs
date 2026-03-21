@@ -49,6 +49,13 @@ pub struct TileSplit {
     pub b: Box<TileNode>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitDividerHit {
+    pub split_id: TileId,
+    pub dir: SplitDir,
+    pub area: Rect,
+}
+
 // Types moved from editor/mod.rs to be shared
 
 #[derive(Debug, Clone)]
@@ -125,10 +132,7 @@ impl TileNode {
         match self {
             TileNode::Leaf(leaf) if leaf.id == id => Some(leaf),
             TileNode::Leaf(_) => None,
-            TileNode::Split(s) => s
-                .a
-                .find_leaf_mut(id)
-                .or_else(|| s.b.find_leaf_mut(id)),
+            TileNode::Split(s) => s.a.find_leaf_mut(id).or_else(|| s.b.find_leaf_mut(id)),
         }
     }
 
@@ -185,6 +189,63 @@ impl TileNode {
         }
     }
 
+    pub fn find_split_mut(&mut self, id: TileId) -> Option<&mut TileSplit> {
+        match self {
+            TileNode::Leaf(_) => None,
+            TileNode::Split(s) => {
+                if s.id == id {
+                    return Some(s);
+                }
+                if let Some(split) = s.a.find_split_mut(id) {
+                    return Some(split);
+                }
+                s.b.find_split_mut(id)
+            }
+        }
+    }
+
+    pub fn hit_test_split_divider(
+        &self,
+        area: Rect,
+        col: f32,
+        row: f32,
+        tolerance: f32,
+    ) -> Option<SplitDividerHit> {
+        match self {
+            TileNode::Leaf(_) => None,
+            TileNode::Split(s) => {
+                let (a_rect, b_rect) = split_rect(area, s.dir, s.ratio);
+                if let Some(hit) = s.a.hit_test_split_divider(a_rect, col, row, tolerance) {
+                    return Some(hit);
+                }
+                if let Some(hit) = s.b.hit_test_split_divider(b_rect, col, row, tolerance) {
+                    return Some(hit);
+                }
+
+                let divider_hit = match s.dir {
+                    SplitDir::Vertical => {
+                        let divider_col = b_rect.col;
+                        (col - divider_col).abs() <= tolerance
+                            && row >= area.row
+                            && row < area.row + area.height
+                    }
+                    SplitDir::Horizontal => {
+                        let divider_row = b_rect.row;
+                        (row - divider_row).abs() <= tolerance
+                            && col >= area.col
+                            && col < area.col + area.width
+                    }
+                };
+
+                divider_hit.then_some(SplitDividerHit {
+                    split_id: s.id,
+                    dir: s.dir,
+                    area,
+                })
+            }
+        }
+    }
+
     /// Split a leaf tile, creating a new split node. The existing leaf stays
     /// as child `a`, and a new leaf (with `new_tile_id` and `new_buffer_idx`)
     /// becomes child `b`.
@@ -215,7 +276,8 @@ impl TileNode {
             TileNode::Leaf(_) => false,
             TileNode::Split(s) => {
                 s.a.split_leaf(target_id, split_id, new_tile_id, new_buffer_idx, dir)
-                    || s.b.split_leaf(target_id, split_id, new_tile_id, new_buffer_idx, dir)
+                    || s.b
+                        .split_leaf(target_id, split_id, new_tile_id, new_buffer_idx, dir)
             }
         }
     }
@@ -231,22 +293,22 @@ impl TileNode {
                 let b_is_target = matches!(s.b.as_ref(), TileNode::Leaf(l) if l.id == id);
 
                 if a_is_target {
-                    let buffer_idx =
-                        if let TileNode::Leaf(l) = s.a.as_ref() { l.buffer_idx } else { 0 };
+                    let buffer_idx = if let TileNode::Leaf(l) = s.a.as_ref() {
+                        l.buffer_idx
+                    } else {
+                        0
+                    };
                     // Replace self with child b
-                    let b = std::mem::replace(
-                        s.b.as_mut(),
-                        TileNode::Leaf(TileLeaf::new(0, 0)),
-                    );
+                    let b = std::mem::replace(s.b.as_mut(), TileNode::Leaf(TileLeaf::new(0, 0)));
                     *self = b;
                     Some(buffer_idx)
                 } else if b_is_target {
-                    let buffer_idx =
-                        if let TileNode::Leaf(l) = s.b.as_ref() { l.buffer_idx } else { 0 };
-                    let a = std::mem::replace(
-                        s.a.as_mut(),
-                        TileNode::Leaf(TileLeaf::new(0, 0)),
-                    );
+                    let buffer_idx = if let TileNode::Leaf(l) = s.b.as_ref() {
+                        l.buffer_idx
+                    } else {
+                        0
+                    };
+                    let a = std::mem::replace(s.a.as_mut(), TileNode::Leaf(TileLeaf::new(0, 0)));
                     *self = a;
                     Some(buffer_idx)
                 } else {
@@ -269,8 +331,8 @@ pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
     match dir {
         SplitDir::Horizontal => {
             // Stacked top/bottom — split height
-            let a_height = ((area.height as f32) * ratio).round() as u16;
-            let b_height = area.height.saturating_sub(a_height);
+            let a_height = (area.height * ratio).round();
+            let b_height = (area.height - a_height).max(0.0);
             (
                 Rect {
                     row: area.row,
@@ -288,8 +350,8 @@ pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
         }
         SplitDir::Vertical => {
             // Stacked left/right — split width
-            let a_width = ((area.width as f32) * ratio).round() as u16;
-            let b_width = area.width.saturating_sub(a_width);
+            let a_width = (area.width * ratio).round();
+            let b_width = (area.width - a_width).max(0.0);
             (
                 Rect {
                     row: area.row,
@@ -305,5 +367,12 @@ pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
                 },
             )
         }
+    }
+}
+
+pub fn split_ratio_for_point(area: Rect, dir: SplitDir, col: f32, row: f32) -> f32 {
+    match dir {
+        SplitDir::Horizontal => ((row - area.row) / area.height.max(1.0)).clamp(0.1, 0.9),
+        SplitDir::Vertical => ((col - area.col) / area.width.max(1.0)).clamp(0.1, 0.9),
     }
 }

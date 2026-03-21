@@ -15,10 +15,10 @@ impl HitGrid {
     /// Build a new hit grid from the root layout node.
     /// Uses the max extent of all descendants, not just the root rect,
     /// so overflowing children (wider than viewport) are hittable.
-    pub fn build(layout: &LayoutNode) -> Self {
-        let (cols, rows) = max_extent(layout);
+    pub fn build(layout: &LayoutNode, aspect: f32) -> Self {
+        let (cols, rows) = max_extent(layout, aspect);
         let mut cells = vec![None; cols as usize * rows as usize];
-        fill_cells(layout, cols, rows, &mut cells);
+        fill_cells(layout, cols, rows, aspect, &mut cells);
         HitGrid { cols, rows, cells }
     }
 
@@ -59,45 +59,56 @@ pub fn to_local(
 /// Convert local float coordinates to integer grid coordinates
 /// suitable for `HitGrid::node_at`.
 pub fn to_query(local_col: f32, local_row: f32) -> (u16, u16) {
-    (
-        local_col.floor() as u16,
-        local_row.floor() as u16,
-    )
+    (local_col.floor() as u16, local_row.floor() as u16)
 }
 
 // ── Private helpers ──────────────────────────────────────────────────────
 
-fn fill_cells(node: &LayoutNode, cols: u16, rows: u16, cells: &mut [Option<LayoutNode>]) {
+fn fill_cells(
+    node: &LayoutNode,
+    cols: u16,
+    rows: u16,
+    aspect: f32,
+    cells: &mut [Option<LayoutNode>],
+) {
     if node.children.is_empty() {
         let r = &node.rect;
-        for row in r.row..r.row.saturating_add(r.height).min(rows) {
-            for col in r.col..r.col.saturating_add(r.width).min(cols) {
+        let col_start = r.col.floor() as u16;
+        let col_end = (r.col + r.width).ceil().min(cols as f32) as u16;
+        let row_start = (r.row / aspect).floor() as u16; // uniform → terminal
+        let row_end = ((r.row + r.height) / aspect).ceil().min(rows as f32) as u16; // uniform → terminal
+        for row in row_start..row_end {
+            for col in col_start..col_end {
                 cells[row as usize * cols as usize + col as usize] = Some(node.clone());
             }
         }
     } else {
         for child in &node.children {
-            fill_cells(child, cols, rows, cells);
+            fill_cells(child, cols, rows, aspect, cells);
         }
     }
 }
 
 /// Find the max (cols, rows) extent across all descendants.
-fn max_extent(node: &LayoutNode) -> (u16, u16) {
-    let own_cols = node.rect.col.saturating_add(node.rect.width);
-    let own_rows = node.rect.row.saturating_add(node.rect.height);
-    node.children.iter().fold((own_cols, own_rows), |(c, r), child| {
-        let (cc, cr) = max_extent(child);
-        (c.max(cc), r.max(cr))
-    })
+pub fn max_extent(node: &LayoutNode, aspect: f32) -> (u16, u16) {
+    let own_cols = (node.rect.col + node.rect.width).ceil() as u16;
+    let own_rows = ((node.rect.row + node.rect.height) / aspect).ceil() as u16; // uniform → terminal
+    node.children
+        .iter()
+        .fold((own_cols, own_rows), |(c, r), child| {
+            let (cc, cr) = max_extent(child, aspect);
+            (c.max(cc), r.max(cr))
+        })
 }
 
-fn hit_key(node: &LayoutNode) -> (String, u16, u16, u16, u16) {
+/// Identity key for hit comparison. Uses `f32::to_bits()` so we get
+/// exact equality without requiring `Eq` on f32.
+fn hit_key(node: &LayoutNode) -> (String, u32, u32, u32, u32) {
     (
         node.widget_type.clone(),
-        node.rect.row,
-        node.rect.col,
-        node.rect.width,
-        node.rect.height,
+        node.rect.row.to_bits(),
+        node.rect.col.to_bits(),
+        node.rect.width.to_bits(),
+        node.rect.height.to_bits(),
     )
 }

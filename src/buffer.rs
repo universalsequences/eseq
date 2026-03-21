@@ -396,14 +396,20 @@ impl Buffer {
     pub fn move_up(&mut self) {
         if self.cursor.0 > 0 {
             self.cursor.0 -= 1;
-            self.cursor.1 = self.cursor.1.min(Self::line_len(&self.lines[self.cursor.0]));
+            self.cursor.1 = self
+                .cursor
+                .1
+                .min(Self::line_len(&self.lines[self.cursor.0]));
         }
     }
 
     pub fn move_down(&mut self) {
         if self.cursor.0 < self.lines.len() - 1 {
             self.cursor.0 += 1;
-            self.cursor.1 = self.cursor.1.min(Self::line_len(&self.lines[self.cursor.0]));
+            self.cursor.1 = self
+                .cursor
+                .1
+                .min(Self::line_len(&self.lines[self.cursor.0]));
         }
     }
 

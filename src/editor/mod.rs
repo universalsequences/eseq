@@ -16,13 +16,13 @@ use crossterm::event::{
 
 use crate::buffer::Buffer;
 use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
+use crate::layout::Rect;
 use crate::mode::{
     BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match, highlight_line,
 };
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
-use crate::layout::Rect;
-use crate::tile::{HighlightCache, SplitDir, TileId, TileLeaf, TileNode};
+use crate::tile::{HighlightCache, SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
 use crate::vm::{Value, format_lisp_value};
 use commands::key_str;
 use natives::register_editor_natives;
@@ -147,6 +147,7 @@ pub struct Editor {
     save_prompt: Option<SavePrompt>,
     completion: Option<CompletionState>,
     last_mouse_precise: Option<(f32, f32)>,
+    active_tile_resize_drag: Option<TileResizeDrag>,
     eval_flash: Option<SExpFlash>,
     mark: Option<Mark>,
     kill_ring: Vec<String>,
@@ -154,6 +155,13 @@ pub struct Editor {
     mode_registry: HashMap<String, MajorMode>,
     /// Cached tile rects, recomputed when tiles change or viewport resizes.
     cached_tile_rects: Vec<(TileId, Rect)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TileResizeDrag {
+    split_id: TileId,
+    dir: SplitDir,
+    area: Rect,
 }
 
 impl Editor {
@@ -178,6 +186,7 @@ impl Editor {
             save_prompt: None,
             completion: None,
             last_mouse_precise: None,
+            active_tile_resize_drag: None,
             eval_flash: None,
             mark: None,
             kill_ring: vec![],
@@ -220,17 +229,17 @@ impl Editor {
     /// Recompute cached tile rects for the given viewport.
     pub fn update_tile_rects(&mut self, total_width: u16, total_height: u16) {
         let area = Rect {
-            row: 0,
-            col: 0,
-            width: total_width,
+            row: 0.0,
+            col: 0.0,
+            width: total_width as f32,
             // Reserve 1 row for global status bar
-            height: total_height.saturating_sub(1),
+            height: (total_height as f32 - 1.0).max(0.0),
         };
         self.cached_tile_rects = self.tile_root.compute_rects(area);
     }
 
     /// Find which tile contains the given screen coordinate.
-    pub fn tile_at_screen(&self, col: u16, row: u16) -> Option<TileId> {
+    pub fn tile_at_screen(&self, col: f32, row: f32) -> Option<TileId> {
         for (tile_id, rect) in &self.cached_tile_rects {
             if col >= rect.col
                 && col < rect.col + rect.width
@@ -243,6 +252,11 @@ impl Editor {
         None
     }
 
+    /// All cached tile rects.
+    pub fn tile_rects(&self) -> &[(TileId, Rect)] {
+        &self.cached_tile_rects
+    }
+
     /// Get the rect for a given tile ID from the cache.
     pub fn tile_rect(&self, tile_id: TileId) -> Option<Rect> {
         self.cached_tile_rects
@@ -251,10 +265,31 @@ impl Editor {
             .map(|(_, rect)| *rect)
     }
 
+    fn tile_root_rect(&self) -> Option<Rect> {
+        let mut rects = self.cached_tile_rects.iter().map(|(_, rect)| *rect);
+        let first = rects.next()?;
+        let mut min_row = first.row;
+        let mut min_col = first.col;
+        let mut max_row = first.row + first.height;
+        let mut max_col = first.col + first.width;
+        for rect in rects {
+            min_row = min_row.min(rect.row);
+            min_col = min_col.min(rect.col);
+            max_row = max_row.max(rect.row + rect.height);
+            max_col = max_col.max(rect.col + rect.width);
+        }
+        Some(Rect {
+            row: min_row,
+            col: min_col,
+            width: (max_col - min_col).max(0.0),
+            height: (max_row - min_row).max(0.0),
+        })
+    }
+
     /// Check if a screen coordinate is on a border between tiles.
     /// Returns the parent split if found.
     #[allow(dead_code)]
-    fn is_on_tile_border(&self, col: u16, row: u16) -> bool {
+    fn is_on_tile_border(&self, col: f32, row: f32) -> bool {
         if self.cached_tile_rects.len() <= 1 {
             return false;
         }
@@ -262,11 +297,17 @@ impl Editor {
         // and the start of another (within the 1-char border zone)
         for (_, rect) in &self.cached_tile_rects {
             // Right edge of a tile (vertical split border)
-            if col == rect.col + rect.width && row >= rect.row && row < rect.row + rect.height {
+            if (col - (rect.col + rect.width)).abs() < 0.5
+                && row >= rect.row
+                && row < rect.row + rect.height
+            {
                 return true;
             }
             // Bottom edge (horizontal split border)
-            if row == rect.row + rect.height && col >= rect.col && col < rect.col + rect.width {
+            if (row - (rect.row + rect.height)).abs() < 0.5
+                && col >= rect.col
+                && col < rect.col + rect.width
+            {
                 return true;
             }
         }
@@ -344,7 +385,10 @@ impl Editor {
         if ids.len() <= 1 {
             return;
         }
-        let current_idx = ids.iter().position(|id| *id == self.active_tile).unwrap_or(0);
+        let current_idx = ids
+            .iter()
+            .position(|id| *id == self.active_tile)
+            .unwrap_or(0);
         let next_idx = (current_idx + 1) % ids.len();
         self.switch_active_tile(ids[next_idx]);
     }
@@ -358,8 +402,18 @@ impl Editor {
         precise_row: f32,
         border_inset: u16,
     ) {
-        let screen_col = mouse.column;
-        let screen_row = mouse.row;
+        if self.handle_tile_resize_drag(mouse, precise_col, precise_row) {
+            return;
+        }
+
+        let screen_col = mouse.column as f32;
+        let screen_row = mouse.row as f32;
+
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.begin_tile_resize_drag(precise_col, precise_row, border_inset)
+        {
+            return;
+        }
 
         // Find which tile this mouse event targets
         if let Some(tile_id) = self.tile_at_screen(screen_col, screen_row) {
@@ -370,15 +424,16 @@ impl Editor {
 
             // Get tile rect and compute content area
             if let Some(rect) = self.tile_rect(tile_id) {
-                let content_col = rect.col + border_inset;
-                let content_row = rect.row + border_inset;
-                let content_width = rect.width.saturating_sub(border_inset * 2);
+                let border = border_inset as f32;
+                let content_col = (rect.col + border).round() as u16;
+                let content_row = (rect.row + border).round() as u16;
+                let content_width = (rect.width - border * 2.0).max(0.0).round() as u16;
                 let leaf = self.tile_root.find_leaf(tile_id).unwrap();
                 let show_status = leaf.show_status;
                 let content_height = if show_status {
-                    rect.height.saturating_sub(border_inset * 2 + 1) // borders + status
+                    (rect.height - border * 2.0 - 1.0).max(0.0).round() as u16 // borders + status
                 } else {
-                    rect.height.saturating_sub(border_inset * 2)
+                    (rect.height - border * 2.0).max(0.0).round() as u16
                 };
 
                 self.handle_mouse_precise(
@@ -394,35 +449,79 @@ impl Editor {
         }
     }
 
-    /// Adjust the ratio of a parent split when dragging a border.
-    pub fn resize_tile_border(&mut self, col: u16, _row: u16) {
-        // Walk through all cached rects and find the split whose border is being dragged
-        for (tile_id, rect) in &self.cached_tile_rects {
-            // Check if col is at the right edge (vertical split)
-            if col >= rect.col + rect.width.saturating_sub(1)
-                && col <= rect.col + rect.width
-            {
-                if let Some(split) = self.tile_root.find_parent_split(*tile_id) {
-                    if split.dir == SplitDir::Vertical {
-                        // Compute new ratio based on mouse position
-                        let total_width = split.a.compute_rects(Rect {
-                            row: 0, col: 0,
-                            width: rect.width, height: rect.height,
-                        }).iter().chain(
-                            split.b.compute_rects(Rect {
-                                row: 0, col: 0,
-                                width: rect.width, height: rect.height,
-                            }).iter()
-                        ).map(|(_, r)| r.width).sum::<u16>();
-                        if total_width > 0 {
-                            split.ratio = ((col as f32 - rect.col as f32) / total_width as f32)
-                                .clamp(0.1, 0.9);
-                            self.mark_needs_redraw();
-                        }
-                        return;
-                    }
-                }
+    fn begin_tile_resize_drag(
+        &mut self,
+        precise_col: f32,
+        precise_row: f32,
+        border_inset: u16,
+    ) -> bool {
+        let Some(root_area) = self.tile_root_rect() else {
+            return false;
+        };
+        let tolerance = if border_inset == 0 { 0.5 } else { 1.0 };
+        let Some(hit) =
+            self.tile_root
+                .hit_test_split_divider(root_area, precise_col, precise_row, tolerance)
+        else {
+            return false;
+        };
+        self.active_tile_resize_drag = Some(TileResizeDrag {
+            split_id: hit.split_id,
+            dir: hit.dir,
+            area: hit.area,
+        });
+        self.update_tile_split_ratio(hit.split_id, hit.dir, hit.area, precise_col, precise_row);
+        true
+    }
+
+    fn handle_tile_resize_drag(
+        &mut self,
+        mouse: MouseEvent,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some(drag) = self.active_tile_resize_drag else {
+            return false;
+        };
+
+        match mouse.kind {
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.update_tile_split_ratio(
+                    drag.split_id,
+                    drag.dir,
+                    drag.area,
+                    precise_col,
+                    precise_row,
+                );
+                true
             }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.update_tile_split_ratio(
+                    drag.split_id,
+                    drag.dir,
+                    drag.area,
+                    precise_col,
+                    precise_row,
+                );
+                self.active_tile_resize_drag = None;
+                self.last_mouse_precise = None;
+                true
+            }
+            _ => true,
+        }
+    }
+
+    fn update_tile_split_ratio(
+        &mut self,
+        split_id: TileId,
+        dir: SplitDir,
+        area: Rect,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        if let Some(split) = self.tile_root.find_split_mut(split_id) {
+            split.ratio = split_ratio_for_point(area, dir, precise_col, precise_row);
+            self.mark_needs_redraw();
         }
     }
 
@@ -544,6 +643,11 @@ impl Editor {
         self.active_leaf().widget_scroll_left
     }
 
+    /// Combined vertical scroll: widget scroll + text scroll.
+    pub fn total_scroll_top(&self) -> f32 {
+        self.widget_scroll_top() as f32 + self.active_buffer().scroll_top as f32
+    }
+
     pub fn focused_widget_id(&self) -> Option<u64> {
         self.active_leaf().focused_widget_id
     }
@@ -565,6 +669,10 @@ impl Editor {
     pub fn set_layout_viewport(&mut self, cols: u16, rows: u16) {
         self.runtime.set_layout_viewport(cols, rows);
         self.sync_layout_to_active_leaf();
+    }
+
+    pub fn set_layout_aspect(&mut self, aspect: f32) {
+        self.runtime.set_layout_aspect(aspect);
     }
 
     /// Sync the Runtime's current layout to the active tile leaf's cached_layout.
@@ -900,9 +1008,7 @@ impl Editor {
                 self.active_leaf_mut().active_widget_gesture = None;
                 if widgets_visible {
                     // Try click-to-activate on focusable widgets first
-                    if self.try_click_focusable_widget(
-                        mouse, content_col, content_row,
-                    ) {
+                    if self.try_click_focusable_widget(mouse, content_col, content_row) {
                         return;
                     }
                     if self.try_handle_widget_double_click(
@@ -911,15 +1017,15 @@ impl Editor {
                         precise_col,
                         precise_row,
                     ) {
-                        self.remember_widget_click(content_col, content_row, precise_col, precise_row);
+                        self.remember_widget_click(
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        );
                         return;
                     }
-                    self.begin_widget_gesture(
-                        content_col,
-                        content_row,
-                        precise_col,
-                        precise_row,
-                    );
+                    self.begin_widget_gesture(content_col, content_row, precise_col, precise_row);
                     if self.try_handle_widget_mouse_precise(
                         mouse,
                         content_col,
@@ -927,14 +1033,24 @@ impl Editor {
                         precise_col,
                         precise_row,
                     ) {
-                        self.remember_widget_click(content_col, content_row, precise_col, precise_row);
+                        self.remember_widget_click(
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        );
                         return;
                     }
                     if self
                         .widget_node_at_screen(precise_col, precise_row, content_col, content_row)
                         .is_some()
                     {
-                        self.remember_widget_click(content_col, content_row, precise_col, precise_row);
+                        self.remember_widget_click(
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        );
                         return;
                     }
                 }
@@ -994,13 +1110,15 @@ impl Editor {
                 self.last_mouse_precise = None;
             }
             MouseEventKind::ScrollUp => {
-                if widgets_visible && self.try_handle_widget_mouse_precise(
-                    mouse,
-                    content_col,
-                    content_row,
-                    precise_col,
-                    precise_row,
-                ) {
+                if widgets_visible
+                    && self.try_handle_widget_mouse_precise(
+                        mouse,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                {
                     return;
                 }
                 if !text_visible {
@@ -1015,31 +1133,42 @@ impl Editor {
                     if buffer.scroll_top > 0 {
                         buffer.scroll_top = buffer.scroll_top.saturating_sub(3);
                         if !buffer.read_only {
-                            buffer.cursor.0 = buffer.cursor.0.min(
-                                buffer.scroll_top + content_height.saturating_sub(1) as usize,
-                            );
+                            buffer.cursor.0 = buffer
+                                .cursor
+                                .0
+                                .min(buffer.scroll_top + content_height.saturating_sub(1) as usize);
                         }
                     }
                     self.mark_needs_redraw();
                 }
             }
             MouseEventKind::ScrollDown => {
-                if widgets_visible && self.try_handle_widget_mouse_precise(
-                    mouse,
-                    content_col,
-                    content_row,
-                    precise_col,
-                    precise_row,
-                ) {
+                if widgets_visible
+                    && self.try_handle_widget_mouse_precise(
+                        mouse,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                {
                     return;
                 }
                 if !text_visible {
                     // UI-only: scroll widget viewport, clamped to widget bounds
-                    let max_scroll = self.runtime.current_layout.as_ref()
-                        .map(|l| (l.rect.row + l.rect.height).saturating_sub(content_height))
+                    let aspect = self.runtime.layout_aspect();
+                    let max_scroll = self
+                        .runtime
+                        .current_layout
+                        .as_ref()
+                        .map(|l| {
+                            (((l.rect.row + l.rect.height) / aspect).ceil() as u16)
+                                .saturating_sub(content_height)
+                        })
                         .unwrap_or(0);
                     let leaf = self.active_leaf_mut();
-                    leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_add(3).min(max_scroll);
+                    leaf.widget_scroll_top =
+                        leaf.widget_scroll_top.saturating_add(3).min(max_scroll);
                     self.mark_needs_redraw();
                 } else if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Down);
@@ -1054,9 +1183,15 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollLeft => {
-                if !widgets_visible || !self.try_handle_widget_mouse_precise(
-                    mouse, content_col, content_row, precise_col, precise_row,
-                ) {
+                if !widgets_visible
+                    || !self.try_handle_widget_mouse_precise(
+                        mouse,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                {
                     if widgets_visible {
                         let leaf = self.active_leaf_mut();
                         leaf.widget_scroll_left = leaf.widget_scroll_left.saturating_sub(3);
@@ -1065,13 +1200,20 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollRight => {
-                if !widgets_visible || !self.try_handle_widget_mouse_precise(
-                    mouse, content_col, content_row, precise_col, precise_row,
-                ) {
+                if !widgets_visible
+                    || !self.try_handle_widget_mouse_precise(
+                        mouse,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                {
                     if widgets_visible {
                         let max_scroll = self.max_horizontal_scroll(content_width);
                         let leaf = self.active_leaf_mut();
-                        leaf.widget_scroll_left = leaf.widget_scroll_left.saturating_add(3).min(max_scroll);
+                        leaf.widget_scroll_left =
+                            leaf.widget_scroll_left.saturating_add(3).min(max_scroll);
                         self.mark_needs_redraw();
                     }
                 }
@@ -1091,14 +1233,17 @@ impl Editor {
             .as_ref()
             .map(|l| max_layout_right_edge(l) as usize)
             .unwrap_or(0);
-        // Check max text line length
-        let max_line = self
-            .active_buffer()
-            .lines
-            .iter()
-            .map(|l| l.len())
-            .max()
-            .unwrap_or(0);
+        // Include text line width only if text is visible
+        let max_line = if self.active_buffer().view_mode == ViewMode::UiOnly {
+            0
+        } else {
+            self.active_buffer()
+                .lines
+                .iter()
+                .map(|l| l.len())
+                .max()
+                .unwrap_or(0)
+        };
         let content_width = layout_width.max(max_line);
         content_width.saturating_sub(vp) as u16
     }
@@ -1114,7 +1259,13 @@ impl Editor {
         if self.active_buffer().view_mode == ViewMode::TextOnly {
             return;
         }
-        self.handle_touchpad_magnify_impl(content_col, content_row, precise_col, precise_row, delta);
+        self.handle_touchpad_magnify_impl(
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+            delta,
+        );
     }
 
     pub fn handle_touchpad_scroll(
@@ -1125,11 +1276,18 @@ impl Editor {
         precise_row: f32,
         delta_x: f32,
         delta_y: f32,
-    ) {
+    ) -> bool {
         if self.active_buffer().view_mode == ViewMode::TextOnly {
-            return;
+            return false;
         }
-        self.handle_touchpad_scroll_impl(content_col, content_row, precise_col, precise_row, delta_x, delta_y);
+        self.handle_touchpad_scroll_impl(
+            content_col,
+            content_row,
+            precise_col,
+            precise_row,
+            delta_x,
+            delta_y,
+        )
     }
 
     // ── Internal methods ─────────────────────────────────────────────────────
@@ -1552,7 +1710,9 @@ impl Editor {
 
         if let Some(line) = self.runtime.take_pending_goto_line() {
             let buffer = self.active_buffer_mut();
-            let row = line.saturating_sub(1).min(buffer.lines.len().saturating_sub(1));
+            let row = line
+                .saturating_sub(1)
+                .min(buffer.lines.len().saturating_sub(1));
             buffer.cursor = (row, 0);
         }
 
@@ -1641,10 +1801,14 @@ impl Editor {
         }
 
         if self.runtime.take_pending_cycle_view_mode() {
-            let buf = self.active_buffer_mut();
-            buf.view_mode = buf.view_mode.cycle();
-            let label = buf.view_mode.label();
-            self.minibuffer = Some(format!("view: {label}"));
+            let new_mode = self.active_buffer().view_mode.cycle();
+            self.active_buffer_mut().view_mode = new_mode;
+            self.minibuffer = Some(format!("view: {}", new_mode.label()));
+            // Reset scroll when entering UI-only mode so text scroll doesn't
+            // offset the widget viewport past its content.
+            if new_mode == ViewMode::UiOnly {
+                self.active_leaf_mut().widget_scroll_top = 0;
+            }
             self.mark_needs_redraw();
         }
 
@@ -1755,19 +1919,11 @@ impl CompletionState {
 }
 
 /// Find the rightmost edge (col + width) of any node in the layout tree.
-/// The root rect is clamped to viewport width, but children may overflow.
 fn max_layout_right_edge(node: &crate::layout::LayoutNode) -> u16 {
-    let own = node.rect.col + node.rect.width;
-    node.children
-        .iter()
-        .map(max_layout_right_edge)
-        .fold(own, u16::max)
+    crate::ui::hit::max_extent(node, 1.0).0
 }
 
-fn normalize_region(
-    a: (usize, usize),
-    b: (usize, usize),
-) -> ((usize, usize), (usize, usize)) {
+fn normalize_region(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize)) {
     if a < b { (a, b) } else { (b, a) }
 }
 
@@ -1838,6 +1994,7 @@ mod tests {
     use crate::host::HostCommand;
     use crate::mode::BufferMode;
     use crate::runtime::Runtime;
+    use crate::tile::SplitDir;
     use crate::vm::Value;
     use crossterm::event::{
         KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
