@@ -28,7 +28,7 @@ pub fn register_widget_natives(vm: &mut VM) {
     }
 }
 
-fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
+pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     let mut map = HashMap::new();
     map.insert(
         "type".to_string(),

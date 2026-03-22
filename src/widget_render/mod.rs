@@ -4,6 +4,7 @@ pub mod hslider;
 pub mod hstack;
 pub mod knob;
 pub mod label;
+pub mod sdf_widget;
 pub mod tabs;
 pub mod time_view;
 pub mod timeline;
@@ -179,6 +180,7 @@ pub struct WidgetViewport {
     pub vp_w: f32,
     pub vp_h: f32,
     pub focused_widget_id: Option<u64>,
+    pub focused_branch: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -457,9 +459,13 @@ pub fn widget_primitives_for_node(
     node: &LayoutNode,
     viewport: WidgetViewport,
 ) -> Vec<MetalPrimitive> {
-    widget_definition(&node.widget_type)
-        .map(|definition| definition.build_metal_primitives(&node.widget_type, node, viewport))
-        .unwrap_or_default()
+    if let Some(definition) = widget_definition(&node.widget_type) {
+        definition.build_metal_primitives(&node.widget_type, node, viewport)
+    } else if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
+        sdf_widget::sdf_widget_metal_primitives(&node.widget_type, node, viewport)
+    } else {
+        Vec::new()
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -482,24 +488,28 @@ fn collect_metal_primitives_recursive(
     _max_rows: u16,
     primitives: &mut Vec<MetalPrimitive>,
 ) {
+    let node_is_focused = node.focusable && viewport.focused_widget_id == Some(node.widget_id);
+    let focused_branch = viewport.focused_branch || node_is_focused;
+
     // If a container node is focused, emit a background highlight rect.
     // This renders before children (correct z-order: highlight under content).
-    if node.focusable
-        && viewport.focused_widget_id == Some(node.widget_id)
-        && is_layout_widget_type(&node.widget_type)
-    {
+    if node_is_focused && is_layout_widget_type(&node.widget_type) {
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: node.rect,
-            color: crate::theme::STATUS_BG(),
+            color: crate::theme::WIDGET_FOCUS_BG(),
         }));
     }
 
     // No scroll adjustment or clipping here — the Metal backend applies
     // scroll offsets via offset_primitive and clips via scissor rects.
-    primitives.extend(widget_primitives_for_node(node, viewport));
+    let node_viewport = WidgetViewport {
+        focused_branch,
+        ..viewport
+    };
+    primitives.extend(widget_primitives_for_node(node, node_viewport));
 
     for child in &node.children {
-        collect_metal_primitives_recursive(child, viewport, _scroll_top, _max_rows, primitives);
+        collect_metal_primitives_recursive(child, node_viewport, _scroll_top, _max_rows, primitives);
     }
 }
 

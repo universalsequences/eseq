@@ -1427,6 +1427,12 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollLeft => {
+                if self.active_buffer().view_mode == ViewMode::TextOnly {
+                    let leaf = self.active_leaf_mut();
+                    leaf.widget_scroll_left = leaf.widget_scroll_left.saturating_sub(3);
+                    self.mark_needs_redraw();
+                    return;
+                }
                 if !widgets_visible
                     || !self.try_handle_widget_mouse_precise(
                         mouse,
@@ -1444,6 +1450,13 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollRight => {
+                if let Some(max_scroll) = self.max_text_horizontal_scroll(content_width) {
+                    let leaf = self.active_leaf_mut();
+                    leaf.widget_scroll_left =
+                        leaf.widget_scroll_left.saturating_add(3).min(max_scroll);
+                    self.mark_needs_redraw();
+                    return;
+                }
                 if !widgets_visible
                     || !self.try_handle_widget_mouse_precise(
                         mouse,
@@ -1464,6 +1477,44 @@ impl Editor {
             }
             _ => {}
         }
+    }
+
+    fn max_text_horizontal_scroll(&self, viewport_width: u16) -> Option<u16> {
+        if self.active_buffer().view_mode != ViewMode::TextOnly {
+            return None;
+        }
+        let line_width = self
+            .active_buffer()
+            .lines
+            .get(self.active_buffer().cursor.0)
+            .map(|line| line.chars().count())
+            .unwrap_or(0);
+        let max_scroll = line_width.saturating_sub(viewport_width as usize) as u16;
+        (max_scroll > 0).then_some(max_scroll)
+    }
+
+    pub fn sync_text_horizontal_scroll(&mut self, viewport_width: u16) {
+        let Some(max_scroll) = self.max_text_horizontal_scroll(viewport_width) else {
+            if self.active_buffer().view_mode == ViewMode::TextOnly {
+                self.active_leaf_mut().widget_scroll_left = 0;
+            }
+            return;
+        };
+
+        let cursor_col = self.active_buffer().cursor.1;
+        let viewport_width = viewport_width as usize;
+        let leaf = self.active_leaf_mut();
+        let scroll_left = leaf.widget_scroll_left as usize;
+
+        let next_scroll = if cursor_col < scroll_left {
+            cursor_col
+        } else if cursor_col >= scroll_left + viewport_width {
+            cursor_col.saturating_sub(viewport_width.saturating_sub(1))
+        } else {
+            scroll_left
+        };
+
+        leaf.widget_scroll_left = next_scroll.min(max_scroll as usize) as u16;
     }
 
     /// Maximum horizontal scroll: how far right content extends past the viewport.
@@ -1999,40 +2050,60 @@ impl Editor {
         }
         self.completion = None;
 
-        // ── Process tiling operations ────────────────────────────────────────
-        if self.runtime.take_pending_split_right() {
-            // Create a new tile showing the *scratch* buffer (or first available)
-            let new_buf_idx = self.find_or_create_scratch_buffer();
-            self.split_active_tile(SplitDir::Vertical, new_buf_idx);
-        }
-
-        if self.runtime.take_pending_split_below() {
-            let new_buf_idx = self.find_or_create_scratch_buffer();
-            self.split_active_tile(SplitDir::Horizontal, new_buf_idx);
-        }
-
-        if self.runtime.take_pending_delete_window() {
-            if !self.delete_active_tile() {
-                self.minibuffer = Some("Cannot delete the only window".to_string());
+        // ── Create scratch buffers (without switching) ──────────────────────
+        for (name, text) in self.runtime.take_pending_scratch_buffers() {
+            if let Some(buf) = self.buffers.iter_mut().find(|b| b.name == name) {
+                buf.set_text(&text);
+            } else {
+                let id = self.alloc_buffer_id();
+                let mut buffer = Buffer::new(id, &name);
+                buffer.set_text(&text);
+                self.buffers.push(buffer);
             }
         }
 
-        if self.runtime.take_pending_delete_other_windows() {
-            self.delete_other_tiles();
-        }
-
-        if self.runtime.take_pending_other_window() {
-            self.cycle_active_tile();
-        }
-
-        if let Some(name) = self.runtime.take_pending_set_window_buffer() {
-            if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
-                self.save_current_widget_tree();
-                self.active_leaf_mut().buffer_idx = idx;
-                self.sync_runtime_context();
-                self.restore_buffer_widget_tree();
-            } else {
-                self.minibuffer = Some(format!("No buffer named '{name}'"));
+        // ── Process tiling operations (in order enqueued) ─────────────────────
+        for op in self.runtime.take_pending_tile_ops() {
+            match op {
+                crate::runtime::TileOp::SplitRight(buf_name) => {
+                    let new_buf_idx = match buf_name {
+                        Some(ref name) if !name.is_empty() => self
+                            .buffers.iter().position(|b| b.name == *name)
+                            .unwrap_or_else(|| self.find_or_create_scratch_buffer()),
+                        _ => self.find_or_create_scratch_buffer(),
+                    };
+                    self.split_active_tile(SplitDir::Vertical, new_buf_idx);
+                }
+                crate::runtime::TileOp::SplitBelow(buf_name) => {
+                    let new_buf_idx = match buf_name {
+                        Some(ref name) if !name.is_empty() => self
+                            .buffers.iter().position(|b| b.name == *name)
+                            .unwrap_or_else(|| self.find_or_create_scratch_buffer()),
+                        _ => self.find_or_create_scratch_buffer(),
+                    };
+                    self.split_active_tile(SplitDir::Horizontal, new_buf_idx);
+                }
+                crate::runtime::TileOp::DeleteWindow => {
+                    if !self.delete_active_tile() {
+                        self.minibuffer = Some("Cannot delete the only window".to_string());
+                    }
+                }
+                crate::runtime::TileOp::DeleteOtherWindows => {
+                    self.delete_other_tiles();
+                }
+                crate::runtime::TileOp::OtherWindow => {
+                    self.cycle_active_tile();
+                }
+                crate::runtime::TileOp::SetWindowBuffer(name) => {
+                    if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+                        self.save_current_widget_tree();
+                        self.active_leaf_mut().buffer_idx = idx;
+                        self.sync_runtime_context();
+                        self.restore_buffer_widget_tree();
+                    } else {
+                        self.minibuffer = Some(format!("No buffer named '{name}'"));
+                    }
+                }
             }
         }
 

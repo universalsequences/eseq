@@ -17,6 +17,16 @@ use crate::widgets::register_widget_natives;
 pub type RuntimeError = String;
 pub type NativeResult = Result<Value, RuntimeError>;
 
+#[derive(Debug, Clone)]
+pub enum TileOp {
+    SplitRight(Option<String>),
+    SplitBelow(Option<String>),
+    DeleteWindow,
+    DeleteOtherWindows,
+    OtherWindow,
+    SetWindowBuffer(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolMetadata {
     pub signature: String,
@@ -55,17 +65,14 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_cycle_view_mode: bool,
     pub pending_set_view_mode: Option<String>,
     pub current_view_mode: String,
-    // Tiling operations
-    pub pending_split_right: bool,
-    pub pending_split_below: bool,
-    pub pending_delete_window: bool,
-    pub pending_delete_other_windows: bool,
-    pub pending_other_window: bool,
-    pub pending_set_window_buffer: Option<String>,
+    // Tiling operations — processed in order enqueued
+    pub pending_tile_ops: Vec<TileOp>,
     pub pending_window_hide_status: bool,
     pub pending_resize_window: Option<f64>,
     /// Theme map to apply (from `apply-theme` native).
     pub pending_apply_theme: Option<Value>,
+    /// Scratch buffers to create with initial text (name, text).
+    pub pending_scratch_buffers: Vec<(String, String)>,
 }
 
 pub(crate) type SharedBridgeState = Rc<RefCell<RuntimeBridgeState>>;
@@ -161,6 +168,10 @@ impl NativeContext {
         self.shared.borrow_mut().pending_create_buffer = Some(name);
     }
 
+    pub fn create_scratch(&mut self, name: String, text: String) {
+        self.shared.borrow_mut().pending_scratch_buffers.push((name, text));
+    }
+
     pub fn switch_to_buffer(&mut self, name: String) {
         self.shared.borrow_mut().pending_switch_buffer = Some(name);
     }
@@ -195,28 +206,28 @@ impl NativeContext {
 
     // ── Tiling operations ─────────────────────────────────────────────────
 
-    pub fn split_window_right(&mut self) {
-        self.shared.borrow_mut().pending_split_right = true;
+    pub fn split_window_right(&mut self, buffer_name: Option<String>) {
+        self.shared.borrow_mut().pending_tile_ops.push(TileOp::SplitRight(buffer_name));
     }
 
-    pub fn split_window_below(&mut self) {
-        self.shared.borrow_mut().pending_split_below = true;
+    pub fn split_window_below(&mut self, buffer_name: Option<String>) {
+        self.shared.borrow_mut().pending_tile_ops.push(TileOp::SplitBelow(buffer_name));
     }
 
     pub fn delete_window(&mut self) {
-        self.shared.borrow_mut().pending_delete_window = true;
+        self.shared.borrow_mut().pending_tile_ops.push(TileOp::DeleteWindow);
     }
 
     pub fn delete_other_windows(&mut self) {
-        self.shared.borrow_mut().pending_delete_other_windows = true;
+        self.shared.borrow_mut().pending_tile_ops.push(TileOp::DeleteOtherWindows);
     }
 
     pub fn other_window(&mut self) {
-        self.shared.borrow_mut().pending_other_window = true;
+        self.shared.borrow_mut().pending_tile_ops.push(TileOp::OtherWindow);
     }
 
     pub fn set_window_buffer(&mut self, name: String) {
-        self.shared.borrow_mut().pending_set_window_buffer = Some(name);
+        self.shared.borrow_mut().pending_tile_ops.push(TileOp::SetWindowBuffer(name));
     }
 
     pub fn window_hide_status(&mut self) {
@@ -276,6 +287,7 @@ impl Runtime {
         let shared = Rc::new(RefCell::new(RuntimeBridgeState::default()));
         let mut vm = VM::new(vec![]);
         register_core_natives(&mut vm);
+        crate::vm::register_math_natives(&mut vm);
         register_widget_natives(&mut vm);
         let mut runtime = Self {
             vm,
@@ -300,6 +312,109 @@ impl Runtime {
         runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
         crate::theme::set_current(crate::theme::default_theme());
         register_audio_natives(&mut runtime);
+        // Load SDF standard library (macros for SDF primitives)
+        let sdf_src = include_str!("../sdf-stdlib.lisp");
+        if !sdf_src.trim().is_empty() {
+            let _ = runtime.eval_str(sdf_src);
+        }
+        // Register sdf->metal: takes a quoted SDF expression, returns Metal shader string
+        let sdf_macros = runtime.vm.macros.clone();
+        runtime.vm.register_native("sdf->metal", move |args| {
+            use crate::lang::sdf_codegen::value_to_expression;
+            let Some(val) = args.first() else {
+                return Value::String("error: sdf->metal requires 1 argument".into());
+            };
+            let expr = match value_to_expression(val) {
+                Ok(e) => e,
+                Err(e) => return Value::String(format!("error: {}", e)),
+            };
+            // Expand macros
+            let compiler = crate::compiler::Compiler::new_repl(
+                vec![], vec![], vec![],
+                std::collections::HashSet::new(),
+                HashMap::new(),
+                HashMap::new(),
+                0,
+                sdf_macros.clone(),
+            );
+            let expanded = compiler.expand_macros(&expr, 0);
+            match crate::lang::sdf_codegen::compile_sdf_to_metal(&expanded) {
+                Ok(output) => Value::String(output.shader_source),
+                Err(e) => Value::String(format!("error: {}", e)),
+            }
+        });
+        // Register defwidget: defines a new SDF widget type
+        let dw_macros = runtime.vm.macros.clone();
+        runtime.vm.register_native("defwidget", move |args| {
+            use crate::lang::sdf_codegen::{compile_sdf_to_metal, value_to_expression};
+            use crate::widget_render::sdf_widget::{SdfWidgetDef, register_sdf_widget};
+
+            // Parse: (defwidget name :width W :height H :shader '(sdf/layer ...))
+            let name = match args.first() {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Symbol(s)) => s.clone(),
+                _ => return Value::String("defwidget: first arg must be widget name".into()),
+            };
+
+            let mut width: f32 = 10.0;
+            let mut height: f32 = 5.0;
+            let mut shader_val = None;
+
+            let mut i = 1;
+            while i + 1 < args.len() {
+                if let Value::Keyword(key) = &args[i] {
+                    match key.as_str() {
+                        "width" => {
+                            if let Value::Number(n) = &args[i + 1] { width = *n as f32; }
+                        }
+                        "height" => {
+                            if let Value::Number(n) = &args[i + 1] { height = *n as f32; }
+                        }
+                        "shader" => {
+                            shader_val = Some(args[i + 1].clone());
+                        }
+                        _ => {}
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+
+            let Some(shader_val) = shader_val else {
+                return Value::String("defwidget: :shader is required".into());
+            };
+
+            // Convert quoted Value to Expression, expand macros, codegen
+            let expr = match value_to_expression(&shader_val) {
+                Ok(e) => e,
+                Err(e) => return Value::String(format!("defwidget: {}", e)),
+            };
+            let compiler = crate::compiler::Compiler::new_repl(
+                vec![], vec![], vec![],
+                std::collections::HashSet::new(),
+                HashMap::new(),
+                HashMap::new(),
+                0,
+                dw_macros.clone(),
+            );
+            let expanded = compiler.expand_macros(&expr, 0);
+            let output = match compile_sdf_to_metal(&expanded) {
+                Ok(o) => o,
+                Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
+            };
+
+            register_sdf_widget(SdfWidgetDef {
+                name: name.clone(),
+                shader_source: output.shader_source,
+                region_count: output.region_count,
+                width,
+                height,
+            });
+
+            // Return the name so the caller can register the native widget builder
+            Value::Keyword(name.clone())
+        });
         runtime
     }
 
@@ -358,19 +473,69 @@ impl Runtime {
         self.invalidate_symbol_cache();
     }
 
+    pub fn macros(&self) -> &std::collections::HashMap<String, crate::compiler::MacroDef> {
+        &self.vm.macros
+    }
+
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_owner(current_buffer_id);
         if src.contains("(effect") {
             self.clear_layout_effects();
         }
+
+        // If source contains defwidget, process each expression individually
+        // so that widget natives are registered before subsequent expressions.
+        if src.contains("defwidget") {
+            return self.eval_str_per_expression(src);
+        }
+
         let result = self.vm.eval_str(src);
         if result.is_ok() {
             self.sync_theme_from_vm();
+            self.sync_sdf_widget_natives();
             self.invalidate_symbol_cache();
             self.flush_widget_trees();
         }
         result
+    }
+
+    fn eval_str_per_expression(
+        &mut self,
+        src: &str,
+    ) -> Result<Option<Value>, crate::vm::VMError> {
+        use crate::parser::{ASTParser, Parser};
+        let tokens = Parser::new(src.to_string())
+            .parse()
+            .map_err(|_| crate::vm::VMError::ParseError)?;
+        let exprs = ASTParser::new(tokens)
+            .parse()
+            .map_err(|_| crate::vm::VMError::ParseError)?;
+
+        let mut last_result = None;
+        for expr in &exprs {
+            let expr_src = crate::parser::format_expression(expr);
+            let result = self.vm.eval_str(&expr_src)?;
+            self.sync_sdf_widget_natives();
+            last_result = result;
+        }
+        self.sync_theme_from_vm();
+        self.invalidate_symbol_cache();
+        self.flush_widget_trees();
+        Ok(last_result)
+    }
+
+    /// Register native builder functions for any SDF widgets that don't have one yet.
+    fn sync_sdf_widget_natives(&mut self) {
+        use crate::widget_render::sdf_widget;
+        for name in sdf_widget::sdf_widget_names() {
+            if self.vm.has_global(&name) {
+                continue;
+            }
+            let widget_type = name.clone();
+            self.vm
+                .register_native(&name, move |args| crate::widgets::build_widget(&widget_type, args));
+        }
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
@@ -616,6 +781,10 @@ impl Runtime {
         self.shared.borrow_mut().pending_create_buffer.take()
     }
 
+    pub(crate) fn take_pending_scratch_buffers(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_scratch_buffers)
+    }
+
     pub(crate) fn take_pending_switch_buffer(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_switch_buffer.take()
     }
@@ -634,43 +803,8 @@ impl Runtime {
 
     // ── Tiling pending operations ──────────────────────────────────────────
 
-    pub(crate) fn take_pending_split_right(&mut self) -> bool {
-        let mut shared = self.shared.borrow_mut();
-        let v = shared.pending_split_right;
-        shared.pending_split_right = false;
-        v
-    }
-
-    pub(crate) fn take_pending_split_below(&mut self) -> bool {
-        let mut shared = self.shared.borrow_mut();
-        let v = shared.pending_split_below;
-        shared.pending_split_below = false;
-        v
-    }
-
-    pub(crate) fn take_pending_delete_window(&mut self) -> bool {
-        let mut shared = self.shared.borrow_mut();
-        let v = shared.pending_delete_window;
-        shared.pending_delete_window = false;
-        v
-    }
-
-    pub(crate) fn take_pending_delete_other_windows(&mut self) -> bool {
-        let mut shared = self.shared.borrow_mut();
-        let v = shared.pending_delete_other_windows;
-        shared.pending_delete_other_windows = false;
-        v
-    }
-
-    pub(crate) fn take_pending_other_window(&mut self) -> bool {
-        let mut shared = self.shared.borrow_mut();
-        let v = shared.pending_other_window;
-        shared.pending_other_window = false;
-        v
-    }
-
-    pub(crate) fn take_pending_set_window_buffer(&mut self) -> Option<String> {
-        self.shared.borrow_mut().pending_set_window_buffer.take()
+    pub(crate) fn take_pending_tile_ops(&mut self) -> Vec<TileOp> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_tile_ops)
     }
 
     pub(crate) fn take_pending_window_hide_status(&mut self) -> bool {

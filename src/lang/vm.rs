@@ -1,4 +1,4 @@
-use crate::compiler::{Chunk, Compiler, OpCode};
+use crate::compiler::{Chunk, Compiler, MacroDef, OpCode};
 use crate::host::BufferId;
 use crate::parser::{ASTParser, Parser};
 use std::cell::RefCell;
@@ -279,6 +279,7 @@ pub struct VM {
     execution_depth: usize,
     processing_reactive: bool,
     current_effect_owner: Option<BufferId>,
+    pub macros: HashMap<String, MacroDef>,
 }
 
 /// Register built-in functions available in all contexts.
@@ -669,6 +670,120 @@ pub fn register_core_natives(vm: &mut VM) {
     });
 }
 
+/// Register math intrinsics needed for SDF and general numeric work.
+pub fn register_math_natives(vm: &mut VM) {
+    // Single-arg f64 functions
+    macro_rules! math1 {
+        ($name:expr, $op:expr) => {
+            vm.register_native($name, |args| {
+                if let Some(Value::Number(x)) = args.first() {
+                    Value::Number($op(*x))
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            });
+        };
+    }
+    math1!("abs", f64::abs);
+    math1!("sqrt", f64::sqrt);
+    math1!("sin", f64::sin);
+    math1!("cos", f64::cos);
+    math1!("floor", f64::floor);
+    math1!("ceil", f64::ceil);
+    math1!("round", f64::round);
+    math1!("fract", f64::fract);
+
+    macro_rules! math2 {
+        ($name:expr, $op:expr) => {
+            vm.register_native($name, |args| {
+                if let (Some(Value::Number(a)), Some(Value::Number(b))) =
+                    (args.first(), args.get(1))
+                {
+                    Value::Number($op(*a, *b))
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            });
+        };
+    }
+    math2!("pow", f64::powf);
+    math2!("atan2", f64::atan2);
+    math2!("mod", |a: f64, b: f64| a % b);
+
+    macro_rules! math3 {
+        ($name:expr, $op:expr) => {
+            vm.register_native($name, |args| {
+                if let (Some(Value::Number(a)), Some(Value::Number(b)), Some(Value::Number(c))) =
+                    (args.first(), args.get(1), args.get(2))
+                {
+                    Value::Number($op(*a, *b, *c))
+                } else {
+                    Value::Number(f64::NAN)
+                }
+            });
+        };
+    }
+    math3!("clamp", |v: f64, lo: f64, hi: f64| {
+        if lo.is_nan() || hi.is_nan() || lo > hi {
+            f64::NAN
+        } else {
+            v.clamp(lo, hi)
+        }
+    });
+    math3!("mix", |a: f64, b: f64, t: f64| a + (b - a) * t);
+    math3!("smoothstep", |e0: f64, e1: f64, x: f64| {
+        let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    });
+
+    // Vec2 operations (represented as 2-element List)
+    vm.register_native("vec2", |args| {
+        let x = match args.first() {
+            Some(Value::Number(n)) => *n,
+            _ => 0.0,
+        };
+        let y = match args.get(1) {
+            Some(Value::Number(n)) => *n,
+            _ => 0.0,
+        };
+        Value::List(vec![
+            Rc::new(RefCell::new(Value::Number(x))),
+            Rc::new(RefCell::new(Value::Number(y))),
+        ])
+    });
+
+    fn extract_f64(val: &Rc<RefCell<Value>>) -> f64 {
+        match &*val.borrow() {
+            Value::Number(n) => *n,
+            _ => f64::NAN,
+        }
+    }
+
+    vm.register_native("length", |args| {
+        if let Some(Value::List(items)) = args.first() {
+            if items.len() == 2 {
+                let x = extract_f64(&items[0]);
+                let y = extract_f64(&items[1]);
+                return Value::Number((x * x + y * y).sqrt());
+            }
+        }
+        Value::Number(f64::NAN)
+    });
+
+    vm.register_native("dot", |args| {
+        if let (Some(Value::List(a)), Some(Value::List(b))) = (args.first(), args.get(1)) {
+            if a.len() == 2 && b.len() == 2 {
+                let ax = extract_f64(&a[0]);
+                let ay = extract_f64(&a[1]);
+                let bx = extract_f64(&b[0]);
+                let by = extract_f64(&b[1]);
+                return Value::Number(ax * bx + ay * by);
+            }
+        }
+        Value::Number(f64::NAN)
+    });
+}
+
 impl ReactiveDag {
     pub fn new() -> Self {
         Self {
@@ -892,6 +1007,7 @@ impl VM {
             execution_depth: 0,
             processing_reactive: false,
             current_effect_owner: None,
+            macros: HashMap::new(),
         }
     }
 
@@ -926,6 +1042,7 @@ impl VM {
         let state_bindings = self.state_bindings.clone();
         let next_node_id = self.dag.next_id;
 
+        let macros = self.macros.clone();
         let mut compiler = Compiler::new_repl(
             exprs,
             existing,
@@ -934,6 +1051,7 @@ impl VM {
             derived_bindings,
             state_bindings,
             next_node_id,
+            macros,
         );
         match compiler.compile() {
             Ok(chunks) => {
@@ -942,6 +1060,10 @@ impl VM {
                 self.derived_bindings = compiler.derived_bindings();
                 self.state_bindings = compiler.state_bindings();
                 self.dag.next_id = compiler.next_node_id();
+                // Merge any new macro definitions back into the VM
+                for (name, def) in compiler.macros() {
+                    self.macros.insert(name.clone(), def.clone());
+                }
                 self.execute_from(entry_idx)
             }
             Err(_) => Err(VMError::CompileError),
@@ -955,6 +1077,10 @@ impl VM {
         let idx = self.global_names.len();
         self.global_names.push(name.to_string());
         idx
+    }
+
+    pub fn has_global(&self, name: &str) -> bool {
+        self.global_names.iter().any(|n| n == name)
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {

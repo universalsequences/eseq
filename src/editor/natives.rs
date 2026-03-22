@@ -510,24 +510,49 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         },
     );
 
+    runtime.register_native_with_docs(
+        "create-scratch",
+        "(create-scratch name text)",
+        "Create a scratch buffer with the given name and text. Does not switch to it.",
+        |args, ctx| {
+            let Some(Value::String(name)) = args.first() else {
+                return Err("create-scratch expects (name text)".to_string());
+            };
+            let text = match args.get(1) {
+                Some(Value::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            ctx.create_scratch(name.clone(), text);
+            Ok(Value::Bool(true))
+        },
+    );
+
     // ── Tiling / window management ──────────────────────────────────────────
 
     runtime.register_native_with_docs(
         "split-window-right",
-        "(split-window-right)",
-        "Split the current window vertically (C-x 3). The new tile appears to the right.",
-        |_args, ctx| {
-            ctx.split_window_right();
+        "(split-window-right &optional buffer-name)",
+        "Split the current window vertically. Optionally show a specific buffer in the new tile.",
+        |args, ctx| {
+            let name = match args.first() {
+                Some(Value::String(s)) => Some(s.clone()),
+                _ => None,
+            };
+            ctx.split_window_right(name);
             Ok(Value::Bool(true))
         },
     );
 
     runtime.register_native_with_docs(
         "split-window-below",
-        "(split-window-below)",
-        "Split the current window horizontally (C-x 2). The new tile appears below.",
-        |_args, ctx| {
-            ctx.split_window_below();
+        "(split-window-below &optional buffer-name)",
+        "Split the current window horizontally. Optionally show a specific buffer in the new tile.",
+        |args, ctx| {
+            let name = match args.first() {
+                Some(Value::String(s)) => Some(s.clone()),
+                _ => None,
+            };
+            ctx.split_window_below(name);
             Ok(Value::Bool(true))
         },
     );

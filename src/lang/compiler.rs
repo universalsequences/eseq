@@ -82,6 +82,12 @@ pub enum OpCode {
     PushNil,
 }
 
+#[derive(Debug, Clone)]
+pub struct MacroDef {
+    pub params: Vec<String>,
+    pub body: Expression,
+}
+
 pub struct Compiler {
     expressions: Vec<Expression>,
     chunks: Vec<Chunk>,
@@ -93,6 +99,7 @@ pub struct Compiler {
     state_bindings: HashMap<String, u32>,
     next_node_id: u32,
     next_temp_id: u32,
+    pub macros: HashMap<String, MacroDef>,
 }
 
 fn is_widget_name(name: &str) -> bool {
@@ -207,6 +214,7 @@ impl Compiler {
             state_bindings: HashMap::new(),
             next_node_id: 0,
             next_temp_id: 0,
+            macros: HashMap::new(),
         }
     }
 
@@ -220,6 +228,7 @@ impl Compiler {
         derived_bindings: HashMap<String, u32>,
         state_bindings: HashMap<String, u32>,
         next_node_id: u32,
+        macros: HashMap<String, MacroDef>,
     ) -> Self {
         Compiler {
             expressions,
@@ -232,13 +241,90 @@ impl Compiler {
             state_bindings,
             next_node_id,
             next_temp_id: 0,
+            macros,
         }
+    }
+
+    pub fn macros(&self) -> &HashMap<String, MacroDef> {
+        &self.macros
     }
 
     fn alloc_temp_symbol(&mut self, prefix: &str) -> String {
         let symbol = format!("__eseq_{}_{}", prefix, self.next_temp_id);
         self.next_temp_id += 1;
         symbol
+    }
+
+    pub fn expand_macros(&self, expr: &Expression, depth: usize) -> Expression {
+        if depth > 100 {
+            return expr.clone();
+        }
+        match expr {
+            Expression::List(items) if !items.is_empty() => {
+                if let Expression::Symbol(name) = &items[0] {
+                    if let Some(mac) = self.macros.get(name) {
+                        if items.len() - 1 == mac.params.len() {
+                            // Build parameter bindings: expand macro args first
+                            let mut bindings = HashMap::new();
+                            for (param, arg) in mac.params.iter().zip(items.iter().skip(1)) {
+                                bindings.insert(param.clone(), self.expand_macros(arg, depth + 1));
+                            }
+                            let expanded = Self::expand_quasiquote(&mac.body, &bindings);
+                            return self.expand_macros(&expanded, depth + 1);
+                        }
+                    }
+                }
+                // Not a macro call — recursively expand children
+                Expression::List(
+                    items
+                        .iter()
+                        .map(|item| self.expand_macros(item, depth + 1))
+                        .collect(),
+                )
+            }
+            _ => expr.clone(),
+        }
+    }
+
+    fn expand_quasiquote(
+        expr: &Expression,
+        bindings: &HashMap<String, Expression>,
+    ) -> Expression {
+        match expr {
+            Expression::Quasiquote(inner) => {
+                Self::expand_quasiquote_inner(inner, bindings)
+            }
+            // If the macro body isn't quasiquoted, just return it as-is
+            _ => expr.clone(),
+        }
+    }
+
+    fn expand_quasiquote_inner(
+        expr: &Expression,
+        bindings: &HashMap<String, Expression>,
+    ) -> Expression {
+        match expr {
+            Expression::Unquote(inner) => {
+                // Substitute if the unquoted expression is a bound parameter
+                if let Expression::Symbol(name) = inner.as_ref() {
+                    if let Some(replacement) = bindings.get(name) {
+                        return replacement.clone();
+                    }
+                }
+                // Not a bound parameter — return inner as-is
+                *inner.clone()
+            }
+            Expression::List(items) => {
+                Expression::List(
+                    items
+                        .iter()
+                        .map(|item| Self::expand_quasiquote_inner(item, bindings))
+                        .collect(),
+                )
+            }
+            // Everything else inside quasiquote is literal
+            _ => expr.clone(),
+        }
     }
 
     fn desugar_pattern_binding(
@@ -384,6 +470,12 @@ impl Compiler {
             Expression::String(s) => {
                 let str_idx = self.use_string_constant(s);
                 self.emit(OpCode::PushStr(str_idx));
+            }
+            Expression::Quasiquote(inner) => {
+                self.compile_quoted_expression(inner)?;
+            }
+            Expression::Unquote(inner) => {
+                self.compile_quoted_expression(inner)?;
             }
         }
 
@@ -535,6 +627,7 @@ impl Compiler {
                 Err(CompilerError::InvalidArg)
             }
             Expression::QuoteSymbol(_) | Expression::QuoteList(_) => Err(CompilerError::InvalidArg),
+            Expression::Quasiquote(_) | Expression::Unquote(_) => Err(CompilerError::InvalidArg),
         }?;
 
         Ok(())
@@ -1156,6 +1249,15 @@ impl Compiler {
     }
 
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
+        // Macro expansion: if the head is a macro name, expand and compile the result
+        if let Some(Expression::Symbol(name)) = list.first() {
+            if self.macros.contains_key(name) {
+                let call_expr = Expression::List(list.to_vec());
+                let expanded = self.expand_macros(&call_expr, 0);
+                return self.compile_expression(&expanded);
+            }
+        }
+
         if let Some(Expression::Symbol(widget_name)) = list.first()
             && is_widget_name(widget_name)
             && list
@@ -1236,6 +1338,65 @@ impl Compiler {
         }
 
         if let Some(Expression::Symbol(s)) = list.first() {
+            if s == "defmacro" && list.len() == 4 {
+                let Expression::Symbol(name) = &list[1] else {
+                    return Err(CompilerError::InvalidArg);
+                };
+                let Expression::List(params_expr) = &list[2] else {
+                    return Err(CompilerError::InvalidArg);
+                };
+                let params: Vec<String> = params_expr
+                    .iter()
+                    .map(|p| match p {
+                        Expression::Symbol(s) => Ok(s.clone()),
+                        _ => Err(CompilerError::InvalidArg),
+                    })
+                    .collect::<Result<_, _>>()?;
+                self.macros.insert(
+                    name.clone(),
+                    MacroDef {
+                        params,
+                        body: list[3].clone(),
+                    },
+                );
+                self.emit(OpCode::PushNil);
+                return Ok(());
+            }
+            if s == "defwidget" && list.len() >= 4 {
+                // (defwidget name :key val ... :shader (sdf/layer ...))
+                // Compile as a call to the "defwidget" native, but:
+                // 1. Convert the name symbol to a string
+                // 2. Auto-quote the :shader value so it's not evaluated
+                let Expression::Symbol(widget_name) = &list[1] else {
+                    return Err(CompilerError::InvalidArg);
+                };
+                let name_str = self.use_string_constant(widget_name);
+                self.emit(OpCode::PushStr(name_str));
+                let mut i = 2;
+                let mut arity = 1; // name is first arg
+                while i < list.len() {
+                    if let Expression::Keyword(key) = &list[i] {
+                        let idx = self.use_string_constant(key);
+                        self.emit(OpCode::PushKeyword(idx));
+                        arity += 1;
+                        if key == "shader" && i + 1 < list.len() {
+                            // Auto-quote the shader expression
+                            self.compile_quoted_expression(&list[i + 1])?;
+                        } else if i + 1 < list.len() {
+                            self.compile_expression(&list[i + 1])?;
+                        }
+                        arity += 1;
+                        i += 2;
+                    } else {
+                        self.compile_expression(&list[i])?;
+                        arity += 1;
+                        i += 1;
+                    }
+                }
+                self.emit_symbol_load("defwidget");
+                self.emit(OpCode::Call(arity));
+                return Ok(());
+            }
             if s == "do" {
                 return self.compile_block(&list[1..]);
             }
@@ -1297,6 +1458,9 @@ impl Compiler {
                             self.compile_quoted_expression(item)?;
                         }
                         self.emit(OpCode::MakeList(items.len()));
+                    }
+                    Expression::Quasiquote(_) | Expression::Unquote(_) => {
+                        self.compile_expression(elem)?;
                     }
                 }
             }
@@ -1393,6 +1557,14 @@ impl Compiler {
                     self.compile_quoted_expression(item)?;
                 }
                 self.emit(OpCode::MakeList(items.len()));
+            }
+            Expression::Quasiquote(inner) => {
+                // Outside of macro context, quasiquote behaves like quote
+                self.compile_quoted_expression(inner)?;
+            }
+            Expression::Unquote(_) => {
+                // Unquote outside quasiquote is an error
+                return Err(CompilerError::InvalidArg);
             }
         }
 

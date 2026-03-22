@@ -2276,6 +2276,59 @@ fn set_view_mode_supports_both_as_secondary_mode() {
     }
 
     #[test]
+    fn text_only_horizontal_scroll_requires_current_line_overflow() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "short\n01234567890123456789");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollRight, 10, 2),
+            1,
+            1,
+            10,
+            8,
+        );
+        assert_eq!(editor.widget_scroll_left(), 0);
+
+        editor.active_buffer_mut().cursor = (1, 0);
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollRight, 10, 2),
+            1,
+            1,
+            10,
+            8,
+        );
+
+        assert_eq!(editor.widget_scroll_left(), 3);
+    }
+
+    #[test]
+    fn text_only_horizontal_scroll_resets_when_cursor_moves_to_fitting_line() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "short\n01234567890123456789");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.active_buffer_mut().cursor = (1, 12);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollRight, 10, 2),
+            1,
+            1,
+            10,
+            8,
+        );
+        assert_eq!(editor.widget_scroll_left(), 3);
+
+        editor.active_buffer_mut().cursor = (0, 0);
+        let frame = crate::frame::build_render_frame(&mut editor, 10, 8);
+
+        assert_eq!(editor.widget_scroll_left(), 0);
+        assert_eq!(frame.widget_scroll_left, 0);
+    }
+
+    #[test]
     fn focused_timeline_right_arrow_emits_nudge_selection_action() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -2484,4 +2537,339 @@ fn set_view_mode_supports_both_as_secondary_mode() {
         );
         assert_eq!(super::get_map_field_number(&action, "start"), Some(5.0));
         assert_eq!(super::get_map_field_number(&action, "end"), Some(6.0));
+    }
+
+    // ── defmacro tests ────────────────────────────────────────────────────
+
+    fn eval_number(runtime: &mut Runtime, src: &str) -> f64 {
+        match runtime.eval_str(src).unwrap().unwrap() {
+            Value::Number(n) => n,
+            other => panic!("expected Number, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn macro_basic_expansion() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro double (x) `(+ ,x ,x))").unwrap();
+        assert_eq!(eval_number(&mut rt, "(double 5)"), 10.0);
+    }
+
+    #[test]
+    fn macro_nested_arg_expression() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro double (x) `(+ ,x ,x))").unwrap();
+        assert_eq!(eval_number(&mut rt, "(double (+ 1 2))"), 6.0);
+    }
+
+    #[test]
+    fn macro_multiple_params() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro add3 (a b c) `(+ ,a ,b ,c))").unwrap();
+        assert_eq!(eval_number(&mut rt, "(add3 1 2 3)"), 6.0);
+    }
+
+    #[test]
+    fn macro_expanding_to_let() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro with-ten (body) `(let ((x 10)) ,body))").unwrap();
+        assert_eq!(eval_number(&mut rt, "(with-ten (+ x 1))"), 11.0);
+    }
+
+    #[test]
+    fn macro_using_macro() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro square (x) `(* ,x ,x))").unwrap();
+        rt.eval_str("(defmacro sum-of-squares (a b) `(+ (square ,a) (square ,b)))").unwrap();
+        assert_eq!(eval_number(&mut rt, "(sum-of-squares 3 4)"), 25.0);
+    }
+
+    #[test]
+    fn macro_persistence_across_eval() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro inc (x) `(+ ,x 1))").unwrap();
+        // Macro defined in previous eval_str should be available
+        assert_eq!(eval_number(&mut rt, "(inc 41)"), 42.0);
+    }
+
+    #[test]
+    fn macro_with_literal_symbols() {
+        // Symbols in quasiquote that aren't params stay literal
+        let mut rt = Runtime::new();
+        rt.eval_str("(def y 100)").unwrap();
+        rt.eval_str("(defmacro use-y () `y)").unwrap();
+        assert_eq!(eval_number(&mut rt, "(use-y)"), 100.0);
+    }
+
+    #[test]
+    fn defmacro_returns_nil() {
+        let mut rt = Runtime::new();
+        let result = rt.eval_str("(defmacro foo (x) `(+ ,x 1))").unwrap().unwrap();
+        assert!(matches!(result, Value::Nil));
+    }
+
+    #[test]
+    fn macro_in_let_context() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro double (x) `(+ ,x ,x))").unwrap();
+        assert_eq!(eval_number(&mut rt, "(let ((a 7)) (double a))"), 14.0);
+    }
+
+    #[test]
+    fn macro_in_lambda_context() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro double (x) `(+ ,x ,x))").unwrap();
+        assert_eq!(
+            eval_number(&mut rt, "((lambda (n) (double n)) 8)"),
+            16.0
+        );
+    }
+
+    #[test]
+    fn macro_recursive_expansion() {
+        // Macro A expands to a call of macro B
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro inc (x) `(+ ,x 1))").unwrap();
+        rt.eval_str("(defmacro inc2 (x) `(inc (inc ,x)))").unwrap();
+        assert_eq!(eval_number(&mut rt, "(inc2 10)"), 12.0);
+    }
+
+    #[test]
+    fn macro_with_keyword_args() {
+        let mut rt = Runtime::new();
+        rt.eval_str("(defmacro make-dict (k v) `(dict ,k ,v))").unwrap();
+        let result = rt.eval_str("(get (make-dict :name 42) :name)").unwrap().unwrap();
+        assert!(matches!(result, Value::Number(n) if n == 42.0));
+    }
+
+    // ── Math native tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn sin_cos_basic() {
+        let mut rt = Runtime::new();
+        assert!((eval_number(&mut rt, "(sin 0)")).abs() < 1e-10);
+        assert!((eval_number(&mut rt, "(sin 1.5707963267948966)") - 1.0).abs() < 1e-10);
+        assert!((eval_number(&mut rt, "(cos 0)") - 1.0).abs() < 1e-10);
+        assert!((eval_number(&mut rt, "(cos 3.141592653589793)") + 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sqrt_basic() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(sqrt 4)"), 2.0);
+        assert_eq!(eval_number(&mut rt, "(sqrt 0)"), 0.0);
+        assert_eq!(eval_number(&mut rt, "(sqrt 1)"), 1.0);
+    }
+
+    #[test]
+    fn abs_basic() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(abs -5)"), 5.0);
+        assert_eq!(eval_number(&mut rt, "(abs 3)"), 3.0);
+        assert_eq!(eval_number(&mut rt, "(abs 0)"), 0.0);
+    }
+
+    #[test]
+    fn floor_ceil_round() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(floor 2.7)"), 2.0);
+        assert_eq!(eval_number(&mut rt, "(ceil 2.3)"), 3.0);
+        assert_eq!(eval_number(&mut rt, "(round 2.5)"), 3.0);
+    }
+
+    #[test]
+    fn fract_basic() {
+        let mut rt = Runtime::new();
+        assert!((eval_number(&mut rt, "(fract 3.7)") - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn pow_basic() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(pow 2 3)"), 8.0);
+        assert_eq!(eval_number(&mut rt, "(pow 4 0.5)"), 2.0);
+    }
+
+    #[test]
+    fn atan2_basic() {
+        let mut rt = Runtime::new();
+        assert!((eval_number(&mut rt, "(atan2 1 0)") - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+        assert!((eval_number(&mut rt, "(atan2 0 1)")).abs() < 1e-10);
+    }
+
+    #[test]
+    fn mod_basic() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(mod 7 3)"), 1.0);
+        assert_eq!(eval_number(&mut rt, "(mod 5.5 2)"), 1.5);
+    }
+
+    #[test]
+    fn clamp_basic() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(clamp 5 0 1)"), 1.0);
+        assert_eq!(eval_number(&mut rt, "(clamp -1 0 1)"), 0.0);
+        assert_eq!(eval_number(&mut rt, "(clamp 0.5 0 1)"), 0.5);
+        assert!(eval_number(&mut rt, "(clamp 0 5 4)").is_nan());
+    }
+
+    #[test]
+    fn mix_basic() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(mix 0 10 0.5)"), 5.0);
+        assert_eq!(eval_number(&mut rt, "(mix 0 10 0)"), 0.0);
+        assert_eq!(eval_number(&mut rt, "(mix 0 10 1)"), 10.0);
+    }
+
+    #[test]
+    fn smoothstep_basic() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(smoothstep 0 1 0)"), 0.0);
+        assert_eq!(eval_number(&mut rt, "(smoothstep 0 1 1)"), 1.0);
+        assert_eq!(eval_number(&mut rt, "(smoothstep 0 1 0.5)"), 0.5);
+    }
+
+    #[test]
+    fn vec2_length() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(length (vec2 3 4))"), 5.0);
+        assert_eq!(eval_number(&mut rt, "(length (vec2 0 0))"), 0.0);
+    }
+
+    #[test]
+    fn vec2_dot() {
+        let mut rt = Runtime::new();
+        assert_eq!(eval_number(&mut rt, "(dot (vec2 1 0) (vec2 0 1))"), 0.0);
+        assert_eq!(eval_number(&mut rt, "(dot (vec2 2 3) (vec2 4 5))"), 23.0);
+    }
+
+    // ── SDF stdlib tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn sdf_circle_at_origin() {
+        let mut rt = Runtime::new();
+        // Point at origin, circle radius 0.5: distance = -0.5 (inside)
+        let d = eval_number(&mut rt, "(let ((x 0) (y 0)) (sdf/circle 0.5))");
+        assert!((d - (-0.5)).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_circle_on_boundary() {
+        let mut rt = Runtime::new();
+        let d = eval_number(&mut rt, "(let ((x 1) (y 0)) (sdf/circle 1.0))");
+        assert!(d.abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_circle_outside() {
+        let mut rt = Runtime::new();
+        let d = eval_number(&mut rt, "(let ((x 2) (y 0)) (sdf/circle 0.5))");
+        assert!((d - 1.5).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_rect_inside() {
+        let mut rt = Runtime::new();
+        // Point at origin, rect half-extents 2x1: distance = -1 (min of -2, -1)
+        let d = eval_number(&mut rt, "(let ((x 0) (y 0)) (sdf/rect 2 1))");
+        assert!((d - (-1.0)).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_rect_on_edge() {
+        let mut rt = Runtime::new();
+        // Point on the right edge of a 2x1 rect
+        let d = eval_number(&mut rt, "(let ((x 2) (y 0)) (sdf/rect 2 1))");
+        assert!(d.abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_rect_corner() {
+        let mut rt = Runtime::new();
+        // Point at (3, 2) outside a 2x1 rect: corner distance = sqrt(1+1) = sqrt(2)
+        let d = eval_number(&mut rt, "(let ((x 3) (y 2)) (sdf/rect 2 1))");
+        assert!((d - 2.0_f64.sqrt()).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_rounded_rect() {
+        let mut rt = Runtime::new();
+        // Rounded rect with r=0.1 should have distance reduced by r at origin
+        let d_rect = eval_number(&mut rt, "(let ((x 0) (y 0)) (sdf/rect 2 1))");
+        let d_rounded = eval_number(&mut rt, "(let ((x 0) (y 0)) (sdf/rounded-rect 2 1 0.1))");
+        // rounded-rect at origin = rect(w-r, h-r) - r = rect(1.9, 0.9) - 0.1
+        // rect(1.9, 0.9) at origin = min(-1.9, -0.9) = -0.9
+        // so rounded = -0.9 - 0.1 = -1.0, same as rect(2,1)
+        assert!((d_rect - d_rounded).abs() < 1e-10, "rect={} rounded={}", d_rect, d_rounded);
+    }
+
+    #[test]
+    fn sdf_translate_circle() {
+        let mut rt = Runtime::new();
+        // Circle at (1,0), point at (1,0) → should be inside
+        let d = eval_number(&mut rt, "(let ((x 1) (y 0)) (sdf/translate 1 0 (sdf/circle 0.5)))");
+        assert!((d - (-0.5)).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_union() {
+        let mut rt = Runtime::new();
+        // Union = min of two distances
+        let d = eval_number(&mut rt, "(let ((x 0) (y 0)) (sdf/union (sdf/circle 1) (sdf/circle 0.5)))");
+        assert!((d - (-1.0)).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_subtract() {
+        let mut rt = Runtime::new();
+        // Subtract = max(d1, -d2)
+        let d = eval_number(&mut rt, "(let ((x 0) (y 0)) (sdf/subtract (sdf/circle 1) (sdf/circle 0.5)))");
+        // d1 = -1, d2 = -0.5, result = max(-1, 0.5) = 0.5
+        assert!((d - 0.5).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_intersect() {
+        let mut rt = Runtime::new();
+        // Intersect = max(d1, d2)
+        let d = eval_number(&mut rt, "(let ((x 0) (y 0)) (sdf/intersect (sdf/circle 1) (sdf/circle 0.5)))");
+        // max(-1, -0.5) = -0.5
+        assert!((d - (-0.5)).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_scale_circle() {
+        let mut rt = Runtime::new();
+        // Scale a unit circle by 2 → effective radius 2
+        let d = eval_number(&mut rt, "(let ((x 0) (y 0)) (sdf/scale 2 (sdf/circle 1)))");
+        assert!((d - (-2.0)).abs() < 1e-10, "got {}", d);
+    }
+
+    #[test]
+    fn sdf_to_metal_native() {
+        let mut rt = Runtime::new();
+        let result = rt.eval_str("(sdf->metal '(sdf/circle 0.5))").unwrap().unwrap();
+        if let Value::String(shader) = result {
+            assert!(shader.contains("fragment float4 widget_frag"));
+            assert!(shader.contains("length(float2(x, y))"));
+            assert!(shader.contains("discard_fragment"));
+        } else {
+            panic!("expected String, got {:?}", result);
+        }
+    }
+
+    #[test]
+    fn sdf_rotate_90deg() {
+        let mut rt = Runtime::new();
+        // A 2x0.5 rect is wide and short. Point at (1.5, 0) is inside (dx=1.5-2=-0.5, dy=0-0.5=-0.5).
+        // After 90° rotation, the rect becomes tall and narrow (0.5 wide, 2 tall).
+        // Point (1.5, 0) should now be outside the rotated rect.
+        let pi_2 = std::f64::consts::FRAC_PI_2;
+        let d_no_rot = eval_number(&mut rt, "(let ((x 1.5) (y 0)) (sdf/rect 2 0.5))");
+        assert!(d_no_rot < 0.0, "point should be inside un-rotated rect, got {}", d_no_rot);
+
+        let d_rot = eval_number(&mut rt, &format!(
+            "(let ((x 1.5) (y 0)) (sdf/rotate {} (sdf/rect 2 0.5)))", pi_2
+        ));
+        assert!(d_rot > 0.0, "point should be outside 90°-rotated rect, got {}", d_rot);
     }

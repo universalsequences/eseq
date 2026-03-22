@@ -24,6 +24,8 @@ pub enum Token {
     Number(f64),
     String(String),
     Quote,
+    Backtick, // ` (quasiquote)
+    Comma,    // , (unquote)
 }
 
 impl Parser {
@@ -84,7 +86,7 @@ impl Parser {
     fn parse_symbol(&mut self) -> Result<Token, ParserError> {
         let mut text = String::new();
         while let Some(ch) = self.peek() {
-            if ch.is_whitespace() || matches!(ch, '(' | ')' | '|' | '\'' | '\"') {
+            if ch.is_whitespace() || matches!(ch, '(' | ')' | '|' | '\'' | '\"' | '`' | ',') {
                 break;
             }
             text.push(ch);
@@ -150,6 +152,14 @@ impl Parser {
                         tokens.push(Token::Quote);
                         self.next();
                     }
+                    '`' => {
+                        tokens.push(Token::Backtick);
+                        self.next();
+                    }
+                    ',' => {
+                        tokens.push(Token::Comma);
+                        self.next();
+                    }
                     '\"' => {
                         self.next();
                         tokens.push(self.parse_string()?);
@@ -198,6 +208,8 @@ pub enum Expression {
     QuoteList(Vec<Expression>),
     Number(f64),
     List(Vec<Expression>),
+    Quasiquote(Box<Expression>), // `expr
+    Unquote(Box<Expression>),    // ,expr
 }
 
 pub struct ASTParser {
@@ -244,6 +256,8 @@ impl ASTParser {
             Some(Token::Quote) => Err(ParserError::InvalidQuote),
             Some(Token::String(_)) => Err(ParserError::InvalidQuote),
             Some(Token::Keyword(_)) => Err(ParserError::InvalidQuote),
+            Some(Token::Backtick) => Err(ParserError::InvalidQuote),
+            Some(Token::Comma) => Err(ParserError::InvalidQuote),
             Some(Token::Symbol(s)) => {
                 let expression = Expression::QuoteSymbol(s.to_string());
                 self.next();
@@ -314,6 +328,16 @@ impl ASTParser {
                 Ok(Expression::Keyword(value))
             }
             Some(Token::Pipe) => self.parse_lambda_shorthand(),
+            Some(Token::Backtick) => {
+                self.next(); // consume backtick
+                let expr = self.parse_expression()?;
+                Ok(Expression::Quasiquote(Box::new(expr)))
+            }
+            Some(Token::Comma) => {
+                self.next(); // consume comma
+                let expr = self.parse_expression()?;
+                Ok(Expression::Unquote(Box::new(expr)))
+            }
             Some(Token::RightParen) => Err(ParserError::ExpectedLeftParen),
             None => Err(ParserError::UnexpectedEOF),
         }
@@ -346,6 +370,33 @@ impl ASTParser {
             expressions.push(self.parse_expression()?);
         }
         Ok(expressions)
+    }
+}
+
+/// Format an Expression back to a Lisp source string.
+pub fn format_expression(expr: &Expression) -> String {
+    match expr {
+        Expression::Number(n) => {
+            if *n == n.trunc() && n.abs() < 1e15 {
+                format!("{:.1}", n)
+            } else {
+                format!("{}", n)
+            }
+        }
+        Expression::Symbol(s) => s.clone(),
+        Expression::Keyword(s) => format!(":{}", s),
+        Expression::String(s) => format!("\"{}\"", s),
+        Expression::QuoteSymbol(s) => format!("'{}", s),
+        Expression::QuoteList(items) => {
+            let inner: Vec<String> = items.iter().map(format_expression).collect();
+            format!("'({})", inner.join(" "))
+        }
+        Expression::List(items) => {
+            let inner: Vec<String> = items.iter().map(format_expression).collect();
+            format!("({})", inner.join(" "))
+        }
+        Expression::Quasiquote(inner) => format!("`{}", format_expression(inner)),
+        Expression::Unquote(inner) => format!(",{}", format_expression(inner)),
     }
 }
 

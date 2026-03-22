@@ -653,6 +653,58 @@ fragment float4 waveform_frag(
             self.waveform_buffers.get(&key)
         }
 
+        /// Compile Metal pipelines for any SDF widgets that have been registered
+        /// since the last render. This enables lazy compilation of defwidget shaders.
+        fn compile_pending_sdf_pipelines(&mut self) {
+            use crate::widget_render::sdf_widget;
+            for (name, shader_src) in sdf_widget::sdf_widget_shader_sources() {
+                if self.widget_pipelines.contains_key(&name) {
+                    continue;
+                }
+                let full_src = format!(
+                    "{}{}{}",
+                    WIDGET_SHADER_PREAMBLE,
+                    DEFAULT_WIDGET_VERTEX_SHADER,
+                    shader_src
+                );
+                let src_ns = NSString::from_str(&full_src);
+                let Ok(wlib) = self
+                    .device
+                    .newLibraryWithSource_options_error(&src_ns, None)
+                else {
+                    eprintln!("SDF widget '{}': shader compilation failed", name);
+                    continue;
+                };
+                let (Some(wvert), Some(wfrag)) = (
+                    wlib.newFunctionWithName(&NSString::from_str("widget_vert")),
+                    wlib.newFunctionWithName(&NSString::from_str("widget_frag")),
+                ) else {
+                    continue;
+                };
+                let wdesc = MTLRenderPipelineDescriptor::new();
+                wdesc.setVertexFunction(Some(&wvert));
+                wdesc.setFragmentFunction(Some(&wfrag));
+                let wattach = unsafe { wdesc.colorAttachments().objectAtIndexedSubscript(0) };
+                wattach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                wattach.setBlendingEnabled(true);
+                {
+                    use objc2_metal::{MTLBlendFactor, MTLBlendOperation};
+                    wattach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                    wattach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                    wattach.setRgbBlendOperation(MTLBlendOperation::Add);
+                    wattach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                    wattach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                    wattach.setAlphaBlendOperation(MTLBlendOperation::Add);
+                }
+                if let Ok(pipeline_state) = self
+                    .device
+                    .newRenderPipelineStateWithDescriptor_error(&wdesc)
+                {
+                    self.widget_pipelines.insert(name, pipeline_state);
+                }
+            }
+        }
+
         fn draw_waveform_primitives(
             &mut self,
             enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
@@ -841,6 +893,7 @@ fragment float4 waveform_frag(
                             vp_w,
                             vp_h,
                             focused_widget_id: tile.frame.focused_widget_id,
+                            focused_branch: false,
                         },
                         tile.frame.widget_scroll_top,
                         inner_rows,
@@ -901,7 +954,8 @@ fragment float4 waveform_frag(
                             vp_h,
                         );
                     }
-                    // Widget instances (sliders, toggles, knobs)
+                    // Widget instances (sliders, toggles, knobs, SDF widgets)
+                    self.compile_pending_sdf_pipelines();
                     let batches = group_widget_instances(&offset_prims);
                     for (widget_type, instances) in &batches {
                         let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
@@ -1578,6 +1632,7 @@ fragment float4 waveform_frag(
                             vp_w,
                             vp_h,
                             focused_widget_id: frame.focused_widget_id,
+                            focused_branch: false,
                         },
                         frame.widget_scroll_top,
                         max_rows,
@@ -1696,6 +1751,7 @@ fragment float4 waveform_frag(
                 );
             }
 
+            self.compile_pending_sdf_pipelines();
             let mut widget_upload_bytes = 0;
             for (widget_type, instances) in &primitive_instance_batches {
                 let Some(wpipe) = self.widget_pipelines.get(widget_type) else {

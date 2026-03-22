@@ -156,6 +156,10 @@ impl<'a> LayoutEngine<'a> {
                     self.measure(child, child_constraints, font_size)
                 },
             )?
+        } else if let Some(sdf_size) =
+            widget_render::sdf_widget::sdf_widget_measure(&widget_type, node, &children, constraints, &ctx)
+        {
+            sdf_size
         } else {
             measure_builtin_leaf(node, &widget_type, constraints.aspect)
         };
