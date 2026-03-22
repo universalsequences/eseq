@@ -1246,6 +1246,9 @@ impl Editor {
                 self.last_mouse_precise = Some((precise_col, precise_row));
                 self.active_leaf_mut().active_widget_gesture = None;
                 if widgets_visible {
+                    self.update_sdf_hover(
+                        content_col, content_row, precise_col, precise_row, true,
+                    );
                     // Try click-to-activate on focusable widgets first
                     if self.try_click_focusable_widget(
                         precise_col,
@@ -1339,6 +1342,9 @@ impl Editor {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 if widgets_visible {
+                    self.update_sdf_hover(
+                        content_col, content_row, precise_col, precise_row, false,
+                    );
                     if let Some(gesture) = self.active_leaf_mut().active_widget_gesture.take() {
                         let output = self.dispatch_gesture_widget_mouse_event(
                             gesture,
@@ -1352,6 +1358,17 @@ impl Editor {
                     }
                 }
                 self.last_mouse_precise = None;
+            }
+            MouseEventKind::Moved => {
+                if widgets_visible {
+                    self.update_sdf_hover(
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                        false,
+                    );
+                }
             }
             MouseEventKind::ScrollUp => {
                 if widgets_visible

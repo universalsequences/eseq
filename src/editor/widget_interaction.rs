@@ -33,6 +33,7 @@ impl Editor {
             let Some(node) = self.widget_node_at_local(local_col, local_row) else {
                 return false;
             };
+
             self.dispatch_widget_mouse_event(
                 &node,
                 mouse.kind,
@@ -46,6 +47,50 @@ impl Editor {
         };
 
         self.apply_widget_output(output)
+    }
+
+    /// Update SDF widget hover/pressed state and redraw if changed.
+    pub(super) fn update_sdf_hover(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+        pressed: bool,
+    ) {
+        use crate::widget_render::sdf_widget::{self, SdfHitState};
+
+        let Some((local_col, local_row)) =
+            hit::to_local(precise_col, precise_row, content_col, content_row)
+        else {
+            return;
+        };
+        let Some(node) = self.widget_node_at_local(local_col, local_row) else {
+            return;
+        };
+        if sdf_widget::sdf_widget_def(&node.widget_type).is_none() {
+            return;
+        }
+
+        let widget_col = local_col + self.active_leaf().widget_scroll_left as f32 - node.rect.col;
+        let widget_row = local_row + self.total_scroll_top() - node.rect.row;
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        let px_w = node.rect.width * cell_w;
+        let px_h = node.rect.height * cell_h;
+        let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
+
+        let region = sdf_widget::sdf_widget_hit_test(
+            &node.widget_type, widget_col, widget_row, node.rect, pixel_aspect,
+        );
+
+        let old = sdf_widget::get_sdf_hit_state(node.widget_id);
+        if old.hit_region != region || old.hit_pressed != pressed {
+            sdf_widget::set_sdf_hit_state(
+                node.widget_id,
+                SdfHitState { hit_region: region, hit_pressed: pressed },
+            );
+            self.mark_needs_redraw();
+        }
     }
 
     pub(super) fn try_handle_widget_double_click(

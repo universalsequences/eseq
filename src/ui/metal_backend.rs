@@ -499,6 +499,7 @@ fragment float4 waveform_frag(
         window: Option<Window>,
         pending: VecDeque<Event>,
         pending_drag: Option<Event>,
+        pending_move: Option<Event>,
         pending_magnify: VecDeque<(f64, (f32, f32))>,
         pending_scroll: VecDeque<((f32, f32), (f32, f32))>,
         modifiers: KeyModifiers,
@@ -537,6 +538,7 @@ fragment float4 waveform_frag(
                 window: None,
                 pending: VecDeque::new(),
                 pending_drag: None,
+                pending_move: None,
                 pending_magnify: VecDeque::new(),
                 pending_scroll: VecDeque::new(),
                 modifiers: KeyModifiers::NONE,
@@ -1419,11 +1421,16 @@ fragment float4 waveform_frag(
                 self.last_precise_mouse = Some(self.cursor_pos);
                 return Some(ev);
             }
+            if let Some(ev) = self.pending_move.take() {
+                self.last_precise_mouse = Some(self.cursor_pos);
+                return Some(ev);
+            }
             let Some(event_loop) = &mut self.event_loop else {
                 return None;
             };
             let pending = &mut self.pending;
             let pending_drag = &mut self.pending_drag;
+            let pending_move = &mut self.pending_move;
             let pending_magnify = &mut self.pending_magnify;
             let pending_scroll = &mut self.pending_scroll;
             let modifiers = &mut self.modifiers;
@@ -1489,6 +1496,14 @@ fragment float4 waveform_frag(
                         if let Some(button) = pressed_mouse_button {
                             *pending_drag = Some(Event::Mouse(MouseEvent {
                                 kind: MouseEventKind::Drag(*button),
+                                column: col,
+                                row,
+                                modifiers: *modifiers,
+                            }));
+                        } else {
+                            // Coalesce Moved events — only keep the latest for hover detection
+                            *pending_move = Some(Event::Mouse(MouseEvent {
+                                kind: MouseEventKind::Moved,
                                 column: col,
                                 row,
                                 modifiers: *modifiers,

@@ -51,6 +51,29 @@
              (sdf/paint (sdf/rect 0.8 0.02) :accent)
              (sdf/stroke (sdf/circle 0.5) 0.02 :accent)))
 
+;; Interactive: hover changes color, click highlights
+(defwidget sdf-button
+  :width 8 :height 3
+  :shader (sdf/layer
+            (sdf/fill (sdf/rounded-rect 0.9 0.8 0.15)
+              (if hit/active :primary
+                (if hit/hover :accent :dim)))))
+
+;; Multi-region hit test: 3 circles, each a separate sdf/fill.
+;; Hovering highlights the hovered region, clicking shows active.
+(defwidget sdf-three-regions
+  :width 16 :height 5
+  :shader (sdf/layer
+            ;; Region 0: left circle
+            (sdf/fill (sdf/translate -0.55 0 (sdf/circle 0.3))
+              (if hit/active :primary (if hit/hover :accent :dim)))
+            ;; Region 1: center circle
+            (sdf/fill (sdf/circle 0.3)
+              (if hit/active :primary (if hit/hover :accent :dim)))
+            ;; Region 2: right circle
+            (sdf/fill (sdf/translate 0.55 0 (sdf/circle 0.3))
+              (if hit/active :primary (if hit/hover :accent :dim)))))
+
 ;; ── Render the demo ───────────────────────────────────────────────────
 
 (effect
@@ -75,4 +98,14 @@
       (label "crosshair:" :color :dim)
       (sdf-crosshair))
 
-    (label "All shapes defined in Lisp, compiled to Metal shaders" :color :dim :font-size 10)))
+    (h-stack :gap 2 :align :center
+      (label "button:" :color :dim)
+      (sdf-button)
+      (sdf-button)
+      (sdf-button))
+
+    (h-stack :gap 2 :align :center
+      (label "3 regions:" :color :dim)
+      (sdf-three-regions))
+
+    (label "Hover/click the shapes — each circle is a separate hit region" :color :dim :font-size 10)))

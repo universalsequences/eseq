@@ -34,13 +34,23 @@ fn expand_sdf_expression(
     .expand_macros(expr, 0)
 }
 
+struct SdfCompileResult {
+    output: crate::lang::sdf_codegen::SdfShaderOutput,
+    expanded_expr: crate::parser::Expression,
+}
+
 fn compile_sdf_value(
     value: &Value,
     macros: &HashMap<String, crate::compiler::MacroDef>,
-) -> Result<crate::lang::sdf_codegen::SdfShaderOutput, String> {
+) -> Result<SdfCompileResult, String> {
     let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
     let expanded = expand_sdf_expression(&expr, macros);
-    crate::lang::sdf_codegen::compile_sdf_to_metal(&expanded).map_err(|e| e.to_string())
+    let output =
+        crate::lang::sdf_codegen::compile_sdf_to_metal(&expanded).map_err(|e| e.to_string())?;
+    Ok(SdfCompileResult {
+        output,
+        expanded_expr: expanded,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -371,7 +381,7 @@ impl Runtime {
                 return Value::String("error: sdf->metal requires 1 argument".into());
             };
             match compile_sdf_value(val, &sdf_macros) {
-                Ok(output) => Value::String(output.shader_source),
+                Ok(result) => Value::String(result.output.shader_source),
                 Err(e) => Value::String(format!("error: {}", e)),
             }
         });
@@ -422,15 +432,16 @@ impl Runtime {
                     return Value::String("defwidget: :shader is required".into());
                 };
 
-                let output = match compile_sdf_value(&shader_val, &dw_macros) {
+                let compiled = match compile_sdf_value(&shader_val, &dw_macros) {
                     Ok(o) => o,
                     Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
                 };
 
                 register_sdf_widget(SdfWidgetDef {
                     name: name.clone(),
-                    shader_source: output.shader_source,
-                    region_count: output.region_count,
+                    shader_source: compiled.output.shader_source,
+                    sdf_expr: compiled.expanded_expr,
+                    region_count: compiled.output.region_count,
                     width,
                     height,
                 });
@@ -567,6 +578,10 @@ impl Runtime {
 
     pub fn layout_aspect(&self) -> f32 {
         self.layout_aspect
+    }
+
+    pub fn layout_cell_dims(&self) -> (f32, f32) {
+        (self.layout_cell_w, self.layout_cell_h)
     }
 
     /// Set the text measurer for proportional font layout (Metal backend).
