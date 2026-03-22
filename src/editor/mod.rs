@@ -445,28 +445,23 @@ impl Editor {
                     | MouseEventKind::ScrollLeft
                     | MouseEventKind::ScrollRight
             );
-            self.route_pointer_event_to_tile(
-                tile_id,
-                border_inset,
-                persist_selection,
-                |editor| {
-                    let Some((content_col, content_row, content_width, content_height)) =
-                        editor.tile_content_area(tile_id, border_inset)
-                    else {
-                        return;
-                    };
+            self.route_pointer_event_to_tile(tile_id, border_inset, persist_selection, |editor| {
+                let Some((content_col, content_row, content_width, content_height)) =
+                    editor.tile_content_area(tile_id, border_inset)
+                else {
+                    return;
+                };
 
-                    editor.handle_mouse_precise(
-                        mouse,
-                        content_col,
-                        content_row,
-                        content_width,
-                        content_height,
-                        precise_col,
-                        precise_row,
-                    );
-                },
-            );
+                editor.handle_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    content_width,
+                    content_height,
+                    precise_col,
+                    precise_row,
+                );
+            });
         }
     }
 
@@ -756,7 +751,11 @@ impl Editor {
             self.mark_needs_redraw();
         }
 
-        if self.eval_flash.as_ref().is_some_and(|flash| flash.expires_at < Instant::now()) {
+        if self
+            .eval_flash
+            .as_ref()
+            .is_some_and(|flash| flash.expires_at < Instant::now())
+        {
             self.eval_flash = None;
             self.mark_needs_redraw();
         }
@@ -2068,7 +2067,9 @@ impl Editor {
                 crate::runtime::TileOp::SplitRight(buf_name) => {
                     let new_buf_idx = match buf_name {
                         Some(ref name) if !name.is_empty() => self
-                            .buffers.iter().position(|b| b.name == *name)
+                            .buffers
+                            .iter()
+                            .position(|b| b.name == *name)
                             .unwrap_or_else(|| self.find_or_create_scratch_buffer()),
                         _ => self.find_or_create_scratch_buffer(),
                     };
@@ -2077,7 +2078,9 @@ impl Editor {
                 crate::runtime::TileOp::SplitBelow(buf_name) => {
                     let new_buf_idx = match buf_name {
                         Some(ref name) if !name.is_empty() => self
-                            .buffers.iter().position(|b| b.name == *name)
+                            .buffers
+                            .iter()
+                            .position(|b| b.name == *name)
                             .unwrap_or_else(|| self.find_or_create_scratch_buffer()),
                         _ => self.find_or_create_scratch_buffer(),
                     };

@@ -6,8 +6,8 @@ use super::{
 };
 use crate::backend::Color;
 use crate::layout::{
-    Constraints, DEFAULT_FONT_SIZE, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-    get_prop_str, usize_to_f32,
+    Constraints, DEFAULT_FONT_SIZE, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_prop_str,
+    usize_to_f32,
 };
 use crate::theme;
 use crate::vm::Value;
@@ -111,8 +111,8 @@ impl WidgetDefinition for LabelWidget {
             return Vec::new();
         };
         let fg = resolve_color(&node.props);
-        let bg = if viewport.focused_widget_id == Some(node.widget_id) && node.focusable {
-            theme::STATUS_BG()
+        let bg = if viewport.focused_branch {
+            theme::WIDGET_FOCUS_BG()
         } else {
             theme::BG()
         };

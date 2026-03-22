@@ -2859,6 +2859,32 @@ fn set_view_mode_supports_both_as_secondary_mode() {
     }
 
     #[test]
+    fn defwidget_registers_widget_for_later_forms_in_same_eval() {
+        let mut rt = Runtime::new();
+        let result = rt
+            .eval_str(
+                r#"
+                (defwidget sdf-test
+                  :width 3 :height 3
+                  :shader (sdf/layer
+                            (sdf/fill (sdf/circle 0.7) :accent)))
+                (sdf-test)
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        let Value::Map(widget) = result else {
+            panic!("expected widget map");
+        };
+        let widget_type = widget
+            .get("type")
+            .map(|value| value.borrow().clone())
+            .unwrap_or(Value::Nil);
+        assert!(matches!(widget_type, Value::Keyword(name) if name == "sdf-test"));
+    }
+
+    #[test]
     fn sdf_rotate_90deg() {
         let mut rt = Runtime::new();
         // A 2x0.5 rect is wide and short. Point at (1.5, 0) is inside (dx=1.5-2=-0.5, dy=0-0.5=-0.5).

@@ -663,9 +663,7 @@ fragment float4 waveform_frag(
                 }
                 let full_src = format!(
                     "{}{}{}",
-                    WIDGET_SHADER_PREAMBLE,
-                    DEFAULT_WIDGET_VERTEX_SHADER,
-                    shader_src
+                    WIDGET_SHADER_PREAMBLE, DEFAULT_WIDGET_VERTEX_SHADER, shader_src
                 );
                 let src_ns = NSString::from_str(&full_src);
                 let Ok(wlib) = self
@@ -1295,11 +1293,9 @@ fragment float4 waveform_frag(
                 // This lets glyph quads overlap without clipping each other.
                 prop_attach.setBlendingEnabled(true);
                 prop_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
-                prop_attach
-                    .setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                prop_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
                 prop_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-                prop_attach
-                    .setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                prop_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
 
                 self.prop_pipeline = Some(
                     self.device
@@ -2422,7 +2418,6 @@ fragment float4 waveform_frag(
             v(x1, y1),
         ]);
     }
-
 
     fn group_widget_instances(
         primitives: &[widget_render::MetalPrimitive],

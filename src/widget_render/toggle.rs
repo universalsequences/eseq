@@ -33,7 +33,11 @@ fn knob_off_color(props: &HashMap<String, Value>) -> crate::backend::Color {
 /// TUI render for toggle: "(●)" or "(○)"
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let on = get_bool_prop(props, "value", false);
-    let track = if on { on_color(props) } else { off_color(props) };
+    let track = if on {
+        on_color(props)
+    } else {
+        off_color(props)
+    };
     let knob = if on {
         knob_on_color(props)
     } else {
@@ -43,7 +47,11 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     let row_u16 = rect.row.round() as u16;
     let col_u16 = rect.col.round() as u16;
     let width_u16 = rect.width.round() as u16;
-    let glyphs = [('(', track), (if on { '●' } else { '○' }, knob), (')', track)];
+    let glyphs = [
+        ('(', track),
+        (if on { '●' } else { '○' }, knob),
+        (')', track),
+    ];
 
     for (i, (ch, fg)) in glyphs.into_iter().enumerate() {
         let col = col_u16 + i as u16;
@@ -201,7 +209,10 @@ mod tests {
         );
 
         assert_eq!(buf.get(0, 0).unwrap().style.fg, theme::WIDGET_TOGGLE_ON());
-        assert_eq!(buf.get(0, 1).unwrap().style.fg, theme::WIDGET_TOGGLE_KNOB_ON());
+        assert_eq!(
+            buf.get(0, 1).unwrap().style.fg,
+            theme::WIDGET_TOGGLE_KNOB_ON()
+        );
 
         props.insert("value".to_string(), Value::Bool(false));
         props.insert("off-color".to_string(), Value::Keyword("red".to_string()));

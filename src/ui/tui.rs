@@ -104,9 +104,8 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
     }
 
     // ── Status bar ────────────────────────────────────────────────────────────
-    let status_widget = Paragraph::new(cells_to_line(&render_frame.status_cells)).style(
-        Style::default().bg(to_rcolor(crate::theme::STATUS_BG())),
-    );
+    let status_widget = Paragraph::new(cells_to_line(&render_frame.status_cells))
+        .style(Style::default().bg(to_rcolor(crate::theme::STATUS_BG())));
     frame.render_widget(status_widget, chunks[1]);
 
     // ── Widget overlay (with scroll offset) ─────────────────────────────────
@@ -153,15 +152,12 @@ pub fn render(frame: &mut Frame, render_frame: &RenderFrame) {
                         }
                         let cell = &mut buf[(x, y)];
                         let style = cell.style();
-                        let fg = style.fg.map(|color| brighten_rcolor(color, 0.25));
-                        let bg = style.bg.map(|color| brighten_rcolor(color, 0.25));
+                        let fg = style.fg.map(|color| brighten_rcolor(color, 0.15));
                         let mut new_style = Style::default();
                         if let Some(fg) = fg {
                             new_style = new_style.fg(fg);
                         }
-                        if let Some(bg) = bg {
-                            new_style = new_style.bg(bg);
-                        }
+                        new_style = new_style.bg(to_rcolor(crate::theme::WIDGET_FOCUS_BG()));
                         cell.set_style(new_style.add_modifier(Modifier::BOLD));
                     }
                 }
@@ -454,15 +450,12 @@ fn render_tile_in_area(
                         }
                         let cell = &mut buf[(x, y)];
                         let style = cell.style();
-                        let fg = style.fg.map(|color| brighten_rcolor(color, 0.25));
-                        let bg = style.bg.map(|color| brighten_rcolor(color, 0.25));
+                        let fg = style.fg.map(|color| brighten_rcolor(color, 0.15));
                         let mut new_style = Style::default();
                         if let Some(fg) = fg {
                             new_style = new_style.fg(fg);
                         }
-                        if let Some(bg) = bg {
-                            new_style = new_style.bg(bg);
-                        }
+                        new_style = new_style.bg(to_rcolor(crate::theme::WIDGET_FOCUS_BG()));
                         cell.set_style(new_style.add_modifier(Modifier::BOLD));
                     }
                 }

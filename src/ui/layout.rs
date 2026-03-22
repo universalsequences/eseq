@@ -152,13 +152,15 @@ impl<'a> LayoutEngine<'a> {
                 &children,
                 constraints,
                 &ctx,
-                &mut |child, child_constraints| {
-                    self.measure(child, child_constraints, font_size)
-                },
+                &mut |child, child_constraints| self.measure(child, child_constraints, font_size),
             )?
-        } else if let Some(sdf_size) =
-            widget_render::sdf_widget::sdf_widget_measure(&widget_type, node, &children, constraints, &ctx)
-        {
+        } else if let Some(sdf_size) = widget_render::sdf_widget::sdf_widget_measure(
+            &widget_type,
+            node,
+            &children,
+            constraints,
+            &ctx,
+        ) {
             sdf_size
         } else {
             measure_builtin_leaf(node, &widget_type, constraints.aspect)
@@ -167,12 +169,7 @@ impl<'a> LayoutEngine<'a> {
         Some(clamp_size(size, constraints))
     }
 
-    fn build_layout_node(
-        &self,
-        node: &Value,
-        rect: Rect,
-        inherited_font_size: f32,
-    ) -> LayoutNode {
+    fn build_layout_node(&self, node: &Value, rect: Rect, inherited_font_size: f32) -> LayoutNode {
         let widget_type = get_widget_type(node).unwrap_or_default();
         let children_values = get_children(node);
 
@@ -185,7 +182,9 @@ impl<'a> LayoutEngine<'a> {
         let mut props = collect_props(node);
 
         // Inject inherited font-size into props so the rendering path can use it.
-        if !props.contains_key("font-size") && (inherited_font_size - DEFAULT_FONT_SIZE).abs() > 0.01 {
+        if !props.contains_key("font-size")
+            && (inherited_font_size - DEFAULT_FONT_SIZE).abs() > 0.01
+        {
             props.insert(
                 "font-size".to_string(),
                 Value::Number(inherited_font_size as f64),

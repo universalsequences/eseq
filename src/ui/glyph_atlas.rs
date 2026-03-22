@@ -252,11 +252,7 @@ mod inner {
     impl SizedFontCache {
         pub fn new(base_font_size: f64, scale: f64) -> Option<Self> {
             let base_font = unsafe {
-                CTFont::new_ui_font_for_language(
-                    CTFontUIFontType::System,
-                    base_font_size,
-                    None,
-                )
+                CTFont::new_ui_font_for_language(CTFontUIFontType::System, base_font_size, None)
             }?;
 
             let size_tenths = (base_font_size * 10.0).round() as u16;
@@ -543,10 +539,7 @@ mod inner {
                 (ch, size_tenths),
                 ProportionalGlyphEntry {
                     uv_min: [ax as f32 / s, ay as f32 / s],
-                    uv_max: [
-                        (ax + raster_w) as f32 / s,
-                        (ay + raster_h) as f32 / s,
-                    ],
+                    uv_max: [(ax + raster_w) as f32 / s, (ay + raster_h) as f32 / s],
                     advance,
                     raster_w,
                     raster_h,

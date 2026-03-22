@@ -17,6 +17,32 @@ use crate::widgets::register_widget_natives;
 pub type RuntimeError = String;
 pub type NativeResult = Result<Value, RuntimeError>;
 
+fn expand_sdf_expression(
+    expr: &crate::parser::Expression,
+    macros: &HashMap<String, crate::compiler::MacroDef>,
+) -> crate::parser::Expression {
+    crate::compiler::Compiler::new_repl(
+        vec![],
+        vec![],
+        vec![],
+        std::collections::HashSet::new(),
+        HashMap::new(),
+        HashMap::new(),
+        0,
+        macros.clone(),
+    )
+    .expand_macros(expr, 0)
+}
+
+fn compile_sdf_value(
+    value: &Value,
+    macros: &HashMap<String, crate::compiler::MacroDef>,
+) -> Result<crate::lang::sdf_codegen::SdfShaderOutput, String> {
+    let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
+    let expanded = expand_sdf_expression(&expr, macros);
+    crate::lang::sdf_codegen::compile_sdf_to_metal(&expanded).map_err(|e| e.to_string())
+}
+
 #[derive(Debug, Clone)]
 pub enum TileOp {
     SplitRight(Option<String>),
@@ -169,7 +195,10 @@ impl NativeContext {
     }
 
     pub fn create_scratch(&mut self, name: String, text: String) {
-        self.shared.borrow_mut().pending_scratch_buffers.push((name, text));
+        self.shared
+            .borrow_mut()
+            .pending_scratch_buffers
+            .push((name, text));
     }
 
     pub fn switch_to_buffer(&mut self, name: String) {
@@ -207,27 +236,45 @@ impl NativeContext {
     // ── Tiling operations ─────────────────────────────────────────────────
 
     pub fn split_window_right(&mut self, buffer_name: Option<String>) {
-        self.shared.borrow_mut().pending_tile_ops.push(TileOp::SplitRight(buffer_name));
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::SplitRight(buffer_name));
     }
 
     pub fn split_window_below(&mut self, buffer_name: Option<String>) {
-        self.shared.borrow_mut().pending_tile_ops.push(TileOp::SplitBelow(buffer_name));
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::SplitBelow(buffer_name));
     }
 
     pub fn delete_window(&mut self) {
-        self.shared.borrow_mut().pending_tile_ops.push(TileOp::DeleteWindow);
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::DeleteWindow);
     }
 
     pub fn delete_other_windows(&mut self) {
-        self.shared.borrow_mut().pending_tile_ops.push(TileOp::DeleteOtherWindows);
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::DeleteOtherWindows);
     }
 
     pub fn other_window(&mut self) {
-        self.shared.borrow_mut().pending_tile_ops.push(TileOp::OtherWindow);
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::OtherWindow);
     }
 
     pub fn set_window_buffer(&mut self, name: String) {
-        self.shared.borrow_mut().pending_tile_ops.push(TileOp::SetWindowBuffer(name));
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::SetWindowBuffer(name));
     }
 
     pub fn window_hide_status(&mut self) {
@@ -320,101 +367,80 @@ impl Runtime {
         // Register sdf->metal: takes a quoted SDF expression, returns Metal shader string
         let sdf_macros = runtime.vm.macros.clone();
         runtime.vm.register_native("sdf->metal", move |args| {
-            use crate::lang::sdf_codegen::value_to_expression;
             let Some(val) = args.first() else {
                 return Value::String("error: sdf->metal requires 1 argument".into());
             };
-            let expr = match value_to_expression(val) {
-                Ok(e) => e,
-                Err(e) => return Value::String(format!("error: {}", e)),
-            };
-            // Expand macros
-            let compiler = crate::compiler::Compiler::new_repl(
-                vec![], vec![], vec![],
-                std::collections::HashSet::new(),
-                HashMap::new(),
-                HashMap::new(),
-                0,
-                sdf_macros.clone(),
-            );
-            let expanded = compiler.expand_macros(&expr, 0);
-            match crate::lang::sdf_codegen::compile_sdf_to_metal(&expanded) {
+            match compile_sdf_value(val, &sdf_macros) {
                 Ok(output) => Value::String(output.shader_source),
                 Err(e) => Value::String(format!("error: {}", e)),
             }
         });
         // Register defwidget: defines a new SDF widget type
         let dw_macros = runtime.vm.macros.clone();
-        runtime.vm.register_native("defwidget", move |args| {
-            use crate::lang::sdf_codegen::{compile_sdf_to_metal, value_to_expression};
-            use crate::widget_render::sdf_widget::{SdfWidgetDef, register_sdf_widget};
+        runtime
+            .vm
+            .register_native_with_vm("defwidget", move |args, vm| {
+                use crate::widget_render::sdf_widget::{SdfWidgetDef, register_sdf_widget};
 
-            // Parse: (defwidget name :width W :height H :shader '(sdf/layer ...))
-            let name = match args.first() {
-                Some(Value::String(s)) => s.clone(),
-                Some(Value::Symbol(s)) => s.clone(),
-                _ => return Value::String("defwidget: first arg must be widget name".into()),
-            };
+                // Parse: (defwidget name :width W :height H :shader '(sdf/layer ...))
+                let name = match args.first() {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Symbol(s)) => s.clone(),
+                    _ => return Value::String("defwidget: first arg must be widget name".into()),
+                };
 
-            let mut width: f32 = 10.0;
-            let mut height: f32 = 5.0;
-            let mut shader_val = None;
+                let mut width: f32 = 10.0;
+                let mut height: f32 = 5.0;
+                let mut shader_val = None;
 
-            let mut i = 1;
-            while i + 1 < args.len() {
-                if let Value::Keyword(key) = &args[i] {
-                    match key.as_str() {
-                        "width" => {
-                            if let Value::Number(n) = &args[i + 1] { width = *n as f32; }
+                let mut i = 1;
+                while i + 1 < args.len() {
+                    if let Value::Keyword(key) = &args[i] {
+                        match key.as_str() {
+                            "width" => {
+                                if let Value::Number(n) = &args[i + 1] {
+                                    width = *n as f32;
+                                }
+                            }
+                            "height" => {
+                                if let Value::Number(n) = &args[i + 1] {
+                                    height = *n as f32;
+                                }
+                            }
+                            "shader" => {
+                                shader_val = Some(args[i + 1].clone());
+                            }
+                            _ => {}
                         }
-                        "height" => {
-                            if let Value::Number(n) = &args[i + 1] { height = *n as f32; }
-                        }
-                        "shader" => {
-                            shader_val = Some(args[i + 1].clone());
-                        }
-                        _ => {}
+                        i += 2;
+                    } else {
+                        i += 1;
                     }
-                    i += 2;
-                } else {
-                    i += 1;
                 }
-            }
 
-            let Some(shader_val) = shader_val else {
-                return Value::String("defwidget: :shader is required".into());
-            };
+                let Some(shader_val) = shader_val else {
+                    return Value::String("defwidget: :shader is required".into());
+                };
 
-            // Convert quoted Value to Expression, expand macros, codegen
-            let expr = match value_to_expression(&shader_val) {
-                Ok(e) => e,
-                Err(e) => return Value::String(format!("defwidget: {}", e)),
-            };
-            let compiler = crate::compiler::Compiler::new_repl(
-                vec![], vec![], vec![],
-                std::collections::HashSet::new(),
-                HashMap::new(),
-                HashMap::new(),
-                0,
-                dw_macros.clone(),
-            );
-            let expanded = compiler.expand_macros(&expr, 0);
-            let output = match compile_sdf_to_metal(&expanded) {
-                Ok(o) => o,
-                Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
-            };
+                let output = match compile_sdf_value(&shader_val, &dw_macros) {
+                    Ok(o) => o,
+                    Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
+                };
 
-            register_sdf_widget(SdfWidgetDef {
-                name: name.clone(),
-                shader_source: output.shader_source,
-                region_count: output.region_count,
-                width,
-                height,
+                register_sdf_widget(SdfWidgetDef {
+                    name: name.clone(),
+                    shader_source: output.shader_source,
+                    region_count: output.region_count,
+                    width,
+                    height,
+                });
+
+                let widget_type = name.clone();
+                vm.register_native(&name, move |args| {
+                    crate::widgets::build_widget(&widget_type, args)
+                });
+                Value::Keyword(name.clone())
             });
-
-            // Return the name so the caller can register the native widget builder
-            Value::Keyword(name.clone())
-        });
         runtime
     }
 
@@ -484,58 +510,13 @@ impl Runtime {
             self.clear_layout_effects();
         }
 
-        // If source contains defwidget, process each expression individually
-        // so that widget natives are registered before subsequent expressions.
-        if src.contains("defwidget") {
-            return self.eval_str_per_expression(src);
-        }
-
         let result = self.vm.eval_str(src);
         if result.is_ok() {
             self.sync_theme_from_vm();
-            self.sync_sdf_widget_natives();
             self.invalidate_symbol_cache();
             self.flush_widget_trees();
         }
         result
-    }
-
-    fn eval_str_per_expression(
-        &mut self,
-        src: &str,
-    ) -> Result<Option<Value>, crate::vm::VMError> {
-        use crate::parser::{ASTParser, Parser};
-        let tokens = Parser::new(src.to_string())
-            .parse()
-            .map_err(|_| crate::vm::VMError::ParseError)?;
-        let exprs = ASTParser::new(tokens)
-            .parse()
-            .map_err(|_| crate::vm::VMError::ParseError)?;
-
-        let mut last_result = None;
-        for expr in &exprs {
-            let expr_src = crate::parser::format_expression(expr);
-            let result = self.vm.eval_str(&expr_src)?;
-            self.sync_sdf_widget_natives();
-            last_result = result;
-        }
-        self.sync_theme_from_vm();
-        self.invalidate_symbol_cache();
-        self.flush_widget_trees();
-        Ok(last_result)
-    }
-
-    /// Register native builder functions for any SDF widgets that don't have one yet.
-    fn sync_sdf_widget_natives(&mut self) {
-        use crate::widget_render::sdf_widget;
-        for name in sdf_widget::sdf_widget_names() {
-            if self.vm.has_global(&name) {
-                continue;
-            }
-            let widget_type = name.clone();
-            self.vm
-                .register_native(&name, move |args| crate::widgets::build_widget(&widget_type, args));
-        }
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
@@ -590,12 +571,7 @@ impl Runtime {
 
     /// Set the text measurer for proportional font layout (Metal backend).
     /// Also stores cell dimensions for pixel↔cell conversion.
-    pub fn set_text_measurer(
-        &mut self,
-        measurer: Box<dyn TextMeasurer>,
-        cell_w: f32,
-        cell_h: f32,
-    ) {
+    pub fn set_text_measurer(&mut self, measurer: Box<dyn TextMeasurer>, cell_w: f32, cell_h: f32) {
         self.text_measurer = Some(measurer);
         self.layout_cell_w = cell_w;
         self.layout_cell_h = cell_h;

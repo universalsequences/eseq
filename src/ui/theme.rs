@@ -55,6 +55,7 @@ pub struct Theme {
     pub comp_doc_bg: Color,
     pub comp_doc_fg: Color,
     pub comp_doc_title_fg: Color,
+    pub widget_focus_bg: Color,
     pub widget_label_fg: Color,
     pub widget_slider_filled: Color,
     pub widget_slider_track: Color,
@@ -133,9 +134,17 @@ theme_slots!(
     (magenta, MAGENTA, Color::from_hex(0xc8, 0xff, 0x00)),
     (cyan, CYAN, Color::from_hex(0x61, 0xff, 0xca)),
     (white, WHITE, Color::from_hex(0xe0, 0xe0, 0xe0)),
-    (bright_black, BRIGHT_BLACK, Color::from_hex(0x3a, 0x3a, 0x3a)),
+    (
+        bright_black,
+        BRIGHT_BLACK,
+        Color::from_hex(0x3a, 0x3a, 0x3a)
+    ),
     (bright_red, BRIGHT_RED, Color::from_hex(0xff, 0x6b, 0x6b)),
-    (bright_yellow, BRIGHT_YELLOW, Color::from_hex(0xd4, 0xff, 0x40)),
+    (
+        bright_yellow,
+        BRIGHT_YELLOW,
+        Color::from_hex(0xd4, 0xff, 0x40)
+    ),
     (purple, PURPLE, Color::from_hex(0xc8, 0xff, 0x00)),
     (cursor, CURSOR, Color::from_hex(0xc8, 0xff, 0x00)),
     (syn_comment, SYN_COMMENT, Color::from_hex(0x3a, 0x3a, 0x3a)),
@@ -144,41 +153,154 @@ theme_slots!(
     (syn_keyword, SYN_KEYWORD, Color::from_hex(0xc8, 0xff, 0x00)),
     (syn_builtin, SYN_BUILTIN, Color::from_hex(0xff, 0xca, 0x85)),
     (syn_special, SYN_SPECIAL, Color::from_hex(0x5a, 0x9e, 0xff)),
-    (syn_delimiter, SYN_DELIMITER, Color::from_hex(0x55, 0x55, 0x55)),
+    (
+        syn_delimiter,
+        SYN_DELIMITER,
+        Color::from_hex(0x55, 0x55, 0x55)
+    ),
     (bg_region, BG_REGION, Color::rgba(0.784, 1.0, 0.0, 0.20)),
     (bg_sexp, BG_SEXP, Color::rgba(0.12, 0.14, 0.05, 1.0)),
-    (bg_eval_flash, BG_EVAL_FLASH, Color::rgba(0.784, 1.0, 0.0, 0.20)),
-    (bg_match_paren, BG_MATCH_PAREN, Color::from_hex(0xc8, 0xff, 0x00)),
-    (fg_match_paren, FG_MATCH_PAREN, Color::from_hex(0x05, 0x05, 0x05)),
+    (
+        bg_eval_flash,
+        BG_EVAL_FLASH,
+        Color::rgba(0.784, 1.0, 0.0, 0.20)
+    ),
+    (
+        bg_match_paren,
+        BG_MATCH_PAREN,
+        Color::from_hex(0xc8, 0xff, 0x00)
+    ),
+    (
+        fg_match_paren,
+        FG_MATCH_PAREN,
+        Color::from_hex(0x05, 0x05, 0x05)
+    ),
     (status_fg, STATUS_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
     (status_bg, STATUS_BG, Color::from_hex(0x14, 0x14, 0x14)),
     (status_edge, STATUS_EDGE, Color::from_hex(0x23, 0x23, 0x23)),
-    (status_chip_bg, STATUS_CHIP_BG, Color::from_hex(0x1f, 0x1f, 0x1f)),
-    (status_mode_bg, STATUS_MODE_BG, Color::from_hex(0x2c, 0x2c, 0x2c)),
-    (status_chip_muted, STATUS_CHIP_MUTED, Color::from_hex(0x18, 0x23, 0x12)),
-    (status_ui_bg, STATUS_UI_BG, Color::from_hex(0xc8, 0xff, 0x00)),
-    (status_ui_fg, STATUS_UI_FG, Color::from_hex(0x05, 0x05, 0x05)),
-    (status_mix_bg, STATUS_MIX_BG, Color::from_hex(0x5a, 0x9e, 0xff)),
-    (status_mix_fg, STATUS_MIX_FG, Color::from_hex(0x05, 0x05, 0x05)),
-    (status_dirty_bg, STATUS_DIRTY_BG, Color::from_hex(0x4a, 0x33, 0x10)),
-    (status_dirty_fg, STATUS_DIRTY_FG, Color::from_hex(0xff, 0xde, 0xa6)),
-    (status_pos_bg, STATUS_POS_BG, Color::from_hex(0x10, 0x10, 0x10)),
-    (status_accent, STATUS_ACCENT, Color::from_hex(0x61, 0xff, 0xca)),
-    (comp_selected_bg, COMP_SELECTED_BG, Color::from_hex(0x2a, 0x2e, 0x10)),
-    (comp_unselected_bg, COMP_UNSELECTED_BG, Color::from_hex(0x14, 0x14, 0x14)),
+    (
+        status_chip_bg,
+        STATUS_CHIP_BG,
+        Color::from_hex(0x1f, 0x1f, 0x1f)
+    ),
+    (
+        status_mode_bg,
+        STATUS_MODE_BG,
+        Color::from_hex(0x2c, 0x2c, 0x2c)
+    ),
+    (
+        status_chip_muted,
+        STATUS_CHIP_MUTED,
+        Color::from_hex(0x18, 0x23, 0x12)
+    ),
+    (
+        status_ui_bg,
+        STATUS_UI_BG,
+        Color::from_hex(0xc8, 0xff, 0x00)
+    ),
+    (
+        status_ui_fg,
+        STATUS_UI_FG,
+        Color::from_hex(0x05, 0x05, 0x05)
+    ),
+    (
+        status_mix_bg,
+        STATUS_MIX_BG,
+        Color::from_hex(0x5a, 0x9e, 0xff)
+    ),
+    (
+        status_mix_fg,
+        STATUS_MIX_FG,
+        Color::from_hex(0x05, 0x05, 0x05)
+    ),
+    (
+        status_dirty_bg,
+        STATUS_DIRTY_BG,
+        Color::from_hex(0x4a, 0x33, 0x10)
+    ),
+    (
+        status_dirty_fg,
+        STATUS_DIRTY_FG,
+        Color::from_hex(0xff, 0xde, 0xa6)
+    ),
+    (
+        status_pos_bg,
+        STATUS_POS_BG,
+        Color::from_hex(0x10, 0x10, 0x10)
+    ),
+    (
+        status_accent,
+        STATUS_ACCENT,
+        Color::from_hex(0x61, 0xff, 0xca)
+    ),
+    (
+        comp_selected_bg,
+        COMP_SELECTED_BG,
+        Color::from_hex(0x2a, 0x2e, 0x10)
+    ),
+    (
+        comp_unselected_bg,
+        COMP_UNSELECTED_BG,
+        Color::from_hex(0x14, 0x14, 0x14)
+    ),
     (comp_fg, COMP_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
     (comp_doc_bg, COMP_DOC_BG, Color::from_hex(0x0d, 0x0d, 0x0d)),
     (comp_doc_fg, COMP_DOC_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
-    (comp_doc_title_fg, COMP_DOC_TITLE_FG, Color::from_hex(0xc8, 0xff, 0x00)),
-    (widget_label_fg, WIDGET_LABEL_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
-    (widget_slider_filled, WIDGET_SLIDER_FILLED, Color::from_hex(0xc8, 0xff, 0x00)),
-    (widget_slider_track, WIDGET_SLIDER_TRACK, Color::from_hex(0x3a, 0x3a, 0x3a)),
-    (widget_knob_filled, WIDGET_KNOB_FILLED, Color::from_hex(0xc8, 0xff, 0x00)),
-    (widget_knob_track, WIDGET_KNOB_TRACK, Color::from_hex(0x3a, 0x3a, 0x3a)),
-    (widget_toggle_on, WIDGET_TOGGLE_ON, Color::from_hex(0xc8, 0xff, 0x00)),
-    (widget_toggle_off, WIDGET_TOGGLE_OFF, Color::from_hex(0x6f, 0x7a, 0x8f)),
-    (widget_toggle_knob_on, WIDGET_TOGGLE_KNOB_ON, Color::from_hex(0xff, 0xff, 0xff)),
-    (widget_toggle_knob_off, WIDGET_TOGGLE_KNOB_OFF, Color::from_hex(0xf1, 0xf3, 0xf7)),
+    (
+        comp_doc_title_fg,
+        COMP_DOC_TITLE_FG,
+        Color::from_hex(0xc8, 0xff, 0x00)
+    ),
+    (
+        widget_focus_bg,
+        WIDGET_FOCUS_BG,
+        Color::from_hex(0x2f, 0x36, 0x12)
+    ),
+    (
+        widget_label_fg,
+        WIDGET_LABEL_FG,
+        Color::from_hex(0xe0, 0xe0, 0xe0)
+    ),
+    (
+        widget_slider_filled,
+        WIDGET_SLIDER_FILLED,
+        Color::from_hex(0xc8, 0xff, 0x00)
+    ),
+    (
+        widget_slider_track,
+        WIDGET_SLIDER_TRACK,
+        Color::from_hex(0x3a, 0x3a, 0x3a)
+    ),
+    (
+        widget_knob_filled,
+        WIDGET_KNOB_FILLED,
+        Color::from_hex(0xc8, 0xff, 0x00)
+    ),
+    (
+        widget_knob_track,
+        WIDGET_KNOB_TRACK,
+        Color::from_hex(0x3a, 0x3a, 0x3a)
+    ),
+    (
+        widget_toggle_on,
+        WIDGET_TOGGLE_ON,
+        Color::from_hex(0xc8, 0xff, 0x00)
+    ),
+    (
+        widget_toggle_off,
+        WIDGET_TOGGLE_OFF,
+        Color::from_hex(0x6f, 0x7a, 0x8f)
+    ),
+    (
+        widget_toggle_knob_on,
+        WIDGET_TOGGLE_KNOB_ON,
+        Color::from_hex(0xff, 0xff, 0xff)
+    ),
+    (
+        widget_toggle_knob_off,
+        WIDGET_TOGGLE_KNOB_OFF,
+        Color::from_hex(0xf1, 0xf3, 0xf7)
+    ),
 );
 
 static ACTIVE_THEME: OnceLock<RwLock<Theme>> = OnceLock::new();

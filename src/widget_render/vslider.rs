@@ -48,7 +48,11 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             } else {
                 // Dot every other row for subtle track
                 let ch = if row_offset % 2 == 0 { '\u{2022}' } else { ' ' };
-                buf.set(row, col, styled_cell(ch, theme::WIDGET_SLIDER_TRACK(), None));
+                buf.set(
+                    row,
+                    col,
+                    styled_cell(ch, theme::WIDGET_SLIDER_TRACK(), None),
+                );
             }
         }
     }

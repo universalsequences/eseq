@@ -201,11 +201,19 @@ impl WidgetDefinition for WaveformWidget {
             .round() as u16;
         for col in content_left..=content_right {
             buf.set(content_top, col, styled_cell('-', theme::FG_MUTED(), None));
-            buf.set(content_bottom, col, styled_cell('-', theme::FG_MUTED(), None));
+            buf.set(
+                content_bottom,
+                col,
+                styled_cell('-', theme::FG_MUTED(), None),
+            );
         }
         for row in content_top..=content_bottom {
             buf.set(row, content_left, styled_cell('|', theme::FG_MUTED(), None));
-            buf.set(row, content_right, styled_cell('|', theme::FG_MUTED(), None));
+            buf.set(
+                row,
+                content_right,
+                styled_cell('|', theme::FG_MUTED(), None),
+            );
         }
 
         let zero_row =
@@ -259,7 +267,11 @@ impl WidgetDefinition for WaveformWidget {
         if let Some(playhead_col) = view.playhead_col(view.playhead_time) {
             for row_offset in 0..(content.height.round() as u16) {
                 let row = content.row.round() as u16 + row_offset;
-                buf.set(row, playhead_col, styled_cell('|', playhead_color(props), None));
+                buf.set(
+                    row,
+                    playhead_col,
+                    styled_cell('|', playhead_color(props), None),
+                );
             }
         }
     }

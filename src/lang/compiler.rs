@@ -286,14 +286,9 @@ impl Compiler {
         }
     }
 
-    fn expand_quasiquote(
-        expr: &Expression,
-        bindings: &HashMap<String, Expression>,
-    ) -> Expression {
+    fn expand_quasiquote(expr: &Expression, bindings: &HashMap<String, Expression>) -> Expression {
         match expr {
-            Expression::Quasiquote(inner) => {
-                Self::expand_quasiquote_inner(inner, bindings)
-            }
+            Expression::Quasiquote(inner) => Self::expand_quasiquote_inner(inner, bindings),
             // If the macro body isn't quasiquoted, just return it as-is
             _ => expr.clone(),
         }
@@ -314,14 +309,12 @@ impl Compiler {
                 // Not a bound parameter — return inner as-is
                 *inner.clone()
             }
-            Expression::List(items) => {
-                Expression::List(
-                    items
-                        .iter()
-                        .map(|item| Self::expand_quasiquote_inner(item, bindings))
-                        .collect(),
-                )
-            }
+            Expression::List(items) => Expression::List(
+                items
+                    .iter()
+                    .map(|item| Self::expand_quasiquote_inner(item, bindings))
+                    .collect(),
+            ),
             // Everything else inside quasiquote is literal
             _ => expr.clone(),
         }

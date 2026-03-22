@@ -29,10 +29,6 @@ pub fn sdf_widget_def(name: &str) -> Option<SdfWidgetDef> {
     SDF_WIDGETS.with(|w| w.borrow().get(name).cloned())
 }
 
-pub fn sdf_widget_names() -> Vec<String> {
-    SDF_WIDGETS.with(|w| w.borrow().keys().cloned().collect())
-}
-
 /// Measure an SDF widget — returns the fixed size from defwidget :measure.
 pub fn sdf_widget_measure(
     widget_type: &str,
@@ -77,8 +73,7 @@ pub fn sdf_widget_metal_primitives(
     let px_h = node.rect.height * viewport.cell_h;
 
     let value_t = super::get_f32_prop(&node.props, "value", 0.0);
-    let color_a = super::resolve_named_color(&node.props, "color", crate::theme::GREEN())
-        .to_rgba();
+    let color_a = super::resolve_named_color(&node.props, "color", crate::theme::GREEN()).to_rgba();
 
     vec![MetalPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),

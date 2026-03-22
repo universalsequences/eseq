@@ -159,12 +159,24 @@ fn build_buffer_status_row(
     }
 
     if buffer.dirty {
-        push_status_chip(&mut left, " + ", theme::STATUS_DIRTY_FG(), theme::STATUS_DIRTY_BG(), true);
+        push_status_chip(
+            &mut left,
+            " + ",
+            theme::STATUS_DIRTY_FG(),
+            theme::STATUS_DIRTY_BG(),
+            true,
+        );
         left.push(status_space());
     }
 
     if buffer.read_only {
-        push_status_chip(&mut left, " ro ", theme::STATUS_FG(), theme::STATUS_CHIP_BG(), false);
+        push_status_chip(
+            &mut left,
+            " ro ",
+            theme::STATUS_FG(),
+            theme::STATUS_CHIP_BG(),
+            false,
+        );
         left.push(status_space());
     }
 
@@ -224,6 +236,7 @@ pub fn build_render_frame(
     viewport_height: usize,
 ) -> RenderFrame {
     editor.set_layout_viewport(viewport_width as u16, viewport_height as u16);
+    editor.sync_text_horizontal_scroll(viewport_width as u16);
     if editor.active_buffer().view_mode != ViewMode::UiOnly {
         editor.active_buffer_mut().adjust_scroll(viewport_height);
     }
@@ -422,7 +435,12 @@ fn build_tiled_render_frame_impl(
         .map(|(tile_id, rect)| {
             let leaf = editor.tile_root.find_leaf(*tile_id).unwrap();
             let buf = &editor.buffers[leaf.buffer_idx];
-            let frame_key = (buf.revision, leaf.layout_revision, buf.scroll_top, buf.view_mode);
+            let frame_key = (
+                buf.revision,
+                leaf.layout_revision,
+                buf.scroll_top,
+                buf.view_mode,
+            );
             let cached = leaf
                 .cached_inactive_frame
                 .as_ref()

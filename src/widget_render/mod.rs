@@ -509,7 +509,13 @@ fn collect_metal_primitives_recursive(
     primitives.extend(widget_primitives_for_node(node, node_viewport));
 
     for child in &node.children {
-        collect_metal_primitives_recursive(child, node_viewport, _scroll_top, _max_rows, primitives);
+        collect_metal_primitives_recursive(
+            child,
+            node_viewport,
+            _scroll_top,
+            _max_rows,
+            primitives,
+        );
     }
 }
 

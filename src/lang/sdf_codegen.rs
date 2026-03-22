@@ -172,8 +172,10 @@ impl MetalEmitter {
 
     fn emit_sdf_layer(&mut self, children: &[Expression]) -> Result<String, CodegenError> {
         let layer_var = self.fresh_var();
-        self.statements
-            .push(format!("float4 {} = float4(0.0, 0.0, 0.0, 0.0);", layer_var));
+        self.statements.push(format!(
+            "float4 {} = float4(0.0, 0.0, 0.0, 0.0);",
+            layer_var
+        ));
 
         for child in children {
             let child_color = self.emit_expr(child)?;
@@ -214,8 +216,10 @@ impl MetalEmitter {
         self.statements
             .push(format!("float {} = max(fwidth({}), 0.001);", aa, d));
         let mask = self.fresh_var();
-        self.statements
-            .push(format!("float {} = smoothstep({}, -({}), {});", mask, aa, aa, d));
+        self.statements.push(format!(
+            "float {} = smoothstep({}, -({}), {});",
+            mask, aa, aa, d
+        ));
 
         // Evaluate color (may reference hit/hover, hit/active)
         let color = self.emit_expr(color_expr)?;
@@ -276,8 +280,10 @@ impl MetalEmitter {
         self.statements
             .push(format!("float {} = max(fwidth({}), 0.001);", aa, stroke_d));
         let mask = self.fresh_var();
-        self.statements
-            .push(format!("float {} = smoothstep({}, -({}), {});", mask, aa, aa, stroke_d));
+        self.statements.push(format!(
+            "float {} = smoothstep({}, -({}), {});",
+            mask, aa, aa, stroke_d
+        ));
 
         // Evaluate color
         let color = self.emit_expr(&args[2])?;
@@ -296,10 +302,14 @@ impl MetalEmitter {
 
     fn emit_let(&mut self, args: &[Expression]) -> Result<String, CodegenError> {
         if args.len() < 2 {
-            return Err(CodegenError::UnsupportedExpression("let needs bindings and body".into()));
+            return Err(CodegenError::UnsupportedExpression(
+                "let needs bindings and body".into(),
+            ));
         }
         let Expression::List(bindings) = &args[0] else {
-            return Err(CodegenError::UnsupportedExpression("let bindings must be a list".into()));
+            return Err(CodegenError::UnsupportedExpression(
+                "let bindings must be a list".into(),
+            ));
         };
 
         self.scopes.push(HashMap::new());
@@ -336,7 +346,9 @@ impl MetalEmitter {
 
     fn emit_if(&mut self, args: &[Expression]) -> Result<String, CodegenError> {
         if args.len() < 3 {
-            return Err(CodegenError::UnsupportedExpression("if needs 3 args".into()));
+            return Err(CodegenError::UnsupportedExpression(
+                "if needs 3 args".into(),
+            ));
         }
         let cond = self.emit_expr(&args[0])?;
         let then = self.emit_expr(&args[1])?;
@@ -361,11 +373,7 @@ impl MetalEmitter {
         Ok(result)
     }
 
-    fn emit_arithmetic(
-        &mut self,
-        op: &str,
-        args: &[Expression],
-    ) -> Result<String, CodegenError> {
+    fn emit_arithmetic(&mut self, op: &str, args: &[Expression]) -> Result<String, CodegenError> {
         if args.is_empty() {
             return Ok("0.0".to_string());
         }
@@ -508,11 +516,23 @@ pub fn compile_sdf_to_metal(expr: &Expression) -> Result<SdfShaderOutput, Codege
     let region_count = emitter.next_region_id;
 
     let mut shader = String::with_capacity(2048);
-    writeln!(shader, "fragment float4 widget_frag(WidgetVaryings in [[stage_in]])").unwrap();
+    writeln!(
+        shader,
+        "fragment float4 widget_frag(WidgetVaryings in [[stage_in]])"
+    )
+    .unwrap();
     writeln!(shader, "{{").unwrap();
     writeln!(shader, "    float aspect = in.aspect;").unwrap();
-    writeln!(shader, "    float x = (in.uv.x * 2.0 - 1.0) * max(aspect, 1.0);").unwrap();
-    writeln!(shader, "    float y = (in.uv.y * 2.0 - 1.0) * max(1.0 / max(aspect, 0.0001), 1.0);").unwrap();
+    writeln!(
+        shader,
+        "    float x = (in.uv.x * 2.0 - 1.0) * max(aspect, 1.0);"
+    )
+    .unwrap();
+    writeln!(
+        shader,
+        "    float y = (in.uv.y * 2.0 - 1.0) * max(1.0 / max(aspect, 0.0001), 1.0);"
+    )
+    .unwrap();
     writeln!(shader, "    float value_t = in.value_t;").unwrap();
 
     if is_layer {
@@ -535,7 +555,11 @@ pub fn compile_sdf_to_metal(expr: &Expression) -> Result<SdfShaderOutput, Codege
         writeln!(shader, "    float mask = smoothstep(aa, -aa, d);").unwrap();
         writeln!(shader, "    if (mask < 0.001) discard_fragment();").unwrap();
         writeln!(shader, "    float4 fill_color = in.color_a;").unwrap();
-        writeln!(shader, "    return float4(fill_color.rgb, fill_color.a * mask);").unwrap();
+        writeln!(
+            shader,
+            "    return float4(fill_color.rgb, fill_color.a * mask);"
+        )
+        .unwrap();
     }
     writeln!(shader, "}}").unwrap();
 
@@ -734,7 +758,9 @@ mod tests {
 
         let rt = Runtime::new();
         let compiler = Compiler::new_repl(
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
             std::collections::HashSet::new(),
             std::collections::HashMap::new(),
             std::collections::HashMap::new(),
@@ -811,7 +837,8 @@ mod tests {
 
     #[test]
     fn sdf_stroke_basic() {
-        let (stmts, _result) = codegen_expr("(sdf/stroke (- (length (vec2 x y)) 0.5) 0.02 :accent)");
+        let (stmts, _result) =
+            codegen_expr("(sdf/stroke (- (length (vec2 x y)) 0.5) 0.02 :accent)");
         // Stroke converts distance: abs(d) - width
         assert!(stmts.iter().any(|s| s.contains("abs(")));
         assert!(stmts.iter().any(|s| s.contains("0.02")));
@@ -835,9 +862,8 @@ mod tests {
 
     #[test]
     fn sdf_fill_hit_hover() {
-        let (stmts, _) = codegen_expr(
-            "(sdf/fill (- (length (vec2 x y)) 0.5) (if hit/hover :accent :primary))",
-        );
+        let (stmts, _) =
+            codegen_expr("(sdf/fill (- (length (vec2 x y)) 0.5) (if hit/hover :accent :primary))");
         // hit/hover should resolve to (hit_region == 0)
         let all = stmts.join("\n");
         assert!(all.contains("hit_region == 0"));
@@ -845,9 +871,8 @@ mod tests {
 
     #[test]
     fn sdf_layer_single_fill() {
-        let (stmts, result) = codegen_expr(
-            "(sdf/layer (sdf/fill (- (length (vec2 x y)) 0.5) :accent))",
-        );
+        let (stmts, result) =
+            codegen_expr("(sdf/layer (sdf/fill (- (length (vec2 x y)) 0.5) :accent))");
         // Should have layer accumulator and alpha blend
         let all = stmts.join("\n");
         assert!(all.contains("float4"));
