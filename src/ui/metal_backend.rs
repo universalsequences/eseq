@@ -164,6 +164,9 @@ struct WidgetInstance {
     packed_float2 ndc_max;
     float         value_t;
     float         orientation;
+    float         itime;
+    packed_float4 uniform_a;
+    packed_float4 uniform_b;
     packed_float4 color_a;
     packed_float4 color_b;
     packed_float4 color_c;
@@ -176,6 +179,9 @@ struct WidgetVaryings {
     float4 position [[position]];
     float2 uv;
     float  value_t    [[flat]];
+    float  itime      [[flat]];
+    float4 uniform_a  [[flat]];
+    float4 uniform_b  [[flat]];
     float4 color_a    [[flat]];
     float4 color_b    [[flat]];
     float4 color_c    [[flat]];
@@ -220,6 +226,9 @@ vertex WidgetVaryings widget_vert(
     out.position = float4(ndc, 0.0, 1.0);
     out.uv = corner;
     out.value_t = inst.value_t;
+    out.itime = inst.itime;
+    out.uniform_a = inst.uniform_a;
+    out.uniform_b = inst.uniform_b;
     out.color_a = inst.color_a;
     out.color_b = inst.color_b;
     out.color_c = inst.color_c;
@@ -228,6 +237,60 @@ vertex WidgetVaryings widget_vert(
     return out;
 }
 "#;
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::lang::sdf_codegen::compile_sdf_to_metal;
+
+        fn parse_one_expr(src: &str) -> crate::parser::Expression {
+            let tokens = crate::parser::Parser::new(src.to_string()).parse().unwrap();
+            let mut ast = crate::parser::ASTParser::new(tokens);
+            ast.parse().unwrap().into_iter().next().unwrap()
+        }
+
+        fn compile_widget_shader_with_metal(shader_src: &str) -> Result<(), String> {
+            let device = MTLCreateSystemDefaultDevice().ok_or("no Metal device".to_string())?;
+            let full_src = format!(
+                "{}{}{}",
+                WIDGET_SHADER_PREAMBLE, DEFAULT_WIDGET_VERTEX_SHADER, shader_src
+            );
+            let src_ns = NSString::from_str(&full_src);
+            device
+                .newLibraryWithSource_options_error(&src_ns, None)
+                .map(|_| ())
+                .map_err(|err| format!("{:?}", err))
+        }
+
+        #[test]
+        fn generated_top_level_let_layer_shader_compiles_in_metal() {
+            let output = compile_sdf_to_metal(&parse_one_expr(
+                "(let ((shape (- (length (vec2 x y)) 0.5)))
+                   (sdf/layer
+                     (sdf/fill shape
+                       (material
+                         :color (mix :accent :white (smoothstep -0.1 0.03 d))))))",
+            ))
+            .unwrap();
+            compile_widget_shader_with_metal(&output.shader_source).unwrap();
+        }
+
+        #[test]
+        fn generated_shadow_material_shader_compiles_in_metal() {
+            let output = compile_sdf_to_metal(&parse_one_expr(
+                "(let ((shape (- (length (vec2 x y)) 0.5)))
+                   (sdf/layer
+                     (sdf/fill shape
+                       (material
+                         :color :accent
+                         :shadow (shadow :color (rgba 0 0 0 0.2)
+                                         :blur 0.18
+                                         :offset (vec2 0 0.05))))))",
+            ))
+            .unwrap();
+            compile_widget_shader_with_metal(&output.shader_source).unwrap();
+        }
+    }
 
     const WAVEFORM_SHADER_SRC: &str = r#"
 #include <metal_stdlib>
@@ -484,6 +547,7 @@ fragment float4 waveform_frag(
         prop_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         // Per-widget-type GPU pipelines (hslider, vslider, toggle)
         widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        sdf_widget_pipeline_sources: HashMap<String, String>,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
         // Glyph atlases
@@ -508,6 +572,7 @@ fragment float4 waveform_frag(
         cursor_pos: (f32, f32),
         last_precise_mouse: Option<(f32, f32)>,
         last_window_bg: Option<Color>,
+        start_time: Instant,
     }
 
     impl MetalBackend {
@@ -525,6 +590,7 @@ fragment float4 waveform_frag(
                 pipeline: None,
                 prop_pipeline: None,
                 widget_pipelines: HashMap::new(),
+                sdf_widget_pipeline_sources: HashMap::new(),
                 waveform_pipeline: None,
                 waveform_buffers: HashMap::new(),
                 atlas: None,
@@ -547,7 +613,12 @@ fragment float4 waveform_frag(
                 cursor_pos: (0.0, 0.0),
                 last_precise_mouse: None,
                 last_window_bg: None,
+                start_time: Instant::now(),
             })
+        }
+
+        fn elapsed_time_seconds(&self) -> f32 {
+            self.start_time.elapsed().as_secs_f32()
         }
 
         pub fn take_last_precise_mouse(&mut self) -> Option<(f32, f32)> {
@@ -660,7 +731,11 @@ fragment float4 waveform_frag(
         fn compile_pending_sdf_pipelines(&mut self) {
             use crate::widget_render::sdf_widget;
             for (name, shader_src) in sdf_widget::sdf_widget_shader_sources() {
-                if self.widget_pipelines.contains_key(&name) {
+                if self
+                    .sdf_widget_pipeline_sources
+                    .get(&name)
+                    .is_some_and(|current| current == &shader_src)
+                {
                     continue;
                 }
                 let full_src = format!(
@@ -668,12 +743,20 @@ fragment float4 waveform_frag(
                     WIDGET_SHADER_PREAMBLE, DEFAULT_WIDGET_VERTEX_SHADER, shader_src
                 );
                 let src_ns = NSString::from_str(&full_src);
-                let Ok(wlib) = self
+                let wlib = match self
                     .device
                     .newLibraryWithSource_options_error(&src_ns, None)
-                else {
-                    eprintln!("SDF widget '{}': shader compilation failed", name);
-                    continue;
+                {
+                    Ok(lib) => lib,
+                    Err(err) => {
+                        eprintln!(
+                            "SDF widget '{}': shader compilation failed: {:?}",
+                            name, err
+                        );
+                        self.widget_pipelines.remove(&name);
+                        self.sdf_widget_pipeline_sources.insert(name, shader_src);
+                        continue;
+                    }
                 };
                 let (Some(wvert), Some(wfrag)) = (
                     wlib.newFunctionWithName(&NSString::from_str("widget_vert")),
@@ -700,6 +783,8 @@ fragment float4 waveform_frag(
                     .device
                     .newRenderPipelineStateWithDescriptor_error(&wdesc)
                 {
+                    self.sdf_widget_pipeline_sources
+                        .insert(name.clone(), shader_src);
                     self.widget_pipelines.insert(name, pipeline_state);
                 }
             }
@@ -767,6 +852,7 @@ fragment float4 waveform_frag(
 
         /// Render a tiled frame with per-tile scissor clipping.
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
+            crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.sync_window_theme();
 
             let Some(pipeline) = self.pipeline.clone() else {
@@ -882,6 +968,7 @@ fragment float4 waveform_frag(
                 // Collect with LOCAL coords (no offset) so scroll/clip logic works,
                 // then offset the resulting primitives to screen position.
                 if let Some(ref layout) = tile.frame.widget_layout {
+                    let time_seconds = self.elapsed_time_seconds();
                     let inner_rows = (tile.rect.height - if tile.show_status { 1.0 } else { 0.0 })
                         .max(0.0)
                         .round() as u16;
@@ -892,6 +979,7 @@ fragment float4 waveform_frag(
                             cell_h,
                             vp_w,
                             vp_h,
+                            time_seconds,
                             focused_widget_id: tile.frame.focused_widget_id,
                             focused_branch: false,
                         },
@@ -956,8 +1044,8 @@ fragment float4 waveform_frag(
                     }
                     // Widget instances (sliders, toggles, knobs, SDF widgets)
                     self.compile_pending_sdf_pipelines();
-                    let batches = group_widget_instances(&offset_prims);
-                    for (widget_type, instances) in &batches {
+                    let widget_runs = collect_widget_instance_runs(&offset_prims);
+                    for (widget_type, instances) in &widget_runs {
                         let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                             continue;
                         };
@@ -1593,7 +1681,9 @@ fragment float4 waveform_frag(
         }
 
         fn render(&mut self, frame: &RenderFrame) -> Result<(), BackendError> {
+            crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.sync_window_theme();
+            let time_seconds = self.elapsed_time_seconds();
 
             let (Some(pipeline), Some(atlas)) = (&self.pipeline, &mut self.atlas) else {
                 return Ok(());
@@ -1642,6 +1732,7 @@ fragment float4 waveform_frag(
                             cell_h: atlas.cell_h as f32,
                             vp_w,
                             vp_h,
+                            time_seconds,
                             focused_widget_id: frame.focused_widget_id,
                             focused_branch: false,
                         },
@@ -1651,7 +1742,7 @@ fragment float4 waveform_frag(
                 })
                 .unwrap_or_default();
             let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
-            let primitive_instance_batches = group_widget_instances(&primitive_scene);
+            let primitive_instance_runs = collect_widget_instance_runs(&primitive_scene);
 
             // ── Vertex buffer ────────────────────────────────────────────────
             let text_vbuf = self.cached_text_buffer.as_ref();
@@ -1764,7 +1855,7 @@ fragment float4 waveform_frag(
 
             self.compile_pending_sdf_pipelines();
             let mut widget_upload_bytes = 0;
-            for (widget_type, instances) in &primitive_instance_batches {
+            for (widget_type, instances) in &primitive_instance_runs {
                 let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                     continue;
                 };
@@ -2434,23 +2525,26 @@ fragment float4 waveform_frag(
         ]);
     }
 
-    fn group_widget_instances(
+    fn collect_widget_instance_runs(
         primitives: &[widget_render::MetalPrimitive],
-    ) -> HashMap<String, Vec<WidgetInstance>> {
-        let mut batches = HashMap::new();
+    ) -> Vec<(String, Vec<WidgetInstance>)> {
+        let mut runs: Vec<(String, Vec<WidgetInstance>)> = Vec::new();
         for primitive in primitives {
             if let widget_render::MetalPrimitive::WidgetInstance {
                 widget_type,
                 instance,
             } = primitive
             {
-                batches
-                    .entry(widget_type.clone())
-                    .or_insert_with(Vec::new)
-                    .push(*instance);
+                if let Some((run_type, instances)) = runs.last_mut()
+                    && run_type == widget_type
+                {
+                    instances.push(*instance);
+                } else {
+                    runs.push((widget_type.clone(), vec![*instance]));
+                }
             }
         }
-        batches
+        runs
     }
 
     /// Offset a MetalPrimitive by (col_off, row_off) cells.

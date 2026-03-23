@@ -11,7 +11,7 @@ use crate::layout::{
     same_layout_geometry,
 };
 use crate::reactive::ReactiveRegistry;
-use crate::vm::{VM, Value, register_core_natives};
+use crate::vm::{EffectTarget, PendingWidgetTree, VM, Value, register_core_natives};
 use crate::widgets::register_widget_natives;
 
 pub type RuntimeError = String;
@@ -37,19 +37,26 @@ fn expand_sdf_expression(
 struct SdfCompileResult {
     output: crate::lang::sdf_codegen::SdfShaderOutput,
     expanded_expr: crate::parser::Expression,
+    state_symbols: Vec<String>,
 }
 
 fn compile_sdf_value(
     value: &Value,
     macros: &HashMap<String, crate::compiler::MacroDef>,
+    state_bindings: &std::collections::HashSet<String>,
 ) -> Result<SdfCompileResult, String> {
     let expr = crate::lang::sdf_codegen::value_to_expression(value).map_err(|e| e.to_string())?;
     let expanded = expand_sdf_expression(&expr, macros);
+    let mut state_symbols =
+        crate::lang::sdf_codegen::collect_state_symbols(&expanded, state_bindings);
+    state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
     let output =
-        crate::lang::sdf_codegen::compile_sdf_to_metal(&expanded).map_err(|e| e.to_string())?;
+        crate::lang::sdf_codegen::compile_sdf_to_metal_with_state(&expanded, &state_symbols)
+            .map_err(|e| e.to_string())?;
     Ok(SdfCompileResult {
         output,
         expanded_expr: expanded,
+        state_symbols,
     })
 }
 
@@ -90,7 +97,9 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_set_mode: Option<String>,
     pub pending_open_file: Option<String>,
     pub pending_widget_tree: Option<Value>,
+    pub pending_buffer_widget_trees: Vec<PendingWidgetTree>,
     pub pending_create_buffer: Option<String>,
+    pub pending_cleared_effect_sources: Vec<Option<BufferId>>,
     pub pending_switch_buffer: Option<String>,
     pub pending_set_text: Option<String>,
     pub pending_set_lines: Option<Vec<String>>,
@@ -380,7 +389,7 @@ impl Runtime {
             let Some(val) = args.first() else {
                 return Value::String("error: sdf->metal requires 1 argument".into());
             };
-            match compile_sdf_value(val, &sdf_macros) {
+            match compile_sdf_value(val, &sdf_macros, &std::collections::HashSet::new()) {
                 Ok(result) => Value::String(result.output.shader_source),
                 Err(e) => Value::String(format!("error: {}", e)),
             }
@@ -390,7 +399,9 @@ impl Runtime {
         runtime
             .vm
             .register_native_with_vm("defwidget", move |args, vm| {
-                use crate::widget_render::sdf_widget::{SdfWidgetDef, register_sdf_widget};
+                use crate::widget_render::sdf_widget::{
+                    SdfWidgetDef, estimate_shadow_paint_margin, register_sdf_widget,
+                };
 
                 // Parse: (defwidget name :width W :height H :shader '(sdf/layer ...))
                 let name = match args.first() {
@@ -401,6 +412,7 @@ impl Runtime {
 
                 let mut width: f32 = 10.0;
                 let mut height: f32 = 5.0;
+                let mut paint_margin: f32 = 0.0;
                 let mut shader_val = None;
 
                 let mut i = 1;
@@ -415,6 +427,11 @@ impl Runtime {
                             "height" => {
                                 if let Value::Number(n) = &args[i + 1] {
                                     height = *n as f32;
+                                }
+                            }
+                            "paint-margin" => {
+                                if let Value::Number(n) = &args[i + 1] {
+                                    paint_margin = (*n as f32).max(0.0);
                                 }
                             }
                             "shader" => {
@@ -432,23 +449,45 @@ impl Runtime {
                     return Value::String("defwidget: :shader is required".into());
                 };
 
-                let compiled = match compile_sdf_value(&shader_val, &dw_macros) {
+                let state_bindings = vm.state_bindings.keys().cloned().collect();
+                let compiled = match compile_sdf_value(&shader_val, &dw_macros, &state_bindings) {
                     Ok(o) => o,
                     Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
                 };
+                let paint_margin = paint_margin.max(estimate_shadow_paint_margin(
+                    &compiled.expanded_expr,
+                    width,
+                    height,
+                ));
 
                 register_sdf_widget(SdfWidgetDef {
                     name: name.clone(),
                     shader_source: compiled.output.shader_source,
                     sdf_expr: compiled.expanded_expr,
+                    state_uniforms: compiled.state_symbols.clone(),
                     region_count: compiled.output.region_count,
                     width,
                     height,
+                    paint_margin,
                 });
 
                 let widget_type = name.clone();
-                vm.register_native(&name, move |args| {
-                    crate::widgets::build_widget(&widget_type, args)
+                let state_uniforms = compiled.state_symbols;
+                vm.register_native_with_vm(&name, move |args, vm| {
+                    let mut widget = crate::widgets::build_widget(&widget_type, args);
+                    if let Value::Map(map) = &mut widget {
+                        for state_name in &state_uniforms {
+                            if let Some(value) = vm.read_tracked_state_value(state_name) {
+                                map.insert(
+                                    crate::widget_render::sdf_widget::shader_state_prop_name(
+                                        state_name,
+                                    ),
+                                    Rc::new(RefCell::new(value)),
+                                );
+                            }
+                        }
+                    }
+                    widget
                 });
                 Value::Keyword(name.clone())
             });
@@ -516,8 +555,8 @@ impl Runtime {
 
     pub fn eval_str(&mut self, src: &str) -> Result<Option<Value>, crate::vm::VMError> {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
-        self.vm.set_current_effect_owner(current_buffer_id);
-        if src.contains("(effect") {
+        self.vm.set_current_effect_context(current_buffer_id);
+        if src.contains("(effect") || src.contains("(effect-buffer") {
             self.clear_layout_effects();
         }
 
@@ -612,7 +651,7 @@ impl Runtime {
         args: Vec<Value>,
     ) -> Result<Option<Value>, crate::vm::VMError> {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
-        self.vm.set_current_effect_owner(current_buffer_id);
+        self.vm.set_current_effect_context(current_buffer_id);
         let result = self.vm.invoke(callable, args);
         if result.is_ok() {
             self.sync_theme_from_vm();
@@ -623,7 +662,7 @@ impl Runtime {
 
     pub fn run_reactive_cycle(&mut self) {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
-        self.vm.set_current_effect_owner(current_buffer_id);
+        self.vm.set_current_effect_context(current_buffer_id);
         let dirty = self.reactive_registry.drain_dirty();
         if dirty.is_empty() {
             return;
@@ -764,12 +803,20 @@ impl Runtime {
         self.shared.borrow_mut().pending_widget_tree.take()
     }
 
+    pub(crate) fn take_pending_buffer_widget_trees(&mut self) -> Vec<PendingWidgetTree> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_buffer_widget_trees)
+    }
+
     pub(crate) fn take_pending_open_file(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_open_file.take()
     }
 
     pub(crate) fn take_pending_create_buffer(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_create_buffer.take()
+    }
+
+    pub(crate) fn take_pending_cleared_effect_sources(&mut self) -> Vec<Option<BufferId>> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_cleared_effect_sources)
     }
 
     pub(crate) fn take_pending_scratch_buffers(&mut self) -> Vec<(String, String)> {
@@ -842,6 +889,25 @@ impl Runtime {
         self.current_widget_tree.clone()
     }
 
+    pub fn layout_snapshot_for_tree(&mut self, tree: &Value) -> Option<Arc<LayoutNode>> {
+        let saved_tree = self.current_widget_tree.clone();
+        let saved_layout = self.current_layout.clone();
+        let saved_revision = self.layout_revision;
+        let saved_dirty = self.dirty_widget_ids.clone();
+        let saved_rendered_layouts = self.rendered_layouts.clone();
+
+        self.current_widget_tree = Some(tree.clone());
+        self.relayout_current_tree();
+        let snapshot = self.current_layout.clone();
+
+        self.current_widget_tree = saved_tree;
+        self.current_layout = saved_layout;
+        self.layout_revision = saved_revision;
+        self.dirty_widget_ids = saved_dirty;
+        self.rendered_layouts = saved_rendered_layouts;
+        snapshot
+    }
+
     /// Clear the current widget tree and layout without destroying reactive effects.
     /// Used when switching to a buffer/tile that has no widget tree.
     pub fn clear_current_widget_tree(&mut self) {
@@ -877,6 +943,10 @@ impl Runtime {
     pub fn clear_layout_effects(&mut self) {
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.clear_effects_for_owner(current_buffer_id);
+        self.shared
+            .borrow_mut()
+            .pending_cleared_effect_sources
+            .push(current_buffer_id);
         self.current_layout = None;
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
@@ -886,14 +956,24 @@ impl Runtime {
 
     fn flush_widget_trees(&mut self) {
         let trees = std::mem::take(&mut self.vm.pending_widget_trees);
-        let current_buffer_id = self.shared.borrow().current_buffer_id;
-        for pending in trees {
-            if pending.owner_buffer_id != current_buffer_id {
-                continue;
+        let (current_buffer_id, current_buffer_name) = {
+            let shared = self.shared.borrow();
+            (shared.current_buffer_id, shared.current_buffer_name.clone())
+        };
+        for pending in &trees {
+            let targets_active_buffer = match &pending.target {
+                EffectTarget::BufferId(id) => *id == current_buffer_id,
+                EffectTarget::BufferName(name) => *name == current_buffer_name,
+            };
+            if targets_active_buffer {
+                self.current_widget_tree = Some(pending.tree.clone());
+                self.relayout_current_tree();
             }
-            self.current_widget_tree = Some(pending.tree);
-            self.relayout_current_tree();
         }
+        self.shared
+            .borrow_mut()
+            .pending_buffer_widget_trees
+            .extend(trees);
     }
 
     fn relayout_current_tree(&mut self) {

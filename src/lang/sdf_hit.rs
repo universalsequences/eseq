@@ -83,9 +83,7 @@ fn eval_sdf_expr(expr: &Expression, vars: &HashMap<String, f64>) -> f64 {
                     result
                 }
                 "pow" => eval_sdf_expr(&args[0], vars).powf(eval_sdf_expr(&args[1], vars)),
-                "atan2" => {
-                    eval_sdf_expr(&args[0], vars).atan2(eval_sdf_expr(&args[1], vars))
-                }
+                "atan2" => eval_sdf_expr(&args[0], vars).atan2(eval_sdf_expr(&args[1], vars)),
                 "clamp" => {
                     let v = eval_sdf_expr(&args[0], vars);
                     let lo = eval_sdf_expr(&args[1], vars);
@@ -256,13 +254,18 @@ fn extract_fill_regions(expr: &Expression) -> Vec<&Expression> {
 /// `x` and `y` should be in the SDF coordinate space ([-1,1] with aspect correction).
 /// Returns the index of the topmost `sdf/fill` region containing the point,
 /// or -1 if no region is hit.
-pub fn sdf_hit_test(sdf_expr: &Expression, x: f64, y: f64) -> i32 {
+pub fn sdf_hit_test_with_vars(
+    sdf_expr: &Expression,
+    x: f64,
+    y: f64,
+    extra_vars: &HashMap<String, f64>,
+) -> i32 {
     let regions = extract_fill_regions(sdf_expr);
     if regions.is_empty() {
         return -1;
     }
 
-    let mut vars = HashMap::new();
+    let mut vars = extra_vars.clone();
     vars.insert("x".to_string(), x);
     vars.insert("y".to_string(), y);
     // Hit testing variables — not pressed during hit test
@@ -278,6 +281,10 @@ pub fn sdf_hit_test(sdf_expr: &Expression, x: f64, y: f64) -> i32 {
         }
     }
     -1
+}
+
+pub fn sdf_hit_test(sdf_expr: &Expression, x: f64, y: f64) -> i32 {
+    sdf_hit_test_with_vars(sdf_expr, x, y, &HashMap::new())
 }
 
 /// Convert widget-local layout coordinates to SDF normalized coordinates.
@@ -320,7 +327,9 @@ mod tests {
 
         let rt = Runtime::new();
         let compiler = Compiler::new_repl(
-            vec![], vec![], vec![],
+            vec![],
+            vec![],
+            vec![],
             std::collections::HashSet::new(),
             HashMap::new(),
             HashMap::new(),
@@ -372,9 +381,7 @@ mod tests {
 
     #[test]
     fn hit_test_single_fill() {
-        let expr = expand_expr(
-            "(sdf/layer (sdf/fill (sdf/circle 0.5) :accent))",
-        );
+        let expr = expand_expr("(sdf/layer (sdf/fill (sdf/circle 0.5) :accent))");
         // Inside the circle
         assert_eq!(sdf_hit_test(&expr, 0.0, 0.0), 0);
         // Outside
@@ -417,6 +424,34 @@ mod tests {
         assert_eq!(sdf_hit_test(&expr, 0.5, 0.0), 0);
         // At origin — outside
         assert_eq!(sdf_hit_test(&expr, 0.0, 0.0), -1);
+    }
+
+    #[test]
+    fn hit_test_uses_injected_uniform_vars() {
+        let expr = expand_expr(
+            "(sdf/layer
+               (sdf/fill (sdf/translate offset 0 (sdf/circle 0.2)) :accent))",
+        );
+        let mut vars = HashMap::new();
+        vars.insert("offset".to_string(), 0.5);
+        assert_eq!(sdf_hit_test_with_vars(&expr, 0.5, 0.0, &vars), 0);
+
+        vars.insert("offset".to_string(), -0.5);
+        assert_eq!(sdf_hit_test_with_vars(&expr, 0.5, 0.0, &vars), -1);
+    }
+
+    #[test]
+    fn hit_test_can_use_itime() {
+        let expr = expand_expr(
+            "(sdf/layer
+               (sdf/fill (sdf/circle (+ 0.2 (* 0.2 (sin itime)))) :accent))",
+        );
+        let mut vars = HashMap::new();
+        vars.insert("itime".to_string(), std::f64::consts::FRAC_PI_2);
+        assert_eq!(sdf_hit_test_with_vars(&expr, 0.35, 0.0, &vars), 0);
+
+        vars.insert("itime".to_string(), -std::f64::consts::FRAC_PI_2);
+        assert_eq!(sdf_hit_test_with_vars(&expr, 0.35, 0.0, &vars), -1);
     }
 
     #[test]

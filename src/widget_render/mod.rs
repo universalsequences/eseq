@@ -164,6 +164,9 @@ pub struct WidgetInstance {
     pub ndc_max: [f32; 2],
     pub value_t: f32,
     pub orientation: f32,
+    pub itime: f32,
+    pub uniform_a: [f32; 4],
+    pub uniform_b: [f32; 4],
     pub color_a: [f32; 4],
     pub color_b: [f32; 4],
     pub color_c: [f32; 4],
@@ -179,6 +182,7 @@ pub struct WidgetViewport {
     pub cell_h: f32,
     pub vp_w: f32,
     pub vp_h: f32,
+    pub time_seconds: f32,
     pub focused_widget_id: Option<u64>,
     pub focused_branch: bool,
 }

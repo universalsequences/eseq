@@ -79,15 +79,16 @@ impl Editor {
         let px_h = node.rect.height * cell_h;
         let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
 
-        let region = sdf_widget::sdf_widget_hit_test(
-            &node.widget_type, widget_col, widget_row, node.rect, pixel_aspect,
-        );
+        let region = sdf_widget::sdf_widget_hit_test(&node, widget_col, widget_row, pixel_aspect);
 
         let old = sdf_widget::get_sdf_hit_state(node.widget_id);
         if old.hit_region != region || old.hit_pressed != pressed {
             sdf_widget::set_sdf_hit_state(
                 node.widget_id,
-                SdfHitState { hit_region: region, hit_pressed: pressed },
+                SdfHitState {
+                    hit_region: region,
+                    hit_pressed: pressed,
+                },
             );
             self.mark_needs_redraw();
         }

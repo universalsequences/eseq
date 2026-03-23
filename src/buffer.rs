@@ -23,6 +23,7 @@ pub struct Buffer {
     pub revision: u64,
     /// Per-buffer widget tree (for modes that render widgets).
     pub widget_tree: Option<Value>,
+    pub widget_tree_source: Option<BufferId>,
     pub view_mode: ViewMode,
 }
 
@@ -40,6 +41,7 @@ impl Buffer {
             scroll_top: 0,
             revision: 0,
             widget_tree: None,
+            widget_tree_source: None,
             view_mode: ViewMode::Both,
         }
     }

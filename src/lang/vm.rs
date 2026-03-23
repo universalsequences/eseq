@@ -63,14 +63,22 @@ pub enum ReactiveNode {
     Effect {
         id: NodeId,
         chunk_idx: usize,
-        owner_buffer_id: Option<BufferId>,
+        source_buffer_id: Option<BufferId>,
+        target: EffectTarget,
         dirty: bool,
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectTarget {
+    BufferId(Option<BufferId>),
+    BufferName(String),
+}
+
 #[derive(Clone)]
 pub struct PendingWidgetTree {
-    pub owner_buffer_id: Option<BufferId>,
+    pub source_buffer_id: Option<BufferId>,
+    pub target: EffectTarget,
     pub tree: Value,
 }
 
@@ -278,7 +286,8 @@ pub struct VM {
     pub state_bindings: HashMap<String, NodeId>,
     execution_depth: usize,
     processing_reactive: bool,
-    current_effect_owner: Option<BufferId>,
+    current_effect_source_buffer_id: Option<BufferId>,
+    current_effect_target: EffectTarget,
     pub macros: HashMap<String, MacroDef>,
 }
 
@@ -981,7 +990,7 @@ impl ReactiveDag {
             .iter()
             .filter_map(|(id, node)| match node {
                 ReactiveNode::Effect {
-                    owner_buffer_id: current_owner,
+                    source_buffer_id: current_owner,
                     ..
                 } if *current_owner == owner_buffer_id => Some(*id),
                 _ => None,
@@ -1006,7 +1015,8 @@ impl VM {
             state_bindings: HashMap::new(),
             execution_depth: 0,
             processing_reactive: false,
-            current_effect_owner: None,
+            current_effect_source_buffer_id: None,
+            current_effect_target: EffectTarget::BufferId(None),
             macros: HashMap::new(),
         }
     }
@@ -1103,16 +1113,28 @@ impl VM {
             .map(|value| value.borrow().clone())
     }
 
+    pub fn read_tracked_state_value(&mut self, name: &str) -> Option<Value> {
+        let node_id = self.state_bindings.get(name).copied()?;
+        if let Some(ctx_id) = self.tracking_stack.last().copied() {
+            self.dag.add_edge(node_id, ctx_id);
+        }
+        self.dag.nodes.get(&node_id).and_then(|node| match node {
+            ReactiveNode::Source { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+    }
+
     pub fn clear_effects_for_owner(&mut self, owner_buffer_id: Option<BufferId>) {
         for id in self.dag.effect_ids_for_owner(owner_buffer_id) {
             self.dag.remove_node(id);
         }
         self.pending_widget_trees
-            .retain(|pending| pending.owner_buffer_id != owner_buffer_id);
+            .retain(|pending| pending.source_buffer_id != owner_buffer_id);
     }
 
-    pub fn set_current_effect_owner(&mut self, owner_buffer_id: Option<BufferId>) {
-        self.current_effect_owner = owner_buffer_id;
+    pub fn set_current_effect_context(&mut self, source_buffer_id: Option<BufferId>) {
+        self.current_effect_source_buffer_id = source_buffer_id;
+        self.current_effect_target = EffectTarget::BufferId(source_buffer_id);
     }
 
     fn execute_from(&mut self, entry_chunk: usize) -> Result<Option<Value>, VMError> {
@@ -1317,15 +1339,22 @@ impl VM {
                         continue;
                     };
                     progressed = true;
-                    let previous_owner = self.current_effect_owner;
+                    let previous_owner = (
+                        self.current_effect_source_buffer_id,
+                        self.current_effect_target.clone(),
+                    );
                     if let Some(ReactiveNode::Effect {
-                        owner_buffer_id, ..
+                        source_buffer_id,
+                        target,
+                        ..
                     }) = self.dag.nodes.get(&node_id)
                     {
-                        self.current_effect_owner = *owner_buffer_id;
+                        self.current_effect_source_buffer_id = *source_buffer_id;
+                        self.current_effect_target = target.clone();
                     }
                     self.execute_from(chunk_idx)?;
-                    self.current_effect_owner = previous_owner;
+                    self.current_effect_source_buffer_id = previous_owner.0;
+                    self.current_effect_target = previous_owner.1;
                 }
 
                 if !progressed {
@@ -1732,7 +1761,8 @@ impl VM {
                         self.dag.add_node(ReactiveNode::Effect {
                             id: node_id,
                             chunk_idx,
-                            owner_buffer_id: self.current_effect_owner,
+                            source_buffer_id: self.current_effect_source_buffer_id,
+                            target: self.current_effect_target.clone(),
                             dirty: false,
                         });
                     }
@@ -1740,6 +1770,28 @@ impl VM {
                     let current_chunk = self.current_chunk;
                     let result = self.execute_from(chunk_idx)?;
                     self.current_chunk = current_chunk;
+                    let _ = result;
+                    stack.push(Rc::new(RefCell::new(Value::Nil)));
+                    frames.last_mut().unwrap().pc += 1;
+                }
+                OpCode::InitNamedEffect(node_id, chunk_idx, name_idx) => {
+                    let target_name = self.chunks[self.current_chunk].strings[name_idx].clone();
+                    if !self.dag.nodes.contains_key(&node_id) {
+                        self.dag.add_node(ReactiveNode::Effect {
+                            id: node_id,
+                            chunk_idx,
+                            source_buffer_id: self.current_effect_source_buffer_id,
+                            target: EffectTarget::BufferName(target_name.clone()),
+                            dirty: false,
+                        });
+                    }
+
+                    let current_chunk = self.current_chunk;
+                    let previous_target = self.current_effect_target.clone();
+                    self.current_effect_target = EffectTarget::BufferName(target_name);
+                    let result = self.execute_from(chunk_idx)?;
+                    self.current_chunk = current_chunk;
+                    self.current_effect_target = previous_target;
                     let _ = result;
                     stack.push(Rc::new(RefCell::new(Value::Nil)));
                     frames.last_mut().unwrap().pc += 1;
@@ -1964,7 +2016,8 @@ impl VM {
                 OpCode::EmitTree => match stack.pop() {
                     Some(tree) => {
                         self.pending_widget_trees.push(PendingWidgetTree {
-                            owner_buffer_id: self.current_effect_owner,
+                            source_buffer_id: self.current_effect_source_buffer_id,
+                            target: self.current_effect_target.clone(),
                             tree: tree.borrow().clone(),
                         });
                         frames.last_mut().unwrap().pc += 1;

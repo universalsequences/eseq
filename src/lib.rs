@@ -142,12 +142,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         }
         // Update tile rects once per iteration (not per-event)
         editor.update_tile_rects(cols as u16, rows as u16);
-        let redraw_pending = editor.needs_redraw() || pending_drag.is_some();
-        let timeout = if redraw_pending {
-            frame_interval.saturating_sub(last_render_at.elapsed())
-        } else {
-            Duration::from_millis(16)
-        };
+        let timeout = frame_interval.saturating_sub(last_render_at.elapsed());
         match backend.poll_event(timeout) {
             Some(Event::Key(key)) => editor.handle_key(key),
             Some(Event::Mouse(mouse)) => {
@@ -245,7 +240,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
             }
         }
 
-        if editor.needs_redraw() && last_render_at.elapsed() >= frame_interval {
+        if last_render_at.elapsed() >= frame_interval {
             let tiled_frame = frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
             backend.render_tiled(&tiled_frame)?;
             editor.clear_needs_redraw();
@@ -1461,6 +1456,39 @@ mod tests {
         assert_eq!(layout.children.len(), 2);
         assert_eq!(layout.children[0].widget_type, "label");
         assert_eq!(layout.children[1].widget_type, "hslider");
+    }
+
+    #[test]
+    fn sdf_widget_captures_state_as_reactive_uniform_props() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 8);
+        runtime
+            .eval_str(
+                r#"
+                (defstate val 0.5)
+                (defwidget xyz
+                  :width 5 :height 5
+                  :shader (sdf/layer
+                            (sdf/fill (sdf/circle val) :accent)))
+                (effect (xyz))
+                "#,
+            )
+            .unwrap();
+
+        let layout = runtime.current_layout.as_ref().expect("layout");
+        assert_eq!(layout.widget_type, "xyz");
+        assert_eq!(
+            layout.props.get("shader-state-val"),
+            Some(&Value::Number(0.5))
+        );
+
+        runtime.eval_str("(set! val 0.75)").unwrap();
+
+        let layout = runtime.current_layout.as_ref().expect("layout");
+        assert_eq!(
+            layout.props.get("shader-state-val"),
+            Some(&Value::Number(0.75))
+        );
     }
 
     #[test]

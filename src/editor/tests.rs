@@ -1618,6 +1618,142 @@ fn set_view_mode_supports_both_as_secondary_mode() {
     assert_eq!(editor.active_buffer().view_mode, super::ViewMode::Both);
 }
 
+#[test]
+fn effect_buffer_creates_target_buffer_without_switching() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(20, 6);
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(effect-buffer "*controls*" (knob :size 4))"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert_eq!(editor.active_buffer().name, "*scratch*");
+    let controls = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .unwrap();
+    assert!(controls.widget_tree.is_some());
+
+    editor.set_active_buffer(controls.id);
+    assert!(editor.widget_layout().is_some());
+}
+
+#[test]
+fn reevaluating_effect_buffer_clears_previous_target_buffer_ui() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(20, 6);
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(effect-buffer "*controls*" (knob :size 4))"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    assert!(
+        editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*controls*")
+            .unwrap()
+            .widget_tree
+            .is_some()
+    );
+
+    editor
+        .runtime_mut()
+        .eval_str(r#"(effect (label "local"))"#)
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    assert!(
+        editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*controls*")
+            .unwrap()
+            .widget_tree
+            .is_none()
+    );
+    assert!(editor.active_buffer().widget_tree.is_some());
+}
+
+#[test]
+fn effect_buffer_ui_is_visible_immediately_in_split_target_window() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+    editor.update_tile_rects(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*controls*"
+              (box :padding 2
+                (knob :value 2 :size 4 :min 0 :max 10)))
+            (split-window-right "*controls*")
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 12);
+
+    let controls_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*controls*")
+        .unwrap();
+    let controls_leaf = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .filter_map(|tile_id| editor.tile_root.find_leaf(tile_id))
+        .find(|leaf| leaf.buffer_idx == controls_idx)
+        .unwrap();
+
+    assert!(
+        controls_leaf.cached_layout.is_some(),
+        "split target should have cached layout immediately"
+    );
+}
+
+#[test]
+fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (defstate level 2)
+            (effect-buffer "*controls*"
+              (label (fmt "{}" level)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .unwrap()
+        .id;
+    editor.set_active_buffer(controls_id);
+
+    editor.runtime_mut().eval_str("(set! level 7)").unwrap();
+
+    let tree = editor.runtime.current_widget_tree().unwrap();
+    let rendered = crate::vm::format_lisp_value(&tree);
+    assert!(rendered.contains("\"7\""), "tree should reflect updated state: {rendered}");
+}
+
     #[test]
     fn first_layout_buffer_stays_interactive_after_second_layout_buffer_eval() {
         let runtime = Runtime::new();
@@ -2882,6 +3018,80 @@ fn set_view_mode_supports_both_as_secondary_mode() {
             .map(|value| value.borrow().clone())
             .unwrap_or(Value::Nil);
         assert!(matches!(widget_type, Value::Keyword(name) if name == "sdf-test"));
+    }
+
+    #[test]
+    fn defwidget_stores_paint_margin_without_changing_measure_size() {
+        use crate::widget_render::sdf_widget::{sdf_widget_def, sdf_widget_measure};
+
+        let mut rt = Runtime::new();
+        rt.eval_str(
+            r#"
+            (defwidget sdf-shadowed
+              :width 2 :height 2
+              :paint-margin 1
+              :shader (sdf/layer
+                        (sdf/fill (sdf/circle 0.7)
+                          (material
+                            :color :accent
+                            :shadow (shadow :color (rgba 0 0 0 0.2)
+                                            :blur 0.18
+                                            :offset (vec2 0 0.05))))))
+            "#,
+        )
+        .unwrap();
+
+        let def = sdf_widget_def("sdf-shadowed").expect("sdf widget def");
+        assert_eq!(def.paint_margin, 1.0);
+        assert_eq!(def.width, 2.0);
+        assert_eq!(def.height, 2.0);
+
+        let size = sdf_widget_measure(
+            "sdf-shadowed",
+            &Value::Nil,
+            &[],
+            crate::layout::Constraints {
+                min_width: 0.0,
+                max_width: 100.0,
+                min_height: 0.0,
+                max_height: 100.0,
+                aspect: 1.0,
+            },
+            &crate::layout::MeasureCtx {
+                cell_w: 1.0,
+                cell_h: 1.0,
+                text_measurer: None,
+                inherited_font_size: 14.0,
+            },
+        )
+        .expect("measure size");
+
+        assert_eq!(size.width, 2.0);
+        assert_eq!(size.height, 2.0);
+    }
+
+    #[test]
+    fn defwidget_derives_paint_margin_from_shadow_material() {
+        use crate::widget_render::sdf_widget::sdf_widget_def;
+
+        let mut rt = Runtime::new();
+        rt.eval_str(
+            r#"
+            (defwidget sdf-auto-shadow
+              :width 2 :height 2
+              :shader (sdf/layer
+                        (sdf/fill (sdf/circle 0.7)
+                          (material
+                            :color :accent
+                            :shadow (shadow :color (rgba 0 0 0 0.2)
+                                            :blur 0.8
+                                            :offset (vec2 0 0.4))))))
+            "#,
+        )
+        .unwrap();
+
+        let def = sdf_widget_def("sdf-auto-shadow").expect("sdf widget def");
+        assert!(def.paint_margin >= 1.0);
     }
 
     #[test]

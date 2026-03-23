@@ -174,6 +174,9 @@ impl WidgetDefinition for ToggleWidget {
                     0.0
                 },
                 orientation: 0.0,
+                itime: 0.0,
+                uniform_a: [0.0; 4],
+                uniform_b: [0.0; 4],
                 color_a: on_color(&node.props).to_rgba(),
                 color_b: off_color(&node.props).to_rgba(),
                 color_c: knob_on_color(&node.props).to_rgba(),

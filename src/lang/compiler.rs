@@ -64,6 +64,7 @@ pub enum OpCode {
     PushSymbol(usize),       // push Value::Symbol from strings pool (quoted symbol)
     InitDerived(u32, usize), // node id, chunk idx
     InitEffect(u32, usize),  // node id, chunk idx
+    InitNamedEffect(u32, usize, usize), // node id, chunk idx, target buffer name string idx
     InitState(u32),          // node id
     LoadDerived(u32),        // load derived node cached value
     LoadState(u32),          // load state node current value
@@ -948,6 +949,21 @@ impl Compiler {
         Ok(())
     }
 
+    fn compile_effect_buffer_form(&mut self, body: &[Expression]) -> Result<(), CompilerError> {
+        if body.len() < 2 {
+            return Err(CompilerError::InvalidArg);
+        }
+        let target = match &body[0] {
+            Expression::String(name) | Expression::Symbol(name) => name,
+            _ => return Err(CompilerError::InvalidArg),
+        };
+        let node_id = self.alloc_node_id();
+        let chunk_idx = self.compile_reactive_chunk(node_id, &body[1..], true)?;
+        let target_idx = self.use_string_constant(target);
+        self.emit(OpCode::InitNamedEffect(node_id, chunk_idx, target_idx));
+        Ok(())
+    }
+
     fn chunk(&self) -> Option<&Chunk> {
         self.chunks.get(self.current_chunk)
     }
@@ -1404,6 +1420,9 @@ impl Compiler {
             }
             if s == "effect" {
                 return self.compile_effect_form(&list[1..]);
+            }
+            if s == "effect-buffer" {
+                return self.compile_effect_buffer_form(&list[1..]);
             }
             if s == "derived" {
                 return self.compile_inline_derived(&list[1..]);

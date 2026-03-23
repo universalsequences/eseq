@@ -23,7 +23,7 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{HighlightCache, SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
-use crate::vm::{Value, format_lisp_value};
+use crate::vm::{EffectTarget, Value, format_lisp_value};
 use commands::key_str;
 use natives::register_editor_natives;
 
@@ -348,6 +348,7 @@ impl Editor {
             .tile_root
             .split_leaf(target, split_id, new_tile_id, new_buffer_idx, dir)
         {
+            self.refresh_inactive_tile_layouts_for_buffer(new_buffer_idx);
             self.mark_needs_redraw();
             Some(new_tile_id)
         } else {
@@ -948,6 +949,15 @@ impl Editor {
         id
     }
 
+    fn ensure_scratch_buffer_named(&mut self, name: &str) -> usize {
+        if let Some(idx) = self.buffers.iter().position(|buffer| buffer.name == name) {
+            return idx;
+        }
+        let id = self.alloc_buffer_id();
+        self.buffers.push(Buffer::new(id, name));
+        self.buffers.len() - 1
+    }
+
     pub fn open_file_buffer(&mut self, path: impl Into<PathBuf>) -> Result<BufferId, EditorError> {
         self.open_file_buffer_with_mode(path, BufferMode::ESeqLisp)
     }
@@ -1246,9 +1256,7 @@ impl Editor {
                 self.last_mouse_precise = Some((precise_col, precise_row));
                 self.active_leaf_mut().active_widget_gesture = None;
                 if widgets_visible {
-                    self.update_sdf_hover(
-                        content_col, content_row, precise_col, precise_row, true,
-                    );
+                    self.update_sdf_hover(content_col, content_row, precise_col, precise_row, true);
                     // Try click-to-activate on focusable widgets first
                     if self.try_click_focusable_widget(
                         precise_col,
@@ -1343,7 +1351,11 @@ impl Editor {
             MouseEventKind::Up(MouseButton::Left) => {
                 if widgets_visible {
                     self.update_sdf_hover(
-                        content_col, content_row, precise_col, precise_row, false,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                        false,
                     );
                     if let Some(gesture) = self.active_leaf_mut().active_widget_gesture.take() {
                         let output = self.dispatch_gesture_widget_mouse_event(
@@ -1721,6 +1733,53 @@ impl Editor {
         shared.current_view_mode = active.view_mode.label().to_string();
     }
 
+    fn apply_widget_tree_to_buffer(
+        &mut self,
+        buffer_idx: usize,
+        source_buffer_id: Option<BufferId>,
+        tree: Option<Value>,
+    ) {
+        let is_active = self.active_buffer_idx() == buffer_idx;
+        {
+            let buffer = &mut self.buffers[buffer_idx];
+            buffer.widget_tree = tree.clone();
+            buffer.widget_tree_source = source_buffer_id;
+        }
+        if is_active {
+            match tree {
+                Some(tree) => {
+                    self.runtime.set_widget_tree(tree);
+                    self.auto_focus_first_widget();
+                }
+                None => self.clear_widget_focus(),
+            }
+        }
+        self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+    }
+
+    fn refresh_inactive_tile_layouts_for_buffer(&mut self, buffer_idx: usize) {
+        let tree = self.buffers[buffer_idx].widget_tree.clone();
+        let layout = tree
+            .as_ref()
+            .and_then(|tree| self.runtime.layout_snapshot_for_tree(tree));
+        let layout_revision = self.runtime.layout_revision();
+        let tile_ids = self.tile_root.leaf_ids();
+        for tile_id in tile_ids {
+            if tile_id == self.active_tile {
+                continue;
+            }
+            let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) else {
+                continue;
+            };
+            if leaf.buffer_idx != buffer_idx {
+                continue;
+            }
+            leaf.cached_layout = layout.clone();
+            leaf.layout_revision = layout_revision;
+            leaf.cached_inactive_frame = None;
+        }
+    }
+
     fn handle_completion_key(&mut self, key: KeyEvent) -> bool {
         let Some(completion) = self.completion.as_mut() else {
             return false;
@@ -1987,6 +2046,26 @@ impl Editor {
             }
         }
 
+        for source_buffer_id in self.runtime.take_pending_cleared_effect_sources() {
+            let target_indices = self
+                .buffers
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, buffer)| {
+                    (buffer.widget_tree_source == source_buffer_id).then_some(idx)
+                })
+                .collect::<Vec<_>>();
+            for idx in target_indices {
+                if self.active_buffer_idx() == idx {
+                    let buffer = &mut self.buffers[idx];
+                    buffer.widget_tree = None;
+                    buffer.widget_tree_source = None;
+                } else {
+                    self.apply_widget_tree_to_buffer(idx, None, None);
+                }
+            }
+        }
+
         // Process set-buffer-mode (after buffer creation so it targets the new buffer)
         if let Some(mode_name) = self.runtime.take_pending_set_mode() {
             let mode_def = self.mode_registry.get(&mode_name).cloned();
@@ -2036,15 +2115,44 @@ impl Editor {
         if let Some(tree) = self.runtime.take_pending_widget_tree() {
             match tree {
                 Value::Nil | Value::Bool(false) => {
-                    self.active_buffer_mut().widget_tree = None;
+                    let buffer = self.active_buffer_mut();
+                    buffer.widget_tree = None;
+                    buffer.widget_tree_source = None;
                     self.runtime.clear_layout_effects();
                     self.active_leaf_mut().focused_widget_id = None;
                 }
                 tree => {
-                    self.active_buffer_mut().widget_tree = Some(tree.clone());
+                    let source_id = self.active_buffer().id;
+                    let buffer = self.active_buffer_mut();
+                    buffer.widget_tree = Some(tree.clone());
+                    buffer.widget_tree_source = Some(source_id);
                     self.runtime.set_widget_tree(tree);
                     self.auto_focus_first_widget();
                 }
+            }
+        }
+
+        for pending in self.runtime.take_pending_buffer_widget_trees() {
+            let buffer_idx = match pending.target {
+                EffectTarget::BufferId(Some(id)) => {
+                    let Some(idx) = self.buffers.iter().position(|buffer| buffer.id == id) else {
+                        continue;
+                    };
+                    idx
+                }
+                EffectTarget::BufferId(None) => self.active_buffer_idx(),
+                EffectTarget::BufferName(name) => self.ensure_scratch_buffer_named(&name),
+            };
+            if self.active_buffer_idx() == buffer_idx {
+                let buffer = &mut self.buffers[buffer_idx];
+                buffer.widget_tree = Some(pending.tree);
+                buffer.widget_tree_source = pending.source_buffer_id;
+            } else {
+                self.apply_widget_tree_to_buffer(
+                    buffer_idx,
+                    pending.source_buffer_id,
+                    Some(pending.tree),
+                );
             }
         }
 
@@ -2120,6 +2228,7 @@ impl Editor {
                         self.active_leaf_mut().buffer_idx = idx;
                         self.sync_runtime_context();
                         self.restore_buffer_widget_tree();
+                        self.refresh_inactive_tile_layouts_for_buffer(idx);
                     } else {
                         self.minibuffer = Some(format!("No buffer named '{name}'"));
                     }
