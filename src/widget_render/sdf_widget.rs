@@ -74,6 +74,19 @@ pub fn current_sdf_time_fallback_seconds() -> f32 {
     SDF_TIME_ORIGIN.with(|origin| origin.elapsed().as_secs_f32())
 }
 
+/// Resolve a state prop value by name — tries direct name, then prefixed.
+fn resolve_state_prop(props: &HashMap<String, Value>, name: &str) -> Option<f64> {
+    let val = props
+        .get(name)
+        .or_else(|| props.get(&shader_state_prop_name(name)));
+    match val {
+        Some(Value::Number(n)) => Some(*n),
+        Some(Value::Bool(true)) => Some(1.0),
+        Some(Value::Bool(false)) => Some(0.0),
+        _ => None,
+    }
+}
+
 fn hit_test_uniform_vars(
     props: &HashMap<String, Value>,
     state_uniforms: &[String],
@@ -89,13 +102,7 @@ fn hit_test_uniform_vars(
         },
     );
     for state_name in state_uniforms {
-        let value = match props.get(&shader_state_prop_name(state_name)) {
-            Some(Value::Number(n)) => Some(*n),
-            Some(Value::Bool(true)) => Some(1.0),
-            Some(Value::Bool(false)) => Some(0.0),
-            _ => None,
-        };
-        if let Some(value) = value {
+        if let Some(value) = resolve_state_prop(props, state_name) {
             vars.insert(state_name.clone(), value);
         }
     }
@@ -122,6 +129,83 @@ pub fn sdf_widget_hit_test(
     );
     let vars = hit_test_uniform_vars(&node.props, &def.state_uniforms);
     crate::lang::sdf_hit::sdf_hit_test_with_vars(&def.sdf_expr, x, y, &vars)
+}
+
+/// Map mouse events to widget events for SDF widgets.
+pub fn sdf_map_mouse_event(
+    _node: &LayoutNode,
+    mouse_kind: crossterm::event::MouseEventKind,
+    local_col: f32,
+    local_row: f32,
+) -> super::MouseEventOutcome {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    match mouse_kind {
+        MouseEventKind::Down(MouseButton::Left) => super::MouseEventOutcome::Dispatch(
+            super::WidgetEvent::PointerDown(super::PointerEvent {
+                local_col,
+                local_row,
+            }),
+        ),
+        MouseEventKind::Drag(MouseButton::Left) => super::MouseEventOutcome::Dispatch(
+            super::WidgetEvent::PointerDrag(super::PointerDragEvent {
+                start_local_col: local_col,
+                start_local_row: local_row,
+                local_col,
+                local_row,
+            }),
+        ),
+        MouseEventKind::Up(MouseButton::Left) => {
+            super::MouseEventOutcome::Dispatch(super::WidgetEvent::PointerUp(super::PointerEvent {
+                local_col,
+                local_row,
+            }))
+        }
+        _ => super::MouseEventOutcome::Ignore,
+    }
+}
+
+/// Dispatch SDF widget pointer events to Lisp callbacks (:on-click, :on-drag, :on-mouse-up).
+/// Coordinates are normalized to [-1,1] matching the shader's coordinate space.
+pub fn sdf_handle_event(
+    node: &LayoutNode,
+    event: &super::WidgetEvent,
+) -> Option<super::EventOutput> {
+    sdf_widget_def(&node.widget_type)?;
+
+    let (local_col, local_row, prop_names): (f32, f32, &[&str]) = match event {
+        super::WidgetEvent::PointerDown(pe) => {
+            (pe.local_col, pe.local_row, &["on-mouse-down", "on-click"])
+        }
+        super::WidgetEvent::PointerDrag(pe) => (pe.local_col, pe.local_row, &["on-drag"]),
+        super::WidgetEvent::PointerUp(pe) => (pe.local_col, pe.local_row, &["on-mouse-up"]),
+        _ => return None,
+    };
+
+    let callback = prop_names
+        .iter()
+        .find_map(|name| node.props.get(*name))
+        .filter(|cb| !matches!(cb, Value::Nil | Value::Bool(false)))?
+        .clone();
+
+    let wc = local_col - node.rect.col;
+    let wr = local_row - node.rect.row;
+    let sx = (wc / node.rect.width * 2.0 - 1.0) as f64;
+    let sy = (wr / node.rect.height * 2.0 - 1.0) as f64;
+    let pixel_aspect = if node.rect.height > 0.0 {
+        node.rect.width / node.rect.height
+    } else {
+        1.0
+    };
+    let region = sdf_widget_hit_test(node, wc, wr, pixel_aspect);
+
+    Some(super::EventOutput {
+        callback,
+        args: vec![
+            Value::Number(sx),
+            Value::Number(sy),
+            Value::Number(region as f64),
+        ],
+    })
 }
 
 pub fn register_sdf_widget(def: SdfWidgetDef) {
@@ -191,12 +275,7 @@ fn numeric_literal(expr: &Expression) -> Option<f32> {
 }
 
 fn prop_uniform_value(props: &HashMap<String, Value>, name: &str) -> f32 {
-    match props.get(&shader_state_prop_name(name)) {
-        Some(Value::Number(n)) => *n as f32,
-        Some(Value::Bool(true)) => 1.0,
-        Some(Value::Bool(false)) => 0.0,
-        _ => 0.0,
-    }
+    resolve_state_prop(props, name).unwrap_or(0.0) as f32
 }
 
 fn vec2_literal(expr: &Expression) -> Option<(f32, f32)> {

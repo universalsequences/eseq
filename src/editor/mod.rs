@@ -134,6 +134,7 @@ pub struct MajorMode {
     pub read_only: bool,
     pub keybindings: HashMap<String, String>,
     pub on_enter: Option<String>,
+    pub on_key: Option<String>,
 }
 
 pub struct Editor {
@@ -159,6 +160,7 @@ pub struct Editor {
     active_tile_resize_drag: Option<TileResizeDrag>,
     eval_flash: Option<SExpFlash>,
     mark: Option<Mark>,
+    active_text_drag_anchor: Option<Mark>,
     kill_ring: Vec<String>,
     minibuffer_input: Option<MinibufferMode>,
     mode_registry: HashMap<String, MajorMode>,
@@ -199,6 +201,7 @@ impl Editor {
             active_tile_resize_drag: None,
             eval_flash: None,
             mark: None,
+            active_text_drag_anchor: None,
             kill_ring: vec![],
             minibuffer_input: None,
             mode_registry: HashMap::new(),
@@ -902,6 +905,10 @@ impl Editor {
         self.sync_layout_to_active_leaf();
     }
 
+    pub fn sync_text_horizontal_scroll_to_viewport(&mut self) {
+        self.sync_text_horizontal_scroll(self.runtime.layout_cols());
+    }
+
     pub fn set_layout_aspect(&mut self, aspect: f32) {
         self.runtime.set_layout_aspect(aspect);
     }
@@ -1168,6 +1175,10 @@ impl Editor {
             return;
         }
 
+        if self.handle_mode_input_key(key) {
+            return;
+        }
+
         // Check mode-specific keybindings
         if let BufferMode::Named(ref mode_name) = self.active_buffer().mode {
             if let Some(handler) = self
@@ -1346,9 +1357,21 @@ impl Editor {
                         );
                     }
                 }
+                if text_visible {
+                    self.handle_text_drag(
+                        mouse,
+                        content_col,
+                        content_row,
+                        content_width,
+                        content_height,
+                    );
+                }
                 self.last_mouse_precise = Some((precise_col, precise_row));
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if text_visible {
+                    self.finish_text_drag();
+                }
                 if widgets_visible {
                     self.update_sdf_hover(
                         content_col,
@@ -1405,12 +1428,10 @@ impl Editor {
                     let buffer = self.active_buffer_mut();
                     if buffer.scroll_top > 0 {
                         buffer.scroll_top = buffer.scroll_top.saturating_sub(3);
-                        if !buffer.read_only {
-                            buffer.cursor.0 = buffer
-                                .cursor
-                                .0
-                                .min(buffer.scroll_top + content_height.saturating_sub(1) as usize);
-                        }
+                        buffer.cursor.0 = buffer
+                            .cursor
+                            .0
+                            .min(buffer.scroll_top + content_height.saturating_sub(1) as usize);
                     }
                     self.mark_needs_redraw();
                 }
@@ -1448,7 +1469,7 @@ impl Editor {
                     let buffer = self.active_buffer_mut();
                     let max_scroll = buffer.lines.len().saturating_sub(1);
                     buffer.scroll_top = (buffer.scroll_top + 3).min(max_scroll);
-                    if !buffer.read_only && buffer.cursor.0 < buffer.scroll_top {
+                    if buffer.cursor.0 < buffer.scroll_top {
                         buffer.cursor.0 = buffer.scroll_top;
                     }
                     self.mark_needs_redraw();
@@ -1508,7 +1529,7 @@ impl Editor {
     }
 
     fn max_text_horizontal_scroll(&self, viewport_width: u16) -> Option<u16> {
-        if self.active_buffer().view_mode != ViewMode::TextOnly {
+        if self.active_buffer().view_mode == ViewMode::UiOnly {
             return None;
         }
         let line_width = self
@@ -1523,7 +1544,7 @@ impl Editor {
 
     pub fn sync_text_horizontal_scroll(&mut self, viewport_width: u16) {
         let Some(max_scroll) = self.max_text_horizontal_scroll(viewport_width) else {
-            if self.active_buffer().view_mode == ViewMode::TextOnly {
+            if self.active_buffer().view_mode != ViewMode::UiOnly {
                 self.active_leaf_mut().widget_scroll_left = 0;
             }
             return;
@@ -1635,13 +1656,26 @@ impl Editor {
     }
 
     fn call_lisp_handler(&mut self, fn_name: &str) {
+        self.call_lisp_handler_with_args(fn_name, &[]);
+    }
+
+    fn call_lisp_handler_with_args(&mut self, fn_name: &str, args: &[Value]) {
         if fn_name == "eval-sexp" || fn_name == "eval-buffer-command" {
             self.eval_preview_handler(fn_name);
             return;
         }
         self.sync_runtime_context();
         self.clear_minibuffer_message();
-        let code = format!("({fn_name})");
+        let rendered_args = args
+            .iter()
+            .map(format_lisp_value)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let code = if rendered_args.is_empty() {
+            format!("({fn_name})")
+        } else {
+            format!("({fn_name} {rendered_args})")
+        };
         match self.runtime.eval_str(&code) {
             Ok(Some(result)) => self.show_transient_message(format_value_for_minibuffer(&result)),
             Ok(None) => self.show_transient_message("No result"),
@@ -1653,6 +1687,51 @@ impl Editor {
         self.refresh_runtime_side_effects();
         self.sync_runtime_context();
         self.completion = None;
+    }
+
+    fn handle_mode_input_key(&mut self, key: KeyEvent) -> bool {
+        let Some(handler) = (match &self.active_buffer().mode {
+            BufferMode::Named(mode_name) => self
+                .mode_registry
+                .get(mode_name)
+                .and_then(|mode| mode.on_key.clone()),
+            _ => None,
+        }) else {
+            return false;
+        };
+
+        let text = match key.code {
+            KeyCode::Char(c)
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                Value::String(c.to_string())
+            }
+            _ => Value::Bool(false),
+        };
+        let args = vec![Value::String(key_str(key)), text];
+        self.sync_runtime_context();
+        self.clear_minibuffer_message();
+        let code = format!(
+            "({} {} {})",
+            handler,
+            format_lisp_value(&args[0]),
+            format_lisp_value(&args[1])
+        );
+        let handled = match self.runtime.eval_str(&code) {
+            Ok(Some(Value::Bool(handled))) => handled,
+            Ok(Some(Value::Nil)) | Ok(None) => false,
+            Ok(Some(_)) => true,
+            Err(e) => {
+                self.show_transient_message(format!("Error: {e:?}"));
+                true
+            }
+        };
+        if let Some(status) = self.runtime.take_status_message() {
+            self.show_transient_message(status);
+        }
+        self.refresh_runtime_side_effects();
+        self.sync_runtime_context();
+        handled
     }
 
     fn eval_preview_handler(&mut self, fn_name: &str) {
@@ -2000,7 +2079,7 @@ impl Editor {
         }
 
         // Process mode definitions
-        for (name, read_only, on_enter) in self.runtime.take_pending_mode_defs() {
+        for (name, read_only, on_enter, on_key) in self.runtime.take_pending_mode_defs() {
             self.mode_registry.insert(
                 name.clone(),
                 MajorMode {
@@ -2008,6 +2087,7 @@ impl Editor {
                     read_only,
                     keybindings: HashMap::new(),
                     on_enter,
+                    on_key,
                 },
             );
         }
@@ -2101,6 +2181,11 @@ impl Editor {
             buffer.cursor = (0, 0);
             buffer.scroll_top = 0;
             buffer.revision = buffer.revision.wrapping_add(1);
+            buffer.text_styles.clear();
+        }
+
+        if let Some(styles) = self.runtime.take_pending_set_buffer_styles() {
+            self.active_buffer_mut().text_styles = styles;
         }
 
         if let Some(line) = self.runtime.take_pending_goto_line() {
@@ -2307,6 +2392,11 @@ impl Editor {
 
     fn clear_mark(&mut self) {
         self.mark = None;
+        self.active_text_drag_anchor = None;
+    }
+
+    fn clear_text_drag_anchor(&mut self) {
+        self.active_text_drag_anchor = None;
     }
 
     fn apply_widget_output(&mut self, output: Option<crate::widget_render::EventOutput>) -> bool {

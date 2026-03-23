@@ -79,77 +79,59 @@ impl Editor {
                 });
             }
             "move-left" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_left();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "move-right" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_right();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "move-up" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_up();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "move-down" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_down();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "move-buffer-end" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_to_buffer_end();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
 
             "move-line-start" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_to_line_start();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "move-line-end" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_to_line_end();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "move-word-left" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_word_left();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "move-word-right" => {
-                if self.active_buffer().read_only {
-                    return;
-                }
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_word_right();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "delete-char-before" => {
                 if self.guard_read_only() {

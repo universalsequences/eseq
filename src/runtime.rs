@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::audio::register_audio_natives;
+use crate::buffer::BufferTextStyle;
 use crate::host::{BufferId, HostCommand};
 use crate::layout::{
     LayoutEngine, LayoutNode, TextMeasurer, format_layout_tree_lines, reuse_layout_node,
@@ -92,8 +93,8 @@ pub(crate) struct RuntimeBridgeState {
     pub current_buffer_read_only: bool,
     pub pending_set_read_only: Option<bool>,
     pub current_buffer_mode: String,
-    pub pending_mode_defs: Vec<(String, bool, Option<String>)>, // (name, read_only, on_enter)
-    pub pending_mode_bindings: Vec<(String, String, String)>,   // (mode, key, handler)
+    pub pending_mode_defs: Vec<(String, bool, Option<String>, Option<String>)>, // (name, read_only, on_enter, on_key)
+    pub pending_mode_bindings: Vec<(String, String, String)>, // (mode, key, handler)
     pub pending_set_mode: Option<String>,
     pub pending_open_file: Option<String>,
     pub pending_widget_tree: Option<Value>,
@@ -103,6 +104,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_switch_buffer: Option<String>,
     pub pending_set_text: Option<String>,
     pub pending_set_lines: Option<Vec<String>>,
+    pub pending_set_buffer_styles: Option<Vec<BufferTextStyle>>,
     pub pending_goto_line: Option<usize>,
     pub current_line_number: usize,
     pub current_line_text: String,
@@ -187,11 +189,17 @@ impl NativeContext {
         self.shared.borrow().current_buffer_mode.clone()
     }
 
-    pub fn define_mode(&mut self, name: String, read_only: bool, on_enter: Option<String>) {
+    pub fn define_mode(
+        &mut self,
+        name: String,
+        read_only: bool,
+        on_enter: Option<String>,
+        on_key: Option<String>,
+    ) {
         self.shared
             .borrow_mut()
             .pending_mode_defs
-            .push((name, read_only, on_enter));
+            .push((name, read_only, on_enter, on_key));
     }
 
     pub fn mode_bind_key(&mut self, mode: String, key: String, handler: String) {
@@ -230,6 +238,10 @@ impl NativeContext {
 
     pub fn set_buffer_lines(&mut self, lines: Vec<String>) {
         self.shared.borrow_mut().pending_set_lines = Some(lines);
+    }
+
+    pub fn set_buffer_styles(&mut self, styles: Vec<BufferTextStyle>) {
+        self.shared.borrow_mut().pending_set_buffer_styles = Some(styles);
     }
 
     pub fn render_widget(&mut self, tree: Value) {
@@ -414,6 +426,7 @@ impl Runtime {
                 let mut height: f32 = 5.0;
                 let mut paint_margin: f32 = 0.0;
                 let mut shader_val = None;
+                let mut widget_state_names: Vec<String> = Vec::new();
 
                 let mut i = 1;
                 while i + 1 < args.len() {
@@ -437,6 +450,16 @@ impl Runtime {
                             "shader" => {
                                 shader_val = Some(args[i + 1].clone());
                             }
+                            "state" => {
+                                // Extract state symbol names from quoted list
+                                if let Value::List(items) = &args[i + 1] {
+                                    for item in items {
+                                        if let Value::Symbol(s) = &*item.borrow() {
+                                            widget_state_names.push(s.clone());
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                         i += 2;
@@ -449,7 +472,12 @@ impl Runtime {
                     return Value::String("defwidget: :shader is required".into());
                 };
 
-                let state_bindings = vm.state_bindings.keys().cloned().collect();
+                // Combine VM state bindings with widget-declared state names
+                let mut state_bindings: std::collections::HashSet<String> =
+                    vm.state_bindings.keys().cloned().collect();
+                for name in &widget_state_names {
+                    state_bindings.insert(name.clone());
+                }
                 let compiled = match compile_sdf_value(&shader_val, &dw_macros, &state_bindings) {
                     Ok(o) => o,
                     Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
@@ -787,7 +815,13 @@ impl Runtime {
         self.shared.borrow_mut().pending_set_read_only.take()
     }
 
-    pub(crate) fn take_pending_mode_defs(&mut self) -> Vec<(String, bool, Option<String>)> {
+    pub(crate) fn take_pending_set_buffer_styles(&mut self) -> Option<Vec<BufferTextStyle>> {
+        self.shared.borrow_mut().pending_set_buffer_styles.take()
+    }
+
+    pub(crate) fn take_pending_mode_defs(
+        &mut self,
+    ) -> Vec<(String, bool, Option<String>, Option<String>)> {
         std::mem::take(&mut self.shared.borrow_mut().pending_mode_defs)
     }
 
@@ -919,6 +953,10 @@ impl Runtime {
 
     pub fn layout_rows(&self) -> u16 {
         self.layout_rows
+    }
+
+    pub fn layout_cols(&self) -> u16 {
+        self.layout_cols
     }
 
     pub fn set_widget_tree(&mut self, tree: Value) {

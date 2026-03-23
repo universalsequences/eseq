@@ -654,7 +654,105 @@ fn transient_minibuffer_message_expires_without_input() {
     }
 
     #[test]
-    fn read_only_buffers_ignore_keyboard_cursor_movement() {
+    fn mouse_drag_selects_text_region() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha");
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+            1,
+            1,
+            20,
+            10,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 5, 1),
+            1,
+            1,
+            20,
+            10,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 5, 1),
+            1,
+            1,
+            20,
+            10,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (0, 4));
+        assert_eq!(editor.active_region_range(), Some(((0, 1), (0, 4))));
+    }
+
+    #[test]
+    fn mouse_click_clears_existing_mark() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha");
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(editor.active_region_range(), Some(((0, 1), (0, 2))));
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 1),
+            1,
+            1,
+            20,
+            10,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 1),
+            1,
+            1,
+            20,
+            10,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (0, 3));
+        assert!(editor.active_region_range().is_none());
+    }
+
+    #[test]
+    fn region_rendering_uses_high_contrast_selection_colors() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha");
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let frame = crate::frame::build_render_frame(&mut editor, 20, 10);
+        let selected = &frame.lines[0][1];
+
+        assert_eq!(selected.style.bg, Some(crate::theme::BG_REGION()));
+        assert_eq!(selected.style.fg, crate::theme::BG());
+    }
+
+    #[test]
+    fn region_rendering_overrides_active_sexp_highlight() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(mix foo)");
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        let frame = crate::frame::build_render_frame(&mut editor, 20, 10);
+        let selected = &frame.lines[0][1];
+
+        assert_eq!(selected.style.bg, Some(crate::theme::BG_REGION()));
+        assert_eq!(selected.style.fg, crate::theme::BG());
+    }
+
+    #[test]
+    fn read_only_buffers_allow_keyboard_cursor_movement() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
         editor.open_scratch_buffer("*test*", "alpha\nbravo");
@@ -665,11 +763,11 @@ fn transient_minibuffer_message_expires_without_input() {
         editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
 
-        assert_eq!(editor.active_buffer().cursor, (0, 2));
+        assert_eq!(editor.active_buffer().cursor, (1, 0));
     }
 
     #[test]
-    fn read_only_buffers_ignore_text_click_cursor_changes() {
+    fn read_only_buffers_allow_text_click_cursor_changes() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
         editor.open_scratch_buffer("*test*", "alpha\nbravo");
@@ -684,11 +782,11 @@ fn transient_minibuffer_message_expires_without_input() {
             10,
         );
 
-        assert_eq!(editor.active_buffer().cursor, (0, 1));
+        assert_eq!(editor.active_buffer().cursor, (1, 2));
     }
 
     #[test]
-    fn read_only_buffers_hide_text_cursor() {
+    fn read_only_buffers_show_text_cursor() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
         editor.open_scratch_buffer("*test*", "alpha");
@@ -697,7 +795,7 @@ fn transient_minibuffer_message_expires_without_input() {
 
         let frame = crate::frame::build_render_frame(&mut editor, 20, 10);
 
-        assert_eq!(frame.cursor, None);
+        assert_eq!(frame.cursor, Some((0, 2)));
     }
 
     #[test]
@@ -1326,18 +1424,35 @@ fn transient_minibuffer_message_expires_without_input() {
             "mode should be dired-mode, got {:?}",
             editor.active_buffer().mode
         );
-        // Widget-based dired: check that a layout exists
         assert!(
-            editor.widget_layout().is_some(),
-            "dired should have a widget layout"
+            editor.widget_layout().is_none(),
+            "dired should not have a widget layout"
         );
-        let layout = editor.widget_layout().unwrap();
-        assert!(layout.children.len() > 2, "should list files as widget children");
+        assert!(
+            editor.active_buffer().lines.len() >= 3,
+            "dired should render a text listing"
+        );
+        assert_eq!(editor.active_buffer().cursor.0, 2, "cursor should land on ../");
+    }
 
-        assert!(
-            editor.focused_widget_id().is_some(),
-            "should auto-focus first focusable widget"
+    #[test]
+    fn dired_mode_highlights_the_current_row() {
+        let init = std::fs::read_to_string("init.lisp").unwrap_or_default();
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                init_source: Some(init),
+            },
         );
+
+        editor.call_lisp_handler("dired-here");
+        let frame = crate::frame::build_render_frame(&mut editor, 80, 12);
+
+        let highlighted = frame.lines[2]
+            .iter()
+            .any(|cell| cell.style.bg == Some(crate::theme::WIDGET_FOCUS_BG()));
+        assert!(highlighted, "dired cursor row should have a background highlight");
     }
 
     #[test]
@@ -1889,6 +2004,68 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
             Value::Number(n) => assert!(n > 0.0, "roll-level should have changed, got {n}"),
             _ => panic!("expected number"),
         }
+    }
+
+    #[test]
+    fn buffer_list_mode_accepts_filter_input_while_read_only() {
+        let init = include_str!("../../init.lisp").to_string();
+        let runtime = Runtime::with_init_source(&init);
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                init_source: Some(init),
+            },
+        );
+
+        editor.open_scratch_buffer("*grid*", "");
+        editor.open_scratch_buffer("*gain*", "");
+        editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+        editor.refresh_runtime_side_effects();
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().name, "*buffers*");
+        assert_eq!(editor.minibuffer.as_deref(), Some("1 buffers"));
+        assert_eq!(editor.active_buffer().lines[0], "Switch to: gr");
+        assert!(
+            editor
+                .active_buffer()
+                .lines
+                .iter()
+                .any(|line| line.contains("*grid*")),
+            "filtered list should include *grid*"
+        );
+        assert!(
+            !editor
+                .active_buffer()
+                .lines
+                .iter()
+                .any(|line| line.contains("*gain*")),
+            "filtered list should exclude *gain*"
+        );
+    }
+
+    #[test]
+    fn buffer_list_mode_backspace_updates_filter() {
+        let init = include_str!("../../init.lisp").to_string();
+        let runtime = Runtime::with_init_source(&init);
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                init_source: Some(init),
+            },
+        );
+
+        editor.open_scratch_buffer("*grid*", "");
+        editor.runtime_mut().eval_str("(buffer-list-here)").unwrap();
+        editor.refresh_runtime_side_effects();
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().lines[0], "Switch to: g");
     }
 
     #[test]
@@ -2462,6 +2639,111 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
 
         assert_eq!(editor.widget_scroll_left(), 0);
         assert_eq!(frame.widget_scroll_left, 0);
+    }
+
+    #[test]
+    fn text_only_mouse_click_uses_horizontal_scroll_offset() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "01234567890123456789");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.set_layout_viewport(10, 8);
+        editor.active_leaf_mut().widget_scroll_left = 6;
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 1),
+            1,
+            1,
+            10,
+            8,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (0, 9));
+    }
+
+    #[test]
+    fn text_only_mouse_drag_selection_uses_horizontal_scroll_offset() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "01234567890123456789");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.set_layout_viewport(10, 8);
+        editor.active_leaf_mut().widget_scroll_left = 6;
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1),
+            1,
+            1,
+            10,
+            8,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 6, 1),
+            1,
+            1,
+            10,
+            8,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Up(MouseButton::Left), 6, 1),
+            1,
+            1,
+            10,
+            8,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (0, 11));
+        assert_eq!(editor.active_region_range(), Some(((0, 8), (0, 11))));
+    }
+
+    #[test]
+    fn text_only_right_arrow_keeps_cursor_visible_horizontally() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "01234567890123456789");
+        editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+        editor.set_layout_viewport(10, 8);
+        editor.active_buffer_mut().cursor = (0, 9);
+        editor.active_leaf_mut().widget_scroll_left = 0;
+
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 10));
+        assert_eq!(editor.widget_scroll_left(), 1);
+    }
+
+    #[test]
+    fn text_buffer_mouse_click_uses_horizontal_scroll_offset() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "01234567890123456789");
+        editor.set_layout_viewport(10, 8);
+        editor.active_leaf_mut().widget_scroll_left = 6;
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 1),
+            1,
+            1,
+            10,
+            8,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (0, 9));
+    }
+
+    #[test]
+    fn text_buffer_right_arrow_keeps_cursor_visible_horizontally() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "01234567890123456789");
+        editor.set_layout_viewport(10, 8);
+        editor.active_buffer_mut().cursor = (0, 9);
+        editor.active_leaf_mut().widget_scroll_left = 0;
+
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 10));
+        assert_eq!(editor.widget_scroll_left(), 1);
     }
 
     #[test]

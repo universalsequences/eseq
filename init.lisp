@@ -79,6 +79,7 @@
     :comp_selected_bg "#cbdaf6" :comp_unselected_bg "#dcdcde"
     :comp_fg "#3760bf" :comp_doc_bg "#d5d6db"
     :comp_doc_fg "#3760bf" :comp_doc_title_fg "#2e7de9"
+    :widget_focus_bg "#cbdaf6"
     :widget_label_fg "#3760bf"
     :widget_slider_filled "#2e7de9" :widget_slider_track "#a8aecb"
     :widget_knob_filled "#9854f1" :widget_knob_track "#a8aecb"
@@ -109,6 +110,7 @@
     :comp_selected_bg "#292e42" :comp_unselected_bg "#1f2335"
     :comp_fg "#c0caf5" :comp_doc_bg "#1b1e2d"
     :comp_doc_fg "#c0caf5" :comp_doc_title_fg "#7aa2f7"
+    :widget_focus_bg "#394b70"
     :widget_label_fg "#c0caf5"
     :widget_slider_filled "#7aa2f7" :widget_slider_track "#394b70"
     :widget_knob_filled "#bb9af7" :widget_knob_track "#545c7e"
@@ -127,7 +129,7 @@
     :syn_comment "#6d6d6d" :syn_string "#61ffca" :syn_number "#ffca85"
     :syn_keyword "#a277ff" :syn_builtin "#82e2ff" :syn_special "#f694ff"
     :syn_delimiter "#6d6d6d"
-    :bg_region "#29263c" :bg_sexp "#28253c" :bg_eval_flash "#3d375e"
+    :bg_region "#5a4b8a" :bg_sexp "#28253c" :bg_eval_flash "#3d375e"
     :bg_match_paren "#a277ff" :fg_match_paren "#15141b"
     :status_fg "#adacae" :status_bg "#121016" :status_edge "#3b334b"
     :status_chip_bg "#2e2b38" :status_mode_bg "#3b334b"
@@ -139,6 +141,7 @@
     :comp_selected_bg "#2e2b38" :comp_unselected_bg "#15141b"
     :comp_fg "#edecee" :comp_doc_bg "#15141b"
     :comp_doc_fg "#cdccce" :comp_doc_title_fg "#a277ff"
+    :widget_focus_bg "#3b334b"
     :widget_label_fg "#edecee"
     :widget_slider_filled "#a277ff" :widget_slider_track "#6d6d6d"
     :widget_knob_filled "#a277ff" :widget_knob_track "#6d6d6d"
@@ -163,50 +166,83 @@
 (mode-bind-key "dired-mode" "g" "dired-refresh")
 (mode-bind-key "dired-mode" "q" "dired-quit")
 (mode-bind-key "dired-mode" "-" "dired-up")
+(mode-bind-key "dired-mode" "RET" "dired-open-at-point")
 
-;; Build the action callback for a directory entry
-(def dired-entry-action (entry)
+(def style-fg (line start end color)
+  (dict :line line :start start :end end :fg color))
+
+(def style-bg-current-line (color)
+  (dict :current-line true :full-line true :bg color))
+
+(def style-bold-fg (line start end color)
+  (dict :line line :start start :end end :fg color :bold true))
+
+(def dired-row-styles (line is-dir)
+  (append
+    (list
+      (style-fg line 0 10 :fg-muted)
+      (style-fg line 11 13 :syn-number)
+      (style-fg line 14 24 :green)
+      (style-fg line 25 33 :green)
+      (style-fg line 34 40 :syn-number)
+      (style-fg line 41 53 :fg-muted))
+    (list
+      (if is-dir
+        (style-bold-fg line 53 200 :blue)
+        (style-bold-fg line 53 200 :syn-number)))))
+
+(def dired-entry-styles (entries line)
+  (if (empty? entries)
+    '()
+    (append
+      (dired-row-styles line (get (first entries) :directory))
+      (dired-entry-styles (rest entries) (+ line 1)))))
+
+(def dired-styles ()
+  (append
+    (list
+      (style-bg-current-line :widget-focus-bg)
+      (style-bold-fg 0 0 1 :yellow)
+      (style-bold-fg 0 2 200 :blue))
+    (dired-row-styles 2 true)
+    (dired-entry-styles dired-entries 3)))
+
+;; Open the dired entry under the text cursor.
+(def dired-open-entry (entry)
   (let ((name (get entry :name))
         (is-dir (get entry :directory)))
     (if is-dir
-      (lambda ()
+      (do
         (set! dired-current-dir (path-join dired-current-dir name))
         (dired-refresh))
-      (lambda ()
-        (open-file (path-join dired-current-dir name))))))
+      (open-file (path-join dired-current-dir name)))))
 
-;; Build a single row widget for a dired entry
-(def dired-entry-widget (entry)
-  (let ((name (get entry :name))
-        (is-dir (get entry :directory)))
-    (if is-dir
-      (h-stack :gap 1 :align :center :focusable true
-        :on-enter (dired-entry-action entry)
-        (label "▸" :color :yellow :width 2)
-        (label (str name "/") :color :cyan))
-      (h-stack :gap 1 :align :center :focusable true
-        :on-enter (dired-entry-action entry)
-        (label " " :width 2)
-        (label name)))))
+(def dired-current-entry ()
+  (let ((line (current-line-number)))
+    (if (= line 3)
+      :parent
+      (if (>= line 4)
+        (nth dired-entries (- line 4))
+        nil))))
 
-;; Refresh the *dired* buffer with a widget-based directory listing
+(def dired-format-entry (entry)
+  (get entry :display))
+
+;; Refresh the *dired* buffer with a plain text directory listing.
 (def dired-refresh ()
   (let ((entries (list-directory dired-current-dir))
         (dirs (filter |e| (get e :directory) entries))
         (files (filter |e| (not (get e :directory)) entries)))
     (set! dired-entries (append dirs files))
-    (let ((header (label (str dired-current-dir ":")
-                    :color :dim))
-          (parent (h-stack :gap 1 :align :center :focusable true
-                    :on-enter (lambda () (dired-up))
-                    (label "▸" :color :purple :width 2)
-                    (label "../" :color :purple)))
-          (dir-widgets (map dired-entry-widget dirs))
-          (file-widgets (map dired-entry-widget files))
-          (all-widgets (cons header
-                         (cons parent
-                           (append dir-widgets file-widgets)))))
-      (render-widget (v-stack :font-size 18 :gap 0.125 :padding 0.5 :align :stretch all-widgets))
+    (let ((lines (append
+                   (list (str "∨ > " dired-current-dir)
+                         ""
+                         "drwxr-xr-x  1 parent     parent      0            .. ../")
+                   (map dired-format-entry dired-entries))))
+      (render-widget nil)
+      (set-buffer-lines lines)
+      (set-buffer-styles (dired-styles))
+      (goto-line 3)
       (status (fmt "{} entries" (len dired-entries))))))
 
 ;; Navigate to parent directory
@@ -217,6 +253,14 @@
       (do
         (set! dired-current-dir parent)
         (dired-refresh)))))
+
+(def dired-open-at-point ()
+  (let ((entry (dired-current-entry)))
+    (if (= entry :parent)
+      (dired-up)
+      (if entry
+        (dired-open-entry entry)
+        (status "No entry on this line")))))
 
 ;; Close dired and switch to previous buffer
 (def dired-quit ()
@@ -230,6 +274,7 @@
   (let ((dir (current-directory)))
     (set! dired-current-dir dir)
     (switch-or-create-buffer "*dired*")
+    (set-view-mode "text")
     (set-buffer-mode "dired-mode")
     (dired-refresh)))
 
@@ -237,31 +282,86 @@
 ;; Shows all open buffers and lets you switch between them.
 
 (def buflist-source-buffer "")
+(def buflist-filter "")
 
-(define-mode "buffer-list-mode" :read-only true)
+(define-mode "buffer-list-mode" :read-only true :on-key "buflist-handle-key")
 (mode-bind-key "buffer-list-mode" "q" "buflist-quit")
 (mode-bind-key "buffer-list-mode" "g" "buflist-refresh")
+(mode-bind-key "buffer-list-mode" "RET" "buflist-open-at-point")
 
-(def buflist-make-entry (name)
+(def buflist-entry-styles (bufs line)
+  (if (empty? bufs)
+    '()
+    (append
+      (list
+        (style-fg line 0 1 :blue)
+        (style-bold-fg line 2 200 :fg))
+      (buflist-entry-styles (rest bufs) (+ line 1)))))
+
+(def buflist-styles ()
+  (append
+    (list
+      (style-bold-fg 0 0 10 :status-accent)
+      (style-bold-fg 0 11 200 :syn-number)
+      (style-bg-current-line :comp-selected-bg))
+    (buflist-entry-styles (buflist-visible-buffers) 1)))
+
+(def buflist-visible-buffers ()
+  (let ((bufs (buffer-list))
+        (query (string-downcase buflist-filter)))
+    (if (= query "")
+      bufs
+      (filter |name|
+        (string-contains? (string-downcase name) query)
+        bufs))))
+
+(def buflist-format-entry (name)
   (let ((is-current (= name buflist-source-buffer))
-        (prefix (if is-current " > " "   "))
-        (color (if is-current :yellow :white)))
-    (label (str prefix name)
-      :width 80
-      :color color
-      :focusable true
-      :on-enter (lambda ()
-                  (switch-to-buffer name)))))
+        (prefix (if is-current "> " "  ")))
+    (str prefix name)))
+
+(def buflist-current-buffer-name ()
+  (let ((line (current-line-number)))
+    (if (>= line 2)
+      (nth (buflist-visible-buffers) (- line 2))
+      nil)))
 
 (def buflist-refresh ()
-  (let ((bufs (buffer-list))
-        (header (label "  Buffers:"
-                  :color :dim
-                  :width 80))
-        (entries (map buflist-make-entry bufs))
-        (all-widgets (cons header entries)))
-    (render-widget (v-stack all-widgets))
+  (let ((bufs (buflist-visible-buffers))
+        (lines (append
+                 (list (fmt "Switch to: {}" buflist-filter))
+                 (map buflist-format-entry bufs))))
+    (render-widget nil)
+    (set-buffer-lines lines)
+    (set-buffer-styles (buflist-styles))
+    (goto-line (if (> (len bufs) 0) 2 1))
     (status (fmt "{} buffers" (len bufs)))))
+
+(def buflist-handle-key (key text)
+  (if text
+    (do
+      (set! buflist-filter (str buflist-filter text))
+      (buflist-refresh)
+      true)
+    (if (= key "BS")
+      (do
+        (if (> (len buflist-filter) 0)
+          (set! buflist-filter (substring buflist-filter 0 (- (len buflist-filter) 1)))
+          nil)
+        (buflist-refresh)
+        true)
+      (if (= key "ESC")
+        (do
+          (set! buflist-filter "")
+          (buflist-refresh)
+          true)
+        false))))
+
+(def buflist-open-at-point ()
+  (let ((name (buflist-current-buffer-name)))
+    (if name
+      (switch-to-buffer name)
+      (status "No buffer on this line"))))
 
 (def buflist-quit ()
   (if (not (= buflist-source-buffer ""))
@@ -273,11 +373,12 @@
 
 (def buffer-list-here ()
   (set! buflist-source-buffer (current-buffer-name))
+  (set! buflist-filter "")
   (switch-or-create-buffer "*buffers*")
+  (set-view-mode "text")
   (set-buffer-mode "buffer-list-mode")
   (buflist-refresh))
 
 (bind-key "C-x b" "buffer-list-here")
 
-;; dired-open-at-cursor is no longer needed — Enter triggers :on-enter on focused widget
 (bind-key "C-x v" "cycle-view-mode")

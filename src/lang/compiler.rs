@@ -1388,8 +1388,8 @@ impl Compiler {
                         let idx = self.use_string_constant(key);
                         self.emit(OpCode::PushKeyword(idx));
                         arity += 1;
-                        if key == "shader" && i + 1 < list.len() {
-                            // Auto-quote the shader expression
+                        if (key == "shader" || key == "state") && i + 1 < list.len() {
+                            // Auto-quote shader and state expressions
                             self.compile_quoted_expression(&list[i + 1])?;
                         } else if i + 1 < list.len() {
                             self.compile_expression(&list[i + 1])?;

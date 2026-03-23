@@ -1613,6 +1613,8 @@ fragment float4 waveform_frag(
                                 }));
                             }
                             ElementState::Released => {
+                                // Clear stale drag so it doesn't fire after the up
+                                *pending_drag = None;
                                 pending.push_back(Event::Mouse(MouseEvent {
                                     kind: MouseEventKind::Up(button),
                                     column: cursor_cell.0,
@@ -2101,11 +2103,15 @@ fragment float4 waveform_frag(
                 let y0 = ndc_y(abs_row as f32 * cell_h);
                 let y1 = ndc_y((abs_row + 1) as f32 * cell_h);
 
-                // Cursor inverts fg/bg; otherwise use cell style.
+                // Use a dedicated cursor fill so it stays legible over selection and syntax colors.
                 let (fg, bg) = if is_cursor {
-                    let cell_fg = cell.style.fg;
-                    let cell_bg = cell.style.bg.unwrap_or(theme::BG());
-                    (to_rgba(cell_bg), to_rgba(cell_fg))
+                    let cursor_bg = theme::CURSOR();
+                    let cursor_fg = if cursor_bg.luma() >= 0.55 {
+                        theme::BG()
+                    } else {
+                        theme::FG()
+                    };
+                    (to_rgba(cursor_fg), to_rgba(cursor_bg))
                 } else {
                     (
                         to_rgba(cell.style.fg),

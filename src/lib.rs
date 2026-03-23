@@ -155,6 +155,10 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                 ) {
                     pending_drag = Some((Event::Mouse(mouse), (precise_col, precise_row)));
                 } else {
+                    // Clear stale drag on mouse up so it doesn't fire after release
+                    if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_)) {
+                        pending_drag = None;
+                    }
                     editor.handle_tiled_mouse_precise(
                         mouse,
                         precise_col,

@@ -1,11 +1,24 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
 
+use crate::backend::Color;
 use crate::editor::ViewMode;
 use crate::host::BufferId;
 use crate::mode::BufferMode;
 use crate::text::sexp_range_at_cursor;
 use crate::vm::Value;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BufferTextStyle {
+    pub line: Option<usize>,
+    pub current_line: bool,
+    pub start: Option<usize>,
+    pub end: Option<usize>,
+    pub full_line: bool,
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub bold: bool,
+}
 
 pub struct Buffer {
     pub id: BufferId,
@@ -25,6 +38,7 @@ pub struct Buffer {
     pub widget_tree: Option<Value>,
     pub widget_tree_source: Option<BufferId>,
     pub view_mode: ViewMode,
+    pub text_styles: Vec<BufferTextStyle>,
 }
 
 impl Buffer {
@@ -43,6 +57,7 @@ impl Buffer {
             widget_tree: None,
             widget_tree_source: None,
             view_mode: ViewMode::Both,
+            text_styles: Vec::new(),
         }
     }
 
@@ -80,6 +95,7 @@ impl Buffer {
         self.cursor = (0, 0);
         self.scroll_top = 0;
         self.revision = self.revision.wrapping_add(1);
+        self.text_styles.clear();
     }
 
     pub fn text(&self) -> String {

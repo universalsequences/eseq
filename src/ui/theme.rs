@@ -158,7 +158,7 @@ theme_slots!(
         SYN_DELIMITER,
         Color::from_hex(0x55, 0x55, 0x55)
     ),
-    (bg_region, BG_REGION, Color::rgba(0.784, 1.0, 0.0, 0.20)),
+    (bg_region, BG_REGION, Color::from_hex(0xb6, 0xd8, 0x2d)),
     (bg_sexp, BG_SEXP, Color::rgba(0.12, 0.14, 0.05, 1.0)),
     (
         bg_eval_flash,

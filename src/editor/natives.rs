@@ -1,9 +1,12 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 
+use crate::buffer::BufferTextStyle;
 use crate::runtime::Runtime;
+use crate::theme;
 use crate::vm::{Value, format_lisp_value};
 
 pub(super) fn register_editor_natives(runtime: &mut Runtime) {
@@ -201,7 +204,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
 
     runtime.register_native_with_docs(
         "define-mode",
-        "(define-mode name :read-only bool :on-enter fn-name)",
+        "(define-mode name :read-only bool :on-enter fn-name :on-key fn-name)",
         "Register a named major mode.",
         |args, ctx| {
             let Some(Value::String(name)) = args.first() else {
@@ -209,6 +212,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             };
             let mut read_only = false;
             let mut on_enter: Option<String> = None;
+            let mut on_key: Option<String> = None;
             let mut i = 1;
             while i < args.len() {
                 match args.get(i) {
@@ -222,10 +226,16 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         }
                         i += 2;
                     }
+                    Some(Value::Keyword(k)) if k == "on-key" => {
+                        if let Some(Value::String(fn_name)) = args.get(i + 1) {
+                            on_key = Some(fn_name.clone());
+                        }
+                        i += 2;
+                    }
                     _ => i += 1,
                 }
             }
-            ctx.define_mode(name.clone(), read_only, on_enter);
+            ctx.define_mode(name.clone(), read_only, on_enter, on_key);
             Ok(Value::Bool(true))
         },
     );
@@ -340,6 +350,26 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "set-buffer-styles",
+        "(set-buffer-styles styles)",
+        "Set buffer-local text style spans from a list of maps.",
+        |args, ctx| {
+            let Some(Value::List(items)) = args.first() else {
+                return Err("set-buffer-styles expects a list".to_string());
+            };
+            let mut styles = Vec::with_capacity(items.len());
+            for item in items {
+                let Value::Map(map) = &*item.borrow() else {
+                    return Err("set-buffer-styles items must be maps".to_string());
+                };
+                styles.push(parse_buffer_text_style(map)?);
+            }
+            ctx.set_buffer_styles(styles);
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "goto-line",
         "(goto-line n)",
         "Move cursor to line n (1-indexed).",
@@ -386,6 +416,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let is_dir = metadata.is_dir();
                 let size = metadata.len();
+                let info = describe_directory_entry(&entry.path(), &metadata, &name);
                 let mut map = HashMap::new();
                 map.insert(
                     "name".to_string(),
@@ -399,8 +430,55 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                     "size".to_string(),
                     Rc::new(RefCell::new(Value::Number(size as f64))),
                 );
+                map.insert(
+                    "display".to_string(),
+                    Rc::new(RefCell::new(Value::String(info.display))),
+                );
+                map.insert(
+                    "permissions".to_string(),
+                    Rc::new(RefCell::new(Value::String(info.permissions))),
+                );
+                map.insert(
+                    "links".to_string(),
+                    Rc::new(RefCell::new(Value::Number(info.links as f64))),
+                );
+                map.insert(
+                    "owner".to_string(),
+                    Rc::new(RefCell::new(Value::String(info.owner))),
+                );
+                map.insert(
+                    "group".to_string(),
+                    Rc::new(RefCell::new(Value::String(info.group))),
+                );
+                map.insert(
+                    "modified".to_string(),
+                    Rc::new(RefCell::new(Value::String(info.modified))),
+                );
                 result.push(Rc::new(RefCell::new(Value::Map(map))));
             }
+            result.sort_by(|a, b| {
+                let a_name = match &*a.borrow() {
+                    Value::Map(map) => map
+                        .get("name")
+                        .and_then(|v| match &*v.borrow() {
+                            Value::String(s) => Some(s.to_ascii_lowercase()),
+                            _ => None,
+                        })
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let b_name = match &*b.borrow() {
+                    Value::Map(map) => map
+                        .get("name")
+                        .and_then(|v| match &*v.borrow() {
+                            Value::String(s) => Some(s.to_ascii_lowercase()),
+                            _ => None,
+                        })
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                };
+                a_name.cmp(&b_name)
+            });
             Ok(Value::List(result))
         },
     );
@@ -685,6 +763,31 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "string-contains?",
+        "(string-contains? s needle)",
+        "Return true if string contains needle.",
+        |args, _ctx| {
+            let (Some(Value::String(s)), Some(Value::String(needle))) = (args.first(), args.get(1))
+            else {
+                return Err("string-contains? expects two strings".to_string());
+            };
+            Ok(Value::Bool(s.contains(needle.as_str())))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "string-downcase",
+        "(string-downcase s)",
+        "Return a lowercase copy of the string.",
+        |args, _ctx| {
+            let Some(Value::String(s)) = args.first() else {
+                return Err("string-downcase expects a string".to_string());
+            };
+            Ok(Value::String(s.to_ascii_lowercase()))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "cycle-view-mode",
         "(cycle-view-mode)",
         "Toggle the primary view mode between ui and text. Returns the new mode name.",
@@ -748,5 +851,201 @@ pub(super) fn extract_suggested_name(payload: &Value) -> Option<String> {
     match &*value.borrow() {
         Value::String(name) if !name.is_empty() => Some(name.clone()),
         _ => None,
+    }
+}
+
+struct DirectoryEntryInfo {
+    display: String,
+    permissions: String,
+    links: u64,
+    owner: String,
+    group: String,
+    modified: String,
+}
+
+fn describe_directory_entry(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    name: &str,
+) -> DirectoryEntryInfo {
+    #[cfg(unix)]
+    {
+        if let Some(info) = describe_directory_entry_unix(path, metadata, name) {
+            return info;
+        }
+    }
+
+    let permissions = if metadata.permissions().readonly() {
+        "-r--r--r--"
+    } else if metadata.is_dir() {
+        "drwxr-xr-x"
+    } else {
+        "-rw-r--r--"
+    };
+    let display_name = if metadata.is_dir() {
+        format!("{name}/")
+    } else {
+        name.to_string()
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|time| time.as_secs().to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let display = format!(
+        "{permissions} {:>2} {:<8} {:<8} {:>6} {modified:>12} {display_name}",
+        1,
+        "-",
+        "-",
+        metadata.len()
+    );
+    DirectoryEntryInfo {
+        display,
+        permissions: permissions.to_string(),
+        links: 1,
+        owner: "-".to_string(),
+        group: "-".to_string(),
+        modified,
+    }
+}
+
+#[cfg(unix)]
+fn describe_directory_entry_unix(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    name: &str,
+) -> Option<DirectoryEntryInfo> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let display_name = if metadata.is_dir() {
+        format!("{name}/")
+    } else {
+        name.to_string()
+    };
+
+    let stat_output = Command::new("stat")
+        .args(["-f", "%Sp\t%l\t%Su\t%Sg\t%z\t%Sm", "-t", "%b %e %H:%M"])
+        .arg(path)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok());
+
+    if let Some(output) = stat_output {
+        let line = output.trim_end();
+        let mut parts = line.split('\t');
+        let permissions = parts.next()?.to_string();
+        let links = parts.next()?.parse::<u64>().ok()?;
+        let owner = parts.next()?.to_string();
+        let group = parts.next()?.to_string();
+        let size = parts.next()?.parse::<u64>().ok()?;
+        let modified = parts.next()?.to_string();
+        let size_text = format_size(size);
+        let display = format!(
+            "{permissions} {links:>2} {owner:<10.10} {group:<8.8} {size_text:>6} {modified:>12} {display_name}"
+        );
+        return Some(DirectoryEntryInfo {
+            display,
+            permissions,
+            links,
+            owner,
+            group,
+            modified,
+        });
+    }
+
+    let mode = metadata.permissions().mode();
+    let file_type = if metadata.is_dir() { 'd' } else { '-' };
+    let permissions = format!(
+        "{}{}{}{}{}{}{}{}{}{}",
+        file_type,
+        bit(mode, 0o400, 'r'),
+        bit(mode, 0o200, 'w'),
+        bit(mode, 0o100, 'x'),
+        bit(mode, 0o040, 'r'),
+        bit(mode, 0o020, 'w'),
+        bit(mode, 0o010, 'x'),
+        bit(mode, 0o004, 'r'),
+        bit(mode, 0o002, 'w'),
+        bit(mode, 0o001, 'x')
+    );
+    let links = metadata.nlink();
+    let owner = metadata.uid().to_string();
+    let group = metadata.gid().to_string();
+    let modified = metadata.mtime().to_string();
+    let size_text = format_size(metadata.size());
+    let display = format!(
+        "{permissions} {links:>2} {owner:<10.10} {group:<8.8} {size_text:>6} {modified:>12} {display_name}",
+    );
+    Some(DirectoryEntryInfo {
+        display,
+        permissions,
+        links,
+        owner,
+        group,
+        modified,
+    })
+}
+
+#[cfg(unix)]
+fn bit(mode: u32, flag: u32, ch: char) -> char {
+    if mode & flag != 0 { ch } else { '-' }
+}
+
+fn format_size(size: u64) -> String {
+    const UNITS: [&str; 5] = ["", "K", "M", "G", "T"];
+    let mut value = size as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        size.to_string()
+    } else if value >= 10.0 {
+        format!("{value:.0}{}", UNITS[unit])
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
+}
+
+fn parse_buffer_text_style(
+    map: &HashMap<String, Rc<RefCell<Value>>>,
+) -> Result<BufferTextStyle, String> {
+    Ok(BufferTextStyle {
+        line: map.get("line").and_then(|v| match &*v.borrow() {
+            Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+            _ => None,
+        }),
+        current_line: map
+            .get("current-line")
+            .is_some_and(|v| matches!(&*v.borrow(), Value::Bool(true))),
+        start: map.get("start").and_then(|v| match &*v.borrow() {
+            Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+            _ => None,
+        }),
+        end: map.get("end").and_then(|v| match &*v.borrow() {
+            Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+            _ => None,
+        }),
+        full_line: map
+            .get("full-line")
+            .is_some_and(|v| matches!(&*v.borrow(), Value::Bool(true))),
+        fg: map.get("fg").map(parse_style_color).transpose()?,
+        bg: map.get("bg").map(parse_style_color).transpose()?,
+        bold: map
+            .get("bold")
+            .is_some_and(|v| matches!(&*v.borrow(), Value::Bool(true))),
+    })
+}
+
+fn parse_style_color(value: &Rc<RefCell<Value>>) -> Result<crate::backend::Color, String> {
+    match &*value.borrow() {
+        Value::Keyword(name) | Value::String(name) => {
+            theme::named_color(name).ok_or_else(|| format!("Unknown style color '{name}'"))
+        }
+        _ => Err("Style colors must be keywords or strings".to_string()),
     }
 }

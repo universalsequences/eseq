@@ -524,6 +524,9 @@ fn collect_metal_primitives_recursive(
 }
 
 pub fn handle_event(node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+    if let Some(output) = sdf_widget::sdf_handle_event(node, &event) {
+        return Some(output);
+    }
     widget_definition(&node.widget_type)?.handle_event(node, event)
 }
 
@@ -535,6 +538,10 @@ pub fn map_mouse_event(
     drag_start: Option<(f32, f32)>,
     gesture: Option<&Value>,
 ) -> MouseEventOutcome {
+    // SDF widgets handle their own mouse events
+    if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
+        return sdf_widget::sdf_map_mouse_event(node, mouse_kind, local_col, local_row);
+    }
     widget_definition(&node.widget_type)
         .map(|definition| {
             definition.mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture)
@@ -543,6 +550,9 @@ pub fn map_mouse_event(
 }
 
 pub fn widget_captures_drag(widget_type: &str) -> bool {
+    if sdf_widget::sdf_widget_def(widget_type).is_some() {
+        return true; // SDF widgets capture drag for :on-drag support
+    }
     widget_definition(widget_type)
         .map(WidgetDefinition::captures_drag)
         .unwrap_or(false)

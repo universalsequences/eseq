@@ -2,7 +2,7 @@ use crate::backend::{
     Cell, CellStyle, Color, CompletionEntry, CompletionFrame, RenderFrame, StatusIndicator,
     TileFrame, TiledRenderFrame,
 };
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, BufferTextStyle};
 use crate::editor::{Editor, ViewMode};
 use crate::mode::{TokenClass, TokenSpan, highlight_line};
 use crate::text::matching_paren;
@@ -31,6 +31,14 @@ fn token_fg(col: usize, spans: Option<&Vec<TokenSpan>>) -> Color {
         .and_then(|ss| ss.iter().find(|s| col >= s.start && col < s.end))
         .map(|s| token_color(s.class))
         .unwrap_or(theme::FG())
+}
+
+fn contrasting_text_for(bg: Color) -> Color {
+    if bg.luma() >= 0.55 {
+        theme::BG()
+    } else {
+        theme::FG()
+    }
 }
 
 /// Returns true if `(row, col)` falls inside a highlighted range.
@@ -260,30 +268,56 @@ pub fn build_render_frame(
             let row = scroll_top + i;
             let match_col = match_pos.and_then(|(mr, mc)| if mr == row { Some(mc) } else { None });
             let row_spans = highlight_spans.get(row);
+            let row_styles = buf
+                .text_styles
+                .iter()
+                .filter(|style| style_applies_to_row(style, row, cursor_row))
+                .collect::<Vec<_>>();
             let chars: Vec<char> = content.chars().collect();
             let line_len = chars.len();
-            let mut cells: Vec<Cell> = Vec::with_capacity(line_len + 1);
-            for col in 0..line_len + 1 {
+            let render_cols = if row_styles.iter().any(|style| style.full_line) {
+                viewport_width.max(line_len + 1)
+            } else {
+                line_len + 1
+            };
+            let mut cells: Vec<Cell> = Vec::with_capacity(render_cols);
+            for col in 0..render_cols {
                 let mut fg = token_fg(col, row_spans);
-                let mut bg = if in_range(row, col, eval_flash_range, line_len) {
+                let mut bg = None;
+                let mut bold = false;
+                for style in &row_styles {
+                    if style_applies_to_col(style, col) {
+                        if let Some(style_fg) = style.fg {
+                            fg = style_fg;
+                        }
+                        if let Some(style_bg) = style.bg {
+                            bg = Some(style_bg);
+                        }
+                        if style.bold {
+                            bold = true;
+                        }
+                    }
+                }
+                let in_region = in_range(row, col, region_range, line_len);
+                bg = if in_range(row, col, eval_flash_range, line_len) {
                     Some(theme::BG_EVAL_FLASH())
                 } else if in_range(row, col, sexp_range, line_len) {
                     Some(theme::BG_SEXP())
-                } else if in_range(row, col, region_range, line_len) {
+                } else if in_region {
                     Some(theme::BG_REGION())
                 } else {
-                    None
+                    bg
                 };
                 if match_col == Some(col) {
                     bg = Some(theme::BG_MATCH_PAREN());
                     fg = theme::FG_MATCH_PAREN();
                 }
+                if in_region {
+                    bg = Some(theme::BG_REGION());
+                    fg = contrasting_text_for(theme::BG_REGION());
+                }
                 cells.push(Cell {
-                    style: CellStyle {
-                        bg,
-                        fg,
-                        bold: false,
-                    },
+                    style: CellStyle { bg, fg, bold },
                     ch: chars.get(col).copied().unwrap_or(' '),
                 });
             }
@@ -292,10 +326,7 @@ pub fn build_render_frame(
         .collect();
 
     // Cursor in visible-area coordinates
-    let cursor = if !buf.read_only
-        && cursor_row >= scroll_top
-        && cursor_row < scroll_top + viewport_height
-    {
+    let cursor = if cursor_row >= scroll_top && cursor_row < scroll_top + viewport_height {
         Some((cursor_row - scroll_top, cursor_col))
     } else {
         None
@@ -385,6 +416,19 @@ pub fn build_render_frame(
         widget_scroll_left: editor.widget_scroll_left(),
         text_scroll_top: scroll_top,
     }
+}
+
+fn style_applies_to_row(style: &BufferTextStyle, row: usize, cursor_row: usize) -> bool {
+    (style.current_line && row == cursor_row) || style.line == Some(row)
+}
+
+fn style_applies_to_col(style: &BufferTextStyle, col: usize) -> bool {
+    if style.full_line {
+        return true;
+    }
+    let start = style.start.unwrap_or(0);
+    let end = style.end.unwrap_or(usize::MAX);
+    col >= start && col < end
 }
 
 // ── Tiled frame builder ──────────────────────────────────────────────────────

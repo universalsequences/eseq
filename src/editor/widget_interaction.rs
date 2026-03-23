@@ -60,6 +60,9 @@ impl Editor {
     ) {
         use crate::widget_render::sdf_widget::{self, SdfHitState};
 
+        // Update time for SDF hit testing (once per event, not per hit test)
+        sdf_widget::set_sdf_time_seconds(sdf_widget::current_sdf_time_fallback_seconds());
+
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
         else {
@@ -298,32 +301,107 @@ impl Editor {
         content_width: u16,
         content_height: u16,
     ) {
-        if mouse.column < content_col || mouse.row < content_row {
+        let Some(cursor) = self.text_cursor_from_mouse(
+            mouse,
+            content_col,
+            content_row,
+            content_width,
+            content_height,
+        ) else {
             return;
+        };
+
+        let buffer_id = self.active_buffer().id;
+        self.clear_mark();
+        self.active_text_drag_anchor = Some(crate::editor::Mark { buffer_id, cursor });
+        self.active_buffer_mut().cursor = cursor;
+        let leaf = self.active_leaf_mut();
+        leaf.focused_widget_id = None;
+        leaf.active_widget_gesture = None;
+        self.completion = None;
+        self.minibuffer = None;
+        self.sync_runtime_context();
+        self.mark_needs_redraw();
+    }
+
+    pub(super) fn handle_text_drag(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        content_width: u16,
+        content_height: u16,
+    ) {
+        let Some(anchor) = self.active_text_drag_anchor else {
+            return;
+        };
+        if anchor.buffer_id != self.active_buffer().id {
+            self.clear_text_drag_anchor();
+            return;
+        }
+        let Some(cursor) = self.text_cursor_from_mouse(
+            mouse,
+            content_col,
+            content_row,
+            content_width,
+            content_height,
+        ) else {
+            return;
+        };
+
+        self.active_buffer_mut().cursor = cursor;
+        self.mark = Some(anchor);
+        self.completion = None;
+        self.minibuffer = None;
+        self.sync_runtime_context();
+        self.mark_needs_redraw();
+    }
+
+    pub(super) fn finish_text_drag(&mut self) {
+        let Some(anchor) = self.active_text_drag_anchor else {
+            return;
+        };
+        self.clear_text_drag_anchor();
+        if anchor.buffer_id != self.active_buffer().id
+            || self.active_buffer().cursor == anchor.cursor
+        {
+            self.clear_mark();
+        } else {
+            self.mark = Some(anchor);
+        }
+        self.mark_needs_redraw();
+    }
+
+    fn text_cursor_from_mouse(
+        &self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        content_width: u16,
+        content_height: u16,
+    ) -> Option<(usize, usize)> {
+        if mouse.column < content_col || mouse.row < content_row {
+            return None;
         }
         let local_col = mouse.column - content_col;
         let local_row = mouse.row - content_row;
         if local_col >= content_width || local_row >= content_height {
-            return;
+            return None;
         }
 
-        let buffer = self.active_buffer_mut();
-        if !buffer.read_only {
-            let absolute_row = buffer
-                .scroll_top
-                .saturating_add(local_row as usize)
-                .min(buffer.lines.len().saturating_sub(1));
-            let absolute_col = (local_col as usize).min(buffer.lines[absolute_row].len());
-            buffer.cursor = (absolute_row, absolute_col);
-            let leaf = self.active_leaf_mut();
-            leaf.focused_widget_id = None;
-            leaf.active_widget_gesture = None;
-        }
-        self.completion = None;
-        self.minibuffer = None;
-        self.clear_mark();
-        self.sync_runtime_context();
-        self.mark_needs_redraw();
+        let buffer = self.active_buffer();
+        let scroll_left = if buffer.view_mode != crate::editor::ViewMode::UiOnly {
+            self.active_leaf().widget_scroll_left as usize
+        } else {
+            0
+        };
+        let absolute_row = buffer
+            .scroll_top
+            .saturating_add(local_row as usize)
+            .min(buffer.lines.len().saturating_sub(1));
+        let absolute_col =
+            (local_col as usize + scroll_left).min(buffer.lines[absolute_row].chars().count());
+        Some((absolute_row, absolute_col))
     }
 
     pub(super) fn dispatch_widget_mouse_event(
