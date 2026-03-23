@@ -311,6 +311,9 @@ impl Editor {
             return;
         };
 
+        if self.active_buffer().read_only {
+            return; // keep widget focus in read-only buffers
+        }
         let buffer_id = self.active_buffer().id;
         self.clear_mark();
         self.active_text_drag_anchor = Some(crate::editor::Mark { buffer_id, cursor });

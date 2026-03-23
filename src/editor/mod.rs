@@ -103,6 +103,10 @@ enum MinibufferMode {
         candidates: Vec<String>,
         selected: usize,
     },
+    FindFile {
+        input: String,
+        selected: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1662,6 +1666,10 @@ impl Editor {
     fn call_lisp_handler_with_args(&mut self, fn_name: &str, args: &[Value]) {
         if fn_name == "eval-sexp" || fn_name == "eval-buffer-command" {
             self.eval_preview_handler(fn_name);
+            return;
+        }
+        if fn_name == "find-file" {
+            self.run_command("find-file");
             return;
         }
         self.sync_runtime_context();

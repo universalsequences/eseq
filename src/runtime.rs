@@ -407,7 +407,6 @@ impl Runtime {
             }
         });
         // Register defwidget: defines a new SDF widget type
-        let dw_macros = runtime.vm.macros.clone();
         runtime
             .vm
             .register_native_with_vm("defwidget", move |args, vm| {
@@ -478,7 +477,7 @@ impl Runtime {
                 for name in &widget_state_names {
                     state_bindings.insert(name.clone());
                 }
-                let compiled = match compile_sdf_value(&shader_val, &dw_macros, &state_bindings) {
+                let compiled = match compile_sdf_value(&shader_val, &vm.macros, &state_bindings) {
                     Ok(o) => o,
                     Err(e) => return Value::String(format!("defwidget shader error: {}", e)),
                 };

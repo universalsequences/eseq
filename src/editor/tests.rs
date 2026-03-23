@@ -66,6 +66,101 @@
     }
 
     #[test]
+    fn ctrl_x_ctrl_f_opens_find_file_minibuffer() {
+        let init = include_str!("../../init.lisp").to_string();
+        let runtime = Runtime::with_init_source(&init);
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                init_source: Some(init),
+            },
+        );
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        assert_eq!(editor.minibuffer_prompt().as_deref(), Some("Find file: "));
+    }
+
+    #[test]
+    fn find_file_minibuffer_opens_existing_file() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let dir = std::env::temp_dir().join(format!(
+            "eseqlisp-find-file-open-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("open-me.lisp");
+        std::fs::write(&path, "(+ 1 2)\n").unwrap();
+
+        editor.minibuffer_input = Some(super::MinibufferMode::FindFile {
+            input: path.display().to_string(),
+            selected: 0,
+        });
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().path.as_ref(), Some(&path));
+        assert_eq!(editor.active_buffer().text(), "(+ 1 2)\n");
+    }
+
+    #[test]
+    fn find_file_minibuffer_creates_new_file_backed_buffer() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let dir = std::env::temp_dir().join(format!(
+            "eseqlisp-find-file-create-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("new-file.lisp");
+
+        editor.minibuffer_input = Some(super::MinibufferMode::FindFile {
+            input: path.display().to_string(),
+            selected: 0,
+        });
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().path.as_ref(), Some(&path));
+        assert_eq!(editor.active_buffer().text(), "");
+        assert!(!path.exists(), "opening a new file should not write it yet");
+    }
+
+    #[test]
+    fn find_file_tab_completes_input_in_place() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let dir = std::env::temp_dir().join(format!(
+            "eseqlisp-find-file-complete-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("font-demo.lisp");
+        std::fs::write(&path, "(demo)\n").unwrap();
+        editor.active_buffer_mut().path = Some(dir.join("anchor.lisp"));
+
+        editor.minibuffer_input = Some(super::MinibufferMode::FindFile {
+            input: "f".to_string(),
+            selected: 0,
+        });
+        editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(
+            editor.minibuffer_prompt().as_deref(),
+            Some("Find file: font-demo.lisp  [font-demo.lisp]")
+        );
+    }
+
+    #[test]
     fn dragging_vertical_tile_border_updates_split_ratio() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -3300,6 +3395,35 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
             .map(|value| value.borrow().clone())
             .unwrap_or(Value::Nil);
         assert!(matches!(widget_type, Value::Keyword(name) if name == "sdf-test"));
+    }
+
+    #[test]
+    fn defwidget_uses_macros_defined_earlier_in_same_eval() {
+        let mut rt = Runtime::new();
+        let result = rt
+            .eval_str(
+                r#"
+                (defmacro chasis (w h)
+                  `(sdf/rect ,w ,h))
+                (defwidget spore
+                  :width 8 :height 8
+                  :shader
+                  (sdf/layer
+                    (sdf/fill (chasis 0.5 0.3) :accent)))
+                (spore)
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        let Value::Map(widget) = result else {
+            panic!("expected widget map");
+        };
+        let widget_type = widget
+            .get("type")
+            .map(|value| value.borrow().clone())
+            .unwrap_or(Value::Nil);
+        assert!(matches!(widget_type, Value::Keyword(name) if name == "spore"));
     }
 
     #[test]

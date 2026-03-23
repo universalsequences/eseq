@@ -52,6 +52,7 @@ impl Editor {
             ("C-x 0", "delete-window"),
             ("C-x 1", "delete-other-windows"),
             ("C-x o", "other-window"),
+            ("C-x C-f", "find-file"),
         ];
         for (key, handler) in tiling_binds {
             self.default_lisp_bindings
@@ -219,6 +220,14 @@ impl Editor {
                 self.minibuffer_input = Some(super::MinibufferMode::SwitchBuffer {
                     input: String::new(),
                     candidates,
+                    selected: 0,
+                });
+            }
+            "find-file" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.minibuffer_input = Some(super::MinibufferMode::FindFile {
+                    input: String::new(),
                     selected: 0,
                 });
             }

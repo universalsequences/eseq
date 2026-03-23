@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{Editor, MinibufferMode, filter_candidates};
@@ -136,6 +138,61 @@ impl Editor {
                     });
                 }
             },
+            MinibufferMode::FindFile {
+                mut input,
+                mut selected,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.minibuffer = None;
+                }
+                KeyCode::Enter => {
+                    let candidates = self.collect_find_file_candidates(&input);
+                    let path_input = if candidates.iter().any(|candidate| candidate == &input) {
+                        input.clone()
+                    } else if let Some(sel) = candidates.get(selected) {
+                        sel.clone()
+                    } else {
+                        input.clone()
+                    };
+                    if !path_input.is_empty() {
+                        match self.open_or_create_file_buffer(self.resolve_file_input(&path_input)) {
+                            Ok(_) => {
+                                self.minibuffer = Some(format!("Opened {path_input}"));
+                            }
+                            Err(error) => {
+                                self.minibuffer = Some(format!("Error: {error:?}"));
+                            }
+                        }
+                    }
+                    return true;
+                }
+                KeyCode::Tab => {
+                    let candidates = self.collect_find_file_candidates(&input);
+                    if !candidates.is_empty() {
+                        selected = (selected + 1) % candidates.len();
+                        if let Some(candidate) = candidates.get(selected) {
+                            input = candidate.clone();
+                        }
+                    }
+                    self.minibuffer_input = Some(MinibufferMode::FindFile { input, selected });
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    selected = 0;
+                    self.minibuffer_input = Some(MinibufferMode::FindFile { input, selected });
+                }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    input.push(c);
+                    selected = 0;
+                    self.minibuffer_input = Some(MinibufferMode::FindFile { input, selected });
+                }
+                _ => {
+                    self.minibuffer_input = Some(MinibufferMode::FindFile { input, selected });
+                }
+            },
         }
         self.mark_needs_redraw();
         true
@@ -145,6 +202,10 @@ impl Editor {
         // Check if it's a command that opens its own minibuffer
         if name == "switch-to-buffer" {
             self.run_command("switch-to-buffer");
+            return;
+        }
+        if name == "find-file" {
+            self.run_command("find-file");
             return;
         }
         // First try as a builtin command name
@@ -196,7 +257,70 @@ impl Editor {
                     Some(format!("Switch to buffer: {input}  [{hint}]"))
                 }
             }
+            Some(MinibufferMode::FindFile { input, selected }) => {
+                let candidates = self.collect_find_file_candidates(input);
+                let hint = candidates.get(*selected).map(|s| s.as_str()).unwrap_or("");
+                if hint.is_empty() || input.is_empty() {
+                    Some(format!("Find file: {input}"))
+                } else {
+                    Some(format!("Find file: {input}  [{hint}]"))
+                }
+            }
             None => None,
         }
+    }
+
+    fn minibuffer_default_directory(&self) -> PathBuf {
+        self.active_buffer()
+            .path
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    }
+
+    fn resolve_file_input(&self, input: &str) -> PathBuf {
+        if let Some(stripped) = input.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return PathBuf::from(home).join(stripped);
+            }
+        }
+        let path = PathBuf::from(input);
+        if path.is_absolute() {
+            path
+        } else {
+            self.minibuffer_default_directory().join(path)
+        }
+    }
+
+    fn collect_find_file_candidates(&self, input: &str) -> Vec<String> {
+        let (dir_input, needle) = match input.rsplit_once('/') {
+            Some((dir, tail)) => (Some(format!("{dir}/")), tail.to_ascii_lowercase()),
+            None => (None, input.to_ascii_lowercase()),
+        };
+
+        let search_dir = dir_input
+            .as_deref()
+            .map(|dir| self.resolve_file_input(dir))
+            .unwrap_or_else(|| self.minibuffer_default_directory());
+        let display_prefix = dir_input.unwrap_or_default();
+
+        let Ok(entries) = std::fs::read_dir(&search_dir) else {
+            return Vec::new();
+        };
+
+        let mut out = entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let file_type = entry.file_type().ok()?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !needle.is_empty() && !name.to_ascii_lowercase().contains(&needle) {
+                    return None;
+                }
+                let suffix = if file_type.is_dir() { "/" } else { "" };
+                Some(format!("{display_prefix}{name}{suffix}"))
+            })
+            .collect::<Vec<_>>();
+        out.sort();
+        out
     }
 }

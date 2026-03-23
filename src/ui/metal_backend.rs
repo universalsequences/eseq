@@ -1007,6 +1007,28 @@ fragment float4 waveform_frag(
                             )
                         })
                         .collect();
+                    // Partition widget instances into background (behind text) and foreground
+                    self.compile_pending_sdf_pipelines();
+                    let (bg_runs, fg_runs) = partition_widget_instance_runs(&offset_prims);
+                    for (widget_type, instances) in &bg_runs {
+                        let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                            continue;
+                        };
+                        if instances.is_empty() { continue; }
+                        let byte_len = std::mem::size_of_val(instances.as_slice());
+                        let Some(wbuf) = (unsafe {
+                            self.device.newBufferWithBytes_length_options(
+                                NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                                byte_len, MTLResourceOptions(0))
+                        }) else { continue; };
+                        enc.setRenderPipelineState(wpipe);
+                        unsafe {
+                            enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                MTLPrimitiveType::Triangle, 0, 6, instances.len() as _);
+                        }
+                    }
+
                     // Rect/Quad/GlyphRun primitives
                     let prim_quads = {
                         let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
@@ -1042,10 +1064,8 @@ fragment float4 waveform_frag(
                             vp_h,
                         );
                     }
-                    // Widget instances (sliders, toggles, knobs, SDF widgets)
-                    self.compile_pending_sdf_pipelines();
-                    let widget_runs = collect_widget_instance_runs(&offset_prims);
-                    for (widget_type, instances) in &widget_runs {
+                    // Foreground widget instances (sliders, toggles, knobs, SDF widgets)
+                    for (widget_type, instances) in &fg_runs {
                         let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                             continue;
                         };
@@ -1687,6 +1707,8 @@ fragment float4 waveform_frag(
             self.sync_window_theme();
             let time_seconds = self.elapsed_time_seconds();
 
+            self.compile_pending_sdf_pipelines();
+
             let (Some(pipeline), Some(atlas)) = (&self.pipeline, &mut self.atlas) else {
                 return Ok(());
             };
@@ -1744,7 +1766,8 @@ fragment float4 waveform_frag(
                 })
                 .unwrap_or_default();
             let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
-            let primitive_instance_runs = collect_widget_instance_runs(&primitive_scene);
+            let (primitive_bg_runs, primitive_instance_runs) =
+                partition_widget_instance_runs(&primitive_scene);
 
             // ── Vertex buffer ────────────────────────────────────────────────
             let text_vbuf = self.cached_text_buffer.as_ref();
@@ -1780,6 +1803,24 @@ fragment float4 waveform_frag(
             let enc = buf
                 .renderCommandEncoderWithDescriptor(&desc)
                 .ok_or(BackendError::MetalError)?;
+
+            // Background SDF widgets (behind text)
+            for (widget_type, instances) in &primitive_bg_runs {
+                let Some(wpipe) = self.widget_pipelines.get(widget_type) else { continue; };
+                if instances.is_empty() { continue; }
+                let byte_len = std::mem::size_of_val(instances.as_slice());
+                let Some(wbuf) = (unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                        byte_len, MTLResourceOptions(0))
+                }) else { continue; };
+                enc.setRenderPipelineState(wpipe);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                    enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                        MTLPrimitiveType::Triangle, 0, 6, instances.len() as _);
+                }
+            }
 
             if let Some(vbuf) = &text_vbuf {
                 enc.setRenderPipelineState(pipeline);
@@ -1855,7 +1896,6 @@ fragment float4 waveform_frag(
                 );
             }
 
-            self.compile_pending_sdf_pipelines();
             let mut widget_upload_bytes = 0;
             for (widget_type, instances) in &primitive_instance_runs {
                 let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
@@ -2531,16 +2571,23 @@ fragment float4 waveform_frag(
         ]);
     }
 
-    fn collect_widget_instance_runs(
+    /// Partition widget instances into background and foreground runs in a single pass.
+    fn partition_widget_instance_runs(
         primitives: &[widget_render::MetalPrimitive],
-    ) -> Vec<(String, Vec<WidgetInstance>)> {
-        let mut runs: Vec<(String, Vec<WidgetInstance>)> = Vec::new();
+    ) -> (
+        Vec<(String, Vec<WidgetInstance>)>,
+        Vec<(String, Vec<WidgetInstance>)>,
+    ) {
+        let mut bg_runs: Vec<(String, Vec<WidgetInstance>)> = Vec::new();
+        let mut fg_runs: Vec<(String, Vec<WidgetInstance>)> = Vec::new();
         for primitive in primitives {
             if let widget_render::MetalPrimitive::WidgetInstance {
                 widget_type,
                 instance,
+                is_background,
             } = primitive
             {
+                let runs = if *is_background { &mut bg_runs } else { &mut fg_runs };
                 if let Some((run_type, instances)) = runs.last_mut()
                     && run_type == widget_type
                 {
@@ -2550,7 +2597,7 @@ fragment float4 waveform_frag(
                 }
             }
         }
-        runs
+        (bg_runs, fg_runs)
     }
 
     /// Offset a MetalPrimitive by (col_off, row_off) cells.
@@ -2595,6 +2642,7 @@ fragment float4 waveform_frag(
             widget_render::MetalPrimitive::WidgetInstance {
                 widget_type,
                 mut instance,
+                is_background,
             } => {
                 let ndc_dx = (col_off as f32 * cell_w / vp_w) * 2.0;
                 let ndc_dy = -(row_off as f32 * cell_h / vp_h) * 2.0;
@@ -2605,6 +2653,7 @@ fragment float4 waveform_frag(
                 widget_render::MetalPrimitive::WidgetInstance {
                     widget_type,
                     instance,
+                    is_background,
                 }
             }
         }

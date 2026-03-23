@@ -1,4 +1,6 @@
 use super::{Align, WidgetDefinition, resolve_align};
+#[cfg(target_os = "macos")]
+use super::{MetalPrimitive, WidgetViewport};
 use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, shrink_constraints,
 };
@@ -130,5 +132,19 @@ impl WidgetDefinition for BoxWidget {
             })
             .into_iter()
             .collect()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn build_metal_primitives(
+        &self,
+        _widget_type: &str,
+        node: &LayoutNode,
+        viewport: WidgetViewport,
+    ) -> Vec<MetalPrimitive> {
+        // If box has a :background prop naming an SDF widget, render it behind children
+        if let Some(Value::String(bg_type)) = node.props.get("background") {
+            return super::sdf_widget::sdf_widget_background_primitives(bg_type, node.rect, viewport);
+        }
+        Vec::new()
     }
 }

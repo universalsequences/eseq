@@ -111,6 +111,10 @@ impl WidgetDefinition for LabelWidget {
             return Vec::new();
         };
         let fg = resolve_color(&node.props);
+        let bg_transparent = matches!(
+            node.props.get("bg"),
+            Some(Value::Keyword(k)) if k == "transparent"
+        );
         let bg = if viewport.focused_branch {
             theme::WIDGET_FOCUS_BG()
         } else {
@@ -124,19 +128,21 @@ impl WidgetDefinition for LabelWidget {
                 _ => None,
             })
             .unwrap_or(DEFAULT_FONT_SIZE);
-        vec![
-            MetalPrimitive::Rect(MetalRectPrimitive {
+        let mut prims = Vec::new();
+        if !bg_transparent {
+            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: node.rect,
                 color: bg,
-            }),
-            MetalPrimitive::ProportionalText(MetalProportionalTextPrimitive {
-                row: node.rect.row,
-                col: node.rect.col,
-                text: text.clone(),
-                font_size,
-                fg,
-                bg,
-            }),
-        ]
+            }));
+        }
+        prims.push(MetalPrimitive::ProportionalText(MetalProportionalTextPrimitive {
+            row: node.rect.row,
+            col: node.rect.col,
+            text: text.clone(),
+            font_size,
+            fg,
+            bg,
+        }));
+        prims
     }
 }

@@ -255,6 +255,7 @@ pub enum MetalPrimitive {
     WidgetInstance {
         widget_type: String,
         instance: WidgetInstance,
+        is_background: bool,
     },
 }
 
@@ -263,6 +264,7 @@ pub fn metal_widget_instance(widget_type: &str, instance: WidgetInstance) -> Vec
     vec![MetalPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),
         instance,
+        is_background: false,
     }]
 }
 

@@ -436,6 +436,49 @@ pub fn sdf_widget_metal_primitives(
             corner_radius: 0.0,
             pixel_aspect,
         },
+        is_background: false,
+    }]
+}
+
+/// Build Metal primitives for an SDF widget used as a container background.
+/// Uses the container's rect instead of the widget's own rect.
+#[cfg(target_os = "macos")]
+pub fn sdf_widget_background_primitives(
+    widget_type: &str,
+    rect: Rect,
+    viewport: WidgetViewport,
+) -> Vec<MetalPrimitive> {
+    use super::{WidgetInstance, ndc_bounds};
+
+    if sdf_widget_def(widget_type).is_none() {
+        return Vec::new();
+    }
+
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
+    const NO_HIT_REGION: f32 = -1.0;
+    const FULL_UV_BOUNDS: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+    vec![MetalPrimitive::WidgetInstance {
+        widget_type: widget_type.to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [0.0; 4],
+            uniform_b: [0.0; 4],
+            color_a: [0.0; 4],
+            color_b: [NO_HIT_REGION, 0.0, 0.0, 0.0],
+            color_c: FULL_UV_BOUNDS,
+            color_d: [0.0; 4],
+            corner_radius: 0.0,
+            pixel_aspect,
+        },
+        is_background: true,
     }]
 }
 
