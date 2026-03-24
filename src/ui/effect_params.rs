@@ -6,6 +6,7 @@ use crate::effects::{
 };
 use crate::reverb;
 
+use super::command::{apply_command, AppCommand};
 use super::draw::rect_contains;
 use super::{App, EffectPaneEntry, EffectTab, InputMode, ParamMouseDragTarget};
 
@@ -389,19 +390,14 @@ impl App {
         self.set_reverb_param(self.ui.reverb_param_cursor, current + delta);
     }
 
-    fn adjust_slot_param(&self, direction: f32) {
+    fn adjust_slot_param(&mut self, direction: f32) {
         let track = self.ui.cursor_track;
         let Some(slot_idx) = self.selected_effect_slot() else {
             return;
         };
         let param_idx = self.ui.effect_param_cursor;
 
-        let desc = match self
-            .graph
-            .effect_descriptors
-            .get(track)
-            .and_then(|d| d.get(slot_idx))
-        {
+        let desc = match self.graph.effect_descriptors.get(track).and_then(|d| d.get(slot_idx)) {
             Some(d) => d,
             None => return,
         };
@@ -425,28 +421,24 @@ impl App {
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
             self.apply_effect_sidechain_selection(track, slot_idx, param_idx, new_val as usize);
-            slot.defaults.set(param_idx, new_val);
-            self.state.publish_scheduler_snapshot();
+            apply_command(self, AppCommand::SetEffectParam { track, slot_idx, param_idx, value: new_val });
         } else if self.has_selection() {
-            for step in self.selected_steps() {
-                let current = slot
-                    .plocks
-                    .get(step, param_idx)
-                    .unwrap_or_else(|| slot.defaults.get(param_idx));
+            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
+                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
                 let inc = param_desc.increment(current);
-                let new_val = param_desc.clamp(current + direction * inc);
-                slot.plocks.set(step, param_idx, new_val);
+                (step, param_desc.clamp(current + direction * inc))
+            }).collect();
+            for (step, value) in new_vals {
+                apply_command(self, AppCommand::SetEffectPlock { track, step, slot_idx, param_idx, value });
             }
-            self.state.publish_scheduler_snapshot();
         } else {
+            let slot = &self.state.pattern.effect_chains[track][slot_idx];
+            let desc = &self.graph.effect_descriptors[track][slot_idx];
             let old = slot.defaults.get(param_idx);
-            let inc = param_desc.increment(old);
-            let new_val = param_desc.clamp(old + direction * inc);
-            slot.defaults.set(param_idx, new_val);
-            self.send_slot_param(track, slot_idx, param_idx, new_val);
-            self.state.publish_scheduler_snapshot();
+            let inc = desc.params[param_idx].increment(old);
+            let new_val = desc.params[param_idx].clamp(old + direction * inc);
+            apply_command(self, AppCommand::SetEffectParam { track, slot_idx, param_idx, value: new_val });
         }
-        self.state.publish_scheduler_snapshot();
     }
 
     pub(super) fn send_slot_param(
@@ -494,44 +486,25 @@ impl App {
         }
     }
 
-    fn toggle_slot_boolean(&self) {
+    fn toggle_slot_boolean(&mut self) {
         let param_idx = self.ui.effect_param_cursor;
-
-        let slot = match self.current_slot() {
-            Some(s) => s,
-            None => return,
-        };
+        let track = self.ui.cursor_track;
+        let Some(slot_idx) = self.selected_effect_slot() else { return };
+        let Some(slot) = self.current_slot() else { return };
 
         if self.has_selection() {
-            for step in self.selected_steps() {
-                let current = slot
-                    .plocks
-                    .get(step, param_idx)
-                    .unwrap_or_else(|| slot.defaults.get(param_idx));
-                let new_val = if current > 0.5 { 0.0 } else { 1.0 };
-                slot.plocks.set(step, param_idx, new_val);
+            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
+                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
+                (step, if current > 0.5 { 0.0 } else { 1.0 })
+            }).collect();
+            for (step, value) in new_vals {
+                apply_command(self, AppCommand::SetEffectPlock { track, step, slot_idx, param_idx, value });
             }
-            self.state.publish_scheduler_snapshot();
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
-            slot.defaults.set(param_idx, new_val);
-            if !matches!(
-                self.current_slot_descriptor()
-                    .and_then(|d| d.params.get(param_idx))
-                    .and_then(|p| p.host_control.as_ref()),
-                Some(crate::effects::HostControl::FxSidechain { .. })
-            ) {
-                self.send_slot_param(
-                    self.ui.cursor_track,
-                    self.selected_effect_slot().unwrap(),
-                    param_idx,
-                    new_val,
-                );
-            }
-            self.state.publish_scheduler_snapshot();
+            apply_command(self, AppCommand::SetEffectParam { track, slot_idx, param_idx, value: new_val });
         }
-        self.state.publish_scheduler_snapshot();
     }
 
     fn update_delay_time_param_kind(&mut self) {
@@ -579,16 +552,15 @@ impl App {
             desc.params[TIME_PARAM].kind = ParamKind::Enum { labels };
             desc.params[TIME_PARAM].min = 0.0;
             desc.params[TIME_PARAM].max = (SyncDivision::ALL.len() - 1) as f32;
-            slot.defaults.set(TIME_PARAM, 6.0);
+            apply_command(self, AppCommand::SetEffectParam { track, slot_idx: DELAY_SLOT, param_idx: TIME_PARAM, value: 6.0 });
         } else {
             desc.params[TIME_PARAM].kind = ParamKind::Continuous {
                 unit: Some("ms".to_string()),
             };
             desc.params[TIME_PARAM].min = 1.0;
             desc.params[TIME_PARAM].max = 2000.0;
-            slot.defaults.set(TIME_PARAM, 250.0);
+            apply_command(self, AppCommand::SetEffectParam { track, slot_idx: DELAY_SLOT, param_idx: TIME_PARAM, value: 250.0 });
         }
-        self.state.publish_scheduler_snapshot();
     }
 
     fn get_current_slot_value(&self) -> f32 {
@@ -673,8 +645,9 @@ impl App {
                     return;
                 };
                 self.ui.cursor_step = step;
-                self.state
-                    .set_step_param(drag.track, step, self.ui.active_param, value);
+                let param = self.ui.active_param;
+                let track = drag.track;
+                apply_command(self, AppCommand::SetStepParam { track, step, param, value });
             }
             ParamMouseDragTarget::TrackListVolume => {
                 let layout = super::cirklon::track_list_row_layout(self.ui.layout.track_list);
@@ -693,86 +666,60 @@ impl App {
                     let (lo, hi) = self.track_selected_range();
                     drag.track >= lo && drag.track <= hi
                 };
-                if apply_bulk {
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_volume(volume);
-                        app.push_track_volume(track);
-                    });
+                let tracks = if apply_bulk {
+                    self.selected_tracks()
                 } else {
-                    let tp = &self.state.pattern.track_params[drag.track];
-                    tp.set_volume(volume);
-                    self.push_track_volume(drag.track);
+                    vec![drag.track]
+                };
+                for track in tracks {
+                    apply_command(self, AppCommand::SetTrackVolume { track, value: volume });
                 }
-                self.state.publish_scheduler_snapshot();
             }
             ParamMouseDragTarget::TrackParam { row_idx } => {
+                let sdv = drag.start_display_value;
+                let tracks = self.selected_tracks();
                 match row_idx {
-                    super::TP_ATTACK => self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_attack_ms(
-                            (drag.start_display_value + dx as f32 * 5.0).clamp(0.0, 500.0),
-                        );
-                    }),
-                    super::TP_RELEASE => self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_release_ms(
-                            (drag.start_display_value + dx as f32 * 10.0).clamp(0.0, 2000.0),
-                        );
-                    }),
-                    super::TP_SWING => self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_swing(
-                            (drag.start_display_value + dx as f32 * 0.5).clamp(50.0, 75.0),
-                        );
-                    }),
-                    super::TP_STEPS => self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track].set_num_steps(
-                            (drag.start_display_value + (dx as f32 / 2.0).round())
-                                .clamp(1.0, crate::sequencer::MAX_STEPS as f32)
-                                as usize,
-                        );
-                    }),
+                    super::TP_ATTACK => {
+                        let ms = (sdv + dx as f32 * 5.0).clamp(0.0, 500.0);
+                        for track in tracks { apply_command(self, AppCommand::SetTrackAttack { track, ms }); }
+                    }
+                    super::TP_RELEASE => {
+                        let ms = (sdv + dx as f32 * 10.0).clamp(0.0, 2000.0);
+                        for track in tracks { apply_command(self, AppCommand::SetTrackRelease { track, ms }); }
+                    }
+                    super::TP_SWING => {
+                        let value = (sdv + dx as f32 * 0.5).clamp(50.0, 75.0);
+                        for track in tracks { apply_command(self, AppCommand::SetTrackSwing { track, value }); }
+                    }
+                    super::TP_STEPS => {
+                        let n = (sdv + (dx as f32 / 2.0).round()).clamp(1.0, crate::sequencer::MAX_STEPS as f32) as usize;
+                        for track in tracks { apply_command(self, AppCommand::SetTrackNumSteps { track, n }); }
+                    }
                     super::TP_VOLUME => {
-                        self.for_each_selected_track(|app, track| {
-                            app.state.pattern.track_params[track].set_volume(
-                                (drag.start_display_value + dx as f32 * 0.01).clamp(0.0, 1.0),
-                            );
-                            app.push_track_volume(track);
-                        });
+                        let value = (sdv + dx as f32 * 0.01).clamp(0.0, 1.0);
+                        for track in tracks { apply_command(self, AppCommand::SetTrackVolume { track, value }); }
                     }
                     super::TP_PAN => {
-                        self.for_each_selected_track(|app, track| {
-                            app.state.pattern.track_params[track].set_pan(
-                                (drag.start_display_value + dx as f32 * 0.01).clamp(-1.0, 1.0),
-                            );
-                            app.push_track_pan(track);
-                        });
+                        let value = (sdv + dx as f32 * 0.01).clamp(-1.0, 1.0);
+                        for track in tracks { apply_command(self, AppCommand::SetTrackPan { track, value }); }
                     }
                     super::TP_SEND => {
-                        self.for_each_selected_track(|app, track| {
-                            app.state.pattern.track_params[track].set_send(
-                                (drag.start_display_value + dx as f32 * 0.01).clamp(0.0, 1.0),
-                            );
-                            app.push_send_gain(track);
-                        });
+                        let value = (sdv + dx as f32 * 0.01).clamp(0.0, 1.0);
+                        for track in tracks { apply_command(self, AppCommand::SetTrackSend { track, value }); }
                     }
                     super::TP_MASTER => {
-                        self.state.transport.master_volume.store(
-                            (drag.start_display_value + dx as f32 * 0.01)
-                                .clamp(0.0, 2.0)
-                                .to_bits(),
-                            Ordering::Relaxed,
-                        );
-                        self.push_master_volume();
+                        apply_command(self, AppCommand::SetMasterVolume { value: (sdv + dx as f32 * 0.01).clamp(0.0, 2.0) });
                     }
                     _ => {}
                 }
-                self.state.publish_scheduler_snapshot();
             }
             ParamMouseDragTarget::AccumParam { row_idx } => {
                 if row_idx == super::AC_LIMIT {
-                    self.for_each_selected_track(|app, track| {
-                        app.state.pattern.track_params[track]
-                            .set_accum_limit((drag.start_display_value + dx as f32).max(0.0));
-                    });
-                    self.state.publish_scheduler_snapshot();
+                    let value = (drag.start_display_value + dx as f32).max(0.0);
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(self, AppCommand::SetTrackAccumLimit { track, value });
+                    }
                 }
             }
             ParamMouseDragTarget::SynthParam { row_idx } => {
@@ -873,20 +820,17 @@ impl App {
                 else {
                     return;
                 };
+                let track = drag.track;
                 if matches!(
                     param_desc.host_control,
                     Some(crate::effects::HostControl::FxSidechain { .. })
                 ) {
                     let selection = new_stored.round().max(0.0) as usize;
-                    self.apply_effect_sidechain_selection(
-                        drag.track, slot_idx, param_idx, selection,
-                    );
-                    slot.defaults.set(param_idx, selection as f32);
+                    self.apply_effect_sidechain_selection(track, slot_idx, param_idx, selection);
+                    apply_command(self, AppCommand::SetEffectParam { track, slot_idx, param_idx, value: selection as f32 });
                 } else {
-                    slot.defaults.set(param_idx, new_stored);
-                    self.send_slot_param(drag.track, slot_idx, param_idx, new_stored);
+                    apply_command(self, AppCommand::SetEffectParam { track, slot_idx, param_idx, value: new_stored });
                 }
-                self.state.publish_scheduler_snapshot();
             }
             ParamMouseDragTarget::ReverbParam { param_idx } => {
                 let sensitivity = 1.0 / 48.0;

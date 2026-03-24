@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use eseqlisp::frame as eseq_frame;
 use eseqlisp::tui as eseq_tui;
 use eseqlisp::vm::Value as EValue;
 use eseqlisp::{BufferMode, CompileKind, Editor, EditorConfig, HostCommand, HostEvent, Runtime};
@@ -3470,15 +3471,18 @@ where
         },
     );
     let initial = match std::fs::read_to_string(&path) {
-        Ok(src) if !src.trim().is_empty() => src,
-        _ => default_template_for_kind(&kind).to_string(),
+        Ok(src) if !src.trim().is_empty() => None,
+        _ => Some(default_template_for_kind(&kind).to_string()),
     };
     if editor
-        .open_or_create_file_buffer_with_mode(&path, &initial, BufferMode::DGenLisp)
+        .open_or_create_file_buffer_with_mode(&path, BufferMode::DGenLisp)
         .map_err(|e| eprintln!("Failed to open editor buffer '{}': {e:?}", path.display()))
         .is_err()
     {
         return None;
+    }
+    if let Some(initial) = initial {
+        editor.active_buffer_mut().set_text(&initial);
     }
 
     let mut terminal = ratatui::init();
@@ -3758,7 +3762,17 @@ where
 
         if editor.needs_redraw() {
             terminal
-                .draw(|frame| eseq_tui::render(frame, &mut editor))
+                .draw(|f| {
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let viewport_width = cols as usize;
+                    let viewport_height = (rows as usize).saturating_sub(3);
+                    let render_frame = eseq_frame::build_render_frame(
+                        &mut editor,
+                        viewport_width,
+                        viewport_height,
+                    );
+                    eseq_tui::render(f, &render_frame);
+                })
                 .ok()?;
             editor.clear_needs_redraw();
         }
@@ -3915,7 +3929,17 @@ pub fn run_embedded_scratch_flow(
 
         if editor.needs_redraw() {
             if terminal
-                .draw(|frame| eseq_tui::render(frame, &mut editor))
+                .draw(|f| {
+                    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                    let viewport_width = cols as usize;
+                    let viewport_height = (rows as usize).saturating_sub(3);
+                    let render_frame = eseq_frame::build_render_frame(
+                        &mut editor,
+                        viewport_width,
+                        viewport_height,
+                    );
+                    eseq_tui::render(f, &render_frame);
+                })
                 .is_err()
             {
                 break;

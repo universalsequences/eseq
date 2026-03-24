@@ -531,7 +531,8 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         }
 
         AppCommand::SetInstrumentBaseNoteOffset { track, value } => {
-            app.set_instrument_base_note_offset(track, value);
+            app.state.pattern.instrument_base_note_offsets[track]
+                .store(value.to_bits(), Ordering::Relaxed);
         }
 
         // ── Transport ─────────────────────────────────────────────────────

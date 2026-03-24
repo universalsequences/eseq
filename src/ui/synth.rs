@@ -2,6 +2,8 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::prelude::*;
 use std::sync::atomic::Ordering;
 
+use super::command::{apply_command, AppCommand};
+
 use crate::effects::EffectDescriptor;
 
 use super::{App, InputMode};
@@ -316,11 +318,8 @@ impl App {
         )
     }
 
-    pub(super) fn set_instrument_base_note_offset(&self, track: usize, value: f32) {
-        self.state.pattern.instrument_base_note_offsets[track]
-            .store(value.to_bits(), Ordering::Relaxed);
-        self.mark_track_sound_dirty(track);
-        self.state.publish_scheduler_snapshot();
+    pub(super) fn set_instrument_base_note_offset(&mut self, track: usize, value: f32) {
+        apply_command(self, AppCommand::SetInstrumentBaseNoteOffset { track, value });
     }
 
     pub(super) fn synth_row_count(&self) -> usize {
@@ -962,21 +961,17 @@ impl App {
             .and_then(|(_, maybe_row)| *maybe_row)
     }
 
-    pub(super) fn set_instrument_param_or_plock(&self, track: usize, param_idx: usize, value: f32) {
-        let slot = &self.state.pattern.instrument_slots[track];
+    pub(super) fn set_instrument_param_or_plock(&mut self, track: usize, param_idx: usize, value: f32) {
         if self.has_selection() {
             for step in self.selected_steps() {
-                slot.plocks.set(step, param_idx, value);
+                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
             }
         } else {
-            slot.defaults.set(param_idx, value);
-            self.send_instrument_param(track, param_idx, value);
-            self.mark_track_sound_dirty(track);
+            apply_command(self, AppCommand::SetInstrumentParam { track, param_idx, value });
         }
-        self.state.publish_scheduler_snapshot();
     }
 
-    fn adjust_instrument_param(&self, direction: f32) {
+    fn adjust_instrument_param(&mut self, direction: f32) {
         let track = self.ui.cursor_track;
         if self.ui.instrument_param_cursor == 0 {
             return;
@@ -985,7 +980,6 @@ impl App {
         let Some(&param_idx) = synth_indices.get(self.ui.instrument_param_cursor - 1) else {
             return;
         };
-
         let desc = match self.graph.instrument_descriptors.get(track) {
             Some(d) => d,
             None => return,
@@ -995,28 +989,24 @@ impl App {
         }
         let param_desc = &desc.params[param_idx];
         let slot = &self.state.pattern.instrument_slots[track];
-
         if self.has_selection() {
-            for step in self.selected_steps() {
-                let current = slot
-                    .plocks
-                    .get(step, param_idx)
-                    .unwrap_or_else(|| slot.defaults.get(param_idx));
+            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
+                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
                 let inc = param_desc.increment(current);
-                let new_val = param_desc.clamp(current + direction * inc);
-                slot.plocks.set(step, param_idx, new_val);
+                (step, param_desc.clamp(current + direction * inc))
+            }).collect();
+            for (step, value) in new_vals {
+                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
             }
-            self.state.publish_scheduler_snapshot();
         } else {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
-            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
 
-    fn adjust_mod_param(&self, direction: f32) {
+    fn adjust_mod_param(&mut self, direction: f32) {
         let track = self.ui.cursor_track;
         let mod_indices = self.mod_param_indices(track);
         let Some(&param_idx) = mod_indices.get(self.ui.mod_param_cursor) else {
@@ -1031,26 +1021,23 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            for step in self.selected_steps() {
-                let current = slot
-                    .plocks
-                    .get(step, param_idx)
-                    .unwrap_or_else(|| slot.defaults.get(param_idx));
+            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
+                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
                 let inc = param_desc.increment(current);
-                let new_val = param_desc.clamp(current + direction * inc);
-                slot.plocks.set(step, param_idx, new_val);
+                (step, param_desc.clamp(current + direction * inc))
+            }).collect();
+            for (step, value) in new_vals {
+                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
             }
-            self.state.publish_scheduler_snapshot();
         } else {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
-            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
 
-    fn adjust_source_param(&self, direction: f32) {
+    fn adjust_source_param(&mut self, direction: f32) {
         let track = self.ui.cursor_track;
         let source_indices = self.source_param_actual_indices(track);
         let Some(&param_idx) = source_indices.get(self.ui.source_param_cursor) else {
@@ -1065,21 +1052,18 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            for step in self.selected_steps() {
-                let current = slot
-                    .plocks
-                    .get(step, param_idx)
-                    .unwrap_or_else(|| slot.defaults.get(param_idx));
+            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
+                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
                 let inc = param_desc.increment(current);
-                let new_val = param_desc.clamp(current + direction * inc);
-                slot.plocks.set(step, param_idx, new_val);
+                (step, param_desc.clamp(current + direction * inc))
+            }).collect();
+            for (step, value) in new_vals {
+                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
             }
-            self.state.publish_scheduler_snapshot();
         } else {
             let old = slot.defaults.get(param_idx);
             let inc = param_desc.increment(old);
             let new_val = param_desc.clamp(old + direction * inc);
-            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
@@ -1152,7 +1136,7 @@ impl App {
         }
     }
 
-    fn toggle_instrument_boolean(&self) {
+    fn toggle_instrument_boolean(&mut self) {
         let track = self.ui.cursor_track;
         if self.ui.instrument_param_cursor == 0 {
             return;
@@ -1162,26 +1146,22 @@ impl App {
             return;
         };
         let slot = &self.state.pattern.instrument_slots[track];
-
         if self.has_selection() {
-            for step in self.selected_steps() {
-                let current = slot
-                    .plocks
-                    .get(step, param_idx)
-                    .unwrap_or_else(|| slot.defaults.get(param_idx));
-                let new_val = if current > 0.5 { 0.0 } else { 1.0 };
-                slot.plocks.set(step, param_idx, new_val);
+            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
+                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
+                (step, if current > 0.5 { 0.0 } else { 1.0 })
+            }).collect();
+            for (step, value) in new_vals {
+                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
             }
-            self.state.publish_scheduler_snapshot();
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
-            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
 
-    fn toggle_mod_boolean(&self) {
+    fn toggle_mod_boolean(&mut self) {
         let track = self.ui.cursor_track;
         let mod_indices = self.mod_param_indices(track);
         let Some(&param_idx) = mod_indices.get(self.ui.mod_param_cursor) else {
@@ -1189,24 +1169,21 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            for step in self.selected_steps() {
-                let current = slot
-                    .plocks
-                    .get(step, param_idx)
-                    .unwrap_or_else(|| slot.defaults.get(param_idx));
-                let new_val = if current > 0.5 { 0.0 } else { 1.0 };
-                slot.plocks.set(step, param_idx, new_val);
+            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
+                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
+                (step, if current > 0.5 { 0.0 } else { 1.0 })
+            }).collect();
+            for (step, value) in new_vals {
+                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
             }
-            self.state.publish_scheduler_snapshot();
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
-            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }
 
-    fn toggle_source_boolean(&self) {
+    fn toggle_source_boolean(&mut self) {
         let track = self.ui.cursor_track;
         let source_indices = self.source_param_actual_indices(track);
         let Some(&param_idx) = source_indices.get(self.ui.source_param_cursor) else {
@@ -1214,19 +1191,16 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            for step in self.selected_steps() {
-                let current = slot
-                    .plocks
-                    .get(step, param_idx)
-                    .unwrap_or_else(|| slot.defaults.get(param_idx));
-                let new_val = if current > 0.5 { 0.0 } else { 1.0 };
-                slot.plocks.set(step, param_idx, new_val);
+            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
+                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
+                (step, if current > 0.5 { 0.0 } else { 1.0 })
+            }).collect();
+            for (step, value) in new_vals {
+                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
             }
-            self.state.publish_scheduler_snapshot();
         } else {
             let current = slot.defaults.get(param_idx);
             let new_val = if current > 0.5 { 0.0 } else { 1.0 };
-            // publish is called inside set_instrument_param_or_plock
             self.set_instrument_param_or_plock(track, param_idx, new_val);
         }
     }

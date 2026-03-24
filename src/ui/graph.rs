@@ -806,8 +806,40 @@ impl GraphController<'_> {
                     .store(route_r_id as u64, Ordering::Release);
                 route_pair[1] = route_r_id;
             } else {
+                let route_r_name =
+                    CString::new(format!("{}_eng{}_route_{}_r", track_name, engine_id, v)).unwrap();
+                let route_r_id = unsafe {
+                    crate::audiograph::live_add_gain(self.app.graph.lg.0, 0.0, route_r_name.as_ptr())
+                };
+                if route_r_id < 0 {
+                    return Err(format!(
+                        "connect_engine_to_track: failed to add mirrored right route gain for engine {} track {} voice {}",
+                        engine_id, track_idx, v
+                    ));
+                }
+                self.graph_connect_checked(
+                    synth_ids[v],
+                    0,
+                    route_r_id,
+                    0,
+                    &format!(
+                        "connect_engine_to_track mirrored-right engine {} track {} voice {}",
+                        engine_id, track_idx, v
+                    ),
+                )?;
+                self.graph_connect_checked(
+                    route_r_id,
+                    0,
+                    voice_sum_r_id,
+                    0,
+                    &format!(
+                        "connect_engine_to_track mirrored-right engine {} track {} voice {}",
+                        engine_id, track_idx, v
+                    ),
+                )?;
                 self.app.state.runtime.engine_route_lids_r[engine_id][v][track_idx]
-                    .store(0, Ordering::Release);
+                    .store(route_r_id as u64, Ordering::Release);
+                route_pair[1] = route_r_id;
             }
 
             route_ids.push(route_pair);
@@ -854,14 +886,19 @@ impl GraphController<'_> {
                     );
                 }
                 for route_pair in engine.route_gain_ids.iter().flat_map(|routes| routes.iter()) {
-                    for (out_idx, &route_id) in route_pair.iter().enumerate() {
+                    for (route_idx, &route_id) in route_pair.iter().enumerate() {
                         if route_id <= 0 {
                             continue;
                         }
+                        let src_port = if engine.synth_outputs > 1 {
+                            route_idx as i32
+                        } else {
+                            0
+                        };
                         crate::audiograph::graph_disconnect(
                             self.app.graph.lg.0,
                             old_synth,
-                            out_idx as i32,
+                            src_port,
                             route_id,
                             0,
                         );
@@ -925,18 +962,23 @@ impl GraphController<'_> {
                 }
             }
                 for route_pair in engine.route_gain_ids.iter().flat_map(|routes| routes.iter()) {
-                    for (out_idx, &route_id) in route_pair.iter().enumerate() {
-                        if route_id <= 0 || out_idx >= manifest.n_outputs.max(1) {
+                    for (route_idx, &route_id) in route_pair.iter().enumerate() {
+                        if route_id <= 0 {
                             continue;
                         }
+                        let src_port = if manifest.n_outputs > 1 {
+                            route_idx as i32
+                        } else {
+                            0
+                        };
                         self.graph_connect_checked(
                             synth_id,
-                            out_idx as i32,
+                            src_port,
                             route_id,
                             0,
                             &format!(
                                 "rebuild_custom_engine_runtime engine {} voice {} route {}:{}",
-                                engine_id, v, route_id, out_idx
+                                engine_id, v, route_id, src_port
                             ),
                         )?;
                     }
