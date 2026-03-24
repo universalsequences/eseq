@@ -65,7 +65,7 @@ impl Drop for GraphEditBatchGuard {
 }
 
 impl App {
-    pub(super) fn graph_controller(&mut self) -> GraphController<'_> {
+    pub fn graph_controller(&mut self) -> GraphController<'_> {
         GraphController { app: self }
     }
 }
