@@ -25,6 +25,7 @@ struct MetalEmitter {
     next_var: usize,
     statements: Vec<String>,
     scopes: Vec<HashMap<String, String>>,
+    type_scopes: Vec<HashMap<String, &'static str>>,
     uniform_symbols: HashMap<String, String>,
     current_region_id: Option<usize>,
     next_region_id: usize,
@@ -33,6 +34,7 @@ struct MetalEmitter {
 struct MaterialSpec<'a> {
     color_expr: &'a Expression,
     shadow: Option<ShadowSpec<'a>>,
+    lighting: Option<LightingSpec<'a>>,
 }
 
 struct ShadowSpec<'a> {
@@ -42,12 +44,22 @@ struct ShadowSpec<'a> {
     spread_expr: Option<&'a Expression>,
 }
 
+struct LightingSpec<'a> {
+    edge_min_expr: &'a Expression,
+    edge_max_expr: &'a Expression,
+    eps_expr: Option<&'a Expression>,
+    light_expr: Option<&'a Expression>,
+    shininess_expr: Option<&'a Expression>,
+    bump_expr: Option<&'a Expression>,
+}
+
 impl MetalEmitter {
     fn new(uniform_symbols: HashMap<String, String>) -> Self {
         Self {
             next_var: 0,
             statements: Vec::new(),
             scopes: Vec::new(),
+            type_scopes: Vec::new(),
             uniform_symbols,
             current_region_id: None,
             next_region_id: 0,
@@ -64,6 +76,7 @@ impl MetalEmitter {
         // Hit contextual variables
         match name {
             "itime" => return "itime".to_string(),
+            "aspect" => return "aspect".to_string(),
             "hit/hover" => {
                 return if let Some(rid) = self.current_region_id {
                     format!("(hit_region == {})", rid)
@@ -92,6 +105,50 @@ impl MetalEmitter {
         }
         // Remap Lisp names to Metal-safe identifiers
         name.replace('-', "_")
+    }
+
+    fn resolve_symbol_type(&self, name: &str) -> Option<&'static str> {
+        for scope in self.type_scopes.iter().rev() {
+            if let Some(type_name) = scope.get(name) {
+                return Some(*type_name);
+            }
+        }
+        None
+    }
+
+    fn expr_type(&self, expr: &Expression) -> Option<&'static str> {
+        match expr {
+            Expression::Keyword(_) => Some("float4"),
+            Expression::Symbol(name) => self.resolve_symbol_type(name),
+            Expression::List(items) if items.is_empty() => None,
+            Expression::List(items) => {
+                let Some(Expression::Symbol(head)) = items.first() else {
+                    return None;
+                };
+                match head.as_str() {
+                    "vec2" => Some("float2"),
+                    "vec3" => Some("float3"),
+                    "vec4" | "rgba" | "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/layer" => {
+                        Some("float4")
+                    }
+                    "let" | "do" => items.last().and_then(|expr| self.expr_type(expr)),
+                    "if" => items
+                        .get(2)
+                        .and_then(|expr| self.expr_type(expr))
+                        .or_else(|| items.get(3).and_then(|expr| self.expr_type(expr))),
+                    "mix" => items
+                        .get(1)
+                        .and_then(|expr| self.expr_type(expr))
+                        .or_else(|| items.get(2).and_then(|expr| self.expr_type(expr))),
+                    // normalize preserves its input type (float2→float2, float3→float3)
+                    "normalize" => items.get(1).and_then(|expr| self.expr_type(expr)),
+                    // + and * propagate type from first operand
+                    "+" | "-" | "*" | "/" => items.get(1).and_then(|expr| self.expr_type(expr)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     fn emit_expr(&mut self, expr: &Expression) -> Result<String, CodegenError> {
@@ -145,7 +202,7 @@ impl MetalEmitter {
 
                     // 1-arg math intrinsics (same name in Metal)
                     "abs" | "sin" | "cos" | "sqrt" | "fract" | "floor" | "ceil" | "round"
-                    | "length" => self.emit_func_call(head, args),
+                    | "length" | "normalize" => self.emit_func_call(head, args),
 
                     // 2-arg math intrinsics
                     "pow" | "atan2" | "dot" | "mod" => {
@@ -242,10 +299,29 @@ impl MetalEmitter {
         ));
 
         let material = self.parse_material(material_expr)?;
-        self.scopes
-            .push(HashMap::from([("d".to_string(), d.clone())]));
+        let mut scope_bindings = HashMap::from([("d".to_string(), d.clone())]);
+
+        // Emit lighting contribution (normal estimation + optional diffuse/specular)
+        // before pushing the scope, so lighting bindings are available in color expr
+        let lighting_bindings = if let Some(ref lighting) = material.lighting {
+            self.emit_lighting_contribution(sdf_expr, lighting)?
+        } else {
+            HashMap::new()
+        };
+        scope_bindings.extend(lighting_bindings);
+
+        self.scopes.push(scope_bindings);
+        self.type_scopes.push(HashMap::new());
+        // Register normal as float3 in type scope if present
+        if material.lighting.is_some() {
+            self.type_scopes
+                .last_mut()
+                .unwrap()
+                .insert("normal".to_string(), "float3");
+        }
         let shadow = self.emit_shadow_contribution(sdf_expr, &material, &d)?;
         let color = self.emit_expr(material.color_expr)?;
+        self.type_scopes.pop();
         self.scopes.pop();
         let clr = self.fresh_var();
         self.statements.push(format!("float4 {} = {};", clr, color));
@@ -278,29 +354,34 @@ impl MetalEmitter {
             return Ok(MaterialSpec {
                 color_expr: expr,
                 shadow: None,
+                lighting: None,
             });
         };
         let Some(Expression::Symbol(head)) = items.first() else {
             return Ok(MaterialSpec {
                 color_expr: expr,
                 shadow: None,
+                lighting: None,
             });
         };
         if head != "material" {
             return Ok(MaterialSpec {
                 color_expr: expr,
                 shadow: None,
+                lighting: None,
             });
         }
 
         let mut color_expr = None;
         let mut shadow_expr = None;
+        let mut lighting_expr = None;
         let mut i = 1;
         while i + 1 < items.len() {
             if let Expression::Keyword(key) = &items[i] {
                 match key.as_str() {
                     "color" => color_expr = Some(&items[i + 1]),
                     "shadow" => shadow_expr = Some(&items[i + 1]),
+                    "lighting" => lighting_expr = Some(&items[i + 1]),
                     _ => {}
                 }
                 i += 2;
@@ -318,6 +399,7 @@ impl MetalEmitter {
         Ok(MaterialSpec {
             color_expr,
             shadow: shadow_expr.map(Self::parse_shadow).transpose()?,
+            lighting: lighting_expr.map(Self::parse_lighting).transpose()?,
         })
     }
 
@@ -375,6 +457,251 @@ impl MetalEmitter {
             offset_expr,
             spread_expr,
         })
+    }
+
+    fn parse_lighting<'a>(expr: &'a Expression) -> Result<LightingSpec<'a>, CodegenError> {
+        let Expression::List(items) = expr else {
+            return Err(CodegenError::UnsupportedExpression(
+                "lighting must be a form".into(),
+            ));
+        };
+        let Some(Expression::Symbol(head)) = items.first() else {
+            return Err(CodegenError::UnsupportedExpression(
+                "lighting head must be a symbol".into(),
+            ));
+        };
+        if head != "lighting" {
+            return Err(CodegenError::UnsupportedExpression(
+                "material :lighting must use lighting".into(),
+            ));
+        }
+
+        let mut edge_min_expr = None;
+        let mut edge_max_expr = None;
+        let mut eps_expr = None;
+        let mut light_expr = None;
+        let mut shininess_expr = None;
+        let mut bump_expr = None;
+        let mut i = 1;
+        while i + 1 < items.len() {
+            if let Expression::Keyword(key) = &items[i] {
+                match key.as_str() {
+                    "edge-min" => edge_min_expr = Some(&items[i + 1]),
+                    "edge-max" => edge_max_expr = Some(&items[i + 1]),
+                    "eps" => eps_expr = Some(&items[i + 1]),
+                    "light" => light_expr = Some(&items[i + 1]),
+                    "shininess" => shininess_expr = Some(&items[i + 1]),
+                    "bump" => bump_expr = Some(&items[i + 1]),
+                    _ => {}
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+
+        let Some(edge_min_expr) = edge_min_expr else {
+            return Err(CodegenError::UnsupportedExpression(
+                "lighting requires :edge-min".into(),
+            ));
+        };
+        let Some(edge_max_expr) = edge_max_expr else {
+            return Err(CodegenError::UnsupportedExpression(
+                "lighting requires :edge-max".into(),
+            ));
+        };
+
+        Ok(LightingSpec {
+            edge_min_expr,
+            edge_max_expr,
+            eps_expr,
+            light_expr,
+            shininess_expr,
+            bump_expr,
+        })
+    }
+
+    /// Emit normal estimation and optional diffuse/specular.
+    /// Returns a HashMap of variable bindings to inject into the color scope.
+    fn emit_lighting_contribution(
+        &mut self,
+        sdf_expr: &Expression,
+        lighting: &LightingSpec<'_>,
+    ) -> Result<HashMap<String, String>, CodegenError> {
+        let mut bindings = HashMap::new();
+
+        let edge_min = self.emit_expr(lighting.edge_min_expr)?;
+        let edge_max = self.emit_expr(lighting.edge_max_expr)?;
+        let eps = match lighting.eps_expr {
+            Some(expr) => self.emit_expr(expr)?,
+            None => "0.01".to_string(),
+        };
+
+        // Sample SDF at 4 offset positions, apply smoothstep to create height field.
+        // If :bump is provided, evaluate it at each offset and add to the height.
+        // This creates surface detail without changing the shape boundary.
+
+        // Right: x + eps
+        let right_x = self.fresh_var();
+        self.statements
+            .push(format!("float {} = x + {};", right_x, eps));
+        self.scopes
+            .push(HashMap::from([("x".to_string(), right_x.clone())]));
+        let right_sdf = self.emit_expr(sdf_expr)?;
+        let right_bump = if let Some(bump) = lighting.bump_expr {
+            Some(self.emit_expr(bump)?)
+        } else {
+            None
+        };
+        self.scopes.pop();
+        let right = self.fresh_var();
+        if let Some(ref rb) = right_bump {
+            self.statements.push(format!(
+                "float {} = smoothstep({}, {}, {}) + {};",
+                right, edge_min, edge_max, right_sdf, rb
+            ));
+        } else {
+            self.statements.push(format!(
+                "float {} = smoothstep({}, {}, {});",
+                right, edge_min, edge_max, right_sdf
+            ));
+        }
+
+        // Left: x - eps
+        let left_x = self.fresh_var();
+        self.statements
+            .push(format!("float {} = x - {};", left_x, eps));
+        self.scopes
+            .push(HashMap::from([("x".to_string(), left_x.clone())]));
+        let left_sdf = self.emit_expr(sdf_expr)?;
+        let left_bump = if let Some(bump) = lighting.bump_expr {
+            Some(self.emit_expr(bump)?)
+        } else {
+            None
+        };
+        self.scopes.pop();
+        let left = self.fresh_var();
+        if let Some(ref lb) = left_bump {
+            self.statements.push(format!(
+                "float {} = smoothstep({}, {}, {}) + {};",
+                left, edge_min, edge_max, left_sdf, lb
+            ));
+        } else {
+            self.statements.push(format!(
+                "float {} = smoothstep({}, {}, {});",
+                left, edge_min, edge_max, left_sdf
+            ));
+        }
+
+        // Up: y + eps
+        let up_y = self.fresh_var();
+        self.statements
+            .push(format!("float {} = y + {};", up_y, eps));
+        self.scopes
+            .push(HashMap::from([("y".to_string(), up_y.clone())]));
+        let up_sdf = self.emit_expr(sdf_expr)?;
+        let up_bump = if let Some(bump) = lighting.bump_expr {
+            Some(self.emit_expr(bump)?)
+        } else {
+            None
+        };
+        self.scopes.pop();
+        let up = self.fresh_var();
+        if let Some(ref ub) = up_bump {
+            self.statements.push(format!(
+                "float {} = smoothstep({}, {}, {}) + {};",
+                up, edge_min, edge_max, up_sdf, ub
+            ));
+        } else {
+            self.statements.push(format!(
+                "float {} = smoothstep({}, {}, {});",
+                up, edge_min, edge_max, up_sdf
+            ));
+        }
+
+        // Down: y - eps
+        let down_y = self.fresh_var();
+        self.statements
+            .push(format!("float {} = y - {};", down_y, eps));
+        self.scopes
+            .push(HashMap::from([("y".to_string(), down_y.clone())]));
+        let down_sdf = self.emit_expr(sdf_expr)?;
+        let down_bump = if let Some(bump) = lighting.bump_expr {
+            Some(self.emit_expr(bump)?)
+        } else {
+            None
+        };
+        self.scopes.pop();
+        let down = self.fresh_var();
+        if let Some(ref db) = down_bump {
+            self.statements.push(format!(
+                "float {} = smoothstep({}, {}, {}) + {};",
+                down, edge_min, edge_max, down_sdf, db
+            ));
+        } else {
+            self.statements.push(format!(
+                "float {} = smoothstep({}, {}, {});",
+                down, edge_min, edge_max, down_sdf
+            ));
+        }
+
+        // Central differences → normal
+        let dx = self.fresh_var();
+        self.statements.push(format!(
+            "float {} = ({} - {}) / (2.0 * {});",
+            dx, right, left, eps
+        ));
+        let dy = self.fresh_var();
+        self.statements.push(format!(
+            "float {} = ({} - {}) / (2.0 * {});",
+            dy, up, down, eps
+        ));
+        let normal = self.fresh_var();
+        self.statements.push(format!(
+            "float3 {} = normalize(float3({}, {}, 1.0));",
+            normal, dx, dy
+        ));
+        self.type_scopes
+            .last_mut()
+            .map(|s| s.insert("normal".to_string(), "float3"));
+        bindings.insert("normal".to_string(), normal.clone());
+
+        // If :light is provided, also compute diffuse and specular
+        if let Some(light_expr) = lighting.light_expr {
+            let light = self.emit_expr(light_expr)?;
+            let light_var = self.fresh_var();
+            self.statements.push(format!(
+                "float3 {} = normalize({});",
+                light_var, light
+            ));
+
+            // Diffuse: max(0, dot(normal, light))
+            let diffuse = self.fresh_var();
+            self.statements.push(format!(
+                "float {} = max(0.0, dot({}, {}));",
+                diffuse, normal, light_var
+            ));
+            bindings.insert("diffuse".to_string(), diffuse);
+
+            // Specular: Blinn-Phong
+            let shininess = match lighting.shininess_expr {
+                Some(expr) => self.emit_expr(expr)?,
+                None => "48.0".to_string(),
+            };
+            let half_vec = self.fresh_var();
+            self.statements.push(format!(
+                "float3 {} = normalize({} + float3(0.0, 0.0, 1.0));",
+                half_vec, light_var
+            ));
+            let specular = self.fresh_var();
+            self.statements.push(format!(
+                "float {} = pow(max(0.0, dot({}, {})), {});",
+                specular, normal, half_vec, shininess
+            ));
+            bindings.insert("specular".to_string(), specular);
+        }
+
+        Ok(bindings)
     }
 
     fn emit_shadow_contribution(
@@ -521,6 +848,7 @@ impl MetalEmitter {
         };
 
         self.scopes.push(HashMap::new());
+        self.type_scopes.push(HashMap::new());
         for binding in bindings {
             let Expression::List(pair) = binding else {
                 return Err(CodegenError::UnsupportedExpression(
@@ -541,14 +869,21 @@ impl MetalEmitter {
             // Emit value before inserting binding (sequential let: sees prior bindings only)
             let val = self.emit_expr(&pair[1])?;
             let var = self.fresh_var();
-            let type_name = metal_type_for_expr(&pair[1]).unwrap_or("float");
+            let type_name = self.expr_type(&pair[1]).unwrap_or("float");
             self.statements
                 .push(format!("{} {} = {};", type_name, var, val));
             self.scopes.last_mut().unwrap().insert(name.clone(), var);
+            if type_name != "float" {
+                self.type_scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(name.clone(), type_name);
+            }
         }
 
         let body = self.emit_body(&args[1..])?;
         self.scopes.pop();
+        self.type_scopes.pop();
         Ok(body)
     }
 
@@ -675,23 +1010,6 @@ fn format_float(n: f64) -> String {
             format!("{}.0", s)
         }
     }
-}
-
-/// Returns the Metal type if the expression produces a non-float type.
-fn metal_type_for_expr(expr: &Expression) -> Option<&'static str> {
-    if let Expression::List(items) = expr {
-        if let Some(Expression::Symbol(s)) = items.first() {
-            return match s.as_str() {
-                "vec2" => Some("float2"),
-                "vec3" => Some("float3"),
-                "vec4" => Some("float4"),
-                "rgba" => Some("float4"),
-                "sdf/fill" | "sdf/paint" | "sdf/stroke" | "sdf/layer" => Some("float4"),
-                _ => None,
-            };
-        }
-    }
-    None
 }
 
 fn expr_returns_float4(expr: &Expression) -> bool {
@@ -840,6 +1158,7 @@ pub fn collect_state_symbols(expr: &Expression, state_bindings: &HashSet<String>
         "d".to_string(),
         "value_t".to_string(),
         "itime".to_string(),
+        "aspect".to_string(),
         "hit/hover".to_string(),
         "hit/active".to_string(),
         "hit/region".to_string(),
@@ -1273,6 +1592,19 @@ mod tests {
         assert!(all.contains("smoothstep(-1.0, 1.0, y)"));
         assert!(all.contains("smoothstep(0.1"));
         assert!(!all.contains(", d)"));
+    }
+
+    #[test]
+    fn let_infers_float4_for_mix_of_color_bindings() {
+        let (stmts, _result) = codegen_expr(
+            "(let ((track-color (mix :dim :primary 0.25))
+                   (arc-color (mix track-color :red 0.5)))
+               arc-color)",
+        );
+        let all = stmts.join("\n");
+        assert!(all.contains("float4"));
+        assert!(!all.contains("float _v0 = ((float4"));
+        assert!(!all.contains("float _v1 = ((_v0) + (((float4"));
     }
 
     #[test]

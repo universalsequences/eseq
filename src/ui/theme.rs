@@ -346,7 +346,29 @@ pub fn set_current(theme: Theme) {
 pub fn parse_color_value(value: &Value) -> Option<Color> {
     match value {
         Value::String(text) | Value::Keyword(text) => parse_color_string(text),
-        Value::List(items) => parse_color_list(items),
+        Value::List(items) => parse_color_list(items)
+            .or_else(|| parse_color_func_call(items)),
+        _ => None,
+    }
+}
+
+/// Handle (rgba r g b a) and (rgb r g b) function-call forms as colors.
+fn parse_color_func_call(items: &[std::rc::Rc<std::cell::RefCell<Value>>]) -> Option<Color> {
+    let head = items.first()?;
+    let name = match &*head.borrow() {
+        Value::Symbol(s) => s.clone(),
+        _ => return None,
+    };
+    let nums: Vec<f32> = items[1..]
+        .iter()
+        .map(|item| match &*item.borrow() {
+            Value::Number(n) => Some(*n as f32),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    match (name.as_str(), nums.as_slice()) {
+        ("rgba", [r, g, b, a]) => Some(Color::rgba(*r, *g, *b, *a)),
+        ("rgb", [r, g, b]) => Some(Color::rgb(*r, *g, *b)),
         _ => None,
     }
 }

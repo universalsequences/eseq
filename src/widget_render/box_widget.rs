@@ -1,10 +1,47 @@
-use super::{Align, WidgetDefinition, resolve_align};
+use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
 #[cfg(target_os = "macos")]
 use super::{MetalPrimitive, WidgetViewport};
 use crate::layout::{
-    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, shrink_constraints,
+    Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num, shrink_constraints,
 };
+use crate::layout::Rect;
 use crate::vm::Value;
+use crossterm::event::{MouseButton, MouseEventKind};
+
+/// Compute the bounding rect that covers the box itself and all its children.
+/// This ensures the SDF background covers the full scrollable content.
+fn content_extent(node: &LayoutNode) -> Rect {
+    let padding = get_prop_num_from_layout(node, "padding");
+    let mut rect = node.rect;
+    for child in &node.children {
+        let cr = child_extent(child);
+        // Add padding on the right/bottom side of the content
+        let right = (cr.col + cr.width + padding).max(rect.col + rect.width);
+        let bottom = (cr.row + cr.height + padding).max(rect.row + rect.height);
+        rect.width = right - rect.col;
+        rect.height = bottom - rect.row;
+    }
+    rect
+}
+
+fn get_prop_num_from_layout(node: &LayoutNode, key: &str) -> f32 {
+    match node.props.get(key) {
+        Some(Value::Number(n)) => *n as f32,
+        _ => 0.0,
+    }
+}
+
+fn child_extent(node: &LayoutNode) -> Rect {
+    let mut rect = node.rect;
+    for child in &node.children {
+        let cr = child_extent(child);
+        let right = (cr.col + cr.width).max(rect.col + rect.width);
+        let bottom = (cr.row + cr.height).max(rect.row + rect.height);
+        rect.width = right - rect.col;
+        rect.height = bottom - rect.row;
+    }
+    rect
+}
 
 pub struct BoxWidget;
 
@@ -134,6 +171,34 @@ impl WidgetDefinition for BoxWidget {
             .collect()
     }
 
+    fn mouse_event(
+        &self,
+        node: &LayoutNode,
+        mouse_kind: MouseEventKind,
+        _local_col: f32,
+        _local_row: f32,
+        _drag_start: Option<(f32, f32)>,
+        _gesture: Option<&Value>,
+    ) -> MouseEventOutcome {
+        if node.props.contains_key("on-click") {
+            if let MouseEventKind::Down(MouseButton::Left) = mouse_kind {
+                return MouseEventOutcome::Dispatch(WidgetEvent::Activate);
+            }
+        }
+        MouseEventOutcome::Ignore
+    }
+
+    fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+        let WidgetEvent::Activate = event else {
+            return None;
+        };
+        let callback = node.props.get("on-click")?.clone();
+        Some(EventOutput {
+            callback,
+            args: vec![],
+        })
+    }
+
     #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
@@ -143,7 +208,10 @@ impl WidgetDefinition for BoxWidget {
     ) -> Vec<MetalPrimitive> {
         // If box has a :background prop naming an SDF widget, render it behind children
         if let Some(Value::String(bg_type)) = node.props.get("background") {
-            return super::sdf_widget::sdf_widget_background_primitives(bg_type, node.rect, viewport);
+            // Use the content extent (union of children rects) so the SDF background
+            // covers the full scrollable content, not just the viewport-constrained rect.
+            let bg_rect = content_extent(node);
+            return super::sdf_widget::sdf_widget_background_primitives(bg_type, bg_rect, viewport, &node.props);
         }
         Vec::new()
     }

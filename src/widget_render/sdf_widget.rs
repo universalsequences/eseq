@@ -127,7 +127,13 @@ pub fn sdf_widget_hit_test(
         node.rect.height,
         pixel_aspect,
     );
-    let vars = hit_test_uniform_vars(&node.props, &def.state_uniforms);
+    let mut vars = hit_test_uniform_vars(&node.props, &def.state_uniforms);
+    let aspect = if node.rect.height > 0.0 {
+        (node.rect.width / node.rect.height) as f64
+    } else {
+        1.0
+    };
+    vars.insert("aspect".to_string(), aspect);
     crate::lang::sdf_hit::sdf_hit_test_with_vars(&def.sdf_expr, x, y, &vars)
 }
 
@@ -447,12 +453,14 @@ pub fn sdf_widget_background_primitives(
     widget_type: &str,
     rect: Rect,
     viewport: WidgetViewport,
+    props: &HashMap<String, Value>,
 ) -> Vec<MetalPrimitive> {
     use super::{WidgetInstance, ndc_bounds};
 
-    if sdf_widget_def(widget_type).is_none() {
-        return Vec::new();
-    }
+    let def = match sdf_widget_def(widget_type) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
 
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
@@ -460,6 +468,23 @@ pub fn sdf_widget_background_primitives(
     let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
     const NO_HIT_REGION: f32 = -1.0;
     const FULL_UV_BOUNDS: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+    // Resolve state uniforms from the box's props
+    let mut uniform_a = [0.0; 4];
+    let mut uniform_b = [0.0; 4];
+    for (idx, name) in def
+        .state_uniforms
+        .iter()
+        .take(MAX_SDF_STATE_UNIFORMS)
+        .enumerate()
+    {
+        let value = prop_uniform_value(props, name);
+        if idx < 4 {
+            uniform_a[idx] = value;
+        } else {
+            uniform_b[idx - 4] = value;
+        }
+    }
 
     vec![MetalPrimitive::WidgetInstance {
         widget_type: widget_type.to_string(),
@@ -469,8 +494,8 @@ pub fn sdf_widget_background_primitives(
             value_t: 0.0,
             orientation: 0.0,
             itime: viewport.time_seconds,
-            uniform_a: [0.0; 4],
-            uniform_b: [0.0; 4],
+            uniform_a,
+            uniform_b,
             color_a: [0.0; 4],
             color_b: [NO_HIT_REGION, 0.0, 0.0, 0.0],
             color_c: FULL_UV_BOUNDS,

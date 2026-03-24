@@ -13,7 +13,7 @@ use super::{
 };
 #[cfg(target_os = "macos")]
 use super::{
-    MetalGlyphRunPrimitive, MetalPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
+    MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive, MetalRectPrimitive,
     MetalWaveformPrimitive,
 };
 use crate::audio::sample::{
@@ -400,6 +400,27 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
         color: theme::BG(),
     }));
 
+    // Resolve optional styling props
+    let ruler_font_size = get_num(&node.props, "ruler-font-size", 10.0) as f32;
+    let ruler_fg = super::resolve_named_color(&node.props, "ruler-color", theme::FG());
+    let ruler_bg = super::resolve_named_color(&node.props, "ruler-bg", theme::STATUS_BG());
+    let grid_major_color = super::resolve_named_color(
+        &node.props,
+        "grid-major-color",
+        theme::FG_MUTED(),
+    );
+    let grid_minor_color = super::resolve_named_color(
+        &node.props,
+        "grid-minor-color",
+        crate::backend::Color::from_hex(0x4a, 0x4a, 0x50),
+    );
+    let bg_color = super::resolve_named_color(&node.props, "bg", theme::BG());
+
+    primitives[0] = MetalPrimitive::Rect(MetalRectPrimitive {
+        rect,
+        color: bg_color,
+    });
+
     if view.header_height > 0.0 {
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: Rect {
@@ -408,7 +429,7 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
                 width: rect.width,
                 height: view.header_height.min(rect.height),
             },
-            color: theme::STATUS_BG(),
+            color: ruler_bg,
         }));
         for (x, is_major) in view
             .time_viewport()
@@ -420,20 +441,23 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
                 width: 0.125,
                 height: view.header_height.min(rect.height),
                 color: if is_major {
-                    theme::PURPLE()
+                    grid_major_color
                 } else {
-                    theme::BRIGHT_BLACK()
+                    grid_minor_color
                 },
             }));
         }
         for (absolute_col, label) in view.time_ruler_labels() {
-            primitives.push(MetalPrimitive::GlyphRun(MetalGlyphRunPrimitive {
-                row: metal_header_text_row(rect, view.header_height),
-                col: absolute_col as i32 + 1,
-                text: label,
-                fg: theme::FG(),
-                bg: theme::STATUS_BG(),
-            }));
+            primitives.push(MetalPrimitive::ProportionalText(
+                MetalProportionalTextPrimitive {
+                    row: metal_header_text_row(rect, view.header_height),
+                    col: absolute_col as f32 + 0.5,
+                    text: label,
+                    font_size: ruler_font_size,
+                    fg: ruler_fg,
+                    bg: ruler_bg,
+                },
+            ));
         }
     }
 
@@ -447,9 +471,9 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             width: 0.125,
             height: content.height,
             color: if is_major {
-                theme::FG_MUTED()
+                grid_major_color
             } else {
-                crate::backend::Color::from_hex(0x4a, 0x4a, 0x50)
+                grid_minor_color
             },
         }));
     }

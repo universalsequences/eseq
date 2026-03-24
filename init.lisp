@@ -149,6 +149,41 @@
     :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#edecee"))
   (status "Aura theme applied"))
 
+(def aqua-dark-theme ()
+  (apply-theme (dict
+    :bg "#0a0612" :fg "#c8d8f0" :fg_muted "#5a6e8a"
+    :black "#061020" :red "#ff6b8a" :green "#5ec4b0"
+    :yellow "#f0c060" :blue "#4a9ef5" :magenta "#a88bfa"
+    :cyan "#5ccfe6" :white "#ffffff"
+    :bright_black "#3a4e6a" :bright_red "#ff8da0" :bright_yellow "#ffd080"
+    :purple "#3080e0" :cursor "#4a9ef5"
+    :syn_comment "#4a5e7a" :syn_string "#5ec4b0" :syn_number "#f0c060"
+    :syn_keyword "#a88bfa" :syn_builtin "#4a9ef5" :syn_special "#5ccfe6"
+    :syn_delimiter "#3a4e6a"
+    :bg_region "#1a2e48" :bg_sexp "#1a2e48" :bg_eval_flash "#1e3a5a"
+    :bg_match_paren "#4a9ef5" :fg_match_paren "#0a1628"
+    :status_fg "#c8d8f0" :status_bg "#0e1a30" :status_edge "#162640"
+    :status_chip_bg "#162640" :status_mode_bg "#1e3a5a"
+    :status_chip_muted "#162640"
+    :status_ui_bg "#2060c0" :status_ui_fg "#e0eaff"
+    :status_mix_bg "#2060c0" :status_mix_fg "#e0eaff"
+    :status_dirty_bg "#cc4466" :status_dirty_fg "#ffffff"
+    :status_pos_bg "#162640" :status_accent "#5ccfe6"
+    :comp_selected_bg "#1a2e48" :comp_unselected_bg "#0e1a30"
+    :comp_fg "#c8d8f0" :comp_doc_bg "#0a1224"
+    :comp_doc_fg "#c8d8f0" :comp_doc_title_fg "#4a9ef5"
+    :widget_focus_bg "#1e3a5a"
+    :widget_label_fg "#c8d8f0"
+    :widget_slider_filled "#3080e0" :widget_slider_track "#1e3a5a"
+    :widget_knob_filled "#a88bfa" :widget_knob_track "#3a4e6a"
+    :widget_toggle_on "#3080e0" :widget_toggle_off "#3a4e6a"
+    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#c8d8f0"))
+  (status "Aqua Dark theme applied"))
+
+;; (load "file.lisp") — read and evaluate a Lisp file, like Common Lisp's load.
+(def load (path)
+  (eval (read-file-to-string path)))
+
 (bind-key "C-x C-e" "eval-sexp")
 (bind-key "C-x C-b" "eval-buffer-command")
 (bind-key "C-x C-s" "save-current-buffer")

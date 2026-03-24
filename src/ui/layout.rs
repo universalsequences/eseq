@@ -235,11 +235,22 @@ impl<'a> LayoutEngine<'a> {
     }
 }
 
+fn node_has_event_handler(node: &LayoutNode) -> bool {
+    node.props.contains_key("on-click")
+        || node.props.contains_key("on-drag")
+        || node.props.contains_key("on-change")
+        || node.props.contains_key("on-mouse-down")
+}
+
 pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutNode> {
     // Container nodes: always recurse into children — their rects may be
     // clamped to the viewport while children extend beyond (scroll).
     for child in node.children.iter().rev() {
         if let Some(hit) = hit_test_layout(child, row, col) {
+            // If the child doesn't handle events but this node does, bubble up
+            if !node_has_event_handler(hit) && node_has_event_handler(node) {
+                return Some(node);
+            }
             return Some(hit);
         }
     }
@@ -252,7 +263,9 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
         if !widget_render::is_layout_widget_type(&node.widget_type) {
             return Some(node);
         }
-        if node.props.contains_key("on-change") || node.props.contains_key("bind") {
+        if node.props.contains_key("on-change") || node.props.contains_key("bind")
+            || node.props.contains_key("on-click")
+        {
             return Some(node);
         }
     }
