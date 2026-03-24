@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 
@@ -73,6 +74,14 @@ pub enum ReactiveNode {
 pub enum EffectTarget {
     BufferId(Option<BufferId>),
     BufferName(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EvalProfile {
+    pub parse: Duration,
+    pub ast: Duration,
+    pub compile: Duration,
+    pub execute: Duration,
 }
 
 #[derive(Clone)]
@@ -172,30 +181,104 @@ pub fn format_lisp_source(value: &Value) -> String {
     }
 }
 
-fn format_fmt_value(value: &Value, precision: Option<usize>) -> String {
-    match (value, precision) {
+/// Parsed format spec from `{:>4.2}` style placeholders.
+#[derive(Default)]
+struct FmtSpec {
+    precision: Option<usize>,
+    width: Option<usize>,
+    align: FmtAlign,
+    fill: char,
+}
+
+#[derive(Default, Clone, Copy)]
+enum FmtAlign {
+    #[default]
+    Right,
+    Left,
+}
+
+fn format_fmt_value(value: &Value, spec: &FmtSpec) -> String {
+    // Format the raw value first
+    let raw = match (value, spec.precision) {
         (Value::Number(n), Some(precision)) => format!("{n:.precision$}"),
         (Value::String(s), _) => s.clone(),
         _ => format_lisp_value(value),
+    };
+    // Apply width + alignment padding
+    let Some(width) = spec.width else {
+        return raw;
+    };
+    let len = raw.chars().count();
+    if len >= width {
+        return raw;
+    }
+    let pad: String = std::iter::repeat(spec.fill).take(width - len).collect();
+    match spec.align {
+        FmtAlign::Right => format!("{pad}{raw}"),
+        FmtAlign::Left => format!("{raw}{pad}"),
     }
 }
 
-fn parse_fmt_placeholder(template: &str, start: usize) -> Option<(usize, Option<usize>)> {
+fn parse_fmt_placeholder(template: &str, start: usize) -> Option<(usize, FmtSpec)> {
     let rest = template.get(start..)?;
     if rest.starts_with("{}") {
-        return Some((2, None));
+        return Some((2, FmtSpec::default()));
     }
 
-    let Some(spec) = rest.strip_prefix("{:.") else {
-        return None;
+    let spec_str = rest.strip_prefix("{:")?;
+    let mut pos = 0;
+    let bytes = spec_str.as_bytes();
+
+    // Parse optional fill + alignment
+    let mut fill = ' ';
+    let mut align = FmtAlign::Right;
+
+    if bytes.get(pos) == Some(&b'>') {
+        align = FmtAlign::Right;
+        pos += 1;
+    } else if bytes.get(pos) == Some(&b'<') {
+        align = FmtAlign::Left;
+        pos += 1;
+    } else if bytes.get(pos) == Some(&b'0') && bytes.get(pos + 1).is_some_and(|b| b.is_ascii_digit()) {
+        // Zero-pad: {:02}, {:04} etc.
+        fill = '0';
+        // don't advance pos — the digits are the width
+    }
+
+    // Parse optional width
+    let width_start = pos;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let width = if pos > width_start {
+        spec_str[width_start..pos].parse().ok()
+    } else {
+        None
     };
-    let digits_len = spec.bytes().take_while(|b| b.is_ascii_digit()).count();
-    if digits_len == 0 || spec.as_bytes().get(digits_len) != Some(&b'}') {
+
+    // Parse optional .precision
+    let precision = if bytes.get(pos) == Some(&b'.') {
+        pos += 1;
+        let prec_start = pos;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if pos > prec_start {
+            spec_str[prec_start..pos].parse().ok()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Expect closing }
+    if bytes.get(pos) != Some(&b'}') {
         return None;
     }
 
-    let precision = spec[..digits_len].parse().ok()?;
-    Some((digits_len + 4, Some(precision)))
+    let total_len = 2 + pos + 1; // "{:" + spec + "}"
+    Some((total_len, FmtSpec { precision, width, align, fill }))
 }
 
 fn is_falsey(value: &Value) -> bool {
@@ -662,11 +745,11 @@ pub fn register_core_natives(vm: &mut VM) {
             let mut search_from = 0;
             while let Some(relative_idx) = rendered[search_from..].find('{') {
                 let idx = search_from + relative_idx;
-                let Some((len, precision)) = parse_fmt_placeholder(&rendered, idx) else {
+                let Some((len, spec)) = parse_fmt_placeholder(&rendered, idx) else {
                     search_from = idx + 1;
                     continue;
                 };
-                let replacement = format_fmt_value(value, precision);
+                let replacement = format_fmt_value(value, &spec);
                 rendered.replace_range(idx..idx + len, &replacement);
                 replaced = true;
                 break;
@@ -1078,6 +1161,63 @@ impl VM {
             }
             Err(_) => Err(VMError::CompileError),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn profile_eval_str(
+        &mut self,
+        code: &str,
+    ) -> Result<(Option<Value>, EvalProfile), VMError> {
+        let mut profile = EvalProfile::default();
+
+        let parse_started = std::time::Instant::now();
+        let tokens = Parser::new(code.to_string())
+            .parse()
+            .map_err(|_| VMError::ParseError)?;
+        profile.parse = parse_started.elapsed();
+
+        let ast_started = std::time::Instant::now();
+        let exprs = ASTParser::new(tokens)
+            .parse()
+            .map_err(|_| VMError::ParseError)?;
+        profile.ast = ast_started.elapsed();
+
+        let entry_idx = self.chunks.len();
+        let existing = self.chunks.clone();
+        let names = self.global_names.clone();
+        let reactive_namespaces = self.reactive_namespaces.clone();
+        let derived_bindings = self.derived_bindings.clone();
+        let state_bindings = self.state_bindings.clone();
+        let next_node_id = self.dag.next_id;
+
+        let macros = self.macros.clone();
+        let compile_started = std::time::Instant::now();
+        let mut compiler = Compiler::new_repl(
+            exprs,
+            existing,
+            names,
+            reactive_namespaces,
+            derived_bindings,
+            state_bindings,
+            next_node_id,
+            macros,
+        );
+        let chunks = compiler.compile().map_err(|_| VMError::CompileError)?;
+        self.chunks = chunks;
+        self.global_names = compiler.global_names();
+        self.derived_bindings = compiler.derived_bindings();
+        self.state_bindings = compiler.state_bindings();
+        self.dag.next_id = compiler.next_node_id();
+        for (name, def) in compiler.macros() {
+            self.macros.insert(name.clone(), def.clone());
+        }
+        profile.compile = compile_started.elapsed();
+
+        let execute_started = std::time::Instant::now();
+        let result = self.execute_from(entry_idx);
+        profile.execute = execute_started.elapsed();
+
+        result.map(|value| (value, profile))
     }
 
     fn ensure_global(&mut self, name: &str) -> usize {

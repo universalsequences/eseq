@@ -134,9 +134,8 @@ impl WidgetDefinition for HorizontalSliderWidget {
         _gesture: Option<&Value>,
     ) -> MouseEventOutcome {
         match mouse_kind {
-            MouseEventKind::Down(MouseButton::Left) => MouseEventOutcome::Consume,
-            MouseEventKind::Drag(MouseButton::Left) => {
-                let denom = (node.rect.width - 1.0).max(1.0);
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
+                let denom = node.rect.width.max(0.001);
                 let t = ((local_col - node.rect.col) / denom).clamp(0.0, 1.0);
                 MouseEventOutcome::Dispatch(WidgetEvent::SetNormalized(t))
             }

@@ -4,7 +4,7 @@ mod natives;
 mod widget_focus;
 mod widget_interaction;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -107,6 +107,30 @@ enum MinibufferMode {
         input: String,
         selected: usize,
     },
+    Search {
+        state: SearchState,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchMatch {
+    start: (usize, usize),
+    end: (usize, usize),
+}
+
+#[derive(Debug, Clone)]
+struct SearchState {
+    input: String,
+    origin: (usize, usize),
+    direction: SearchDirection,
+    current_match: Option<SearchMatch>,
+    failed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +154,13 @@ pub struct SExpFlash {
 pub struct Mark {
     pub buffer_id: BufferId,
     pub cursor: (usize, usize),
+}
+
+#[derive(Debug, Clone)]
+struct DefinitionLocation {
+    path: Option<PathBuf>,
+    buffer_id: Option<BufferId>,
+    cursor: (usize, usize),
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +195,7 @@ pub struct Editor {
     active_tile_resize_drag: Option<TileResizeDrag>,
     eval_flash: Option<SExpFlash>,
     mark: Option<Mark>,
+    jump_stack: Vec<Mark>,
     active_text_drag_anchor: Option<Mark>,
     kill_ring: Vec<String>,
     minibuffer_input: Option<MinibufferMode>,
@@ -205,6 +237,7 @@ impl Editor {
             active_tile_resize_drag: None,
             eval_flash: None,
             mark: None,
+            jump_stack: vec![],
             active_text_drag_anchor: None,
             kill_ring: vec![],
             minibuffer_input: None,
@@ -867,6 +900,230 @@ impl Editor {
         &mut self.buffers[idx]
     }
 
+    fn start_search(&mut self, direction: SearchDirection) {
+        self.completion = None;
+        self.minibuffer = None;
+        self.minibuffer_input = Some(MinibufferMode::Search {
+            state: SearchState {
+                input: String::new(),
+                origin: self.active_buffer().cursor,
+                direction,
+                current_match: None,
+                failed: false,
+            },
+        });
+    }
+
+    fn apply_search_state(&mut self, state: &mut SearchState) {
+        if state.input.is_empty() {
+            self.active_buffer_mut().cursor = state.origin;
+            state.current_match = None;
+            state.failed = false;
+            self.sync_text_horizontal_scroll_to_viewport();
+            self.sync_runtime_context();
+            return;
+        }
+
+        let result = match state.direction {
+            SearchDirection::Forward => self.active_buffer().find_forward(&state.input, state.origin),
+            SearchDirection::Backward => {
+                self.active_buffer()
+                    .find_backward(&state.input, state.origin)
+            }
+        };
+
+        if let Some(start) = result {
+            let end = (start.0, start.1 + state.input.chars().count());
+            self.active_buffer_mut().cursor = start;
+            state.current_match = Some(SearchMatch { start, end });
+            state.failed = false;
+            self.sync_text_horizontal_scroll_to_viewport();
+            self.sync_runtime_context();
+        } else {
+            self.active_buffer_mut().cursor = state.origin;
+            state.current_match = None;
+            state.failed = true;
+            self.sync_text_horizontal_scroll_to_viewport();
+            self.sync_runtime_context();
+        }
+    }
+
+    fn repeat_search(&mut self, state: &mut SearchState, direction: SearchDirection) {
+        state.direction = direction;
+        if state.input.is_empty() {
+            return;
+        }
+
+        let start = match direction {
+            SearchDirection::Forward => state.current_match.map(|found| found.end).unwrap_or(state.origin),
+            SearchDirection::Backward => state
+                .current_match
+                .map(|found| found.start)
+                .unwrap_or(state.origin),
+        };
+        let result = match direction {
+            SearchDirection::Forward => self.active_buffer().find_forward(&state.input, start),
+            SearchDirection::Backward => self.active_buffer().find_backward(&state.input, start),
+        };
+
+        if let Some(found) = result {
+            let end = (found.0, found.1 + state.input.chars().count());
+            self.active_buffer_mut().cursor = found;
+            state.current_match = Some(SearchMatch { start: found, end });
+            state.failed = false;
+            self.sync_text_horizontal_scroll_to_viewport();
+            self.sync_runtime_context();
+        } else {
+            state.failed = true;
+        }
+    }
+
+    fn goto_definition(&mut self) {
+        self.completion = None;
+        let Some(symbol) = self.symbol_under_cursor() else {
+            self.show_transient_message("No symbol at cursor");
+            return;
+        };
+
+        let Some(location) = self.find_definition(&symbol) else {
+            self.show_transient_message(format!("Definition not found: {symbol}"));
+            return;
+        };
+
+        let current = Mark {
+            buffer_id: self.active_buffer().id,
+            cursor: self.active_buffer().cursor,
+        };
+
+        let navigated = if let Some(buffer_id) = location.buffer_id {
+            self.set_active_buffer(buffer_id);
+            true
+        } else if let Some(path) = location.path.as_ref() {
+            self.open_definition_path(path)
+        } else {
+            false
+        };
+
+        if !navigated {
+            self.show_transient_message(format!("Definition not found: {symbol}"));
+            return;
+        }
+
+        self.jump_stack.push(current);
+        self.active_buffer_mut().cursor = location.cursor;
+        self.sync_text_horizontal_scroll_to_viewport();
+        self.sync_runtime_context();
+        self.show_transient_message(format!("Definition: {symbol}"));
+    }
+
+    fn pop_definition_mark(&mut self) {
+        let Some(mark) = self.jump_stack.pop() else {
+            self.show_transient_message("Definition mark stack is empty");
+            return;
+        };
+        self.set_active_buffer(mark.buffer_id);
+        self.active_buffer_mut().cursor = mark.cursor;
+        self.sync_text_horizontal_scroll_to_viewport();
+        self.sync_runtime_context();
+        self.show_transient_message("Popped definition mark");
+    }
+
+    fn open_definition_path(&mut self, path: &PathBuf) -> bool {
+        if let Some(existing) = self
+            .buffers
+            .iter()
+            .find(|buffer| buffer.path.as_ref() == Some(path))
+            .map(|buffer| buffer.id)
+        {
+            self.set_active_buffer(existing);
+            return true;
+        }
+        self.open_file_buffer(path.clone()).is_ok()
+    }
+
+    fn symbol_under_cursor(&self) -> Option<String> {
+        let buffer = self.active_buffer();
+        let line = buffer.lines.get(buffer.cursor.0)?;
+        let chars: Vec<char> = line.chars().collect();
+        if chars.is_empty() {
+            return None;
+        }
+
+        let mut idx = buffer.cursor.1.min(chars.len());
+        if idx == chars.len() || !is_symbol_char(chars[idx]) {
+            if idx == 0 || !is_symbol_char(chars[idx.saturating_sub(1)]) {
+                return None;
+            }
+            idx = idx.saturating_sub(1);
+        }
+
+        let mut start = idx;
+        while start > 0 && is_symbol_char(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = idx + 1;
+        while end < chars.len() && is_symbol_char(chars[end]) {
+            end += 1;
+        }
+
+        Some(chars[start..end].iter().collect())
+    }
+
+    fn find_definition(&self, symbol: &str) -> Option<DefinitionLocation> {
+        for buffer in self
+            .buffers
+            .iter()
+            .filter(|buffer| buffer.id == self.active_buffer().id)
+            .chain(self.buffers.iter().filter(|buffer| buffer.id != self.active_buffer().id))
+        {
+            if let Some(cursor) = find_definition_in_text(&buffer.text(), symbol) {
+                return Some(DefinitionLocation {
+                    path: buffer.path.clone(),
+                    buffer_id: Some(buffer.id),
+                    cursor,
+                });
+            }
+        }
+
+        let mut seen_paths = HashSet::new();
+        for buffer in &self.buffers {
+            if let Some(path) = &buffer.path {
+                seen_paths.insert(path.clone());
+            }
+        }
+
+        for path in self.definition_search_paths() {
+            if seen_paths.contains(&path) {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if let Some(cursor) = find_definition_in_text(&text, symbol) {
+                return Some(DefinitionLocation {
+                    path: Some(path),
+                    buffer_id: None,
+                    cursor,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn definition_search_paths(&self) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let root = self
+            .active_buffer()
+            .path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        collect_lisp_files(&root, &mut out);
+        out.sort();
+        out
+    }
+
     pub fn widget_scroll_top(&self) -> u16 {
         self.active_leaf().widget_scroll_top
     }
@@ -1161,7 +1418,11 @@ impl Editor {
         if let Some(prefix) = self.pending_key.take() {
             let chord = format!("{} {}", key_str(prefix), key_str(key));
             if let Some(handler) = self.lisp_bindings.get(&chord).cloned() {
-                self.call_lisp_handler(&handler);
+                if self.builtins.values().any(|cmd| cmd == &handler) {
+                    self.run_command(&handler);
+                } else {
+                    self.call_lisp_handler(&handler);
+                }
             }
             return;
         }
@@ -2078,7 +2339,7 @@ impl Editor {
         true
     }
 
-    fn refresh_runtime_side_effects(&mut self) {
+    pub fn refresh_runtime_side_effects(&mut self) {
         self.lisp_bindings = self.default_lisp_bindings.clone();
         self.lisp_bindings.extend(self.runtime.lisp_bindings());
 
@@ -2476,6 +2737,153 @@ fn max_layout_right_edge(node: &crate::layout::LayoutNode) -> u16 {
 
 fn normalize_region(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize)) {
     if a < b { (a, b) } else { (b, a) }
+}
+
+fn is_symbol_char(ch: char) -> bool {
+    !ch.is_whitespace()
+        && !matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | '`' | ',' | ';'
+        )
+}
+
+fn collect_lisp_files(root: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_lisp_files(&path, out);
+            continue;
+        }
+        if path.extension().is_some_and(|ext| ext == "lisp") {
+            out.push(path);
+        }
+    }
+}
+
+fn find_definition_in_text(text: &str, symbol: &str) -> Option<(usize, usize)> {
+    let targets = ["def", "defmacro", "defwidget", "defmode"];
+    let bytes = text.as_bytes();
+    let mut idx = 0usize;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            idx += 1;
+            continue;
+        }
+        match ch {
+            ';' => {
+                in_comment = true;
+                idx += 1;
+            }
+            '"' => {
+                in_string = true;
+                idx += 1;
+            }
+            '(' => {
+                let form_depth = depth;
+                depth += 1;
+                idx += 1;
+                if form_depth != 0 {
+                    continue;
+                }
+
+                let mut cursor = skip_ws_and_comments(text, idx);
+                let head_start = cursor;
+                cursor = advance_symbol(text, cursor);
+                if cursor == head_start {
+                    continue;
+                }
+                let head = &text[head_start..cursor];
+                if !targets.contains(&head) {
+                    continue;
+                }
+
+                cursor = skip_ws_and_comments(text, cursor);
+                let name_start = cursor;
+                cursor = advance_symbol(text, cursor);
+                if cursor == name_start {
+                    continue;
+                }
+                if &text[name_start..cursor] == symbol {
+                    return Some(offset_to_position(text, name_start));
+                }
+                idx = cursor;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                idx += 1;
+            }
+            _ => idx += 1,
+        }
+    }
+
+    None
+}
+
+fn skip_ws_and_comments(text: &str, mut idx: usize) -> usize {
+    let bytes = text.as_bytes();
+    while idx < bytes.len() {
+        match bytes[idx] as char {
+            ch if ch.is_whitespace() => idx += 1,
+            ';' => {
+                while idx < bytes.len() && bytes[idx] as char != '\n' {
+                    idx += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    idx
+}
+
+fn advance_symbol(text: &str, mut idx: usize) -> usize {
+    while idx < text.len() {
+        let ch = text[idx..].chars().next().unwrap();
+        if !is_symbol_char(ch) {
+            break;
+        }
+        idx += ch.len_utf8();
+    }
+    idx
+}
+
+fn offset_to_position(text: &str, offset: usize) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for ch in text[..offset.min(text.len())].chars() {
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (row, col)
 }
 
 fn filter_candidates(candidates: &[String], input: &str) -> Vec<String> {
