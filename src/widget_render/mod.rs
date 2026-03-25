@@ -116,8 +116,8 @@ pub enum WidgetEvent {
     SetNormalized(f32),
     /// Scroll/arrow: delta in value-space units
     Nudge(f32),
-    /// Click/confirm
-    Activate,
+    /// Click/confirm (carries modifier keys from the triggering mouse event)
+    Activate(KeyModifiers),
     PointerDown(PointerEvent),
     PointerDrag(PointerDragEvent),
     PointerUp(PointerEvent),
@@ -344,6 +344,7 @@ pub trait WidgetDefinition: Sync {
         _local_row: f32,
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
+        _modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         MouseEventOutcome::Ignore
     }
@@ -539,6 +540,7 @@ pub fn map_mouse_event(
     local_row: f32,
     drag_start: Option<(f32, f32)>,
     gesture: Option<&Value>,
+    modifiers: KeyModifiers,
 ) -> MouseEventOutcome {
     // SDF widgets handle their own mouse events
     if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
@@ -546,7 +548,7 @@ pub fn map_mouse_event(
     }
     widget_definition(&node.widget_type)
         .map(|definition| {
-            definition.mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture)
+            definition.mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers)
         })
         .unwrap_or(MouseEventOutcome::Ignore)
 }

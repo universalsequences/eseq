@@ -39,6 +39,18 @@ impl Editor {
                 KeyModifiers::ALT,
                 "execute-extended-command",
             ),
+            (
+                KeyCode::Char('s'),
+                KeyModifiers::CONTROL,
+                "search-forward",
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+                "search-backward",
+            ),
+            (KeyCode::Char('.'), KeyModifiers::ALT, "goto-definition"),
+            (KeyCode::Char(','), KeyModifiers::ALT, "pop-definition-mark"),
         ];
         for (code, mods, cmd) in binds {
             self.builtins
@@ -53,6 +65,8 @@ impl Editor {
             ("C-x 1", "delete-other-windows"),
             ("C-x o", "other-window"),
             ("C-x C-f", "find-file"),
+            ("ESC .", "goto-definition"),
+            ("ESC ,", "pop-definition-mark"),
         ];
         for (key, handler) in tiling_binds {
             self.default_lisp_bindings
@@ -230,6 +244,18 @@ impl Editor {
                     input: String::new(),
                     selected: 0,
                 });
+            }
+            "search-forward" => {
+                self.start_search(super::SearchDirection::Forward);
+            }
+            "search-backward" => {
+                self.start_search(super::SearchDirection::Backward);
+            }
+            "goto-definition" => {
+                self.goto_definition();
+            }
+            "pop-definition-mark" => {
+                self.pop_definition_mark();
             }
             _ => {}
         }

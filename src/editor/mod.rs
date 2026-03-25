@@ -1427,6 +1427,20 @@ impl Editor {
             return;
         }
 
+        // Check direct keybinding before treating as chord prefix.
+        // This allows e.g. "ESC" to fire even when "ESC ." chords exist.
+        {
+            let ks = key_str(key);
+            if let Some(handler) = self.lisp_bindings.get(&ks).cloned() {
+                if self.builtins.values().any(|cmd| cmd == &handler) {
+                    self.run_command(&handler);
+                } else {
+                    self.call_lisp_handler(&handler);
+                }
+                return;
+            }
+        }
+
         if self.binding_has_prefix(&key_str(key)) {
             self.pending_key = Some(key);
             return;
@@ -1609,6 +1623,7 @@ impl Editor {
                             content_row,
                             precise_col,
                             precise_row,
+                            mouse.modifiers,
                         ) {
                             let _ = self.apply_widget_output(Some(output));
                         }
@@ -1653,6 +1668,7 @@ impl Editor {
                             content_row,
                             precise_col,
                             precise_row,
+                            mouse.modifiers,
                         );
                         let _ = self.apply_widget_output(output);
                     }

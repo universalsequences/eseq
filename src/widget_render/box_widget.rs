@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
 #[cfg(target_os = "macos")]
 use super::{MetalPrimitive, WidgetViewport};
@@ -6,7 +9,7 @@ use crate::layout::{
 };
 use crate::layout::Rect;
 use crate::vm::Value;
-use crossterm::event::{MouseButton, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 /// Compute the bounding rect that covers the box itself and all its children.
 /// This ensures the SDF background covers the full scrollable content.
@@ -179,23 +182,28 @@ impl WidgetDefinition for BoxWidget {
         _local_row: f32,
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
+        modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         if node.props.contains_key("on-click") {
             if let MouseEventKind::Down(MouseButton::Left) = mouse_kind {
-                return MouseEventOutcome::Dispatch(WidgetEvent::Activate);
+                return MouseEventOutcome::Dispatch(WidgetEvent::Activate(modifiers));
             }
         }
         MouseEventOutcome::Ignore
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
-        let WidgetEvent::Activate = event else {
+        let WidgetEvent::Activate(modifiers) = event else {
             return None;
         };
         let callback = node.props.get("on-click")?.clone();
+        let mut info = std::collections::HashMap::new();
+        info.insert("shift".to_string(), Rc::new(RefCell::new(Value::Bool(modifiers.contains(KeyModifiers::SHIFT)))));
+        info.insert("ctrl".to_string(), Rc::new(RefCell::new(Value::Bool(modifiers.contains(KeyModifiers::CONTROL)))));
+        info.insert("alt".to_string(), Rc::new(RefCell::new(Value::Bool(modifiers.contains(KeyModifiers::ALT)))));
         Some(EventOutput {
             callback,
-            args: vec![],
+            args: vec![Value::Map(info)],
         })
     }
 

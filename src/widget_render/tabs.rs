@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crossterm::event::{MouseButton, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_f32_prop,
@@ -177,6 +177,7 @@ impl WidgetDefinition for TabsWidget {
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
+        _modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         // Only respond to clicks in the header area (above children)
         let header_bottom = node

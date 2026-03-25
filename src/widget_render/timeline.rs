@@ -273,6 +273,7 @@ impl WidgetDefinition for TimelineWidget {
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
         gesture: Option<&Value>,
+        _modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         let view = TimelineView::from_props(&node.props, node.rect);
         match mouse_kind {

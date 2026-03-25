@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crossterm::event::{MouseButton, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
@@ -138,6 +138,7 @@ impl WidgetDefinition for KnobWidget {
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
+        _modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {

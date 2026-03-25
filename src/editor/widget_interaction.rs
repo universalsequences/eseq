@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crossterm::event::{MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::layout::{LayoutNode, hit_test_layout};
 use crate::tile::{WidgetClick, WidgetGesture};
@@ -43,6 +43,7 @@ impl Editor {
                 precise_row,
                 None,
                 None,
+                mouse.modifiers,
             )
         };
 
@@ -232,6 +233,7 @@ impl Editor {
                 clamped_row,
                 Some(start),
                 None,
+                mouse.modifiers,
             );
             let _ = self.apply_widget_output(output);
             return;
@@ -417,6 +419,7 @@ impl Editor {
         precise_row: f32,
         drag_start: Option<(f32, f32)>,
         explicit_gesture: Option<&Value>,
+        modifiers: KeyModifiers,
     ) -> Option<crate::widget_render::EventOutput> {
         let total_scroll_top = self.total_scroll_top();
         let total_scroll_left = self.active_leaf().widget_scroll_left as f32;
@@ -435,7 +438,7 @@ impl Editor {
             .and_then(|gesture| (gesture.widget_id == node.widget_id).then_some(gesture))
             .and_then(|gesture| gesture.gesture_data.as_ref())
             .or(explicit_gesture);
-        match map_mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture) {
+        match map_mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers) {
             MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
             MouseEventOutcome::Dispatch(widget_event) => handle_event(node, widget_event),
         }
@@ -449,6 +452,7 @@ impl Editor {
         content_row: u16,
         precise_col: f32,
         precise_row: f32,
+        modifiers: KeyModifiers,
     ) -> Option<crate::widget_render::EventOutput> {
         let layout = self.runtime.current_layout.as_ref()?;
         let node = find_node_by_id(layout, gesture.widget_id)?;
@@ -461,6 +465,7 @@ impl Editor {
             precise_row,
             Some((gesture.start_precise_col, gesture.start_precise_row)),
             gesture.gesture_data.as_ref(),
+            modifiers,
         )
     }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crossterm::event::{MouseButton, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
@@ -127,17 +127,18 @@ impl WidgetDefinition for ToggleWidget {
         _local_row: f32,
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
+        modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         match mouse_kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                MouseEventOutcome::Dispatch(WidgetEvent::Activate)
+                MouseEventOutcome::Dispatch(WidgetEvent::Activate(modifiers))
             }
             _ => MouseEventOutcome::Ignore,
         }
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
-        let WidgetEvent::Activate = event else {
+        let WidgetEvent::Activate(_) = event else {
             return None;
         };
         let callback = node.props.get("on-change")?.clone();

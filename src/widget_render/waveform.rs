@@ -4,7 +4,7 @@ use std::rc::Rc;
 #[cfg(target_os = "macos")]
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
@@ -289,6 +289,7 @@ impl WidgetDefinition for WaveformWidget {
         local_row: f32,
         _drag_start: Option<(f32, f32)>,
         gesture: Option<&Value>,
+        _modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         let view = WaveformView::from_props(&node.props, node.rect);
         match mouse_kind {
