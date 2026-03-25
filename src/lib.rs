@@ -6,7 +6,7 @@ pub mod audiograph;
 #[allow(dead_code)]
 mod delay;
 #[allow(dead_code)]
-mod effects;
+pub mod effects;
 #[allow(dead_code)]
 mod filter;
 #[allow(dead_code)]

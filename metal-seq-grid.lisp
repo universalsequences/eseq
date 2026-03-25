@@ -1,7 +1,8 @@
 ; Minimal Metal Sequencer - Step Grid UI
-; C-p to toggle play/stop
+; C-p to toggle play/stop, Esc to deselect
 
 (bind-key "C-p" "seq-toggle-play")
+(bind-key "ESC" "seq-clear-selection")
 
 ; 0=vel 1=dur 2=transpose 3=pan
 (defstate param-mode 0)
@@ -41,6 +42,14 @@
     (if (= param-mode 3) 0
       (param-min))))
 
+;; ── Aqua material for sliders ──
+
+(defmacro aqua-slider-material ()
+  `(material
+     :lighting (lighting :edge-min -0.35 :edge-max 0.5
+       :light (vec3 -0.5 -1.0 1.5) :shininess 32.0)
+     :color (aqua-color (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0))))
+
 ;; ── Aqua widgets ──
 
 (defmacro aqua-color (base1 base2)
@@ -65,32 +74,39 @@
 (defwidget aqua-button
   :width 4 :height 3
   :paint-margin 1
-  :state (active)
+  :state (active plocked selected)
   :shader
-  (sdf/layer
-    (sdf/fill (+ (* 0.001 (smoothstep 0 0.1 (* y x))) (sdf/fill-rounded-rect -0.01 0.85))
-      (material
-        :lighting
-        (lighting :edge-min -0.35 :edge-max 0.5
-          :light (vec3 (cos (* 0.3 itime)) -1.0 (+ (* 0.2 (cos itime)) 1.5)) :shininess 32.0)
-        :color
-        (* (if active 1 0.7) (aqua-color (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0)))
-        :shadow (shadow
-          :color (rgba 0 0 0 0.3)
-          :blur 0.15
-          :offset (vec2 0 0.05))))))
+  (let ((sel-y (if (= selected 1) (* 0.3 (cos (* 3 itime))) 0)))
+    (sdf/translate 0 sel-y
+      (sdf/layer
+        (sdf/fill (+ (* 0.001 (smoothstep 0 0.1 (* y x))) (sdf/fill-rounded-rect -0.01 0.85))
+          (material
+            :lighting
+            (lighting :edge-min -0.35 :edge-max 0.5
+              :light (vec3 (cos (* 0.3 itime)) -1.0 (+ (* 0.2 (cos itime)) 1.5)) :shininess 32.0)
+            :color
+            (* (if (= active 1) 1 0.7) (aqua-color (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0)))
+            :shadow (shadow
+              :color (rgba 0 0 0 0.3)
+              :blur 0.15
+              :offset (vec2 0 0.05))))))))
 
 (defwidget tick
-  :width 2 :height 2
-  :state (active)
+  :width 1.5 :height 1.5
+  :state (active plocked selected)
   :shader
-  (sdf/layer
-    (sdf/fill (sdf/circle 1)
-      (material
-        :lighting (lighting :edge-min -0.35 :edge-max 0.5
-          :light (vec3 0.0 -1.0 1.5) :shininess 32.0)
-        :color
-        (* (if active 1 0.3) (aqua-color (rgba 0.3 0.3 0.75 1.0) (rgba 0.90 0.50 0.92 1)))))))
+  (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
+    (sdf/translate 0 sel-y
+      (sdf/layer
+        (sdf/fill (sdf/circle 1)
+          (material
+            :lighting (lighting :edge-min -0.35 :edge-max 0.5
+              :light (vec3 0.0 -1.0 1.5) :shininess 32.0)
+            :color
+            (* (if (= active 1) 1 0.3)
+               (aqua-color
+                 (if (= plocked 1) (rgba 0.05 0.15 0.1 1.0) (rgba 0.3 0.3 0.85 1.0))
+                 (if (= plocked 1) (rgba 0.4 0.135 0.95 1.0) (rgba 0.90 0.50 0.82 1.0))))))))))
 
 ;; ── Play/Pause buttons ──
 
@@ -211,21 +227,32 @@
     
     ; Step columns: vslider + aqua step toggle + step number
     (grid :cols 16 :col-width 3
-      (each SEQ.steps |active i|
+      (each (zip SEQ.steps (range 0 16)) |(active i)|
         (v-stack :align :center :gap 0.5
           (vslider :height 4
             :min (param-min) :max (param-max)
             :origin (param-origin)
             :value (nth (param-values) i)
-            :fill (param-color)
-            :on-change (lambda (v) (seq-set-step-param i (param-keyword) v)))
-          (box :on-click |x y r| (seq-toggle-step i)
+            :material (aqua-slider-material)
+            :on-change (lambda (v)
+              (if (seq-has-selection?)
+                (seq-set-step-param-plock (param-keyword) v)
+                (seq-set-step-param i (param-keyword) v))))
+          (box :on-click (lambda (evt)
+                (if (get evt :shift)
+                  (seq-select-step i)
+                  (do (seq-clear-selection) (seq-toggle-step i))))
             :active (if active 1 0)
+            :plocked 1
+            :selected (if (= 1 (nth SEQ.selected-steps i)) 1 0)
             :background "aqua-button"
-            :align :center :width 3 :height 2
-            (tick :active (if active 1 0)))
+            :align :center :width 3 :height 1.5
+            (tick :active (if active 1 0)
+                  :plocked (if (nth SEQ.step-has-plocks i) 1 0)
+                  :selected (if (nth SEQ.selected-steps i) 1 0)))
           (label (str (+ i 1)) :font-size 10
-            :color (if (= (mod SEQ.playhead 16) i) :white :gray)))))
+            :color (if (nth SEQ.selected-steps i) :yellow
+                    (if (= (mod SEQ.playhead 16) i) :white :gray))))))
 
     ; Mixer — track list with volume sliders
     (v-stack :gap 0.5
@@ -240,8 +267,28 @@
           (box :flex 1
             (hslider :min 0 :max 1
                      :value (nth SEQ.track-volumes i)
-                     :fill (if (= SEQ.current-track i) :blue :gray)
-                     :on-change (lambda (v) (seq-set-track-volume i v)))))))))
+                     :material (aqua-slider-material)
+                     :on-change (lambda (v) (seq-set-track-volume i v)))))))
+
+    ; Effect chain for current track
+    (h-stack :gap 1
+      (each SEQ.effects |fx slot-idx|
+        (box :width 20 :bg '(rgba 0.08 0.1 0.12 1)
+             :padding 0.5
+          (v-stack :gap 0.5
+            (label (get fx :name) :font-size 12 :color :white :bg :transparent)
+            (each (get fx :params) |p pi|
+              (h-stack :gap 0.5 :align :center
+                (label (get p :name) :font-size 9 :width 8
+                       :color :gray :bg :transparent)
+                (box :width 10
+                  (hslider :min (get p :min) :max (get p :max)
+                           :value (get p :value)
+                           :material (aqua-slider-material)
+                           :on-change (lambda (v)
+                             (if (seq-has-selection?)
+                               (seq-set-effect-plock slot-idx (get p :idx) v)
+                               (seq-set-effect-param slot-idx (get p :idx) v)))))))))))))
 
 
 (delete-other-windows)

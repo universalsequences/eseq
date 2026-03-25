@@ -1,8 +1,9 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::event::Event;
@@ -57,13 +58,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("No samples found".into());
     }
 
-    // Collect pan node IDs for volume control (need to push params to audiograph)
+    // Collect node IDs for param pushing to audiograph
     let track_pan_ids: Vec<i32> = app.graph.track_node_ids.iter().map(|n| n.pan_id).collect();
+    let effect_descriptors = app.graph.effect_descriptors.clone();
     let lg_raw = lg_ptr.0;
 
     // Shared current track index
     let current_track = Arc::new(AtomicUsize::new(0));
-    // UI-only counter for changes that shouldn't affect pattern_epoch (e.g. volume)
+    // Selected steps for p-locking
+    let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+    // UI-only counter for changes that shouldn't affect pattern_epoch (e.g. volume, selection)
     let ui_epoch = Arc::new(AtomicUsize::new(0));
 
     // 3. Set up eseqlisp runtime with sequencer natives
@@ -89,6 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("transposes", build_param_list(&state, 0, StepParam::Transpose)),
             ("pans", build_param_list(&state, 0, StepParam::Pan)),
             ("track-volumes", build_track_volumes(&state)),
+            ("effects", build_effects_value(&state, 0, &effect_descriptors, &selected_steps)),
+            ("selected-steps", build_selection_value(&selected_steps)),
+            ("step-has-plocks", build_step_has_plocks(&state, 0, &effect_descriptors)),
         ],
         false,
     );
@@ -181,6 +188,161 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Ok(Value::Number(vol as f64))
+    });
+
+    // seq-set-effect-param — (seq-set-effect-param slot-idx param-idx value)
+    let st = state.clone();
+    let ct = current_track.clone();
+    let descs = effect_descriptors.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-effect-param", move |args, _ctx| {
+        let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-set-effect-param: expected (slot param value)".into());
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let slot_idx = *slot as usize;
+        let param_idx = *param as usize;
+        let val = *val as f32;
+
+        let chain = &st.pattern.effect_chains[track];
+        let Some(slot_state) = chain.get(slot_idx) else {
+            return Err(format!("seq-set-effect-param: slot {slot_idx} out of range").into());
+        };
+
+        // Clamp to descriptor range if available
+        let clamped = descs
+            .get(track)
+            .and_then(|d| d.get(slot_idx))
+            .and_then(|d| d.params.get(param_idx))
+            .map(|p| val.clamp(p.min, p.max))
+            .unwrap_or(val);
+
+        slot_state.defaults.set(param_idx, clamped);
+
+        // Push to audiograph
+        let node_id = slot_state.node_id.load(Ordering::Relaxed);
+        if node_id != 0 {
+            let idx = slot_state.resolve_node_idx(param_idx);
+            // Check for host_control — skip if present
+            let skip = descs
+                .get(track)
+                .and_then(|d| d.get(slot_idx))
+                .and_then(|d| d.params.get(param_idx))
+                .and_then(|p| p.host_control.as_ref())
+                .is_some();
+            if !skip {
+                unsafe {
+                    sequencer::audiograph::params_push_wrapper(
+                        lg_raw,
+                        sequencer::audiograph::ParamMsg {
+                            idx,
+                            logical_id: node_id as u64,
+                            fvalue: clamped,
+                        },
+                    );
+                }
+            }
+        }
+
+        // Publish snapshot so the scheduler sees the new default
+        // (otherwise it re-applies the old value on next step trigger)
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(clamped as f64))
+    });
+
+    // ── Selection natives ──
+
+    // seq-select-step — toggle step in/out of selection
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-select-step", move |args, _ctx| {
+        let Some(Value::Number(step)) = args.first() else {
+            return Err("seq-select-step: expected step number".into());
+        };
+        let step = *step as usize;
+        let mut set = sel.lock().unwrap();
+        let was_selected = !set.insert(step);
+        if was_selected {
+            set.remove(&step);
+        }
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(!was_selected))
+    });
+
+    // seq-clear-selection
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-clear-selection", move |_args, _ctx| {
+        sel.lock().unwrap().clear();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Nil)
+    });
+
+    // seq-has-selection?
+    let sel = selected_steps.clone();
+    runtime.register_native("seq-has-selection?", move |_args, _ctx| {
+        Ok(Value::Bool(!sel.lock().unwrap().is_empty()))
+    });
+
+    // seq-set-effect-plock — apply p-lock to ALL selected steps
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-effect-plock", move |args, _ctx| {
+        let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            return Err("seq-set-effect-plock: expected (slot param value)".into());
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let slot_idx = *slot as usize;
+        let param_idx = *param as usize;
+        let val = *val as f32;
+        let chain = &st.pattern.effect_chains[track];
+        let Some(slot_state) = chain.get(slot_idx) else {
+            return Err(format!("slot {slot_idx} out of range").into());
+        };
+        let steps = sel.lock().unwrap();
+        for &step in steps.iter() {
+            slot_state.plocks.set(step, param_idx, val);
+        }
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(val as f64))
+    });
+
+    // seq-set-step-param-plock — apply step param p-lock to selected steps
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-step-param-plock", move |args, _ctx| {
+        let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
+            (args.first(), args.get(1))
+        else {
+            return Err("seq-set-step-param-plock: expected (:param value)".into());
+        };
+        let param = match param_name.as_str() {
+            "velocity" | "vel" => StepParam::Velocity,
+            "duration" | "dur" => StepParam::Duration,
+            "transpose" => StepParam::Transpose,
+            "pan" => StepParam::Pan,
+            "speed" => StepParam::Speed,
+            other => return Err(format!("unknown param :{other}").into()),
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let val = (*val as f32).clamp(param.min(), param.max());
+        let steps = sel.lock().unwrap();
+        for &step in steps.iter() {
+            st.pattern.step_data[track].set(step, param, val);
+        }
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(val as f64))
     });
 
     // seq-toggle-play
@@ -375,6 +537,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "transposes", build_param_list(&state, ct, StepParam::Transpose));
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &effect_descriptors, &selected_steps));
+                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &effect_descriptors));
                 prev_current_track = ct;
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
@@ -399,13 +563,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "transposes", build_param_list(&state, ct, StepParam::Transpose));
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &effect_descriptors));
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
                 needs_reactive_cycle = true;
             }
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
-                editor.runtime_mut().set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                let rt = editor.runtime_mut();
+                rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &effect_descriptors, &selected_steps));
+                rt.set_reactive("SEQ", "selected-steps", build_selection_value(&selected_steps));
+                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &effect_descriptors));
                 prev_ui_epoch = ui_ep;
                 needs_reactive_cycle = true;
             }
@@ -420,6 +589,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 editor.refresh_runtime_side_effects();
                 editor.mark_needs_redraw();
             }
+        }
+
+        // Always redraw when selection is active (for itime animation on selected steps)
+        if !selected_steps.lock().unwrap().is_empty() {
+            editor.mark_needs_redraw();
         }
 
         // Render
@@ -486,6 +660,124 @@ fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
         .map(|t| {
             let vol = state.pattern.track_params[t].get_volume();
             Rc::new(RefCell::new(Value::Number(vol as f64)))
+        })
+        .collect();
+    Value::List(items)
+}
+
+/// Build a Lisp Value::List of effect slot maps for a track.
+/// Each slot is a map: {:name "Filter" :params ({:name "cutoff" :value 1000 :min 20 :max 20000} ...)}
+fn build_effects_value(
+    state: &Arc<SequencerState>,
+    track: usize,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    use std::collections::HashMap;
+    let Some(track_descs) = descriptors.get(track) else {
+        return Value::List(vec![]);
+    };
+    let chain = &state.pattern.effect_chains[track];
+    let sel = selected.lock().unwrap();
+    // If steps are selected, show p-lock value from first selected step
+    let plock_step = sel.iter().copied().min();
+
+    let slots: Vec<Rc<RefCell<Value>>> = track_descs
+        .iter()
+        .enumerate()
+        .map(|(slot_idx, desc)| {
+            let mut slot_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+
+            slot_map.insert(
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String(desc.name.clone()))),
+            );
+
+            slot_map.insert(
+                "slot-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+            );
+
+            let params: Vec<Rc<RefCell<Value>>> = desc
+                .params
+                .iter()
+                .enumerate()
+                .map(|(param_idx, pdesc)| {
+                    let default_val = chain
+                        .get(slot_idx)
+                        .map(|s| s.defaults.get(param_idx))
+                        .unwrap_or(pdesc.default);
+                    // Show p-lock value if steps are selected, fall back to default
+                    let current_val = plock_step
+                        .and_then(|step| {
+                            chain.get(slot_idx)?.plocks.get(step, param_idx)
+                        })
+                        .unwrap_or(default_val);
+
+                    let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                    pmap.insert(
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String(pdesc.name.clone()))),
+                    );
+                    pmap.insert(
+                        "idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(param_idx as f64))),
+                    );
+                    pmap.insert(
+                        "value".to_string(),
+                        Rc::new(RefCell::new(Value::Number(current_val as f64))),
+                    );
+                    pmap.insert(
+                        "min".to_string(),
+                        Rc::new(RefCell::new(Value::Number(pdesc.min as f64))),
+                    );
+                    pmap.insert(
+                        "max".to_string(),
+                        Rc::new(RefCell::new(Value::Number(pdesc.max as f64))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(pmap)))
+                })
+                .collect();
+
+            slot_map.insert(
+                "params".to_string(),
+                Rc::new(RefCell::new(Value::List(params))),
+            );
+
+            Rc::new(RefCell::new(Value::Map(slot_map)))
+        })
+        .collect();
+
+    Value::List(slots)
+}
+
+/// Build a Lisp Value::List of bools (16 entries) indicating which steps are selected.
+fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Value {
+    let set = selected.lock().unwrap();
+    let items: Vec<Rc<RefCell<Value>>> = (0..NUM_STEPS)
+        .map(|s| Rc::new(RefCell::new(Value::Bool(set.contains(&s)))))
+        .collect();
+    Value::List(items)
+}
+
+/// Build a Lisp Value::List of bools indicating which steps have any p-locks on the given track.
+fn build_step_has_plocks(
+    state: &Arc<SequencerState>,
+    track: usize,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+) -> Value {
+    let chain = &state.pattern.effect_chains[track];
+    let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
+    let items: Vec<Rc<RefCell<Value>>> = (0..NUM_STEPS)
+        .map(|step| {
+            let has_plock = (0..num_slots).any(|slot_idx| {
+                let Some(slot) = chain.get(slot_idx) else {
+                    return false;
+                };
+                let np = slot.num_params.load(Ordering::Relaxed) as usize;
+                (0..np).any(|p| slot.plocks.get(step, p).is_some())
+            });
+            Rc::new(RefCell::new(Value::Bool(has_plock)))
         })
         .collect();
     Value::List(items)
