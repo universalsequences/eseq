@@ -58,34 +58,35 @@
 
 (def light-theme ()
   (apply-theme (dict
-    :bg "#e1e2e7" :fg "#3760bf" :fg_muted "#848cb5"
-    :black "#dcdcde" :red "#f52a65" :green "#587539"
-    :yellow "#8c6c3e" :blue "#2e7de9" :magenta "#9854f1"
-    :cyan "#007197" :white "#3760bf"
-    :bright_black "#a1a6c5" :bright_red "#c64343" :bright_yellow "#a27629"
-    :purple "#7847bd" :cursor "#2e7de9"
-    :syn_comment "#848cb5" :syn_string "#587539" :syn_number "#b15c00"
-    :syn_keyword "#9854f1" :syn_builtin "#2e7de9" :syn_special "#007197"
-    :syn_delimiter "#8990b3"
-    :bg_region "#b6d6fd" :bg_sexp "#d7d8df" :bg_eval_flash "#c4d6b0"
-    :bg_match_paren "#2e7de9" :fg_match_paren "#e1e2e7"
-    :status_fg "#3760bf" :status_bg "#dcdcde" :status_edge "#c4c8da"
-    :status_chip_bg "#d5d6db" :status_mode_bg "#cbdaf6"
-    :status_chip_muted "#d9dadf"
-    :status_ui_bg "#2e7de9" :status_ui_fg "#e1e2e7"
-    :status_mix_bg "#2e7de9" :status_mix_fg "#e1e2e7"
-    :status_dirty_bg "#b15c00" :status_dirty_fg "#f7efe4"
-    :status_pos_bg "#d5d6db" :status_accent "#007197"
-    :comp_selected_bg "#cbdaf6" :comp_unselected_bg "#dcdcde"
-    :comp_fg "#3760bf" :comp_doc_bg "#d5d6db"
-    :comp_doc_fg "#3760bf" :comp_doc_title_fg "#2e7de9"
-    :widget_focus_bg "#cbdaf6"
-    :widget_label_fg "#3760bf"
-    :widget_slider_filled "#2e7de9" :widget_slider_track "#a8aecb"
-    :widget_knob_filled "#9854f1" :widget_knob_track "#a8aecb"
-    :widget_toggle_on "#2e7de9" :widget_toggle_off "#8990b3"
-    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#f1f3f7"))
-  (status "TokyoNight Day theme applied"))
+    :bg "#fafafa" :fg "#1a1a2e" :fg_muted "#8b8fa0"
+    :black "#f0f0f3" :red "#d1345b" :green "#2e8555"
+    :yellow "#9a6700" :blue "#0969da" :magenta "#8250df"
+    :cyan "#0c7d9d" :white "#1a1a2e"
+    :bright_black "#9ca0b0" :bright_red "#cf222e" :bright_yellow "#9a6700"
+    :purple "#8250df" :cursor "#0969da"
+    :syn_comment "#8b8fa0" :syn_string "#2e8555" :syn_number "#9a6700"
+    :syn_keyword "#8250df" :syn_builtin "#0969da" :syn_special "#0c7d9d"
+    :syn_delimiter "#8b8fa0"
+    :bg_region "#ddf4ff" :bg_sexp "#f3f4f6" :bg_eval_flash "#dafbe1"
+    :bg_match_paren "#0969da" :fg_match_paren "#ffffff"
+    :status_fg "#57606a" :status_bg "#f6f8fa" :status_edge "#d0d7de"
+    :status_chip_bg "#eaeef2" :status_mode_bg "#ddf4ff"
+    :status_chip_muted "#eaeef2"
+    :status_ui_bg "#0969da" :status_ui_fg "#ffffff"
+    :status_mix_bg "#0969da" :status_mix_fg "#ffffff"
+    :status_dirty_bg "#9a6700" :status_dirty_fg "#ffffff"
+    :status_pos_bg "#eaeef2" :status_accent "#0c7d9d"
+    :comp_selected_bg "#ddf4ff" :comp_unselected_bg "#f6f8fa"
+    :comp_fg "#1a1a2e" :comp_doc_bg "#f6f8fa"
+    :comp_doc_fg "#1a1a2e" :comp_doc_title_fg "#0969da"
+    :widget_focus_bg "#ddf4ff"
+    :widget_label_fg "#1a1a2e"
+    :widget_slider_filled "#0969da" :widget_slider_track "#d0d7de"
+    :widget_knob_filled "#8250df" :widget_knob_track "#d0d7de"
+    :widget_toggle_on "#0969da" :widget_toggle_off "#8b8fa0"
+    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#f6f8fa"
+    :border_active "#8b8fa0" :border_inactive "#d0d7de"))
+  (status "Light theme applied"))
 
 (def tokyonight-storm-theme ()
   (apply-theme (dict
@@ -115,7 +116,8 @@
     :widget_slider_filled "#7aa2f7" :widget_slider_track "#394b70"
     :widget_knob_filled "#bb9af7" :widget_knob_track "#545c7e"
     :widget_toggle_on "#7aa2f7" :widget_toggle_off "#545c7e"
-    :widget_toggle_knob_on "#c0caf5" :widget_toggle_knob_off "#c0caf5"))
+    :widget_toggle_knob_on "#c0caf5" :widget_toggle_knob_off "#c0caf5"
+    :border_active "#7aa2f7" :border_inactive "#292e42"))
   (status "TokyoNight Storm theme applied"))
 
 (def aura-theme ()
@@ -146,7 +148,8 @@
     :widget_slider_filled "#a277ff" :widget_slider_track "#6d6d6d"
     :widget_knob_filled "#a277ff" :widget_knob_track "#6d6d6d"
     :widget_toggle_on "#a277ff" :widget_toggle_off "#6d6d6d"
-    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#edecee"))
+    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#edecee"
+    :border_active "#a277ff" :border_inactive "#3b334b"))
   (status "Aura theme applied"))
 
 (def aqua-dark-theme ()
@@ -177,7 +180,8 @@
     :widget_slider_filled "#3080e0" :widget_slider_track "#1e3a5a"
     :widget_knob_filled "#a88bfa" :widget_knob_track "#3a4e6a"
     :widget_toggle_on "#3080e0" :widget_toggle_off "#3a4e6a"
-    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#c8d8f0"))
+    :widget_toggle_knob_on "#ffffff" :widget_toggle_knob_off "#c8d8f0"
+    :border_active "#4a9ef5" :border_inactive "#162640"))
   (status "Aqua Dark theme applied"))
 
 ;; (load "file.lisp") — read and evaluate a Lisp file, like Common Lisp's load.
@@ -216,15 +220,15 @@
   (append
     (list
       (style-fg line 0 10 :fg-muted)
-      (style-fg line 11 13 :syn-number)
-      (style-fg line 14 24 :green)
-      (style-fg line 25 33 :green)
-      (style-fg line 34 40 :syn-number)
+      (style-fg line 11 13 :fg-muted)
+      (style-fg line 14 24 :fg-muted)
+      (style-fg line 25 33 :fg-muted)
+      (style-fg line 34 40 :fg-muted)
       (style-fg line 41 53 :fg-muted))
     (list
       (if is-dir
         (style-bold-fg line 53 200 :blue)
-        (style-bold-fg line 53 200 :syn-number)))))
+        (style-fg line 53 200 :fg)))))
 
 (def dired-entry-styles (entries line)
   (if (empty? entries)
@@ -417,3 +421,5 @@
 (bind-key "C-x b" "buffer-list-here")
 
 (bind-key "C-x v" "cycle-view-mode")
+
+(aqua-dark-theme)

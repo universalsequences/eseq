@@ -343,6 +343,129 @@
     }
 
     #[test]
+    fn ctrl_s_opens_incremental_search_in_minibuffer() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha beta");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert_eq!(editor.minibuffer_prompt().as_deref(), Some("I-search: "));
+    }
+
+    #[test]
+    fn incremental_search_moves_cursor_and_ctrl_s_repeats_forward() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha beta alpha beta");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(editor.active_buffer().cursor, (0, 11));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+    }
+
+    #[test]
+    fn search_escape_restores_original_cursor() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha beta alpha");
+        editor.active_buffer_mut().cursor = (0, 7);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 11));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 7));
+        assert_eq!(editor.minibuffer_prompt(), None);
+    }
+
+    #[test]
+    fn meta_period_jumps_to_definition_and_meta_comma_returns() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let defs_id = editor.open_scratch_buffer("*defs*", "(def target 42)\n(def other 9)");
+        let callsite_id = editor.open_scratch_buffer("*main*", "(target)");
+        editor.set_active_buffer(callsite_id);
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
+
+        assert_eq!(editor.active_buffer().id, defs_id);
+        assert_eq!(editor.active_buffer().cursor, (0, 5));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::ALT));
+
+        assert_eq!(editor.active_buffer().id, callsite_id);
+        assert_eq!(editor.active_buffer().cursor, (0, 1));
+    }
+
+    #[test]
+    fn meta_period_opens_definition_from_workspace_file() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let dir = std::env::temp_dir().join(format!(
+            "eseqlisp-goto-definition-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let defs_path = dir.join("defs.lisp");
+        let main_path = dir.join("main.lisp");
+        std::fs::write(&defs_path, "(def remote-target 99)\n").unwrap();
+        std::fs::write(&main_path, "(remote-target)\n").unwrap();
+
+        editor.open_file_buffer(&main_path).unwrap();
+        editor.active_buffer_mut().cursor = (0, 2);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::ALT));
+
+        assert_eq!(editor.active_buffer().path.as_ref(), Some(&defs_path));
+        assert_eq!(editor.active_buffer().cursor, (0, 5));
+    }
+
+    #[test]
+    fn esc_period_and_esc_comma_work_as_meta_definition_bindings() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let defs_id = editor.open_scratch_buffer("*defs*", "(def target 42)");
+        let callsite_id = editor.open_scratch_buffer("*main*", "(target)");
+        editor.set_active_buffer(callsite_id);
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().id, defs_id);
+        assert_eq!(editor.active_buffer().cursor, (0, 5));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().id, callsite_id);
+        assert_eq!(editor.active_buffer().cursor, (0, 1));
+    }
+
+    #[test]
     fn ctrl_left_moves_to_previous_word() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -3514,4 +3637,321 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
             "(let ((x 1.5) (y 0)) (sdf/rotate {} (sdf/rect 2 0.5)))", pi_2
         ));
         assert!(d_rot > 0.0, "point should be outside 90°-rotated rect, got {}", d_rot);
+    }
+
+    #[test]
+    fn hslider_material_in_effect_simple() {
+        // Simple test: material with just :color :accent inside effect
+        let rt = Runtime::new();
+        let mut editor = Editor::new(rt, EditorConfig::default());
+        editor.set_layout_viewport(40, 20);
+        let result = editor.runtime.eval_str(
+            r#"
+            (defstate test-vol 0.5)
+            (effect
+              (hslider :min 0 :max 1 :bind test-vol :width 20
+                :material (material :color :accent)))
+            "#,
+        );
+        assert!(result.is_ok(), "simple material failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn hslider_material_with_y_no_effect() {
+        // Material with `y` WITHOUT effect wrapper — does auto-quoting work?
+        let mut rt = Runtime::new();
+        let result = rt.eval_str(
+            r#"(hslider :min 0 :max 1 :value 0.5
+                :material (material :color (rgba y 0 0 1)))"#,
+        );
+        assert!(result.is_ok(), "material with y (no effect) failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn hslider_material_in_effect_with_y_variable() {
+        // Material that references shader variable `y` inside effect
+        let rt = Runtime::new();
+        let mut editor = Editor::new(rt, EditorConfig::default());
+        editor.set_layout_viewport(40, 20);
+        let result = editor.runtime.eval_str(
+            r#"
+            (defstate test-vol 0.5)
+            (effect
+              (hslider :min 0 :max 1 :bind test-vol :width 20
+                :material (material
+                  :color (rgba y 0 0 1))))
+            "#,
+        );
+        assert!(result.is_ok(), "material with y (in effect) failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn hslider_material_in_effect_with_lighting() {
+        // Full material with lighting + vec3 inside effect
+        let rt = Runtime::new();
+        let mut editor = Editor::new(rt, EditorConfig::default());
+        editor.set_layout_viewport(40, 20);
+        let result = editor.runtime.eval_str(
+            r#"
+            (defstate test-vol 0.5)
+            (effect
+              (hslider :min 0 :max 1 :bind test-vol :width 20
+                :material (material
+                  :lighting (lighting :edge-min -0.35 :edge-max 0.5
+                    :light (vec3 -0.5 -1.0 1.5) :shininess 32.0)
+                  :color :accent)))
+            "#,
+        );
+        assert!(result.is_ok(), "material with lighting failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn hslider_material_in_effect_with_aqua_macro() {
+        let rt = Runtime::new();
+        let mut editor = Editor::new(rt, EditorConfig::default());
+        editor.set_layout_viewport(40, 20);
+        let result = editor.runtime.eval_str(
+            r#"
+            (defmacro test-aqua (base1 base2)
+              `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
+                    (__base (mix ,base1 ,base2 (smoothstep -0.5 0.5 __ny)))
+                    (__rim (smoothstep -0.53 -0.033 d)))
+                 (* __base (rgba __rim __rim __rim 1.0))))
+
+            (defstate test-vol 0.5)
+            (effect
+              (hslider :min 0 :max 1 :bind test-vol :width 20
+                :material (material
+                  :lighting (lighting :edge-min -0.35 :edge-max 0.5
+                    :light (vec3 -0.5 -1.0 1.5) :shininess 32.0)
+                  :color (test-aqua (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0)))))
+            "#,
+        );
+        assert!(result.is_ok(), "aqua macro material failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn hslider_material_with_lighting_and_vec3() {
+        use crate::widget_render::sdf_widget::sdf_widget_def;
+
+        let mut rt = Runtime::new();
+        let result = rt
+            .eval_str(
+                r#"
+                (hslider :min 0 :max 1 :value 0.5
+                  :material (material
+                    :lighting (lighting :edge-min -0.35 :edge-max 0.5
+                      :light (vec3 -0.5 -1.0 1.5) :shininess 32.0)
+                    :color :accent))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        if let Value::Map(map) = &result {
+            let shader_type = map
+                .get("__shader_type")
+                .expect("hslider with :material+lighting should have __shader_type");
+            if let Value::String(name) = &*shader_type.borrow() {
+                assert!(
+                    sdf_widget_def(name).is_some(),
+                    "shader '{}' should be registered",
+                    name
+                );
+            } else {
+                panic!("__shader_type should be a string");
+            }
+        } else {
+            panic!("hslider should return a map");
+        }
+    }
+
+    #[test]
+    fn hslider_material_with_macro_containing_vec3() {
+        use crate::widget_render::sdf_widget::sdf_widget_def;
+
+        let mut rt = Runtime::new();
+        // Define the aqua-color macro (same as in the demo)
+        rt.eval_str(
+            r#"
+            (defmacro aqua-color (base1 base2)
+              `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
+                    (__base (mix ,base1 ,base2 (smoothstep -0.5 0.5 __ny)))
+                    (__glass (smoothstep 0.1 -0.65 __ny))
+                    (__edge-fade (smoothstep 0.0 -0.26 d))
+                    (__hi (* __glass __edge-fade 0.655))
+                    (__spec (* specular __edge-fade 0.3))
+                    (__rim (smoothstep -0.53 -0.033 d)))
+                 (+ (* __base (rgba __rim __rim __rim 1.0))
+                    (rgba (+ __hi __spec) (+ __hi __spec) (+ __hi __spec) 0.0))))
+            "#,
+        )
+        .unwrap();
+
+        // Use the macro inside a :material expression
+        let result = rt
+            .eval_str(
+                r#"
+                (hslider :min 0 :max 1 :value 0.5
+                  :material (material
+                    :lighting (lighting :edge-min -0.35 :edge-max 0.5
+                      :light (vec3 -0.5 -1.0 1.5) :shininess 32.0)
+                    :color (aqua-color (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0))))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        if let Value::Map(map) = &result {
+            let shader_type = map
+                .get("__shader_type")
+                .expect("hslider with aqua-color material should have __shader_type");
+            if let Value::String(name) = &*shader_type.borrow() {
+                assert!(
+                    sdf_widget_def(name).is_some(),
+                    "shader '{}' should be registered",
+                    name
+                );
+            } else {
+                panic!("__shader_type should be a string");
+            }
+        } else {
+            panic!("hslider should return a map");
+        }
+    }
+
+    #[test]
+    fn hslider_material_compiles_and_sets_shader_type() {
+        use crate::widget_render::sdf_widget::sdf_widget_def;
+
+        let mut rt = Runtime::new();
+        let result = rt
+            .eval_str(
+                r#"
+                (hslider :min 0 :max 1 :value 0.5
+                  :material (material :color :accent))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        // The widget should have __shader_type set
+        if let Value::Map(map) = &result {
+            let shader_type = map
+                .get("__shader_type")
+                .expect("hslider with :material should have __shader_type");
+            if let Value::String(name) = &*shader_type.borrow() {
+                // The compiled SDF widget should be registered
+                assert!(
+                    sdf_widget_def(name).is_some(),
+                    "shader '{}' should be registered as SDF widget",
+                    name
+                );
+            } else {
+                panic!("__shader_type should be a string");
+            }
+        } else {
+            panic!("hslider should return a map");
+        }
+    }
+
+    #[test]
+    fn vslider_material_shader_output_simple() {
+        use crate::widget_render::sdf_widget::sdf_widget_def;
+
+        let mut rt = Runtime::new();
+        // Test with simple color to check fill geometry
+        let result = rt
+            .eval_str(r#"(vslider :min 0 :max 1 :value 0.5 :material (material :color (rgba y 0 0 1)))"#)
+            .unwrap()
+            .unwrap();
+
+        if let Value::Map(map) = &result {
+            if let Some(st) = map.get("__shader_type") {
+                if let Value::String(name) = &*st.borrow() {
+                    let def = sdf_widget_def(name).unwrap();
+                    eprintln!("=== vslider fill-relative shader ===");
+                    eprintln!("shader:\n{}", def.shader_source);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vslider_material_includes_origin_t_state() {
+        use crate::widget_render::sdf_widget::sdf_widget_def;
+
+        let mut rt = Runtime::new();
+        let result = rt
+            .eval_str(
+                r#"
+                (vslider :min 0 :max 100 :value 50 :origin 25
+                  :material (material :color :accent))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        if let Value::Map(map) = &result {
+            let shader_type = map
+                .get("__shader_type")
+                .expect("vslider with :material should have __shader_type");
+            if let Value::String(name) = &*shader_type.borrow() {
+                assert!(
+                    sdf_widget_def(name).is_some(),
+                    "shader '{}' should be registered",
+                    name
+                );
+            } else {
+                panic!("__shader_type should be a string");
+            }
+            // origin_t prop should still be set (25/100 = 0.25)
+            let origin_prop = map
+                .get("shader-state-origin_t")
+                .expect("vslider should have origin_t prop");
+            if let Value::Number(n) = &*origin_prop.borrow() {
+                assert!(
+                    (*n - 0.25).abs() < 0.001,
+                    "origin_t should be 0.25, got {}",
+                    n
+                );
+            }
+        } else {
+            panic!("vslider should return a map");
+        }
+    }
+
+    #[test]
+    fn slider_material_caches_identical_expressions() {
+        let mut rt = Runtime::new();
+        // Compile two sliders with the same material
+        let r1 = rt
+            .eval_str(r#"(hslider :material (material :color :accent))"#)
+            .unwrap()
+            .unwrap();
+        let r2 = rt
+            .eval_str(r#"(hslider :material (material :color :accent))"#)
+            .unwrap()
+            .unwrap();
+
+        let name1 = if let Value::Map(m) = &r1 {
+            if let Value::String(s) = &*m.get("__shader_type").unwrap().borrow() {
+                s.clone()
+            } else {
+                panic!()
+            }
+        } else {
+            panic!()
+        };
+        let name2 = if let Value::Map(m) = &r2 {
+            if let Value::String(s) = &*m.get("__shader_type").unwrap().borrow() {
+                s.clone()
+            } else {
+                panic!()
+            }
+        } else {
+            panic!()
+        };
+
+        assert_eq!(name1, name2, "identical materials should produce the same shader name");
     }

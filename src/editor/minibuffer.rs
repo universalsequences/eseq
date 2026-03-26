@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{Editor, MinibufferMode, filter_candidates};
+use super::{Editor, MinibufferMode, SearchDirection, filter_candidates};
 
 impl Editor {
     pub(super) fn handle_minibuffer_key(&mut self, key: KeyEvent) -> bool {
@@ -193,6 +193,41 @@ impl Editor {
                     self.minibuffer_input = Some(MinibufferMode::FindFile { input, selected });
                 }
             },
+            MinibufferMode::Search { mut state } => match key.code {
+                KeyCode::Esc => {
+                    self.active_buffer_mut().cursor = state.origin;
+                    self.minibuffer = None;
+                    self.sync_text_horizontal_scroll_to_viewport();
+                }
+                KeyCode::Enter => {
+                    self.minibuffer = None;
+                    return true;
+                }
+                KeyCode::Backspace => {
+                    state.input.pop();
+                    self.apply_search_state(&mut state);
+                    self.minibuffer_input = Some(MinibufferMode::Search { state });
+                }
+                KeyCode::Char('s') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.repeat_search(&mut state, SearchDirection::Forward);
+                    self.minibuffer_input = Some(MinibufferMode::Search { state });
+                }
+                KeyCode::Char('r') if key.modifiers == KeyModifiers::CONTROL => {
+                    self.repeat_search(&mut state, SearchDirection::Backward);
+                    self.minibuffer_input = Some(MinibufferMode::Search { state });
+                }
+                KeyCode::Char(c)
+                    if key.modifiers == KeyModifiers::NONE
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    state.input.push(c);
+                    self.apply_search_state(&mut state);
+                    self.minibuffer_input = Some(MinibufferMode::Search { state });
+                }
+                _ => {
+                    self.minibuffer_input = Some(MinibufferMode::Search { state });
+                }
+            },
         }
         self.mark_needs_redraw();
         true
@@ -265,6 +300,15 @@ impl Editor {
                 } else {
                     Some(format!("Find file: {input}  [{hint}]"))
                 }
+            }
+            Some(MinibufferMode::Search { state }) => {
+                let prefix = match (state.direction, state.failed) {
+                    (SearchDirection::Forward, false) => "I-search",
+                    (SearchDirection::Backward, false) => "I-search backward",
+                    (SearchDirection::Forward, true) => "Failing I-search",
+                    (SearchDirection::Backward, true) => "Failing I-search backward",
+                };
+                Some(format!("{prefix}: {}", state.input))
             }
             None => None,
         }

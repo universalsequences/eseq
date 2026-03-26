@@ -920,6 +920,17 @@ impl Compiler {
                     arity += 1;
                     idx += 2;
                 }
+                // Auto-quote :material and :shader values (SDF shader expressions)
+                Some(Expression::Keyword(key)) if key == "material" || key == "shader" => {
+                    let kw_idx = self.use_string_constant(key);
+                    self.emit(OpCode::PushKeyword(kw_idx));
+                    arity += 1;
+                    if let Some(val) = list.get(idx + 1) {
+                        self.compile_quoted_expression(val)?;
+                        arity += 1;
+                    }
+                    idx += 2;
+                }
                 Some(expr) => {
                     self.compile_expression(expr)?;
                     arity += 1;
@@ -1438,7 +1449,16 @@ impl Compiler {
         let op = list.first();
 
         if let Some(op) = op {
+            // Auto-quote the value following :material or :shader keywords,
+            // since these contain SDF shader expressions (with variables like
+            // value_t, x, y) that must not be evaluated at runtime.
+            let mut quote_next = false;
             for (i, elem) in list.iter().skip(1).enumerate() {
+                if quote_next {
+                    self.compile_quoted_expression(elem)?;
+                    quote_next = false;
+                    continue;
+                }
                 match elem {
                     Expression::Number(c) => {
                         let constant_idx = self.use_constant(*c);
@@ -1460,6 +1480,9 @@ impl Compiler {
                     Expression::Keyword(k) => {
                         let idx = self.use_string_constant(k);
                         self.emit(OpCode::PushKeyword(idx));
+                        if k == "material" || k == "shader" {
+                            quote_next = true;
+                        }
                     }
                     Expression::QuoteSymbol(s) => {
                         let idx = self.use_string_constant(s);

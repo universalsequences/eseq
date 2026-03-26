@@ -1,6 +1,25 @@
 pub struct Parser {
     text: String,
     pos: usize,
+    #[cfg(test)]
+    profile: std::cell::RefCell<ParserProfile>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Default)]
+pub struct ParserProfile {
+    pub input_bytes: usize,
+    pub peek_calls: usize,
+    pub next_calls: usize,
+    pub peek_nth_calls: usize,
+    pub estimated_char_visits: usize,
+    pub parse_text_calls: usize,
+    pub skip_whitespace_loops: usize,
+    pub parse_symbol_calls: usize,
+    pub parse_number_calls: usize,
+    pub parse_string_calls: usize,
+    pub comments_skipped: usize,
+    pub tokens_emitted: usize,
 }
 
 #[derive(Debug)]
@@ -30,35 +49,74 @@ pub enum Token {
 
 impl Parser {
     pub fn new(text: String) -> Self {
-        Parser { text, pos: 0 }
+        #[cfg(test)]
+        let input_bytes = text.len();
+        Parser {
+            text,
+            pos: 0,
+            #[cfg(test)]
+            profile: std::cell::RefCell::new(ParserProfile {
+                input_bytes,
+                ..ParserProfile::default()
+            }),
+        }
     }
 
-    fn peek(&self) -> Option<char> {
-        self.text.chars().nth(self.pos)
+    fn peek(&self) -> Option<u8> {
+        #[cfg(test)]
+        {
+            let mut profile = self.profile.borrow_mut();
+            profile.peek_calls += 1;
+            profile.estimated_char_visits += 1;
+        }
+        self.text.as_bytes().get(self.pos).copied()
     }
 
-    fn next(&mut self) -> Option<char> {
+    fn next(&mut self) -> Option<u8> {
         if self.pos >= self.text.len() {
             return None;
         }
-        let next = self.text.chars().nth(self.pos);
+        #[cfg(test)]
+        {
+            let mut profile = self.profile.borrow_mut();
+            profile.next_calls += 1;
+            profile.estimated_char_visits += 1;
+        }
+        let next = self.text.as_bytes().get(self.pos).copied();
         self.pos += 1;
         next
     }
 
-    fn peek_nth(&self, offset: usize) -> Option<char> {
-        self.text.chars().nth(self.pos + offset)
+    fn peek_nth(&self, offset: usize) -> Option<u8> {
+        #[cfg(test)]
+        {
+            let mut profile = self.profile.borrow_mut();
+            profile.peek_nth_calls += 1;
+            profile.estimated_char_visits += 1;
+        }
+        self.text.as_bytes().get(self.pos + offset).copied()
+    }
+
+    fn advance_char(&mut self) -> Option<char> {
+        let rest = self.text.get(self.pos..)?;
+        let ch = rest.chars().next()?;
+        self.pos += ch.len_utf8();
+        Some(ch)
     }
 
     fn parse_text(
         &mut self,
         stop_at_whitespace: bool,
-        stop_at_char: Option<char>,
+        stop_at_char: Option<u8>,
         is_numeric: bool,
     ) -> Result<String, ParserError> {
-        let mut str = String::new();
+        #[cfg(test)]
+        {
+            self.profile.borrow_mut().parse_text_calls += 1;
+        }
+        let start = self.pos;
         while let Some(ch) = self.peek() {
-            if stop_at_whitespace && ch.is_whitespace() {
+            if stop_at_whitespace && ch.is_ascii_whitespace() {
                 break;
             }
             if let Some(stop) = stop_at_char
@@ -66,39 +124,58 @@ impl Parser {
             {
                 break;
             }
-            if is_numeric && !ch.is_numeric() {
+            if is_numeric && !ch.is_ascii_digit() {
                 break;
             }
-            str.push(ch);
-            self.next();
+            if ch.is_ascii() {
+                self.next();
+            } else {
+                self.advance_char();
+            }
         }
-        Ok(str)
+        Ok(self.text[start..self.pos].to_string())
     }
 
     fn skip_whitespace(&mut self) {
         while let Some(ch) = self.peek()
-            && ch.is_whitespace()
+            && ch.is_ascii_whitespace()
         {
+            #[cfg(test)]
+            {
+                self.profile.borrow_mut().skip_whitespace_loops += 1;
+            }
             self.next();
         }
     }
 
     fn parse_symbol(&mut self) -> Result<Token, ParserError> {
-        let mut text = String::new();
+        #[cfg(test)]
+        {
+            self.profile.borrow_mut().parse_symbol_calls += 1;
+        }
+        let start = self.pos;
         while let Some(ch) = self.peek() {
-            if ch.is_whitespace() || matches!(ch, '(' | ')' | '|' | '\'' | '\"' | '`' | ',') {
+            if ch.is_ascii_whitespace()
+                || matches!(ch, b'(' | b')' | b'|' | b'\'' | b'"' | b'`' | b',')
+            {
                 break;
             }
-            text.push(ch);
-            self.next();
+            if ch.is_ascii() {
+                self.next();
+            } else {
+                self.advance_char();
+            }
         }
-        Ok(Token::Symbol(text))
+        Ok(Token::Symbol(self.text[start..self.pos].to_string()))
     }
 
     fn parse_number(&mut self) -> Result<Token, ParserError> {
-        let mut text = String::new();
-        if matches!(self.peek(), Some('-')) {
-            text.push('-');
+        #[cfg(test)]
+        {
+            self.profile.borrow_mut().parse_number_calls += 1;
+        }
+        let start = self.pos;
+        if matches!(self.peek(), Some(b'-')) {
             self.next();
         }
         let mut saw_digit = false;
@@ -106,11 +183,9 @@ impl Parser {
         while let Some(ch) = self.peek() {
             if ch.is_ascii_digit() {
                 saw_digit = true;
-                text.push(ch);
                 self.next();
-            } else if ch == '.' && !saw_dot {
+            } else if ch == b'.' && !saw_dot {
                 saw_dot = true;
-                text.push(ch);
                 self.next();
             } else {
                 break;
@@ -119,13 +194,18 @@ impl Parser {
         if !saw_digit {
             return Err(ParserError::ErrorParsingNumber);
         }
+        let text = &self.text[start..self.pos];
         Ok(Token::Number(
             text.parse().map_err(|_| ParserError::ErrorParsingNumber)?,
         ))
     }
 
     fn parse_string(&mut self) -> Result<Token, ParserError> {
-        let text = self.parse_text(false, Some('\"'), false)?;
+        #[cfg(test)]
+        {
+            self.profile.borrow_mut().parse_string_calls += 1;
+        }
+        let text = self.parse_text(false, Some(b'"'), false)?;
         Ok(Token::String(text))
     }
 
@@ -136,42 +216,50 @@ impl Parser {
             self.skip_whitespace();
             if let Some(next) = self.peek() {
                 match next {
-                    '(' => {
+                    b'(' => {
                         tokens.push(Token::LeftParen);
                         self.next();
                     }
-                    ')' => {
+                    b')' => {
                         tokens.push(Token::RightParen);
                         self.next();
                     }
-                    '|' => {
+                    b'|' => {
                         tokens.push(Token::Pipe);
                         self.next();
                     }
-                    '\'' => {
+                    b'\'' => {
                         tokens.push(Token::Quote);
                         self.next();
                     }
-                    '`' => {
+                    b'`' => {
                         tokens.push(Token::Backtick);
                         self.next();
                     }
-                    ',' => {
+                    b',' => {
                         tokens.push(Token::Comma);
                         self.next();
                     }
-                    '\"' => {
+                    b'"' => {
                         self.next();
                         tokens.push(self.parse_string()?);
                         self.next();
                     }
-                    ';' => {
+                    b';' => {
+                        #[cfg(test)]
+                        {
+                            self.profile.borrow_mut().comments_skipped += 1;
+                        }
                         // Skip comment to end of line
-                        while matches!(self.peek(), Some(c) if c != '\n') {
-                            self.next();
+                        while matches!(self.peek(), Some(c) if c != b'\n') {
+                            if self.peek().is_some_and(|c| c.is_ascii()) {
+                                self.next();
+                            } else {
+                                self.advance_char();
+                            }
                         }
                     }
-                    ':' => {
+                    b':' => {
                         self.next(); // consume ':'
                         let Token::Symbol(name) = self.parse_symbol()? else {
                             unreachable!()
@@ -179,23 +267,32 @@ impl Parser {
                         tokens.push(Token::Keyword(name));
                     }
                     _ if next.is_ascii_digit()
-                        || (next == '-'
+                        || (next == b'-'
                             && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit()))
-                        || (next == '.'
+                        || (next == b'.'
                             && matches!(self.peek_nth(1), Some(ch) if ch.is_ascii_digit())) =>
                     {
                         tokens.push(self.parse_number()?);
                     }
-                    _ if next.is_alphabetic() || next.is_ascii_punctuation() => {
+                    _ if next.is_ascii_alphabetic() || next.is_ascii_punctuation() => {
                         tokens.push(self.parse_symbol()?);
                     }
                     _ => {
-                        self.next();
+                        self.advance_char();
                     } // skip unknown chars (e.g. unicode outside strings)
                 }
             }
         }
+        #[cfg(test)]
+        {
+            self.profile.borrow_mut().tokens_emitted = tokens.len();
+        }
         Ok(tokens)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn profile(&self) -> ParserProfile {
+        self.profile.borrow().clone()
     }
 }
 

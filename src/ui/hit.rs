@@ -101,6 +101,21 @@ pub fn max_extent(node: &LayoutNode, aspect: f32) -> (u16, u16) {
         })
 }
 
+/// Like `max_extent` but only counts nodes whose left edge (col) starts
+/// within `max_col`. Nodes positioned entirely beyond `max_col` are clipped
+/// siblings in an overflowing container and should not inflate the scroll range.
+pub fn max_extent_bounded(node: &LayoutNode, aspect: f32, max_col: f32) -> (u16, u16) {
+    let own_cols = (node.rect.col + node.rect.width).ceil() as u16;
+    let own_rows = ((node.rect.row + node.rect.height) / aspect).ceil() as u16;
+    node.children
+        .iter()
+        .filter(|child| child.rect.col < max_col)
+        .fold((own_cols, own_rows), |(c, r), child| {
+            let (cc, cr) = max_extent_bounded(child, aspect, max_col);
+            (c.max(cc), r.max(cr))
+        })
+}
+
 /// Identity key for hit comparison. Uses `f32::to_bits()` so we get
 /// exact equality without requiring `Eq` on f32.
 fn hit_key(node: &LayoutNode) -> (String, u32, u32, u32, u32) {

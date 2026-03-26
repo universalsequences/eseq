@@ -1848,23 +1848,38 @@ impl Editor {
     }
 
     /// Maximum horizontal scroll: how far right content extends past the viewport.
+    ///
+    /// For widget layouts, we look at each direct child of the root layout node
+    /// individually. Each child's right edge (col + width) in the constrained
+    /// layout tells us how far that row extends. We take the max across all
+    /// direct children. This avoids counting deep descendant overflow (e.g. an
+    /// h-stack with 10 clipped boxes) while still detecting when a single row
+    /// like a grid genuinely extends past the viewport.
     fn max_horizontal_scroll(&self, viewport_width: u16) -> u16 {
         let vp = viewport_width as usize;
-        // Only count widget width when this buffer actually owns visible UI.
-        // Runtime layout is global and may still reflect another buffer/tree.
-        let layout_width = if self.active_buffer().view_mode != ViewMode::TextOnly
+        let view_mode = self.active_buffer().view_mode;
+
+        // Widget layout extent: max right edge of root's direct children.
+        let layout_width = if view_mode != ViewMode::TextOnly
             && self.active_buffer().widget_tree.is_some()
         {
+            // Use bounded extent: only count nodes whose left edge starts
+            // within the viewport. This prevents h-stacks with many clipped
+            // children (e.g. 10 effect boxes) from inflating the scroll range,
+            // while still detecting legitimate overflow (e.g. a grid whose
+            // visible cells extend past the viewport).
+            let aspect = self.runtime.layout_aspect();
             self.runtime
                 .current_layout
                 .as_ref()
-                .map(|l| max_layout_right_edge(l) as usize)
+                .map(|l| crate::ui::hit::max_extent_bounded(l, aspect, vp as f32).0 as usize)
                 .unwrap_or(0)
         } else {
             0
         };
-        // Include text line width only if text is visible
-        let max_line = if self.active_buffer().view_mode == ViewMode::UiOnly {
+
+        // Text line width (only when text is visible).
+        let max_line = if view_mode == ViewMode::UiOnly {
             0
         } else {
             self.active_buffer()
@@ -1874,8 +1889,11 @@ impl Editor {
                 .max()
                 .unwrap_or(0)
         };
+
         let content_width = layout_width.max(max_line);
-        content_width.saturating_sub(vp) as u16
+        let result = content_width.saturating_sub(vp) as u16;
+        eprintln!("[MAX-H-SCROLL] view_mode={view_mode:?} layout_width={layout_width} max_line={max_line} vp={vp} result={result}");
+        result
     }
 
     pub fn handle_touchpad_magnify(
@@ -2108,6 +2126,9 @@ impl Editor {
             let buffer = &mut self.buffers[buffer_idx];
             buffer.widget_tree = tree.clone();
             buffer.widget_tree_source = source_buffer_id;
+            if tree.is_some() {
+                buffer.view_mode = ViewMode::UiOnly;
+            }
         }
         if is_active {
             match tree {
@@ -2142,6 +2163,7 @@ impl Editor {
             leaf.layout_revision = layout_revision;
             leaf.cached_inactive_frame = None;
         }
+        self.mark_needs_redraw();
     }
 
     fn handle_completion_key(&mut self, key: KeyEvent) -> bool {
@@ -2488,6 +2510,7 @@ impl Editor {
                     let buffer = self.active_buffer_mut();
                     buffer.widget_tree = None;
                     buffer.widget_tree_source = None;
+                    buffer.view_mode = ViewMode::TextOnly;
                     self.runtime.clear_layout_effects();
                     self.active_leaf_mut().focused_widget_id = None;
                 }
@@ -2496,6 +2519,7 @@ impl Editor {
                     let buffer = self.active_buffer_mut();
                     buffer.widget_tree = Some(tree.clone());
                     buffer.widget_tree_source = Some(source_id);
+                    buffer.view_mode = ViewMode::UiOnly;
                     self.runtime.set_widget_tree(tree);
                     self.auto_focus_first_widget();
                 }
@@ -2517,6 +2541,7 @@ impl Editor {
                 let buffer = &mut self.buffers[buffer_idx];
                 buffer.widget_tree = Some(pending.tree);
                 buffer.widget_tree_source = pending.source_buffer_id;
+                buffer.view_mode = ViewMode::UiOnly;
             } else {
                 self.apply_widget_tree_to_buffer(
                     buffer_idx,
@@ -2746,10 +2771,6 @@ impl CompletionState {
     }
 }
 
-/// Find the rightmost edge (col + width) of any node in the layout tree.
-fn max_layout_right_edge(node: &crate::layout::LayoutNode) -> u16 {
-    crate::ui::hit::max_extent(node, 1.0).0
-}
 
 fn normalize_region(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize)) {
     if a < b { (a, b) } else { (b, a) }

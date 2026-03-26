@@ -497,6 +497,50 @@ impl Buffer {
         }
     }
 
+    pub fn find_forward(&self, needle: &str, start: (usize, usize)) -> Option<(usize, usize)> {
+        if needle.is_empty() {
+            return Some(start);
+        }
+        let haystack = self.text();
+        let start_offset = self.position_to_offset(start);
+        let found = haystack[start_offset..].find(needle)?;
+        Some(self.offset_to_position(start_offset + found))
+    }
+
+    pub fn find_backward(&self, needle: &str, start: (usize, usize)) -> Option<(usize, usize)> {
+        if needle.is_empty() {
+            return Some(start);
+        }
+        let haystack = self.text();
+        let start_offset = self.position_to_offset(start);
+        let found = haystack[..start_offset].rfind(needle)?;
+        Some(self.offset_to_position(found))
+    }
+
+    fn position_to_offset(&self, pos: (usize, usize)) -> usize {
+        let row = pos.0.min(self.lines.len().saturating_sub(1));
+        let mut offset = 0;
+        for line in &self.lines[..row] {
+            offset += line.len() + 1;
+        }
+        let line = &self.lines[row];
+        offset + Self::char_to_byte_idx(line, pos.1.min(Self::line_len(line)))
+    }
+
+    fn offset_to_position(&self, offset: usize) -> (usize, usize) {
+        let mut remaining = offset;
+        for (row, line) in self.lines.iter().enumerate() {
+            if remaining <= line.len() {
+                return (row, Self::byte_to_char_idx(line, remaining));
+            }
+            remaining = remaining.saturating_sub(line.len() + 1);
+        }
+
+        let row = self.lines.len().saturating_sub(1);
+        let col = self.lines.get(row).map(|line| Self::line_len(line)).unwrap_or(0);
+        (row, col)
+    }
+
     fn line_len(line: &str) -> usize {
         line.chars().count()
     }

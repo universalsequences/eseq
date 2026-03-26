@@ -5,7 +5,7 @@ use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent
 #[cfg(target_os = "macos")]
 use super::{MetalPrimitive, WidgetViewport};
 use crate::layout::{
-    Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num, shrink_constraints,
+    Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num, shrink_constraints_xy,
 };
 use crate::layout::Rect;
 use crate::vm::Value;
@@ -72,7 +72,8 @@ impl WidgetDefinition for BoxWidget {
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
-        let inner = shrink_constraints(constraints, padding);
+        let pad_y = padding / constraints.aspect;
+        let inner = shrink_constraints_xy(constraints, padding, pad_y);
         let child_size = children
             .first()
             .and_then(|child| measure_child(child, inner));
@@ -88,8 +89,8 @@ impl WidgetDefinition for BoxWidget {
                 .map(f64_to_f32)
                 .unwrap_or_else(|| {
                     child_size
-                        .map(|size| size.height + padding * 2.0)
-                        .unwrap_or(padding * 2.0)
+                        .map(|size| size.height + pad_y * 2.0)
+                        .unwrap_or(pad_y * 2.0)
                 }),
         })
     }
@@ -99,16 +100,18 @@ impl WidgetDefinition for BoxWidget {
         node: &Value,
         area: Rect,
         children: &[Value],
+        aspect: f32,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
+        let pad_y = padding / aspect;
         let fallback = resolve_align(node, "align", Align::Stretch);
         let h_align = resolve_align(node, "h-align", fallback);
         let v_align = resolve_align(node, "v-align", fallback);
 
         let inner_width = (area.width - padding * 2.0).max(0.0);
-        let inner_height = (area.height - padding * 2.0).max(0.0);
+        let inner_height = (area.height - pad_y * 2.0).max(0.0);
 
         children
             .first()
@@ -118,7 +121,7 @@ impl WidgetDefinition for BoxWidget {
                     return build_child(
                         child,
                         Rect {
-                            row: area.row + padding,
+                            row: area.row + pad_y,
                             col: area.col + padding,
                             width: inner_width,
                             height: inner_height,
@@ -155,9 +158,9 @@ impl WidgetDefinition for BoxWidget {
                     Align::End => area.col + padding + inner_width - child_width,
                 };
                 let row = match v_align {
-                    Align::Start | Align::Stretch | Align::Baseline => area.row + padding,
-                    Align::Center => area.row + padding + (inner_height - child_height) / 2.0,
-                    Align::End => area.row + padding + inner_height - child_height,
+                    Align::Start | Align::Stretch | Align::Baseline => area.row + pad_y,
+                    Align::Center => area.row + pad_y + (inner_height - child_height) / 2.0,
+                    Align::End => area.row + pad_y + inner_height - child_height,
                 };
 
                 build_child(

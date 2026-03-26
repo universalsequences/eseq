@@ -125,6 +125,24 @@ impl<'a> LayoutEngine<'a> {
         Some(layout)
     }
 
+    /// Measure the natural (unconstrained) content width of a widget tree.
+    /// Used for horizontal scroll bounds — if this exceeds the viewport, scrolling is needed.
+    pub fn natural_content_width(&self, tree: &Value) -> f32 {
+        self.measure(
+            tree,
+            Constraints {
+                min_width: 0.0,
+                max_width: f32::MAX,
+                min_height: 0.0,
+                max_height: f32::MAX,
+                aspect: self.aspect,
+            },
+            DEFAULT_FONT_SIZE,
+        )
+        .map(|s| s.width)
+        .unwrap_or(0.0)
+    }
+
     fn measure(
         &self,
         node: &Value,
@@ -224,9 +242,11 @@ impl<'a> LayoutEngine<'a> {
                     node,
                     area,
                     children,
-                    &mut |child, mut child_constraints| {
-                        child_constraints.aspect = self.aspect;
-                        self.measure(child, child_constraints, font_size)
+                    self.aspect,
+                    &mut |child, child_constraints| {
+                        let mut cc = child_constraints;
+                        cc.aspect = self.aspect;
+                        self.measure(child, cc, font_size)
                     },
                     &mut |child, rect| self.build_layout_node(child, rect, font_size),
                 )
@@ -477,12 +497,13 @@ fn clamp_size(size: Size, constraints: Constraints) -> Size {
     }
 }
 
-pub(crate) fn shrink_constraints(constraints: Constraints, padding: f32) -> Constraints {
+/// Shrink constraints by separate x and y padding (for aspect-corrected padding).
+pub(crate) fn shrink_constraints_xy(constraints: Constraints, pad_x: f32, pad_y: f32) -> Constraints {
     Constraints {
         min_width: 0.0,
-        max_width: (constraints.max_width - padding * 2.0).max(0.0),
+        max_width: (constraints.max_width - pad_x * 2.0).max(0.0),
         min_height: 0.0,
-        max_height: (constraints.max_height - padding * 2.0).max(0.0),
+        max_height: (constraints.max_height - pad_y * 2.0).max(0.0),
         aspect: constraints.aspect,
     }
 }
@@ -598,5 +619,248 @@ fn measure_builtin_leaf(node: &Value, widget_type: &str, aspect: f32) -> Size {
             width: 0.0,
             height: 0.0,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::widgets::build_widget;
+    use crate::vm::Value;
+
+    /// Helper: keyword value
+    fn kw(s: &str) -> Value {
+        Value::Keyword(s.to_string())
+    }
+
+    /// Helper: number value
+    fn num(n: f64) -> Value {
+        Value::Number(n)
+    }
+
+    /// Helper: string value
+    fn s(text: &str) -> Value {
+        Value::String(text.to_string())
+    }
+
+    /// Build a label widget: (label "text" :width w)
+    fn label(text: &str, width: Option<f64>) -> Value {
+        let mut args = vec![s(text)];
+        if let Some(w) = width {
+            args.push(kw("width"));
+            args.push(num(w));
+        }
+        build_widget("label", args)
+    }
+
+    /// Build a hslider: (hslider :min 0 :max 1 :value 0.5)
+    fn hslider() -> Value {
+        build_widget("hslider", vec![kw("min"), num(0.0), kw("max"), num(1.0), kw("value"), num(0.5)])
+    }
+
+    /// Build a vslider: (vslider :height h)
+    fn vslider(height: f64) -> Value {
+        build_widget("vslider", vec![kw("height"), num(height)])
+    }
+
+    /// Build a box: (box :width w :height h children...)
+    fn bx(width: Option<f64>, height: Option<f64>, children: Vec<Value>) -> Value {
+        let mut args = Vec::new();
+        if let Some(w) = width {
+            args.push(kw("width"));
+            args.push(num(w));
+        }
+        if let Some(h) = height {
+            args.push(kw("height"));
+            args.push(num(h));
+        }
+        for child in children {
+            args.push(child);
+        }
+        build_widget("box", args)
+    }
+
+    /// Build a v-stack: (v-stack :padding p :gap g children...)
+    fn vstack(padding: f64, gap: f64, children: Vec<Value>) -> Value {
+        let mut args = vec![kw("padding"), num(padding), kw("gap"), num(gap)];
+        for child in children {
+            args.push(child);
+        }
+        build_widget("v-stack", args)
+    }
+
+    /// Build a h-stack: (h-stack :gap g children...)
+    fn hstack(gap: f64, children: Vec<Value>) -> Value {
+        let mut args = vec![kw("gap"), num(gap)];
+        for child in children {
+            args.push(child);
+        }
+        build_widget("h-stack", args)
+    }
+
+    /// Build a grid: (grid :cols c :col-width w children...)
+    fn grid(cols: f64, col_width: f64, children: Vec<Value>) -> Value {
+        let mut args = vec![kw("cols"), num(cols), kw("col-width"), num(col_width)];
+        for child in children {
+            args.push(child);
+        }
+        build_widget("grid", args)
+    }
+
+    // ── Tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn natural_width_simple_vstack_fits_viewport() {
+        // A v-stack with children narrower than the 80-col viewport.
+        let tree = vstack(1.0, 1.0, vec![
+            label("hello", Some(10.0)),
+            hslider(),
+        ]);
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let natural = engine.natural_content_width(&tree);
+        // hslider default width=16, plus vstack padding 1*2 = 18
+        assert_eq!(natural, 18.0, "simple layout should fit in viewport");
+        // max_scroll should be 0
+        assert!(natural <= 80.0, "natural width should not exceed viewport");
+    }
+
+    #[test]
+    fn natural_width_grid_16_cols() {
+        // Grid with 16 columns, col-width 3 — mirrors the step sequencer grid
+        let children: Vec<Value> = (0..16)
+            .map(|i| vstack(0.0, 0.5, vec![
+                vslider(4.0),
+                bx(Some(3.0), Some(1.5), vec![]),
+                label(&format!("{}", i + 1), None),
+            ]))
+            .collect();
+        let tree = vstack(1.0, 1.0, vec![
+            grid(16.0, 3.0, children),
+        ]);
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let natural = engine.natural_content_width(&tree);
+        // grid: 16 * 3 = 48, + vstack padding 2 = 50
+        assert_eq!(natural, 50.0, "grid 16x3 + padding should be 50");
+    }
+
+    #[test]
+    fn natural_width_sequencer_layout_fits_wide_viewport() {
+        // Mirrors the full sequencer layout from metal-seq-grid.lisp
+        // at a wide viewport (content should fit → no scroll needed)
+        let transport = hstack(1.0, vec![
+            bx(Some(4.0), Some(3.0), vec![]),  // play button
+            bx(Some(40.0), Some(3.0), vec![    // LED panel
+                label("1 | 4 | 4  BPM 120", Some(32.0)),
+            ]),
+        ]);
+        let param_tabs = hstack(0.5, vec![
+            bx(Some(8.0), Some(2.0), vec![label("vel", None)]),
+            bx(Some(8.0), Some(2.0), vec![label("dur", None)]),
+            bx(Some(8.0), Some(2.0), vec![label("xpose", None)]),
+            bx(Some(8.0), Some(2.0), vec![label("pan", None)]),
+        ]);
+        let step_grid = grid(16.0, 3.0, (0..16).map(|i| {
+            vstack(0.0, 0.5, vec![
+                vslider(4.0),
+                bx(Some(3.0), Some(1.5), vec![]),
+                label(&format!("{}", i + 1), None),
+            ])
+        }).collect());
+        let mixer_rows: Vec<Value> = ["Kick", "Snare", "Hat"]
+            .iter()
+            .map(|name| hstack(1.0, vec![
+                bx(Some(14.0), Some(1.0), vec![label(name, None)]),
+                bx(None, None, vec![hslider()]),  // flex=1 in real code, natural = hslider width
+            ]))
+            .collect();
+        let mixer = vstack(0.0, 0.5, mixer_rows);
+        let effects = hstack(1.0, vec![
+            bx(Some(20.0), None, vec![
+                vstack(0.0, 0.5, vec![
+                    label("Filter", None),
+                    hstack(0.5, vec![label("cutoff", Some(8.0)), bx(Some(10.0), None, vec![hslider()])]),
+                ]),
+            ]),
+            bx(Some(20.0), None, vec![
+                vstack(0.0, 0.5, vec![
+                    label("Delay", None),
+                    hstack(0.5, vec![label("wet", Some(8.0)), bx(Some(10.0), None, vec![hslider()])]),
+                ]),
+            ]),
+        ]);
+
+        let tree = vstack(1.0, 1.0, vec![
+            transport, param_tabs, step_grid, mixer, effects,
+        ]);
+
+        let engine = LayoutEngine::new(80, 60, 1.0);
+        let natural = engine.natural_content_width(&tree);
+
+        // The widest row should be the grid: 16*3=48, + padding 2 = 50
+        // Or transport: 4 + 40 + 1 gap = 45, + padding 2 = 47
+        // Or effects: 20 + 20 + 1 gap = 41, + padding 2 = 43
+        // Or param tabs: 8*4 + 0.5*3 gaps = 33.5, + padding 2 = 35.5
+        // Or mixer: 14 + 16 + 1 gap = 31, + padding 2 = 33
+        // So natural_width should be 50 (grid is widest)
+        assert_eq!(natural, 50.0, "natural width should be driven by the grid");
+        assert!(natural <= 80.0, "content should fit in 80-col viewport");
+    }
+
+    #[test]
+    fn natural_width_exceeds_narrow_viewport() {
+        // Same layout but in a narrow viewport — natural width > viewport → scroll needed
+        let step_grid = grid(16.0, 3.0, (0..16).map(|i| {
+            vstack(0.0, 0.5, vec![
+                vslider(4.0),
+                bx(Some(3.0), Some(1.5), vec![]),
+                label(&format!("{}", i + 1), None),
+            ])
+        }).collect());
+        let tree = vstack(1.0, 1.0, vec![step_grid]);
+
+        let engine = LayoutEngine::new(40, 24, 1.0);
+        let natural = engine.natural_content_width(&tree);
+
+        // grid: 48 + padding 2 = 50, viewport 40
+        assert_eq!(natural, 50.0, "natural width same regardless of viewport");
+        assert!(natural > 40.0, "content should exceed narrow viewport → scroll needed");
+    }
+
+    #[test]
+    fn natural_width_long_labels_do_not_inflate() {
+        // Labels with long text inside fixed-width boxes should NOT inflate natural width
+        // beyond what the layout structure specifies.
+        // (In TUI mode, label measures as char count if no explicit width)
+        let mixer_rows: Vec<Value> = [
+            "LS301-808ii-FC-Maraca-3-Extended-Name-Very-Long",
+            "_12'' Augustus Pablo - King Tubby Meets",
+        ].iter().map(|name| {
+            hstack(1.0, vec![
+                bx(Some(14.0), Some(1.0), vec![label(name, None)]),
+                bx(Some(20.0), None, vec![hslider()]),
+            ])
+        }).collect();
+        let tree = vstack(1.0, 0.5, mixer_rows);
+
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let natural = engine.natural_content_width(&tree);
+
+        // box widths: 14 + 20 + 1 gap = 35, + padding 2 = 37
+        // The long label text should NOT push beyond 37 because its box is fixed at 14
+        assert_eq!(natural, 37.0, "fixed-width boxes should contain long labels");
+    }
+
+    #[test]
+    fn natural_width_label_without_box_uses_text_width() {
+        // A bare label (not in a fixed-width box) SHOULD use its text width
+        let tree = vstack(0.0, 0.0, vec![
+            label("short", None),
+            label("a much longer label text here", None),
+        ]);
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let natural = engine.natural_content_width(&tree);
+        // In TUI mode (no TextMeasurer), label width = char count
+        // "a much longer label text here" = 29 chars
+        assert_eq!(natural, 29.0, "bare label should use text char count as width");
     }
 }

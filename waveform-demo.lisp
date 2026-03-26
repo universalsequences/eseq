@@ -53,11 +53,17 @@
 
 (effect
   (v-stack
-    
     (if sample
       (v-stack
-        :gap 2
-        (label "Waveform" :font-size 32)
+        :gap 0.5
+        (h-stack
+          :gap 2
+          :align :baseline
+          (label "Waveform" :font-size 24 :color :gray)
+          (label "form" :font-size 14 :color :primary)
+          (label "function" :font-size 14 :color :secondary)
+          )
+        
         (waveform
           :height 6
           :header-height 0.5
@@ -71,6 +77,6 @@
           :time-ruler (dict :mode :seconds)
           :on-action |event| (handle-waveform-action event)
           )
-        (hslider :min 0 :max 100 :value 50)
+       
         )
       (label "failed to load ./sample.wav"))))

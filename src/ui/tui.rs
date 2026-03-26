@@ -356,9 +356,9 @@ fn render_tile_in_area(
     show_status: bool,
 ) {
     let border_color = if is_active {
-        to_rcolor(crate::theme::PURPLE())
+        to_rcolor(crate::theme::BORDER_ACTIVE())
     } else {
-        to_rcolor(Color::DARK_GRAY)
+        to_rcolor(crate::theme::BORDER_INACTIVE())
     };
 
     // Determine layout: content + optional per-tile status

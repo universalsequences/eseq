@@ -71,6 +71,7 @@ impl WidgetDefinition for GridWidget {
         node: &Value,
         area: Rect,
         children: &[Value],
+        _aspect: f32,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
     ) -> Vec<LayoutNode> {

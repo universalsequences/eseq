@@ -309,6 +309,8 @@ struct WaveformInstance {
     int show_playhead;
     packed_float4 waveform_color;
     packed_float4 selection_color;
+    packed_float4 bg_color;
+    packed_float4 border_color;
 };
 
 struct WaveformVaryings {
@@ -324,6 +326,8 @@ struct WaveformVaryings {
     int show_playhead [[flat]];
     float4 waveform_color [[flat]];
     float4 selection_color [[flat]];
+    float4 bg_color [[flat]];
+    float4 border_color [[flat]];
 };
 
 vertex WaveformVaryings waveform_vert(
@@ -351,6 +355,8 @@ vertex WaveformVaryings waveform_vert(
     out.show_playhead = inst.show_playhead;
     out.waveform_color = inst.waveform_color;
     out.selection_color = inst.selection_color;
+    out.bg_color = inst.bg_color;
+    out.border_color = inst.border_color;
     return out;
 }
 
@@ -364,7 +370,7 @@ fragment float4 waveform_frag(
 
     float2 uv = in.uv;
     float2 content_uv = uv;
-    float3 rgb = float3(0.08, 0.08, 0.10);
+    float3 rgb = in.bg_color.rgb;
     float alpha = 0.0;
 
     bool has_selection = in.selection_end > in.selection_start + 0.001;
@@ -376,7 +382,8 @@ fragment float4 waveform_frag(
     }
 
     float center_line = 1.0 - smoothstep(0.0, 0.004, abs(content_uv.y - 0.5));
-    rgb = mix(rgb, float3(0.3, 0.3, 0.35), center_line * 0.20);
+    float3 center_rgb = mix(in.bg_color.rgb, in.border_color.rgb, 0.5);
+    rgb = mix(rgb, center_rgb, center_line * 0.20);
     alpha = max(alpha, center_line * 0.18);
 
     float boundary_width = max(fwidth(content_uv.x) * 0.9, 0.0015);
@@ -468,7 +475,7 @@ fragment float4 waveform_frag(
 
     float border = min(min(content_uv.x, 1.0 - content_uv.x), min(content_uv.y, 1.0 - content_uv.y));
     float border_mask = 1.0 - smoothstep(0.0, 0.004, border);
-    rgb = mix(rgb, float3(0.22, 0.22, 0.25), border_mask * 0.8);
+    rgb = mix(rgb, in.border_color.rgb, border_mask * 0.8);
     alpha = max(alpha, border_mask * 0.7);
 
     if (alpha < 0.001) {
@@ -509,6 +516,8 @@ fragment float4 waveform_frag(
         show_playhead: i32,
         waveform_color: [f32; 4],
         selection_color: [f32; 4],
+        bg_color: [f32; 4],
+        border_color: [f32; 4],
     }
 
     struct WaveformGpuResource {
@@ -830,6 +839,8 @@ fragment float4 waveform_frag(
                     show_playhead: if primitive.show_playhead { 1 } else { 0 },
                     waveform_color: primitive.waveform_color.to_rgba(),
                     selection_color: primitive.selection_color.to_rgba(),
+                    bg_color: theme::BG().to_rgba(),
+                    border_color: theme::BORDER_INACTIVE().to_rgba(),
                 };
                 let Some(instance_buffer) = (unsafe {
                     self.device.newBufferWithBytes_length_options(
@@ -1169,9 +1180,9 @@ fragment float4 waveform_frag(
                 // ── Thin pixel borders (drawn AFTER content, on top) ─────────
                 if has_multiple_tiles {
                     let border_color = if tile.is_active {
-                        theme::PURPLE()
+                        theme::BORDER_ACTIVE()
                     } else {
-                        Color::DARK_GRAY
+                        theme::BORDER_INACTIVE()
                     };
                     let bc = to_rgba(border_color);
                     let bv = |px, py| Vertex {

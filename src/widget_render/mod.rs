@@ -326,10 +326,11 @@ pub trait WidgetDefinition: Sync {
         node: &Value,
         area: Rect,
         children: &[Value],
+        aspect: f32,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
     ) -> Vec<LayoutNode> {
-        let _ = (node, area, children, measure_child, build_child);
+        let _ = (node, area, children, aspect, measure_child, build_child);
         vec![]
     }
     fn tui_render(&self, _props: &HashMap<String, Value>, _rect: Rect, _buf: &mut CellBuffer) {}

@@ -1,9 +1,10 @@
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::layout::LayoutNode;
+use crate::vm::Value;
 use crate::widget_render::{WidgetKeyEvent, handle_event, map_key_event};
 
-use super::Editor;
+use super::{Editor, key_str};
 
 impl Editor {
     pub(super) fn try_click_focusable_widget(
@@ -67,8 +68,54 @@ impl Editor {
                 self.activate_focused();
                 true
             }
-            _ => false,
+            _ => self.dispatch_focus_key(key),
         }
+    }
+
+    /// Dispatch a key event to the focused widget's :on-focus-key callback.
+    /// Returns true if the widget handled the key.
+    fn dispatch_focus_key(&mut self, key: KeyEvent) -> bool {
+        let Some(focused_id) = self.active_leaf().focused_widget_id else {
+            return false;
+        };
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return false;
+        };
+        let Some(node) = find_node_by_id(&layout, focused_id) else {
+            return false;
+        };
+        let Some(callback) = node.props.get("on-focus-key").cloned() else {
+            return false;
+        };
+        let key_arg = Value::String(key_str(key));
+        let text_arg = match key.code {
+            KeyCode::Char(c)
+                if key.modifiers == KeyModifiers::NONE
+                    || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                Value::String(c.to_string())
+            }
+            _ => Value::Bool(false),
+        };
+        let result = self.runtime.invoke(callback, vec![key_arg, text_arg]);
+        if let Some(status) = self.runtime.take_status_message() {
+            self.minibuffer = Some(status);
+        }
+        let handled = match result {
+            Ok(Some(Value::Bool(h))) => h,
+            Ok(Some(Value::Nil)) | Ok(None) => false,
+            Ok(Some(_)) => true,
+            Err(e) => {
+                self.minibuffer = Some(format!("Error: {e:?}"));
+                true
+            }
+        };
+        if handled {
+            self.refresh_runtime_side_effects();
+            self.sync_runtime_context();
+            self.mark_needs_redraw();
+        }
+        handled
     }
 
     pub(super) fn handle_focused_widget_key(&mut self, key: KeyEvent) -> bool {
@@ -123,21 +170,41 @@ impl Editor {
 
         let next_idx = match direction {
             KeyCode::Down | KeyCode::Right => {
-                if current_idx + 1 < focusable_nodes.len() {
-                    current_idx + 1
-                } else {
-                    0
-                }
+                (current_idx + 1).min(focusable_nodes.len() - 1)
             }
             KeyCode::Up | KeyCode::Left => {
-                if current_idx > 0 {
-                    current_idx - 1
-                } else {
-                    focusable_nodes.len() - 1
-                }
+                current_idx.saturating_sub(1)
             }
             _ => current_idx,
         };
+
+        // When already at the first focusable and scrolling up, keep scrolling
+        // the viewport toward the top so content above the first widget is visible.
+        if next_idx == current_idx && current_idx == 0 && matches!(direction, KeyCode::Up | KeyCode::Left) {
+            let leaf = self.active_leaf_mut();
+            leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_sub(3);
+            self.mark_needs_redraw();
+            return;
+        }
+
+        // Similarly, when at the last focusable and scrolling down, keep scrolling
+        // the viewport so content below the last widget is visible.
+        if next_idx == current_idx && current_idx == focusable_nodes.len() - 1 && matches!(direction, KeyCode::Down | KeyCode::Right) {
+            let max_scroll = self
+                .runtime
+                .current_layout
+                .as_ref()
+                .map(|l| {
+                    let viewport_height = self.runtime.layout_rows();
+                    ((l.rect.row + l.rect.height).ceil() as u16)
+                        .saturating_sub(viewport_height)
+                })
+                .unwrap_or(0);
+            let leaf = self.active_leaf_mut();
+            leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_add(3).min(max_scroll);
+            self.mark_needs_redraw();
+            return;
+        }
 
         self.active_leaf_mut().focused_widget_id = Some(focusable_nodes[next_idx].0);
         self.adjust_widget_scroll(focusable_nodes[next_idx].1);
@@ -207,7 +274,10 @@ impl Editor {
         match tree {
             Some(tree) => {
                 self.runtime.restore_widget_tree(tree);
-                self.auto_focus_first_widget();
+                // Only auto-focus if this tile doesn't already have a focused widget
+                if self.active_leaf().focused_widget_id.is_none() {
+                    self.auto_focus_first_widget();
+                }
             }
             None => {
                 self.clear_widget_focus();

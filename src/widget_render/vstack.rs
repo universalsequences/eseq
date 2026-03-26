@@ -1,6 +1,6 @@
 use super::{Align, Justify, WidgetDefinition, distribute_justify, resolve_align, resolve_justify};
 use crate::layout::{
-    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, shrink_constraints,
+    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, shrink_constraints_xy,
 };
 use crate::vm::Value;
 
@@ -30,8 +30,9 @@ impl WidgetDefinition for VStackWidget {
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
+        let pad_y = padding / constraints.aspect;
         let gap = get_prop_num(node, "gap").map(f64_to_f32).unwrap_or(0.0);
-        let inner = shrink_constraints(constraints, padding);
+        let inner = shrink_constraints_xy(constraints, padding, pad_y);
         let child_sizes = children
             .iter()
             .filter_map(|child| measure_child(child, inner))
@@ -44,7 +45,7 @@ impl WidgetDefinition for VStackWidget {
             + gap * (child_sizes.len() as f32 - 1.0).max(0.0);
         Some(Size {
             width: width + padding * 2.0,
-            height: height + padding * 2.0,
+            height: height + pad_y * 2.0,
         })
     }
 
@@ -53,16 +54,18 @@ impl WidgetDefinition for VStackWidget {
         node: &Value,
         area: Rect,
         children: &[Value],
+        aspect: f32,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
+        let pad_y = padding / aspect;
         let gap = get_prop_num(node, "gap").map(f64_to_f32).unwrap_or(0.0);
         let align = resolve_align(node, "align", Align::Start);
         let justify = resolve_justify(node, "justify", Justify::Start);
 
         let inner_width = (area.width - padding * 2.0).max(0.0);
-        let inner_height = (area.height - padding * 2.0).max(0.0);
+        let inner_height = (area.height - pad_y * 2.0).max(0.0);
         let inner_constraints = Constraints {
             min_width: 0.0,
             max_width: inner_width,
@@ -98,7 +101,7 @@ impl WidgetDefinition for VStackWidget {
             distribute_justify(justify, justify_remaining, count, gap);
 
         // Pass 2: position children
-        let mut cursor_row = area.row + padding + start_offset;
+        let mut cursor_row = area.row + pad_y + start_offset;
         measured
             .into_iter()
             .map(|(child, size, flex)| {

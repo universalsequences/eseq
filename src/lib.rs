@@ -276,11 +276,36 @@ pub fn run_standalone() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashMap, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::HashMap,
+        rc::Rc,
+        time::{Duration, Instant},
+    };
 
     use super::{Runtime, Value, run_prog};
     use crate::layout::{LayoutEngine, format_layout_tree_lines};
-    use crate::vm::{VMError, format_lisp_source, format_lisp_value};
+    use crate::parser::Parser;
+    use crate::vm::{EffectTarget, VMError, format_lisp_source, format_lisp_value};
+
+    const SDF_LIGHTING_V2_DEMO: &str = include_str!("../sdf-lighting-v2-demo.lisp");
+
+    fn demo_source_without_window_ops() -> &'static str {
+        SDF_LIGHTING_V2_DEMO
+            .trim_end()
+            .strip_suffix("\n(delete-other-windows)\n(split-window-right \"*light*\")")
+            .expect("demo should end with window management epilogue")
+    }
+
+    fn duration_stats(mut samples: Vec<Duration>) -> (Duration, Duration, Duration) {
+        assert!(!samples.is_empty(), "expected at least one duration sample");
+        samples.sort();
+        let min = samples[0];
+        let median = samples[samples.len() / 2];
+        let total_secs = samples.iter().map(Duration::as_secs_f64).sum::<f64>();
+        let avg = Duration::from_secs_f64(total_secs / samples.len() as f64);
+        (min, median, avg)
+    }
 
     #[test]
     fn test_basic_sum() {
@@ -1563,5 +1588,264 @@ mod tests {
             layout.children[1].props.get("value"),
             Some(&Value::Number(50.0))
         );
+    }
+
+    #[test]
+    fn sdf_lighting_v2_demo_evaluates_and_emits_light_buffer() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(120, 40);
+
+        runtime
+            .eval_str(demo_source_without_window_ops())
+            .expect("eval demo");
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(pending.len(), 1, "demo should emit one named buffer effect");
+        assert!(matches!(
+            pending[0].target,
+            EffectTarget::BufferName(ref name) if name == "*light*"
+        ));
+        assert!(
+            runtime
+                .completion_symbols()
+                .iter()
+                .any(|symbol| symbol == "v2-holo"),
+            "demo should register v2-holo widget"
+        );
+        assert!(
+            runtime
+                .completion_symbols()
+                .iter()
+                .any(|symbol| symbol == "v2-gem"),
+            "demo should register v2-gem widget"
+        );
+        assert!(
+            runtime
+                .completion_symbols()
+                .iter()
+                .any(|symbol| symbol == "v2-holo-bar"),
+            "demo should register v2-holo-bar widget"
+        );
+    }
+
+    #[test]
+    #[ignore = "profiling harness; run explicitly while optimizing compiler/runtime speed"]
+    fn profile_sdf_lighting_v2_demo_eval_speed() {
+        let rounds = std::env::var("ESEQLISP_PROFILE_ITERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(10);
+
+        let mut parse_samples = Vec::with_capacity(rounds);
+        let mut ast_samples = Vec::with_capacity(rounds);
+        let mut compile_samples = Vec::with_capacity(rounds);
+        let mut execute_samples = Vec::with_capacity(rounds);
+        let mut clear_layout_samples = Vec::with_capacity(rounds);
+        let mut sync_theme_samples = Vec::with_capacity(rounds);
+        let mut cache_samples = Vec::with_capacity(rounds);
+        let mut flush_widget_samples = Vec::with_capacity(rounds);
+        let mut total_samples = Vec::with_capacity(rounds);
+        let mut parser_profiles = Vec::with_capacity(rounds);
+
+        for _ in 0..rounds {
+            let mut parser = Parser::new(demo_source_without_window_ops().to_string());
+            parser.parse().expect("tokenize demo");
+            parser_profiles.push(parser.profile());
+
+            let mut runtime = Runtime::new();
+            runtime.set_layout_viewport(120, 40);
+            let total_started = Instant::now();
+            let (_, profile) = runtime
+                .profile_eval_str(demo_source_without_window_ops())
+                .expect("profile demo");
+            total_samples.push(total_started.elapsed());
+            parse_samples.push(profile.vm_parse);
+            ast_samples.push(profile.vm_ast);
+            compile_samples.push(profile.vm_compile);
+            execute_samples.push(profile.vm_execute);
+            clear_layout_samples.push(profile.clear_layout_effects);
+            sync_theme_samples.push(profile.sync_theme);
+            cache_samples.push(profile.invalidate_symbol_cache);
+            flush_widget_samples.push(profile.flush_widget_trees);
+        }
+
+        let (parse_min, parse_median, parse_avg) = duration_stats(parse_samples);
+        let (ast_min, ast_median, ast_avg) = duration_stats(ast_samples);
+        let (compile_min, compile_median, compile_avg) = duration_stats(compile_samples);
+        let (execute_min, execute_median, execute_avg) = duration_stats(execute_samples);
+        let (clear_min, clear_median, clear_avg) = duration_stats(clear_layout_samples);
+        let (sync_min, sync_median, sync_avg) = duration_stats(sync_theme_samples);
+        let (cache_min, cache_median, cache_avg) = duration_stats(cache_samples);
+        let (flush_min, flush_median, flush_avg) = duration_stats(flush_widget_samples);
+        let (total_min, total_median, total_avg) = duration_stats(total_samples);
+        let avg_parser_profile = {
+            let runs = parser_profiles.len().max(1);
+            let sum = parser_profiles.iter().fold(
+                crate::parser::ParserProfile::default(),
+                |mut acc, profile| {
+                    acc.input_bytes += profile.input_bytes;
+                    acc.peek_calls += profile.peek_calls;
+                    acc.next_calls += profile.next_calls;
+                    acc.peek_nth_calls += profile.peek_nth_calls;
+                    acc.estimated_char_visits += profile.estimated_char_visits;
+                    acc.parse_text_calls += profile.parse_text_calls;
+                    acc.skip_whitespace_loops += profile.skip_whitespace_loops;
+                    acc.parse_symbol_calls += profile.parse_symbol_calls;
+                    acc.parse_number_calls += profile.parse_number_calls;
+                    acc.parse_string_calls += profile.parse_string_calls;
+                    acc.comments_skipped += profile.comments_skipped;
+                    acc.tokens_emitted += profile.tokens_emitted;
+                    acc
+                },
+            );
+            crate::parser::ParserProfile {
+                input_bytes: sum.input_bytes / runs,
+                peek_calls: sum.peek_calls / runs,
+                next_calls: sum.next_calls / runs,
+                peek_nth_calls: sum.peek_nth_calls / runs,
+                estimated_char_visits: sum.estimated_char_visits / runs,
+                parse_text_calls: sum.parse_text_calls / runs,
+                skip_whitespace_loops: sum.skip_whitespace_loops / runs,
+                parse_symbol_calls: sum.parse_symbol_calls / runs,
+                parse_number_calls: sum.parse_number_calls / runs,
+                parse_string_calls: sum.parse_string_calls / runs,
+                comments_skipped: sum.comments_skipped / runs,
+                tokens_emitted: sum.tokens_emitted / runs,
+            }
+        };
+
+        eprintln!(
+            "sdf-lighting-v2-demo profile over {rounds} runs\n  source bytes        avg={}\n  parser tokens       avg={}\n  parser peek calls   avg={}\n  parser next calls   avg={}\n  parser peek_nth     avg={}\n  parser est charwalk avg={} ({:.1}x input)\n  parser symbols      avg={}\n  parser numbers      avg={}\n  parser strings      avg={}\n  parser comments     avg={}\n  total               min={:.2}ms median={:.2}ms avg={:.2}ms\n  clear-layout        min={:.2}ms median={:.2}ms avg={:.2}ms\n  vm parse            min={:.2}ms median={:.2}ms avg={:.2}ms\n  vm ast              min={:.2}ms median={:.2}ms avg={:.2}ms\n  vm compile          min={:.2}ms median={:.2}ms avg={:.2}ms\n  vm execute          min={:.2}ms median={:.2}ms avg={:.2}ms\n  sync-theme          min={:.2}ms median={:.2}ms avg={:.2}ms\n  invalidate-cache    min={:.2}ms median={:.2}ms avg={:.2}ms\n  flush-widget-trees  min={:.2}ms median={:.2}ms avg={:.2}ms",
+            avg_parser_profile.input_bytes,
+            avg_parser_profile.tokens_emitted,
+            avg_parser_profile.peek_calls,
+            avg_parser_profile.next_calls,
+            avg_parser_profile.peek_nth_calls,
+            avg_parser_profile.estimated_char_visits,
+            avg_parser_profile.estimated_char_visits as f64
+                / avg_parser_profile.input_bytes.max(1) as f64,
+            avg_parser_profile.parse_symbol_calls,
+            avg_parser_profile.parse_number_calls,
+            avg_parser_profile.parse_string_calls,
+            avg_parser_profile.comments_skipped,
+            total_min.as_secs_f64() * 1_000.0,
+            total_median.as_secs_f64() * 1_000.0,
+            total_avg.as_secs_f64() * 1_000.0,
+            clear_min.as_secs_f64() * 1_000.0,
+            clear_median.as_secs_f64() * 1_000.0,
+            clear_avg.as_secs_f64() * 1_000.0,
+            parse_min.as_secs_f64() * 1_000.0,
+            parse_median.as_secs_f64() * 1_000.0,
+            parse_avg.as_secs_f64() * 1_000.0,
+            ast_min.as_secs_f64() * 1_000.0,
+            ast_median.as_secs_f64() * 1_000.0,
+            ast_avg.as_secs_f64() * 1_000.0,
+            compile_min.as_secs_f64() * 1_000.0,
+            compile_median.as_secs_f64() * 1_000.0,
+            compile_avg.as_secs_f64() * 1_000.0,
+            execute_min.as_secs_f64() * 1_000.0,
+            execute_median.as_secs_f64() * 1_000.0,
+            execute_avg.as_secs_f64() * 1_000.0,
+            sync_min.as_secs_f64() * 1_000.0,
+            sync_median.as_secs_f64() * 1_000.0,
+            sync_avg.as_secs_f64() * 1_000.0,
+            cache_min.as_secs_f64() * 1_000.0,
+            cache_median.as_secs_f64() * 1_000.0,
+            cache_avg.as_secs_f64() * 1_000.0,
+            flush_min.as_secs_f64() * 1_000.0,
+            flush_median.as_secs_f64() * 1_000.0,
+            flush_avg.as_secs_f64() * 1_000.0,
+        );
+
+        if let Some(max_avg_ms) = std::env::var("ESEQLISP_MAX_AVG_EVAL_MS")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+        {
+            assert!(
+                total_avg.as_secs_f64() * 1_000.0 <= max_avg_ms,
+                "average eval time {:.2}ms exceeded threshold {:.2}ms",
+                total_avg.as_secs_f64() * 1_000.0,
+                max_avg_ms
+            );
+        }
+    }
+
+    #[test]
+    fn test_widget_as_arg_to_function_call() {
+        // A widget builder (v-stack) with keyword args passed as an argument
+        // to a regular function should produce exactly one value on the stack.
+        // The parent function should receive the string and the widget map
+        // as two separate arguments.
+        let result = run_prog(
+            r#"
+            (def capture (name tree) (list name (get tree :type)))
+            (capture "hello" (v-stack :padding 1 (label "child")))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let Value::List(items) = result else {
+            panic!("expected list, got: {result:?}");
+        };
+        assert_eq!(items.len(), 2, "capture should receive exactly 2 args");
+        assert_eq!(
+            items[0].borrow().clone(),
+            Value::String("hello".to_string()),
+            "first arg should be the string"
+        );
+        assert_eq!(
+            items[1].borrow().clone(),
+            Value::Keyword("v-stack".to_string()),
+            "second arg should be the v-stack widget's :type"
+        );
+    }
+
+    #[test]
+    fn test_widget_as_arg_to_runtime_native() {
+        // Test with a runtime-level native (like render-widget-to-buffer)
+        // that receives a string and a widget tree as two args.
+        use std::sync::{Arc, Mutex};
+        let captured_args: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured_args.clone();
+
+        let mut runtime = Runtime::new();
+        runtime.register_native("test-capture", move |args, _ctx| {
+            let mut out = cap.lock().unwrap();
+            for arg in &args {
+                out.push(format!("{:?}", std::mem::discriminant(arg)));
+            }
+            Ok(Value::Number(args.len() as f64))
+        });
+
+        let result = runtime
+            .eval_str(r#"(test-capture "*buf*" (v-stack :padding 1 (label "x")))"#)
+            .unwrap()
+            .unwrap();
+
+        let args = captured_args.lock().unwrap();
+        assert_eq!(
+            result,
+            Value::Number(2.0),
+            "native should receive exactly 2 args, got {} args: {:?}",
+            args.len(),
+            *args
+        );
+    }
+
+    #[test]
+    fn test_widget_keyword_args_dont_leak_to_parent() {
+        // Regression: when (v-stack :padding 1 ...) appeared as an arg to
+        // a function, :padding leaked as a separate arg to the parent.
+        let result = run_prog(
+            r#"
+            (def arg-count (a b) 2)
+            (arg-count "first" (v-stack :padding 1 (label "x")))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, Value::Number(2.0), "function should receive exactly 2 args");
     }
 }

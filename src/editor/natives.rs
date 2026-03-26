@@ -589,6 +589,27 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "render-widget-to-buffer",
+        "(render-widget-to-buffer buffer-name tree)",
+        "Render a widget tree in a named buffer's overlay without switching to it.",
+        |args, ctx| {
+            println!("render widget to buffer called");
+            let mut args = args.into_iter();
+            println!("args {:?}", args);
+            let Some(Value::String(name)) = args.next() else {
+                println!("case 1");
+                return Err("render-widget-to-buffer expects a buffer name string".to_string());
+            };
+            let Some(tree) = args.next() else {
+                println!("case 2");
+                return Err("render-widget-to-buffer expects a widget tree value".to_string());
+            };
+            ctx.render_widget_to_buffer(name, tree);
+            Ok(Value::Nil)
+        },
+    );
+
+    runtime.register_native_with_docs(
         "create-scratch",
         "(create-scratch name text)",
         "Create a scratch buffer with the given name and text. Does not switch to it.",

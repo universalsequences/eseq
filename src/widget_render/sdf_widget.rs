@@ -219,6 +219,28 @@ pub fn register_sdf_widget(def: SdfWidgetDef) {
     SDF_WIDGETS.with(|w| w.borrow_mut().insert(name, Rc::new(def)));
 }
 
+/// Register a compiled shader for use as a built-in widget's visual override.
+/// Unlike full SdfWidgetDef, this doesn't need width/height/sdf_expr since the
+/// built-in widget handles layout and hit testing.
+pub fn register_inline_shader(
+    name: String,
+    shader_source: String,
+    state_uniforms: Vec<String>,
+    paint_margin: f32,
+) {
+    let def = SdfWidgetDef {
+        name: name.clone(),
+        shader_source,
+        sdf_expr: crate::parser::Expression::Number(0.0), // placeholder — not used for hit testing
+        state_uniforms,
+        region_count: 0,
+        width: 1.0,
+        height: 1.0,
+        paint_margin,
+    };
+    SDF_WIDGETS.with(|w| w.borrow_mut().insert(name, Rc::new(def)));
+}
+
 pub fn sdf_widget_def(name: &str) -> Option<Rc<SdfWidgetDef>> {
     SDF_WIDGETS.with(|w| w.borrow().get(name).cloned())
 }
@@ -260,7 +282,7 @@ pub fn sdf_widget_paint_rect(rect: Rect, paint_margin: f32) -> Rect {
     }
 }
 
-fn sdf_widget_logical_uv_bounds(logical_rect: Rect, paint_rect: Rect) -> [f32; 4] {
+pub fn sdf_widget_logical_uv_bounds(logical_rect: Rect, paint_rect: Rect) -> [f32; 4] {
     if paint_rect.width <= 0.0 || paint_rect.height <= 0.0 {
         return [0.0, 0.0, 1.0, 1.0];
     }

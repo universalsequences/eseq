@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::audio::register_audio_natives;
 use crate::buffer::BufferTextStyle;
@@ -17,6 +18,18 @@ use crate::widgets::register_widget_natives;
 
 pub type RuntimeError = String;
 pub type NativeResult = Result<Value, RuntimeError>;
+
+#[derive(Debug, Clone, Default)]
+pub struct RuntimeEvalProfile {
+    pub clear_layout_effects: Duration,
+    pub vm_parse: Duration,
+    pub vm_ast: Duration,
+    pub vm_compile: Duration,
+    pub vm_execute: Duration,
+    pub sync_theme: Duration,
+    pub invalidate_symbol_cache: Duration,
+    pub flush_widget_trees: Duration,
+}
 
 fn expand_sdf_expression(
     expr: &crate::parser::Expression,
@@ -59,6 +72,117 @@ fn compile_sdf_value(
         expanded_expr: expanded,
         state_symbols,
     })
+}
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+// Cache for compiled material shaders, keyed by (widget_type, material_hash).
+// Maps to the registered SDF widget name (e.g. "hslider__mat_a1b2c3").
+thread_local! {
+    static MATERIAL_SHADER_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
+}
+
+/// Hash a Value for caching purposes (material expression deduplication).
+fn hash_value(v: &Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    format!("{:?}", v).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Build the SDF expression that wraps a material in the appropriate fill shape
+/// template for a given widget type.
+fn build_material_shader_expr(
+    widget_type: &str,
+    material_expr: &crate::parser::Expression,
+) -> Option<crate::parser::Expression> {
+    use crate::parser::Expression;
+
+    match widget_type {
+        "slider" | "hslider" => {
+            // (sdf/layer (sdf/fill (__hslider-fill) <material>))
+            Some(Expression::List(vec![
+                Expression::Symbol("sdf/layer".into()),
+                Expression::List(vec![
+                    Expression::Symbol("sdf/fill".into()),
+                    Expression::List(vec![Expression::Symbol("__hslider-fill".into())]),
+                    material_expr.clone(),
+                ]),
+            ]))
+        }
+        "vslider" => {
+            // (sdf/layer (__vslider-fill-with-material <material>))
+            // Normalizes y to [-1,1] so material gradients work the same
+            // as on hslider (where y is naturally in [-1,1]).
+            Some(Expression::List(vec![
+                Expression::Symbol("sdf/layer".into()),
+                Expression::List(vec![
+                    Expression::Symbol("__vslider-fill-with-material".into()),
+                    material_expr.clone(),
+                ]),
+            ]))
+        }
+        _ => None,
+    }
+}
+
+/// Compile a :material value for a built-in widget, caching the result.
+/// Returns the registered SDF widget name if successful.
+fn compile_widget_material(
+    widget_type: &str,
+    material_val: &Value,
+    macros: &HashMap<String, crate::compiler::MacroDef>,
+    state_bindings: &std::collections::HashSet<String>,
+) -> Result<String, String> {
+    // Check cache first
+    let mut cache_hasher = DefaultHasher::new();
+    widget_type.hash(&mut cache_hasher);
+    hash_value(material_val).hash(&mut cache_hasher);
+    let cache_key = cache_hasher.finish();
+
+    if let Some(name) = MATERIAL_SHADER_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
+        return Ok(name);
+    }
+
+    // Convert material Value to Expression
+    let material_expr =
+        crate::lang::sdf_codegen::value_to_expression(material_val).map_err(|e| e.to_string())?;
+
+    // Wrap in widget-specific fill template
+    let shader_expr = build_material_shader_expr(widget_type, &material_expr)
+        .ok_or_else(|| format!("widget type '{}' does not support :material", widget_type))?;
+
+    // Expand macros and compile.
+    // For vslider, add origin_t as a known state binding so it gets a uniform slot.
+    let mut bindings = state_bindings.clone();
+    if widget_type == "vslider" {
+        bindings.insert("origin_t".to_string());
+    }
+    let expanded = expand_sdf_expression(&shader_expr, macros);
+    let mut state_symbols = crate::lang::sdf_codegen::collect_state_symbols(&expanded, &bindings);
+    state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
+    let output =
+        crate::lang::sdf_codegen::compile_sdf_to_metal_with_state(&expanded, &state_symbols)
+            .map_err(|e| e.to_string())?;
+
+    // Estimate paint margin for shadows
+    let paint_margin = crate::widget_render::sdf_widget::estimate_shadow_paint_margin(
+        &expanded, 16.0, 8.0, // reasonable defaults for slider dimensions
+    );
+
+    // Register as inline shader
+    let shader_name = format!("{}__mat_{:x}", widget_type, cache_key);
+    crate::widget_render::sdf_widget::register_inline_shader(
+        shader_name.clone(),
+        output.shader_source,
+        state_symbols,
+        paint_margin,
+    );
+
+    // Cache the result
+    MATERIAL_SHADER_CACHE.with(|c| c.borrow_mut().insert(cache_key, shader_name.clone()));
+
+    Ok(shader_name)
 }
 
 #[derive(Debug, Clone)]
@@ -248,6 +372,18 @@ impl NativeContext {
         self.shared.borrow_mut().pending_widget_tree.replace(tree);
     }
 
+    pub fn render_widget_to_buffer(&mut self, buffer_name: String, tree: Value) {
+        let source_buffer_id = self.shared.borrow().current_buffer_id;
+        self.shared
+            .borrow_mut()
+            .pending_buffer_widget_trees
+            .push(PendingWidgetTree {
+                source_buffer_id,
+                target: EffectTarget::BufferName(buffer_name),
+                tree,
+            });
+    }
+
     pub fn goto_line(&mut self, line: usize) {
         self.shared.borrow_mut().pending_goto_line = Some(line);
     }
@@ -390,6 +526,20 @@ impl Runtime {
         runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
         crate::theme::set_current(crate::theme::default_theme());
         register_audio_natives(&mut runtime);
+        // Register SDF constructor functions that return self-quoting tagged lists.
+        // These are compiled to Metal by the SDF codegen; at the Lisp level they
+        // preserve their structure for later compilation.
+        // Note: vec2 is already registered in vm.rs with numeric semantics — don't override it.
+        for name in &["vec3", "vec4", "rgba", "material", "lighting", "shadow"] {
+            let tag = name.to_string();
+            runtime.vm.register_native(name, move |args| {
+                let mut items = vec![Rc::new(RefCell::new(Value::Symbol(tag.clone())))];
+                for a in args {
+                    items.push(Rc::new(RefCell::new(a)));
+                }
+                Value::List(items)
+            });
+        }
         // Load SDF standard library (macros for SDF primitives)
         let sdf_src = include_str!("../sdf-stdlib.lisp");
         if !sdf_src.trim().is_empty() {
@@ -518,6 +668,82 @@ impl Runtime {
                 });
                 Value::Keyword(name.clone())
             });
+
+        // Override slider natives with material-aware versions.
+        // These intercept :material, compile it into an SDF shader, and set
+        // __shader_type so the renderer uses the custom pipeline.
+        for widget_name in &["slider", "hslider", "vslider"] {
+            let wtype = widget_name.to_string();
+            runtime
+                .vm
+                .register_native_with_vm(widget_name, move |args, vm| {
+                    let mut widget = crate::widgets::build_widget(&wtype, args);
+                    if let Value::Map(map) = &mut widget {
+                        if let Some(material_cell) = map.get("material") {
+                            let material_val = material_cell.borrow().clone();
+                            if !matches!(material_val, Value::Nil) {
+                                let state_bindings: std::collections::HashSet<String> =
+                                    vm.state_bindings.keys().cloned().collect();
+                                match compile_widget_material(
+                                    &wtype,
+                                    &material_val,
+                                    &vm.macros,
+                                    &state_bindings,
+                                ) {
+                                    Ok(shader_name) => {
+                                        // Look up the registered def to get state uniforms
+                                        if let Some(def) = crate::widget_render::sdf_widget::sdf_widget_def(&shader_name) {
+                                            // Inject tracked state values as props
+                                            for state_name in &def.state_uniforms {
+                                                if let Some(value) = vm.read_tracked_state_value(state_name) {
+                                                    map.insert(
+                                                        crate::widget_render::sdf_widget::shader_state_prop_name(state_name),
+                                                        Rc::new(RefCell::new(value)),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        // For vslider, inject origin_t as a shader-state prop
+                                        if wtype == "vslider" {
+                                            let min = map.get("min").and_then(|v| match &*v.borrow() {
+                                                Value::Number(n) => Some(*n),
+                                                _ => None,
+                                            }).unwrap_or(0.0);
+                                            let max = map.get("max").and_then(|v| match &*v.borrow() {
+                                                Value::Number(n) => Some(*n),
+                                                _ => None,
+                                            }).unwrap_or(1.0);
+                                            let origin = map.get("origin").and_then(|v| match &*v.borrow() {
+                                                Value::Number(n) => Some(*n),
+                                                _ => None,
+                                            }).unwrap_or(min);
+                                            let range = max - min;
+                                            let origin_t = if range > 0.0 {
+                                                ((origin - min) / range).clamp(0.0, 1.0)
+                                            } else {
+                                                0.0
+                                            };
+                                            map.insert(
+                                                crate::widget_render::sdf_widget::shader_state_prop_name("origin_t"),
+                                                Rc::new(RefCell::new(Value::Number(origin_t))),
+                                            );
+                                        }
+                                        map.insert(
+                                            "__shader_type".to_string(),
+                                            Rc::new(RefCell::new(Value::String(shader_name))),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!("{} :material compile error: {}", wtype, e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    widget
+                });
+        }
+
         runtime
     }
 
@@ -594,6 +820,41 @@ impl Runtime {
             self.flush_widget_trees();
         }
         result
+    }
+
+    #[cfg(test)]
+    pub(crate) fn profile_eval_str(
+        &mut self,
+        src: &str,
+    ) -> Result<(Option<Value>, RuntimeEvalProfile), crate::vm::VMError> {
+        let mut profile = RuntimeEvalProfile::default();
+        let current_buffer_id = self.shared.borrow().current_buffer_id;
+        self.vm.set_current_effect_context(current_buffer_id);
+        if src.contains("(effect") || src.contains("(effect-buffer") {
+            let clear_started = std::time::Instant::now();
+            self.clear_layout_effects();
+            profile.clear_layout_effects = clear_started.elapsed();
+        }
+
+        let (result, vm_profile) = self.vm.profile_eval_str(src)?;
+        profile.vm_parse = vm_profile.parse;
+        profile.vm_ast = vm_profile.ast;
+        profile.vm_compile = vm_profile.compile;
+        profile.vm_execute = vm_profile.execute;
+
+        let sync_started = std::time::Instant::now();
+        self.sync_theme_from_vm();
+        profile.sync_theme = sync_started.elapsed();
+
+        let cache_started = std::time::Instant::now();
+        self.invalidate_symbol_cache();
+        profile.invalidate_symbol_cache = cache_started.elapsed();
+
+        let flush_started = std::time::Instant::now();
+        self.flush_widget_trees();
+        profile.flush_widget_trees = flush_started.elapsed();
+
+        Ok((result, profile))
     }
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
@@ -957,6 +1218,8 @@ impl Runtime {
     pub fn layout_cols(&self) -> u16 {
         self.layout_cols
     }
+
+
 
     pub fn set_widget_tree(&mut self, tree: Value) {
         // Replace the visual widget tree without destroying reactive effects.

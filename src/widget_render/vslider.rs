@@ -226,16 +226,17 @@ impl WidgetDefinition for VerticalSliderWidget {
                     if idx < 4 { uniform_a[idx] = val; } else { uniform_b[idx - 4] = val; }
                 }
 
-                // Layer 1: default shader (track dots + flat fill as base)
+                // Layer 1: default shader (dots only — value_t=0 hides the flat fill
+                // so the material's fill is the only one visible)
                 let mut prims = metal_widget_instance(
                     widget_type,
                     super::WidgetInstance {
                         ndc_min,
                         ndc_max,
-                        value_t: t,
+                        value_t: 0.0,
                         orientation: 0.0,
                         itime: 0.0,
-                        uniform_a: [origin_t, 0.0, 0.0, 0.0],
+                        uniform_a: [0.0, 0.0, 0.0, 0.0],
                         uniform_b: [0.0; 4],
                         color_a: fill_color(&node.props).to_rgba(),
                         color_b: theme::WIDGET_SLIDER_TRACK().to_rgba(),

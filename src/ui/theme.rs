@@ -65,6 +65,8 @@ pub struct Theme {
     pub widget_toggle_off: Color,
     pub widget_toggle_knob_on: Color,
     pub widget_toggle_knob_off: Color,
+    pub border_active: Color,
+    pub border_inactive: Color,
 }
 
 macro_rules! theme_slots {
@@ -300,6 +302,16 @@ theme_slots!(
         widget_toggle_knob_off,
         WIDGET_TOGGLE_KNOB_OFF,
         Color::from_hex(0xf1, 0xf3, 0xf7)
+    ),
+    (
+        border_active,
+        BORDER_ACTIVE,
+        Color::from_hex(0xc8, 0xff, 0x00)
+    ),
+    (
+        border_inactive,
+        BORDER_INACTIVE,
+        Color::from_hex(0x3a, 0x3a, 0x3a)
     ),
 );
 

@@ -160,7 +160,7 @@
         (label (fmt "XY Pad (drag the dot) {:.1},{:.1}" pad-x pad-y) :font-size 14 :color :accent)
         (xy-pad :pos-x pad-x :pos-y pad-y
           :on-mouse-up (lambda (x y region)
-          (do (set! pad-x 0) (set! pad-y 0)))
+            (do (set! pad-x 0) (set! pad-y 0)))
           :on-drag (lambda (x y region)
             (set! pad-x (clamp x -1 1))
             (set! pad-y (clamp y -1 1))))
@@ -181,20 +181,22 @@
                   (set! pads (set-nth pads i (not pad)) ) 
                   nil
                   )))))
-
-    ;; ── Container background demos ─────────────────────────────────────
-    (label "SDF Container Backgrounds" :font-size 18 :color :accent)
-
-    (h-stack :gap 2
-      (box :background "rounded-panel" :padding 2 :width 20 :height 8
-        (v-stack :gap 1
-          (label "Rounded Panel" :font-size 12 :color :accent)
-          (slider :bind pad-x)
-          (slider :bind pad-y)))
-
-      (box :background "blob-panel" :padding 2 :width 20 :height 8
-        (v-stack :gap 1
-          (label "Blob Panel" :font-size 12 :color :accent)
-          (toggle :bind (first pads))
-          (knob :bind pad-x :size 3))))))
-
+        
+        ;; ── Container background demos ─────────────────────────────────────
+        (label "SDF Container Backgrounds" :font-size 18 :color :accent)
+        
+        (h-stack :gap 2
+          (box :background "rounded-panel" :padding 2 :width 20 :height 8
+            (v-stack :gap 1
+              (label "Rounded Panel" :font-size 12 :color :accent)
+              (slider :bind pad-x)
+              (slider :bind pad-y)))
+          
+          (box :background "blob-panel" :padding 2 :width 20 :height 8
+            (v-stack :gap 1
+              (label "Blob Panel" :font-size 12 :color :accent)
+              (toggle :bind (first pads))
+              (knob :bind pad-x :size 3))))))
+    
+    )
+  )

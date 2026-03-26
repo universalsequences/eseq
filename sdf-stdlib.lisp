@@ -120,6 +120,32 @@
   `(let ((__half (normalize (+ ,light-dir ,view-dir))))
      (pow (max 0.0 (dot ,normal __half)) ,shininess)))
 
+;; ── Built-in Widget Fill Shapes ──────────────────────────────────────
+;; Used internally by the :material feature on built-in slider widgets.
+;; These produce the SDF for the value/fill portion of each slider type.
+
+;; Horizontal slider fill bar: rounded rect from left edge to value_t.
+;; In SDF coords the fill center-x = aspect*(value_t - 1), halfW = aspect*value_t.
+;; Vertical inset 0.64 (= (0.5 - 0.18) * 2 from UV padding), corner radius 0.24.
+(defmacro __hslider-fill ()
+  `(sdf/translate (* aspect (- value_t 1.0)) 0.0
+     (sdf/rounded-rect (* aspect value_t) 0.64 0.24)))
+
+;; Vertical slider fill bar with material and bipolar (origin_t) support.
+;; Normalizes y to [-1,1] so material gradients are in the same range as hslider.
+;; NOTE: vslider material rendering has known visual issues with the
+;; non-isotropic coordinate system — tabling for future improvement.
+(defmacro __vslider-fill-with-material (mat)
+  `(let ((y (* y (min aspect 1.0))))
+     (let ((__fill_lo (min value_t origin_t))
+           (__fill_hi (max value_t origin_t))
+           (__fill_span (- __fill_hi __fill_lo))
+           (__center_y (- 1.0 (+ __fill_lo __fill_hi))))
+       (sdf/fill
+         (sdf/translate 0.0 __center_y
+           (sdf/rounded-rect 0.64 __fill_span 0.12))
+         ,mat))))
+
 ;; All-in-one lit material color with curvature control.
 ;; edge-min/edge-max control the smoothstep on the SDF before normal estimation:
 ;;   tight range (e.g. -0.15, 0.02) = sharp bevel/rim
