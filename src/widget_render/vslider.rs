@@ -211,23 +211,9 @@ impl WidgetDefinition for VerticalSliderWidget {
 
         // Check for :material shader override.
         // Emit default shader first (track dots + flat fill), then material on top.
-        if let Some(Value::String(shader_type)) = node.props.get("__shader_type") {
+        if let Some(Value::String(shader_type)) = node.props.get(sdf_widget::SHADER_TYPE_PROP) {
             if let Some(def) = sdf_widget::sdf_widget_def(shader_type) {
-                let paint_rect = sdf_widget::sdf_widget_paint_rect(node.rect, def.paint_margin);
-                let (mat_ndc_min, mat_ndc_max) = ndc_bounds(paint_rect, viewport);
-                let logical_uv = sdf_widget::sdf_widget_logical_uv_bounds(node.rect, paint_rect);
-                let hit = sdf_widget::get_sdf_hit_state(node.widget_id);
-
-                // Pack state uniforms from props
-                let mut uniform_a = [0.0; 4];
-                let mut uniform_b = [0.0; 4];
-                for (idx, name) in def.state_uniforms.iter().take(sdf_widget::MAX_SDF_STATE_UNIFORMS).enumerate() {
-                    let val = super::get_f32_prop(&node.props, &sdf_widget::shader_state_prop_name(name), 0.0);
-                    if idx < 4 { uniform_a[idx] = val; } else { uniform_b[idx - 4] = val; }
-                }
-
-                // Layer 1: default shader (dots only — value_t=0 hides the flat fill
-                // so the material's fill is the only one visible)
+                // Layer 1: dots only (value_t=0 hides flat fill)
                 let mut prims = metal_widget_instance(
                     widget_type,
                     super::WidgetInstance {
@@ -236,7 +222,7 @@ impl WidgetDefinition for VerticalSliderWidget {
                         value_t: 0.0,
                         orientation: 0.0,
                         itime: 0.0,
-                        uniform_a: [0.0, 0.0, 0.0, 0.0],
+                        uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
                         color_a: fill_color(&node.props).to_rgba(),
                         color_b: theme::WIDGET_SLIDER_TRACK().to_rgba(),
@@ -246,28 +232,8 @@ impl WidgetDefinition for VerticalSliderWidget {
                         pixel_aspect,
                     },
                 );
-
-                // Layer 2: material shader (overdraws just the fill)
-                prims.push(MetalPrimitive::WidgetInstance {
-                    widget_type: shader_type.clone(),
-                    instance: super::WidgetInstance {
-                        ndc_min: mat_ndc_min,
-                        ndc_max: mat_ndc_max,
-                        value_t: t,
-                        orientation: 0.0,
-                        itime: viewport.time_seconds,
-                        uniform_a,
-                        uniform_b,
-                        color_a: [0.0; 4],
-                        color_b: [hit.hit_region as f32, if hit.hit_pressed { 1.0 } else { 0.0 }, 0.0, 0.0],
-                        color_c: logical_uv,
-                        color_d: [0.0; 4],
-                        corner_radius: 0.0,
-                        pixel_aspect,
-                    },
-                    is_background: false,
-                });
-
+                // Layer 2: material overlay
+                prims.push(sdf_widget::build_material_overlay(node, &def, shader_type, viewport, t));
                 return prims;
             }
         }

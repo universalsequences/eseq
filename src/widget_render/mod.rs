@@ -6,6 +6,7 @@ pub mod knob;
 pub mod label;
 pub mod scroll;
 pub mod sdf_widget;
+pub mod tree;
 pub mod tabs;
 pub mod time_view;
 pub mod timeline;
@@ -15,6 +16,7 @@ pub mod vstack;
 pub mod waveform;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
@@ -22,6 +24,20 @@ use crate::backend::{Cell, CellStyle, Color};
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, get_map};
 use crate::theme;
 use crate::vm::Value;
+
+// ── Widget state generation counter ─────────────────────────────────────────
+// Bumped whenever a widget's internal state changes (scroll offset, tree
+// expand/collapse, etc.) so that primitive caches can be invalidated.
+
+static WIDGET_STATE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub fn bump_widget_state_generation() {
+    WIDGET_STATE_GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn widget_state_generation() -> u64 {
+    WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
+}
 
 // ── Flex-style alignment enums ──────────────────────────────────────────────
 
@@ -426,6 +442,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &box_widget::BOX_WIDGET,
     &grid::GRID_WIDGET,
     &scroll::SCROLL_WIDGET,
+    &tree::TREE_WIDGET,
 ];
 
 pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {
@@ -521,9 +538,6 @@ fn collect_metal_primitives_recursive(
 
     // Scroll container: clip children to viewport rect and offset by scroll amount
     if node.widget_type == "scroll" {
-        // Emit scrollbar primitives (track + thumb) for this scroll container
-        primitives.extend(widget_primitives_for_node(node, node_viewport));
-
         let state = scroll::get_scroll_state(node.widget_id);
         let offset_y = state.offset_y;
 
@@ -545,6 +559,9 @@ fn collect_metal_primitives_recursive(
         }
 
         primitives.push(MetalPrimitive::PopClipRect);
+
+        // Scrollbar rendered AFTER children so it draws on top
+        primitives.extend(widget_primitives_for_node(node, node_viewport));
         return;
     }
 

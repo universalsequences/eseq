@@ -4,13 +4,16 @@
 (defwidget scroll-border
   :width 1 :height 1
   :shader (sdf/layer
-            (sdf/stroke (sdf/rounded-rect (* width 0.98) (* height 0.98) 0.03) 0.01 :dim)))
+    (sdf/fill (sdf/rounded-rect (* width 0.98) (* height 0.98) 0.03)
+      (material
+        :color (mix :black :gray (* (cos  (* (cos itime) (+  (sin (* itime 0.3)) x) y))))))
+    (sdf/stroke (sdf/rounded-rect (* width 0.98) (* height 0.98) 0.03) 0.005 :white)))
 
 (effect (v-stack :padding 1 :gap 1
-  (label "Fixed Header - Scroll the list below" :color :accent :bg :transparent :font-size 16)
+  (label "Fixed Header - Scroll the list below" :color :white :bg :transparent :font-size 16)
 
   ;; The box wraps the scroll with a visible border
-  (box :background "scroll-border" :padding 0.5 :flex 1
+  (box :background "scroll-border" :padding 2 :flex 1
     (scroll :flex 1
       (v-stack :gap 0.25 :padding 0.5
         (label "Item 1"  :bg :transparent)

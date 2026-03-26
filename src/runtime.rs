@@ -77,17 +77,52 @@ fn compile_sdf_value(
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-// Cache for compiled material shaders, keyed by (widget_type, material_hash).
-// Maps to the registered SDF widget name (e.g. "hslider__mat_a1b2c3").
 thread_local! {
     static MATERIAL_SHADER_CACHE: RefCell<HashMap<u64, String>> = RefCell::new(HashMap::new());
 }
 
-/// Hash a Value for caching purposes (material expression deduplication).
-fn hash_value(v: &Value) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    format!("{:?}", v).hash(&mut hasher);
-    hasher.finish()
+/// Extract origin_t from a widget's min/max/origin props.
+fn compute_origin_t(map: &HashMap<String, Rc<RefCell<Value>>>) -> f64 {
+    let num_prop = |key: &str| -> Option<f64> {
+        map.get(key).and_then(|v| match &*v.borrow() {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        })
+    };
+    let min = num_prop("min").unwrap_or(0.0);
+    let max = num_prop("max").unwrap_or(1.0);
+    let origin = num_prop("origin").unwrap_or(min);
+    let range = max - min;
+    if range > 0.0 {
+        ((origin - min) / range).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Structural hash of a Value tree, avoiding heap allocation.
+fn hash_value(v: &Value, hasher: &mut impl Hasher) {
+    std::mem::discriminant(v).hash(hasher);
+    match v {
+        Value::Number(n) => n.to_bits().hash(hasher),
+        Value::String(s) | Value::Symbol(s) | Value::Keyword(s) => s.hash(hasher),
+        Value::Bool(b) => b.hash(hasher),
+        Value::Nil => {}
+        Value::List(items) => {
+            items.len().hash(hasher);
+            for item in items {
+                hash_value(&item.borrow(), hasher);
+            }
+        }
+        Value::Map(map) => {
+            map.len().hash(hasher);
+            for (k, v) in map {
+                k.hash(hasher);
+                hash_value(&v.borrow(), hasher);
+            }
+        }
+        _ => {} // NativeFunction/Closure won't appear in quoted material exprs
+    }
 }
 
 /// Build the SDF expression that wraps a material in the appropriate fill shape
@@ -132,29 +167,26 @@ fn compile_widget_material(
     widget_type: &str,
     material_val: &Value,
     macros: &HashMap<String, crate::compiler::MacroDef>,
-    state_bindings: &std::collections::HashSet<String>,
+    state_binding_keys: &[String],
 ) -> Result<String, String> {
-    // Check cache first
-    let mut cache_hasher = DefaultHasher::new();
-    widget_type.hash(&mut cache_hasher);
-    hash_value(material_val).hash(&mut cache_hasher);
-    let cache_key = cache_hasher.finish();
+    let mut hasher = DefaultHasher::new();
+    widget_type.hash(&mut hasher);
+    hash_value(material_val, &mut hasher);
+    let cache_key = hasher.finish();
 
     if let Some(name) = MATERIAL_SHADER_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
         return Ok(name);
     }
 
-    // Convert material Value to Expression
     let material_expr =
         crate::lang::sdf_codegen::value_to_expression(material_val).map_err(|e| e.to_string())?;
 
-    // Wrap in widget-specific fill template
     let shader_expr = build_material_shader_expr(widget_type, &material_expr)
         .ok_or_else(|| format!("widget type '{}' does not support :material", widget_type))?;
 
-    // Expand macros and compile.
-    // For vslider, add origin_t as a known state binding so it gets a uniform slot.
-    let mut bindings = state_bindings.clone();
+    // For vslider, add origin_t so it gets a uniform slot.
+    let mut bindings: std::collections::HashSet<String> =
+        state_binding_keys.iter().cloned().collect();
     if widget_type == "vslider" {
         bindings.insert("origin_t".to_string());
     }
@@ -165,12 +197,10 @@ fn compile_widget_material(
         crate::lang::sdf_codegen::compile_sdf_to_metal_with_state(&expanded, &state_symbols)
             .map_err(|e| e.to_string())?;
 
-    // Estimate paint margin for shadows
     let paint_margin = crate::widget_render::sdf_widget::estimate_shadow_paint_margin(
-        &expanded, 16.0, 8.0, // reasonable defaults for slider dimensions
+        &expanded, 16.0, 8.0,
     );
 
-    // Register as inline shader
     let shader_name = format!("{}__mat_{:x}", widget_type, cache_key);
     crate::widget_render::sdf_widget::register_inline_shader(
         shader_name.clone(),
@@ -179,7 +209,6 @@ fn compile_widget_material(
         paint_margin,
     );
 
-    // Cache the result
     MATERIAL_SHADER_CACHE.with(|c| c.borrow_mut().insert(cache_key, shader_name.clone()));
 
     Ok(shader_name)
@@ -682,18 +711,16 @@ impl Runtime {
                         if let Some(material_cell) = map.get("material") {
                             let material_val = material_cell.borrow().clone();
                             if !matches!(material_val, Value::Nil) {
-                                let state_bindings: std::collections::HashSet<String> =
+                                let keys: Vec<String> =
                                     vm.state_bindings.keys().cloned().collect();
                                 match compile_widget_material(
                                     &wtype,
                                     &material_val,
                                     &vm.macros,
-                                    &state_bindings,
+                                    &keys,
                                 ) {
                                     Ok(shader_name) => {
-                                        // Look up the registered def to get state uniforms
                                         if let Some(def) = crate::widget_render::sdf_widget::sdf_widget_def(&shader_name) {
-                                            // Inject tracked state values as props
                                             for state_name in &def.state_uniforms {
                                                 if let Some(value) = vm.read_tracked_state_value(state_name) {
                                                     map.insert(
@@ -703,33 +730,15 @@ impl Runtime {
                                                 }
                                             }
                                         }
-                                        // For vslider, inject origin_t as a shader-state prop
                                         if wtype == "vslider" {
-                                            let min = map.get("min").and_then(|v| match &*v.borrow() {
-                                                Value::Number(n) => Some(*n),
-                                                _ => None,
-                                            }).unwrap_or(0.0);
-                                            let max = map.get("max").and_then(|v| match &*v.borrow() {
-                                                Value::Number(n) => Some(*n),
-                                                _ => None,
-                                            }).unwrap_or(1.0);
-                                            let origin = map.get("origin").and_then(|v| match &*v.borrow() {
-                                                Value::Number(n) => Some(*n),
-                                                _ => None,
-                                            }).unwrap_or(min);
-                                            let range = max - min;
-                                            let origin_t = if range > 0.0 {
-                                                ((origin - min) / range).clamp(0.0, 1.0)
-                                            } else {
-                                                0.0
-                                            };
+                                            let origin_t = compute_origin_t(map);
                                             map.insert(
                                                 crate::widget_render::sdf_widget::shader_state_prop_name("origin_t"),
                                                 Rc::new(RefCell::new(Value::Number(origin_t))),
                                             );
                                         }
                                         map.insert(
-                                            "__shader_type".to_string(),
+                                            crate::widget_render::sdf_widget::SHADER_TYPE_PROP.to_string(),
                                             Rc::new(RefCell::new(Value::String(shader_name))),
                                         );
                                     }
@@ -898,6 +907,15 @@ impl Runtime {
         self.layout_cols = cols;
         self.layout_rows = rows;
         // Viewport changes invalidate layout geometry even if the widget tree is unchanged.
+        self.current_layout = None;
+        self.dirty_widget_ids.clear();
+        self.relayout_current_tree();
+    }
+
+    /// Force a full relayout on the next render pass.
+    /// Used when internal widget state (e.g. tree expand/collapse) changes
+    /// the widget's size without changing the widget tree data.
+    pub fn invalidate_layout(&mut self) {
         self.current_layout = None;
         self.dirty_widget_ids.clear();
         self.relayout_current_tree();
@@ -1170,7 +1188,10 @@ impl Runtime {
     pub(crate) fn apply_theme_map(&mut self, map: Value) {
         if let Value::Map(ref entries) = map {
             for (field, value) in entries {
-                self.set_reactive("THEME", field, value.borrow().clone());
+                // Theme struct fields use underscores (status_ui_bg) but Lisp
+                // keywords use hyphens (status-ui-bg). Convert to match.
+                let field_name = field.replace('-', "_");
+                self.set_reactive("THEME", &field_name, value.borrow().clone());
             }
         }
     }
@@ -1218,8 +1239,6 @@ impl Runtime {
     pub fn layout_cols(&self) -> u16 {
         self.layout_cols
     }
-
-
 
     pub fn set_widget_tree(&mut self, tree: Value) {
         // Replace the visual widget tree without destroying reactive effects.

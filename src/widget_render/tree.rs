@@ -1,0 +1,672 @@
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+
+use super::{
+    CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
+    resolve_named_color, styled_cell,
+};
+use crate::layout::{
+    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+};
+use crate::vm::Value;
+
+#[cfg(target_os = "macos")]
+use super::{
+    MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, WidgetInstance,
+    WidgetViewport, ndc_bounds,
+};
+#[cfg(target_os = "macos")]
+use crate::backend::Color;
+#[cfg(target_os = "macos")]
+use crate::theme;
+
+// ── Tree state ───────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Default)]
+struct TreeState {
+    expanded: HashSet<Vec<usize>>,
+    selected_row: usize,
+}
+
+thread_local! {
+    static TREE_STATES: RefCell<HashMap<u64, TreeState>> = RefCell::new(HashMap::new());
+}
+
+fn get_tree_state(widget_id: u64) -> TreeState {
+    TREE_STATES.with(|s| s.borrow().get(&widget_id).cloned().unwrap_or_default())
+}
+
+fn set_tree_state(widget_id: u64, state: TreeState) {
+    // Always sync LAST_EXPANDED so measure() picks up the latest state
+    update_last_known_expanded(&state.expanded);
+    TREE_STATES.with(|s| s.borrow_mut().insert(widget_id, state));
+    super::bump_widget_state_generation();
+}
+
+// ── Flattened row ────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug)]
+struct TreeRow {
+    depth: usize,
+    label: String,
+    has_children: bool,
+    expanded: bool,
+    path: Vec<usize>,
+    item_value: Value,
+}
+
+/// Get a keyword-keyed value from either a Map or a keyword-value list.
+/// Handles both `{:label "foo"}` (Map) and `(:label "foo")` (List with alternating kw/val).
+fn get_item_field(item: &Value, key: &str) -> Option<Value> {
+    match item {
+        Value::Map(map) => map.get(key).map(|rc| rc.borrow().clone()),
+        Value::List(list) => {
+            let mut i = 0;
+            while i + 1 < list.len() {
+                let k = list[i].borrow();
+                if matches!(&*k, Value::Keyword(k) if k == key) {
+                    return Some(list[i + 1].borrow().clone());
+                }
+                i += 2;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Walk nested items, producing a flat list of visible rows.
+fn flatten_items(items: &Value, depth: usize, parent_path: &[usize], expanded: &HashSet<Vec<usize>>, rows: &mut Vec<TreeRow>) {
+    let Value::List(list) = items else { return };
+    for (i, item_rc) in list.iter().enumerate() {
+        let item = item_rc.borrow();
+        let label = match get_item_field(&item, "label") {
+            Some(Value::String(s)) => s,
+            Some(other) => crate::vm::format_lisp_value(&other),
+            None => match &*item {
+                Value::String(s) => s.clone(),
+                _ => continue,
+            },
+        };
+        let children = get_item_field(&item, "children");
+        let has_children = matches!(&children, Some(Value::List(l)) if !l.is_empty());
+
+        let mut path = parent_path.to_vec();
+        path.push(i);
+
+        let is_expanded = has_children && expanded.contains(&path);
+
+        rows.push(TreeRow {
+            depth,
+            label,
+            has_children,
+            expanded: is_expanded,
+            path: path.clone(),
+            item_value: item.clone(),
+        });
+
+        if is_expanded {
+            if let Some(ref children_val) = children {
+                flatten_items(children_val, depth + 1, &path, expanded, rows);
+            }
+        }
+    }
+}
+
+/// Extract the :items prop from a raw Value node (measure phase).
+fn get_items_value(node: &Value) -> Value {
+    let Value::Map(map) = node else {
+        return Value::Nil;
+    };
+    map.get("items")
+        .map(|rc| rc.borrow().clone())
+        .unwrap_or(Value::Nil)
+}
+
+/// Extract :items from a LayoutNode's props (render/event phase).
+fn get_items_from_props(props: &HashMap<String, Value>) -> Value {
+    props.get("items").cloned().unwrap_or(Value::Nil)
+}
+
+/// Compute row height in cell units.
+fn row_height_cells(ctx: &MeasureCtx<'_>, font_size: f32) -> f32 {
+    if let Some(measurer) = ctx.text_measurer {
+        measurer.line_height_px(font_size) / ctx.cell_h
+    } else {
+        1.0
+    }
+}
+
+/// Convert a keyword-value list like (:label "foo" :path "/bar") to a Value::Map.
+/// If already a map, returns as-is.
+fn item_to_map(item: &Value) -> Value {
+    match item {
+        Value::Map(_) => item.clone(),
+        Value::List(list) => {
+            let mut map = HashMap::new();
+            let mut i = 0;
+            while i + 1 < list.len() {
+                let k = list[i].borrow().clone();
+                let v = list[i + 1].borrow().clone();
+                if let Value::Keyword(key) = k {
+                    map.insert(
+                        key,
+                        std::rc::Rc::new(RefCell::new(v)),
+                    );
+                }
+                i += 2;
+            }
+            Value::Map(map)
+        }
+        _ => item.clone(),
+    }
+}
+
+/// Build an action map for event dispatch.
+/// Converts the item to a proper map so Lisp `(get item :label)` works.
+fn make_action_value(action: &str, item: &Value) -> Value {
+    let mut map = HashMap::new();
+    map.insert(
+        "action".to_string(),
+        std::rc::Rc::new(RefCell::new(Value::String(action.to_string()))),
+    );
+    map.insert(
+        "item".to_string(),
+        std::rc::Rc::new(RefCell::new(item_to_map(item))),
+    );
+    Value::Map(map)
+}
+
+// ── Widget definition ────────────────────────────────────────────────────────
+
+pub struct TreeWidget;
+
+pub static TREE_WIDGET: TreeWidget = TreeWidget;
+
+const INDENT_CELLS: f32 = 1.5;
+
+impl WidgetDefinition for TreeWidget {
+    fn names(&self) -> &'static [&'static str] {
+        &["tree"]
+    }
+
+    #[cfg(target_os = "macos")]
+    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
+        Some(TREE_CHEVRON_SHADER)
+    }
+
+    fn size_affecting_props(&self) -> &'static [&'static str] {
+        &["items", "width", "height", "font-size"]
+    }
+
+    fn measure(
+        &self,
+        node: &Value,
+        _children: &[Value],
+        constraints: Constraints,
+        ctx: &MeasureCtx<'_>,
+        _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
+    ) -> Option<Size> {
+        let items = get_items_value(node);
+        // We don't have widget_id during measure, so use an empty expanded set
+        // for initial measurement. The actual height will be correct after the
+        // first render when TreeState is populated.
+        // For subsequent renders, we need to get the state somehow — but widget_id
+        // isn't available here. We'll use a conservative approach: measure with
+        // all nodes collapsed (items count at depth 0 only).
+        // Actually, since size_affecting_props includes "items" and the items
+        // data doesn't change when we toggle expand, the widget won't re-measure
+        // on toggle. We need a different approach.
+        //
+        // Solution: store the flattened row count in a thread-local keyed by
+        // items pointer identity, updated during build_metal_primitives.
+        let mut rows = Vec::new();
+        let expanded = get_last_known_expanded(&items);
+        flatten_items(&items, 0, &[], &expanded, &mut rows);
+
+        let rh = ROW_HEIGHT;
+
+        let width = get_prop_num(node, "width")
+            .map(f64_to_f32)
+            .unwrap_or_else(|| {
+                if constraints.max_width < f32::MAX {
+                    constraints.max_width
+                } else {
+                    40.0
+                }
+            });
+        let height = get_prop_num(node, "height")
+            .map(f64_to_f32)
+            .unwrap_or(rows.len() as f32 * rh);
+
+        Some(Size { width, height })
+    }
+
+    fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
+        let items = get_items_from_props(props);
+        let expanded = get_last_known_expanded(&items);
+        let mut rows = Vec::new();
+        flatten_items(&items, 0, &[], &expanded, &mut rows);
+
+        let fg = crate::backend::Color {
+            r: 0.88,
+            g: 0.88,
+            b: 0.88,
+            a: 1.0,
+        };
+        let dim = crate::backend::Color {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+            a: 1.0,
+        };
+
+        for (i, row) in rows.iter().enumerate() {
+            let r = rect.row.round() as u16 + i as u16;
+            if r >= rect.row.round() as u16 + rect.height.round() as u16 {
+                break;
+            }
+            let indent = row.depth as u16 * 2;
+            let col_start = rect.col.round() as u16 + indent;
+
+            // Disclosure triangle
+            if row.has_children {
+                let tri = if row.expanded { '▼' } else { '▶' };
+                buf.set(r, col_start, styled_cell(tri, dim, None));
+            }
+
+            // Label
+            let label_col = col_start + 2;
+            let color = if row.has_children { fg } else { dim };
+            for (j, ch) in row.label.chars().enumerate() {
+                let c = label_col + j as u16;
+                if c >= rect.col.round() as u16 + rect.width.round() as u16 {
+                    break;
+                }
+                buf.set(r, c, styled_cell(ch, color, None));
+            }
+        }
+    }
+
+    fn mouse_event(
+        &self,
+        node: &LayoutNode,
+        mouse_kind: MouseEventKind,
+        _local_col: f32,
+        local_row: f32,
+        _drag_start: Option<(f32, f32)>,
+        _gesture: Option<&Value>,
+        _modifiers: KeyModifiers,
+    ) -> MouseEventOutcome {
+        if !matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left)) {
+            return MouseEventOutcome::Consume;
+        }
+
+        let items = get_items_from_props(&node.props);
+        let mut state = get_tree_state(node.widget_id);
+        let mut rows = Vec::new();
+        flatten_items(&items, 0, &[], &state.expanded, &mut rows);
+
+        let rh = ROW_HEIGHT;
+
+        // Adjust for parent scroll container offset
+        let scroll_offset = find_parent_scroll_offset(node);
+        let row_relative = local_row - node.rect.row + scroll_offset;
+        let row_idx = (row_relative / rh).floor() as usize;
+        if row_idx >= rows.len() {
+            return MouseEventOutcome::Consume;
+        }
+
+        state.selected_row = row_idx;
+        let row = &rows[row_idx];
+
+        if row.has_children {
+            // Toggle expand/collapse
+            if state.expanded.contains(&row.path) {
+                state.expanded.remove(&row.path);
+            } else {
+                state.expanded.insert(row.path.clone());
+            }
+            set_tree_state(node.widget_id, state);
+            MouseEventOutcome::Dispatch(WidgetEvent::Custom(
+                make_action_value("toggle", &row.item_value),
+            ))
+        } else {
+            set_tree_state(node.widget_id, state);
+            MouseEventOutcome::Dispatch(WidgetEvent::Custom(
+                make_action_value("select", &row.item_value),
+            ))
+        }
+    }
+
+    fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
+        let items = get_items_from_props(&node.props);
+        let mut state = get_tree_state(node.widget_id);
+        let mut rows = Vec::new();
+        flatten_items(&items, 0, &[], &state.expanded, &mut rows);
+        if rows.is_empty() {
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Up => {
+                state.selected_row = state.selected_row.saturating_sub(1);
+                set_tree_state(node.widget_id, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
+            KeyCode::Down => {
+                state.selected_row = (state.selected_row + 1).min(rows.len() - 1);
+                set_tree_state(node.widget_id, state);
+                Some(WidgetEvent::Custom(Value::Nil))
+            }
+            KeyCode::Right => {
+                let row = &rows[state.selected_row];
+                if row.has_children && !row.expanded {
+                    state.expanded.insert(row.path.clone());
+                    set_tree_state(node.widget_id, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                } else if row.has_children && row.expanded {
+                    // Move to first child
+                    state.selected_row = (state.selected_row + 1).min(rows.len() - 1);
+                    set_tree_state(node.widget_id, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                } else {
+                    None
+                }
+            }
+            KeyCode::Left => {
+                let row = &rows[state.selected_row];
+                if row.has_children && row.expanded {
+                    state.expanded.remove(&row.path);
+                    set_tree_state(node.widget_id, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                } else if row.depth > 0 {
+                    // Move to parent
+                    let parent_path: Vec<usize> =
+                        row.path[..row.path.len() - 1].to_vec();
+                    if let Some(parent_idx) =
+                        rows.iter().position(|r| r.path == parent_path)
+                    {
+                        state.selected_row = parent_idx;
+                        set_tree_state(node.widget_id, state);
+                        Some(WidgetEvent::Custom(Value::Nil))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            KeyCode::Enter => {
+                let row = &rows[state.selected_row];
+                if row.has_children {
+                    // Toggle
+                    if state.expanded.contains(&row.path) {
+                        state.expanded.remove(&row.path);
+                    } else {
+                        state.expanded.insert(row.path.clone());
+                    }
+                    set_tree_state(node.widget_id, state);
+                    Some(WidgetEvent::Custom(
+                        make_action_value("toggle", &row.item_value),
+                    ))
+                } else {
+                    set_tree_state(node.widget_id, state);
+                    Some(WidgetEvent::Custom(
+                        make_action_value("activate", &row.item_value),
+                    ))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+        let WidgetEvent::Custom(ref action) = event else {
+            return None;
+        };
+        // Nil means just redraw (key nav, internal toggle)
+        if matches!(action, Value::Nil) {
+            return None;
+        }
+
+        let Value::Map(action_map) = action else {
+            return None;
+        };
+        let action_type = action_map
+            .get("action")
+            .map(|rc| {
+                let v = rc.borrow();
+                match &*v {
+                    Value::String(s) => s.clone(),
+                    _ => String::new(),
+                }
+            })
+            .unwrap_or_default();
+        let item = action_map
+            .get("item")
+            .map(|rc| rc.borrow().clone())
+            .unwrap_or(Value::Nil);
+
+        let callback_key = match action_type.as_str() {
+            "toggle" => "on-toggle",
+            "select" => "on-select",
+            "activate" => "on-activate",
+            _ => return None,
+        };
+
+        let callback = node
+            .props
+            .get(callback_key)
+            .filter(|v| !matches!(v, Value::Nil | Value::Bool(false)))
+            .cloned();
+
+        let cb = callback?;
+        Some(EventOutput {
+            callback: cb,
+            args: vec![item],
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn build_metal_primitives(
+        &self,
+        _widget_type: &str,
+        node: &LayoutNode,
+        _viewport: WidgetViewport,
+    ) -> Vec<MetalPrimitive> {
+        let items = get_items_from_props(&node.props);
+        let state = get_tree_state(node.widget_id);
+        let mut rows = Vec::new();
+        flatten_items(&items, 0, &[], &state.expanded, &mut rows);
+
+        // Update the last-known expanded state for measure() to use
+        update_last_known_expanded(&state.expanded);
+
+        let font_size = node
+            .props
+            .get("font-size")
+            .and_then(|v| match v {
+                Value::Number(n) => Some(*n as f32),
+                _ => None,
+            })
+            .unwrap_or(DEFAULT_FONT_SIZE);
+
+        let rh = ROW_HEIGHT;
+
+        let default_even = Color { r: 0.04, g: 0.04, b: 0.05, a: 1.0 };
+        let default_odd = Color { r: 0.06, g: 0.06, b: 0.07, a: 1.0 };
+        let bg_even = resolve_named_color(&node.props, "row-bg-even", default_even);
+        let bg_odd = resolve_named_color(&node.props, "row-bg-odd", default_odd);
+        let selected_bg = resolve_named_color(&node.props, "selected-bg", theme::WIDGET_FOCUS_BG());
+        let folder_fg = resolve_named_color(&node.props, "folder-color", theme::WIDGET_LABEL_FG());
+        let file_fg = resolve_named_color(&node.props, "file-color", Color { r: 0.65, g: 0.65, b: 0.68, a: 1.0 });
+        let triangle_fg = resolve_named_color(&node.props, "chevron-color", Color { r: 0.45, g: 0.45, b: 0.50, a: 1.0 });
+
+        let mut prims = Vec::new();
+
+        for (i, row) in rows.iter().enumerate() {
+            let y = node.rect.row + i as f32 * rh;
+
+            // Row background (zebra + selection)
+            let bg = if i == state.selected_row {
+                selected_bg
+            } else if i % 2 == 0 {
+                bg_even
+            } else {
+                bg_odd
+            };
+            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                rect: Rect {
+                    row: y,
+                    col: node.rect.col,
+                    width: node.rect.width,
+                    height: rh,
+                },
+                color: bg,
+            }));
+
+            let indent = row.depth as f32 * INDENT_CELLS;
+            let x = node.rect.col + indent + 0.5; // small left margin
+
+            // Disclosure chevron (SDF rendered)
+            if row.has_children {
+                let chevron_h = rh * 0.85;
+                let chevron_w = chevron_h * 1.8; // wider to give horizontal room
+                let chevron_rect = Rect {
+                    row: y + (rh - chevron_h) * 0.5,
+                    col: x - 0.2,
+                    width: chevron_w,
+                    height: chevron_h,
+                };
+                let (ndc_min, ndc_max) = ndc_bounds(chevron_rect, _viewport);
+                let px_w = chevron_rect.width * _viewport.cell_w;
+                let px_h = chevron_rect.height * _viewport.cell_h;
+                prims.push(MetalPrimitive::WidgetInstance {
+                    widget_type: "tree".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: if row.expanded { 1.0 } else { 0.0 },
+                        orientation: 0.0,
+                        itime: _viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
+                        color_a: [triangle_fg.r, triangle_fg.g, triangle_fg.b, triangle_fg.a],
+                        color_b: [0.0; 4],
+                        color_c: [0.0, 0.0, 1.0, 1.0],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: false,
+                });
+            }
+
+            // Label text (transparent bg — row Rect already handles background)
+            // Offset down slightly to vertically center text in the row
+            let text_y = y + (rh - 1.0) * 0.5;
+            let label_x = x + 2.2;
+            let fg = if row.has_children { folder_fg } else { file_fg };
+            let transparent = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            prims.push(MetalPrimitive::ProportionalText(
+                MetalProportionalTextPrimitive {
+                    row: text_y,
+                    col: label_x,
+                    text: row.label.clone(),
+                    font_size,
+                    fg,
+                    bg: transparent,
+                },
+            ));
+        }
+
+        prims
+    }
+}
+
+// ── Helpers for measure/render coordination ──────────────────────────────────
+
+// Since measure() doesn't have widget_id, we cache the last known expanded
+// set keyed by items list identity so measure can produce the correct height.
+
+thread_local! {
+    static LAST_EXPANDED: RefCell<Option<HashSet<Vec<usize>>>> =
+        const { RefCell::new(None) };
+}
+
+fn get_last_known_expanded(_items: &Value) -> HashSet<Vec<usize>> {
+    LAST_EXPANDED.with(|cell| {
+        cell.borrow().clone().unwrap_or_default()
+    })
+}
+
+fn update_last_known_expanded(expanded: &HashSet<Vec<usize>>) {
+    LAST_EXPANDED.with(|cell| {
+        *cell.borrow_mut() = Some(expanded.clone());
+    });
+}
+
+// ── Metal shader ─────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "macos")]
+const TREE_CHEVRON_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 uv = in.uv;
+    float expanded = in.value_t;
+    float4 col = in.color_a;
+
+    // Aspect-corrected coordinates: x in [-a, a], y in [-1, 1]
+    float a = in.aspect;
+    float2 p = float2((uv.x - 0.5) * 2.0 * a, (uv.y - 0.5) * 2.0);
+
+    // Right chevron ">" — endpoints in aspect-corrected space
+    float2 r_pt = float2(0.25 * a, 0.0);
+    float2 r_a = float2(-0.25 * a, -0.5);
+    float2 r_b = float2(-0.25 * a, 0.5);
+
+    // Down chevron "v" — endpoints in aspect-corrected space
+    float2 d_pt = float2(0.0, 0.3);
+    float2 d_a = float2(-0.55 * a, -0.3);
+    float2 d_b = float2(0.55 * a, -0.3);
+
+    // Interpolate between right and down chevron
+    float s = expanded;
+    float2 pt = r_pt * (1.0 - s) + d_pt * s;
+    float2 arm_a = r_a * (1.0 - s) + d_a * s;
+    float2 arm_b = r_b * (1.0 - s) + d_b * s;
+
+    // SDF for two line segments (arm_a -> pt, pt -> arm_b)
+    float2 pa1 = p - arm_a;
+    float2 ba1 = pt - arm_a;
+    float h1 = clamp(dot(pa1, ba1) / dot(ba1, ba1), 0.0, 1.0);
+    float seg1 = length(pa1 - ba1 * h1);
+
+    float2 pa2 = p - pt;
+    float2 ba2 = arm_b - pt;
+    float h2 = clamp(dot(pa2, ba2) / dot(ba2, ba2), 0.0, 1.0);
+    float seg2 = length(pa2 - ba2 * h2);
+
+    float d = min(seg1, seg2);
+
+    // Stroke width + anti-aliasing
+    float stroke = 0.18;
+    float edge = fwidth(d) * 1.2;
+    float mask = smoothstep(stroke + edge, stroke - edge, d);
+
+    if (mask < 0.002) { discard_fragment(); }
+
+    return float4(col.rgb, col.a * mask);
+}
+"#;
+
+/// Find the scroll offset from the nearest parent scroll container.
+fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {
+    super::scroll::any_active_scroll_offset()
+}
+
+/// Fixed row height in cells. Matches what measure() uses.
+const ROW_HEIGHT: f32 = 1.25;

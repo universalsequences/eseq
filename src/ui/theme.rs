@@ -7,6 +7,7 @@ use crate::vm::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
+    pub accent: Color,
     pub bg: Color,
     pub fg: Color,
     pub fg_muted: Color,
@@ -105,7 +106,7 @@ macro_rules! theme_slots {
             let normalized = normalize_name(name);
             let theme = current();
             match normalized.as_str() {
-                "primary" | "accent" => Some(theme.green),
+                "primary" => Some(theme.accent),
                 "secondary" => Some(theme.red),
                 "gray" | "grey" | "dim" => Some(theme.bright_black),
                 $(
@@ -125,6 +126,7 @@ macro_rules! theme_slots {
 }
 
 theme_slots!(
+    (accent, ACCENT, Color::from_hex(0xc8, 0xff, 0x00)),
     (bg, BG, Color::from_hex(0x0a, 0x0a, 0x0a)),
     (fg, FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
     (fg_muted, FG_MUTED, Color::from_hex(0x50, 0x50, 0x50)),

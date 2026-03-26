@@ -39,6 +39,19 @@ pub fn get_scroll_state(widget_id: u64) -> ScrollState {
 
 pub fn set_scroll_state(widget_id: u64, state: ScrollState) {
     SCROLL_STATES.with(|s| s.borrow_mut().insert(widget_id, state));
+    super::bump_widget_state_generation();
+}
+
+/// Find the scroll offset of any active scroll container that is currently scrolled.
+pub fn any_active_scroll_offset() -> f32 {
+    SCROLL_STATES.with(|s| {
+        for state in s.borrow().values() {
+            if state.viewport_height > 0.0 && state.content_height > state.viewport_height {
+                return state.offset_y;
+            }
+        }
+        0.0
+    })
 }
 
 /// Clamp an existing scroll offset when content/viewport dimensions change.

@@ -47,7 +47,23 @@ impl Editor {
             )
         };
 
-        self.apply_widget_output(output)
+        if self.apply_widget_output(output) {
+            true
+        } else {
+            // For mouse-down on widgets: force relayout in case internal state
+            // changed (e.g. tree expand/collapse). Return true to consume the click.
+            // For scroll events: return false so buffer scrolling still works.
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                let has_widget = self.widget_node_at_local(local_col, local_row).is_some();
+                if has_widget {
+                    self.runtime.invalidate_layout();
+                    self.mark_needs_redraw();
+                }
+                has_widget
+            } else {
+                false
+            }
+        }
     }
 
     /// Update SDF widget hover/pressed state and redraw if changed.
@@ -519,7 +535,11 @@ impl Editor {
             map_scroll_gesture_event(&node, scrolled_col, scrolled_row, delta_x, delta_y)
         {
             let output = handle_event(&node, widget_event);
-            let _ = self.apply_widget_output(output);
+            if !self.apply_widget_output(output) {
+                // Scroll widgets update internal state without a Lisp callback,
+                // so we still need to redraw even when there's no EventOutput.
+                self.mark_needs_redraw();
+            }
             return true;
         }
         if captures_scroll_gesture(&node) {
@@ -539,7 +559,9 @@ impl Editor {
                     delta_y,
                 ) {
                     let output = handle_event(&scroll_node, widget_event);
-                    let _ = self.apply_widget_output(output);
+                    if !self.apply_widget_output(output) {
+                        self.mark_needs_redraw();
+                    }
                     return true;
                 }
             }

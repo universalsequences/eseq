@@ -121,6 +121,7 @@ fn is_widget_name(name: &str) -> bool {
             | "grid"
             | "tabs"
             | "scroll"
+            | "tree"
     )
 }
 

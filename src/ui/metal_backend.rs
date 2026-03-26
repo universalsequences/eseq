@@ -39,7 +39,8 @@ mod inner {
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{Rect, TextMeasurer};
     use crate::theme;
-    use crate::widget_render::{self, WidgetInstance, WidgetViewport};
+    use crate::tile::TileId;
+    use crate::widget_render::{self, MetalPrimitive, WidgetInstance, WidgetViewport};
 
     /// Lightweight TextMeasurer that delegates to `SizedFontCache` for font
     /// metrics without needing a GPU atlas. Used by the layout engine.
@@ -582,6 +583,19 @@ fragment float4 waveform_frag(
         last_precise_mouse: Option<(f32, f32)>,
         last_window_bg: Option<Color>,
         start_time: Instant,
+        /// Per-tile widget primitive cache.
+        /// Key: (layout_cache_key, widget_state_generation, focused_widget_id, scroll_top)
+        /// Avoids re-collecting primitives for tiles whose widget tree hasn't changed.
+        widget_prim_cache: HashMap<TileId, (WidgetPrimCacheKey, Vec<MetalPrimitive>)>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    struct WidgetPrimCacheKey {
+        layout_cache_key: u64,
+        widget_state_gen: u64,
+        focused_widget_id: Option<u64>,
+        scroll_top: u16,
+        scroll_left: u16,
     }
 
     impl MetalBackend {
@@ -623,6 +637,7 @@ fragment float4 waveform_frag(
                 last_precise_mouse: None,
                 last_window_bg: None,
                 start_time: Instant::now(),
+                widget_prim_cache: HashMap::new(),
             })
         }
 
@@ -983,20 +998,59 @@ fragment float4 waveform_frag(
                     let inner_rows = (tile.rect.height - if tile.show_status { 1.0 } else { 0.0 })
                         .max(0.0)
                         .round() as u16;
-                    let primitives = widget_render::collect_metal_primitives(
-                        layout,
-                        WidgetViewport {
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                            time_seconds,
-                            focused_widget_id: tile.frame.focused_widget_id,
-                            focused_branch: false,
-                        },
-                        tile.frame.widget_scroll_top,
-                        inner_rows,
-                    );
+
+                    // Check per-tile primitive cache to avoid re-collecting
+                    // when the widget tree and widget state haven't changed.
+                    let cache_key = WidgetPrimCacheKey {
+                        layout_cache_key: tile.frame.widget_layout_cache_key,
+                        widget_state_gen: widget_render::widget_state_generation(),
+                        focused_widget_id: tile.frame.focused_widget_id,
+                        scroll_top: tile.frame.widget_scroll_top,
+                        scroll_left: tile.frame.widget_scroll_left,
+                    };
+                    let primitives = if let Some((cached_key, cached)) =
+                        self.widget_prim_cache.get(&tile.tile_id)
+                    {
+                        if *cached_key == cache_key {
+                            cached.clone()
+                        } else {
+                            let prims = widget_render::collect_metal_primitives(
+                                layout,
+                                WidgetViewport {
+                                    cell_w,
+                                    cell_h,
+                                    vp_w,
+                                    vp_h,
+                                    time_seconds,
+                                    focused_widget_id: tile.frame.focused_widget_id,
+                                    focused_branch: false,
+                                },
+                                tile.frame.widget_scroll_top,
+                                inner_rows,
+                            );
+                            self.widget_prim_cache
+                                .insert(tile.tile_id, (cache_key, prims.clone()));
+                            prims
+                        }
+                    } else {
+                        let prims = widget_render::collect_metal_primitives(
+                            layout,
+                            WidgetViewport {
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                                time_seconds,
+                                focused_widget_id: tile.frame.focused_widget_id,
+                                focused_branch: false,
+                            },
+                            tile.frame.widget_scroll_top,
+                            inner_rows,
+                        );
+                        self.widget_prim_cache
+                            .insert(tile.tile_id, (cache_key, prims.clone()));
+                        prims
+                    };
                     // Offset primitives to tile's screen position,
                     // shifted by both text scroll (vertical) and hscroll (horizontal)
                     // so widgets move with the text.
@@ -1132,16 +1186,6 @@ fragment float4 waveform_frag(
                         sb(sx0, sy1),
                         sb(sx1, sy1),
                     ]);
-                    push_horizontal_rule(
-                        &mut status_verts,
-                        col_off as f32 * cell_w,
-                        status_row as f32 * cell_h,
-                        tile_w as f32 * cell_w,
-                        1.0,
-                        theme::STATUS_EDGE(),
-                        vp_w,
-                        vp_h,
-                    );
                     for (i, cell) in tile.frame.status_cells.iter().enumerate() {
                         let ch_col = col_off + i;
                         if ch_col >= col_off + tile_w {
@@ -1171,6 +1215,27 @@ fragment float4 waveform_frag(
                             );
                         }
                     }
+                    // Draw the edge lines AFTER cell backgrounds so they render on top
+                    push_horizontal_rule(
+                        &mut status_verts,
+                        col_off as f32 * cell_w,
+                        status_row as f32 * cell_h,
+                        tile_w as f32 * cell_w,
+                        1.0,
+                        theme::STATUS_EDGE(),
+                        vp_w,
+                        vp_h,
+                    );
+                    push_horizontal_rule(
+                        &mut status_verts,
+                        col_off as f32 * cell_w,
+                        (status_row + 1) as f32 * cell_h - 1.0,
+                        tile_w as f32 * cell_w,
+                        1.0,
+                        theme::STATUS_EDGE(),
+                        vp_w,
+                        vp_h,
+                    );
                     draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &status_verts);
                 }
 

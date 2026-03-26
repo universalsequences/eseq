@@ -221,14 +221,12 @@
     (list
       (style-fg line 0 10 :fg-muted)
       (style-fg line 11 13 :fg-muted)
-      (style-fg line 14 24 :fg-muted)
-      (style-fg line 25 33 :fg-muted)
-      (style-fg line 34 40 :fg-muted)
-      (style-fg line 41 53 :fg-muted))
+      (style-fg line 14 20 :fg-muted)
+      (style-fg line 21 33 :fg-muted))
     (list
       (if is-dir
-        (style-bold-fg line 53 200 :blue)
-        (style-fg line 53 200 :fg)))))
+        (style-bold-fg line 34 200 :blue)
+        (style-fg line 34 200 :fg)))))
 
 (def dired-entry-styles (entries line)
   (if (empty? entries)
@@ -276,7 +274,7 @@
     (let ((lines (append
                    (list (str "∨ > " dired-current-dir)
                          ""
-                         "drwxr-xr-x  1 parent     parent      0            .. ../")
+                         "drwxr-xr-x  1      0            .. ../")
                    (map dired-format-entry dired-entries))))
       (render-widget nil)
       (set-buffer-lines lines)

@@ -347,6 +347,11 @@ pub fn reuse_layout_node(
     if widget_type != existing.widget_type {
         return None;
     }
+    // Tree widgets manage internal expand/collapse state that changes their
+    // height without changing props. Always force full relayout.
+    if widget_type == "tree" {
+        return None;
+    }
 
     let children_values = get_children(tree);
     if children_values.len() != existing.children.len() {

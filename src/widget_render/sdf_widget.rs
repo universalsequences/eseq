@@ -23,6 +23,7 @@ pub struct SdfWidgetDef {
 }
 
 pub const MAX_SDF_STATE_UNIFORMS: usize = 8;
+pub const SHADER_TYPE_PROP: &str = "__shader_type";
 
 pub fn shader_state_prop_name(name: &str) -> String {
     format!("shader-state-{}", name)
@@ -268,6 +269,52 @@ pub fn sdf_widget_tui_render(
     _buf: &mut CellBuffer,
 ) {
     // Future: Milestone 6 TUI fallback rendering
+}
+
+/// Build the material overlay layer (Layer 2) for a slider with a :material shader.
+/// Packs state uniforms and returns the overlay MetalPrimitive.
+pub fn build_material_overlay(
+    node: &LayoutNode,
+    def: &SdfWidgetDef,
+    shader_type: &str,
+    viewport: WidgetViewport,
+    value_t: f32,
+) -> MetalPrimitive {
+    let paint_rect = sdf_widget_paint_rect(node.rect, def.paint_margin);
+    let (ndc_min, ndc_max) = super::ndc_bounds(paint_rect, viewport);
+    let logical_uv = sdf_widget_logical_uv_bounds(node.rect, paint_rect);
+    let hit = get_sdf_hit_state(node.widget_id);
+
+    let mut uniform_a = [0.0; 4];
+    let mut uniform_b = [0.0; 4];
+    for (idx, name) in def.state_uniforms.iter().take(MAX_SDF_STATE_UNIFORMS).enumerate() {
+        let val = super::get_f32_prop(&node.props, &shader_state_prop_name(name), 0.0);
+        if idx < 4 { uniform_a[idx] = val; } else { uniform_b[idx - 4] = val; }
+    }
+
+    let px_w = node.rect.width * viewport.cell_w;
+    let px_h = node.rect.height * viewport.cell_h;
+    let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
+
+    MetalPrimitive::WidgetInstance {
+        widget_type: shader_type.to_string(),
+        instance: super::WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a,
+            uniform_b,
+            color_a: [0.0; 4],
+            color_b: [hit.hit_region as f32, if hit.hit_pressed { 1.0 } else { 0.0 }, 0.0, 0.0],
+            color_c: logical_uv,
+            color_d: [0.0; 4],
+            corner_radius: 0.0,
+            pixel_aspect,
+        },
+        is_background: false,
+    }
 }
 
 pub fn sdf_widget_paint_rect(rect: Rect, paint_margin: f32) -> Rect {

@@ -9,18 +9,18 @@
 ;; ── Aqua Button ─────────────────────────────────────────────────────────
 
 (defmacro aqua-color (base1 base2)
-  `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
+  `(let ((__ny (+ y (* 3 (dot normal (vec3 0 1 0)))))
             (__base (mix ,base1
                 ,base2
-                (smoothstep -0.5 0.5 __ny)))
-            (__glass (smoothstep 0.1 -0.65 __ny))
+                (smoothstep -0.5 0.1 __ny)))
+            (__glass (smoothstep 0.1 -0.95 __ny))
             (__edge-fade (smoothstep 0.0 -0.26 d))
             (__hi (* __glass __edge-fade 0.655))
             (__spec (* specular __edge-fade 0.3))
             (__bot (* (smoothstep 0.3 0.5 __ny)
                 (smoothstep 0.65 0.5 __ny)
                 __edge-fade 0.12))
-            (__rim (smoothstep -0.53 -0.033 d)))
+            (__rim (smoothstep -0.53 0.0133 d)))
           (+ (* __base (rgba __rim __rim __rim 1.0))
             (rgba (+ __hi __spec __bot)
               (+ __hi __spec __bot)
@@ -29,12 +29,12 @@
   )
 
 (defwidget aqua-button
-  :width 4 :height 3
+  :width 3 :height 3
   :paint-margin 1
   :state (active)
   :shader
   (sdf/layer
-    (sdf/fill (+ (* 0.2 (smoothstep 0 0.3 (* y x))) (sdf/fill-rounded-rect -0.01 0.85))
+    (sdf/fill (+ (* 0.2 (smoothstep 0 0.23 (abs (- y x)))) (sdf/fill-rounded-rect -0.01 0.85))
       (material
         :lighting 
         (lighting :edge-min -0.35 :edge-max 0.5
@@ -52,30 +52,33 @@
   :paint-margin 1
   :shader
   (sdf/layer
-    (sdf/fill (+ (* (mix 0.417 0.1927 (- y x)) (smoothstep 0 1.2 (mix (- y x) (cos (* 7 (* x y))) (* x y) ))) (sdf/fill-rounded-rect 0.05 0.35))
+    (sdf/fill (+ 
+        (* (mix 0.1417 (*   (+ 1 (cos (* 10 x ))) 0.1927) (smoothstep 0 0.3 (* y x))) 
+          (smoothstep 0 0.13
+            (mix (* 1 x) (sin (* 3.3 (* x (* 0.1 (cos x)) y))) (- x y) ))) (sdf/fill-rounded-rect 0.05 0.35))
       (material
-        :lighting (lighting :edge-min -0.1 :edge-max 0.3
-          :light (vec3 0.0 -0.930 1.5) :shininess 82.0)
+        :lighting (lighting :edge-min -0.051 :edge-max 0.1
+          :light (vec3 -0.8 -0.930 1.985) :shininess 62.0)
         :color
-        (let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
-            (__base (mix (rgba 0.10 0.12 0.168 1.0)
-                (rgba 0.03 0.03 0.06 1.0)
-                (smoothstep -0.5 0.5 __ny)))
-            (__glass (smoothstep 0.9 -0.35 __ny))
-            (__edge-fade (smoothstep 0.0 -0.06 d))
-            (__hi (* __glass __edge-fade 0.0145))
-            (__spec (* specular __edge-fade 0.45))
-            (__bot (* (smoothstep 0.4 0.95 __ny)
+        (let ((__ny (+ x  (* 1 (dot normal (vec3 1 1 0)))))
+            (__base (mix (rgba 0.0 0.0102 0.098 1.0)
+                (rgba 0.01 00.01 0.09 1.0)
+                (smoothstep -0.55 0.65 __ny)))
+            (__glass (smoothstep (dot normal (vec3 1 0 0)) -0.15 (cos (* 0.1 y __ny))))
+            (__edge-fade (smoothstep 0.1 -0.3 d))
+            (__hi (* __glass __edge-fade 0.15))
+            (__spec (* specular __edge-fade (* 1.3 (dot normal (vec3 1 0 1)))))
+            (__bot (* (smoothstep 0.0 0.95 __ny)
                 (smoothstep 0.05 0.5 __ny)
-                __edge-fade 0.2))
-            (__rim (smoothstep 0.50 -0.05 d)))
-          (+ (* __base (rgba __rim __rim __rim 1))
+                __edge-fade 0.145))
+            (__rim (smoothstep 0.10 -0.05 d)))
+          (+ (* __base (rgba __rim __rim __rim 1.))
             (rgba (+ __hi __spec __bot)
               (+ __hi __spec __bot)
               (+ __hi __spec __bot)
               0.0)))
         :shadow (shadow
-          :color (rgba 1 1 1 0.25)
+          :color (rgba 1 1 1 0.025)
           :blur 0.2
           :spread 0.01
           :offset (vec2 0 0.04))))))

@@ -915,10 +915,8 @@ fn describe_directory_entry(
         .map(|time| time.as_secs().to_string())
         .unwrap_or_else(|| "-".to_string());
     let display = format!(
-        "{permissions} {:>2} {:<8} {:<8} {:>6} {modified:>12} {display_name}",
+        "{permissions} {:>2} {:>6} {modified:>12} {display_name}",
         1,
-        "-",
-        "-",
         metadata.len()
     );
     DirectoryEntryInfo {
@@ -964,7 +962,7 @@ fn describe_directory_entry_unix(
         let modified = parts.next()?.to_string();
         let size_text = format_size(size);
         let display = format!(
-            "{permissions} {links:>2} {owner:<10.10} {group:<8.8} {size_text:>6} {modified:>12} {display_name}"
+            "{permissions} {links:>2} {size_text:>6} {modified:>12} {display_name}"
         );
         return Some(DirectoryEntryInfo {
             display,
@@ -997,7 +995,7 @@ fn describe_directory_entry_unix(
     let modified = metadata.mtime().to_string();
     let size_text = format_size(metadata.size());
     let display = format!(
-        "{permissions} {links:>2} {owner:<10.10} {group:<8.8} {size_text:>6} {modified:>12} {display_name}",
+        "{permissions} {links:>2} {size_text:>6} {modified:>12} {display_name}",
     );
     Some(DirectoryEntryInfo {
         display,
