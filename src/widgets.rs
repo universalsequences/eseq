@@ -22,6 +22,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "tabs",
         "timeline",
         "waveform",
+        "scroll",
     ] {
         let widget_type = widget.to_string();
         vm.register_native(widget, move |args| build_widget(&widget_type, args));

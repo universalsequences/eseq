@@ -513,13 +513,64 @@ impl Editor {
         };
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
         let scrolled_row = local_row + self.total_scroll_top();
-        let Some(widget_event) =
+
+        // Try the leaf widget first
+        if let Some(widget_event) =
             map_scroll_gesture_event(&node, scrolled_col, scrolled_row, delta_x, delta_y)
-        else {
-            return captures_scroll_gesture(&node);
-        };
-        let output = handle_event(&node, widget_event);
-        let _ = self.apply_widget_output(output);
-        true
+        {
+            let output = handle_event(&node, widget_event);
+            let _ = self.apply_widget_output(output);
+            return true;
+        }
+        if captures_scroll_gesture(&node) {
+            return true;
+        }
+
+        // Leaf doesn't capture scroll — walk up to find a scroll container ancestor
+        if let Some(layout) = self.runtime.current_layout.as_ref() {
+            if let Some(scroll_node) =
+                find_scroll_ancestor(layout, node.widget_id)
+            {
+                if let Some(widget_event) = map_scroll_gesture_event(
+                    &scroll_node,
+                    scrolled_col,
+                    scrolled_row,
+                    delta_x,
+                    delta_y,
+                ) {
+                    let output = handle_event(&scroll_node, widget_event);
+                    let _ = self.apply_widget_output(output);
+                    return true;
+                }
+            }
+        }
+
+        false
     }
+}
+
+/// Walk the layout tree to find the nearest "scroll" ancestor of the widget with the given ID.
+fn find_scroll_ancestor(node: &LayoutNode, target_id: u64) -> Option<LayoutNode> {
+    find_scroll_ancestor_impl(node, target_id, None)
+}
+
+fn find_scroll_ancestor_impl(
+    node: &LayoutNode,
+    target_id: u64,
+    current_scroll: Option<&LayoutNode>,
+) -> Option<LayoutNode> {
+    if node.widget_id == target_id {
+        return current_scroll.cloned();
+    }
+    let next_scroll = if node.widget_type == "scroll" {
+        Some(node)
+    } else {
+        current_scroll
+    };
+    for child in &node.children {
+        if let Some(found) = find_scroll_ancestor_impl(child, target_id, next_scroll) {
+            return Some(found);
+        }
+    }
+    None
 }

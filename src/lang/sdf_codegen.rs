@@ -1208,6 +1208,14 @@ pub fn compile_sdf_to_metal_with_state(
         "    float y = (logical_uv.y * 2.0 - 1.0) * max(1.0 / max(aspect, 0.0001), 1.0);"
     )
     .unwrap();
+    // Half-extents of the SDF coordinate space — use these to size shapes
+    // that should fill the widget (e.g. sdf/rounded-rect (* width 0.98) (* height 0.98) r)
+    writeln!(shader, "    float width = max(aspect, 1.0);").unwrap();
+    writeln!(
+        shader,
+        "    float height = max(1.0 / max(aspect, 0.0001), 1.0);"
+    )
+    .unwrap();
     writeln!(shader, "    float value_t = in.value_t;").unwrap();
     writeln!(shader, "    float itime = in.itime;").unwrap();
 

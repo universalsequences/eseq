@@ -36,6 +36,11 @@ fn get_prop_num_from_layout(node: &LayoutNode, key: &str) -> f32 {
 
 fn child_extent(node: &LayoutNode) -> Rect {
     let mut rect = node.rect;
+    // Don't recurse into scroll containers — their children may be much
+    // taller than the viewport, which would inflate the parent's extent.
+    if node.widget_type == "scroll" {
+        return rect;
+    }
     for child in &node.children {
         let cr = child_extent(child);
         let right = (cr.col + cr.width).max(rect.col + rect.width);
@@ -217,11 +222,16 @@ impl WidgetDefinition for BoxWidget {
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        // If box has a :background prop naming an SDF widget, render it behind children
         if let Some(Value::String(bg_type)) = node.props.get("background") {
-            // Use the content extent (union of children rects) so the SDF background
-            // covers the full scrollable content, not just the viewport-constrained rect.
-            let bg_rect = content_extent(node);
+            // Check if any child is a scroll container. If so, use the box's own
+            // layout rect — content_extent would still be correct but node.rect
+            // is the definitive bounds for a scroll-containing box.
+            let has_scroll_child = node.children.iter().any(|c| c.widget_type == "scroll");
+            let bg_rect = if has_scroll_child {
+                node.rect
+            } else {
+                content_extent(node)
+            };
             return super::sdf_widget::sdf_widget_background_primitives(bg_type, bg_rect, viewport, &node.props);
         }
         Vec::new()

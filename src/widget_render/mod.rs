@@ -4,6 +4,7 @@ pub mod hslider;
 pub mod hstack;
 pub mod knob;
 pub mod label;
+pub mod scroll;
 pub mod sdf_widget;
 pub mod tabs;
 pub mod time_view;
@@ -257,6 +258,10 @@ pub enum MetalPrimitive {
         instance: WidgetInstance,
         is_background: bool,
     },
+    /// Narrow the scissor rect to the intersection of the current scissor and this rect.
+    PushClipRect(Rect),
+    /// Restore the previous scissor rect.
+    PopClipRect,
 }
 
 #[cfg(target_os = "macos")]
@@ -420,6 +425,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &hstack::HSTACK_WIDGET,
     &box_widget::BOX_WIDGET,
     &grid::GRID_WIDGET,
+    &scroll::SCROLL_WIDGET,
 ];
 
 pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {
@@ -508,12 +514,40 @@ fn collect_metal_primitives_recursive(
         }));
     }
 
-    // No scroll adjustment or clipping here — the Metal backend applies
-    // scroll offsets via offset_primitive and clips via scissor rects.
     let node_viewport = WidgetViewport {
         focused_branch,
         ..viewport
     };
+
+    // Scroll container: clip children to viewport rect and offset by scroll amount
+    if node.widget_type == "scroll" {
+        // Emit scrollbar primitives (track + thumb) for this scroll container
+        primitives.extend(widget_primitives_for_node(node, node_viewport));
+
+        let state = scroll::get_scroll_state(node.widget_id);
+        let offset_y = state.offset_y;
+
+        primitives.push(MetalPrimitive::PushClipRect(node.rect));
+
+        for child in &node.children {
+            let mut child_primitives = Vec::new();
+            collect_metal_primitives_recursive(
+                child,
+                node_viewport,
+                _scroll_top,
+                _max_rows,
+                &mut child_primitives,
+            );
+            // Offset child primitives by negative scroll offset (shift content up)
+            for prim in child_primitives {
+                primitives.push(offset_primitive_y(prim, -offset_y, node_viewport));
+            }
+        }
+
+        primitives.push(MetalPrimitive::PopClipRect);
+        return;
+    }
+
     primitives.extend(widget_primitives_for_node(node, node_viewport));
 
     for child in &node.children {
@@ -524,6 +558,47 @@ fn collect_metal_primitives_recursive(
             _max_rows,
             primitives,
         );
+    }
+}
+
+/// Shift a metal primitive vertically by `dy` cells.
+#[cfg(target_os = "macos")]
+fn offset_primitive_y(prim: MetalPrimitive, dy: f32, viewport: WidgetViewport) -> MetalPrimitive {
+    match prim {
+        MetalPrimitive::Rect(mut r) => {
+            r.rect.row += dy;
+            MetalPrimitive::Rect(r)
+        }
+        MetalPrimitive::Quad(mut q) => {
+            q.y += dy;
+            MetalPrimitive::Quad(q)
+        }
+        MetalPrimitive::GlyphRun(mut g) => {
+            g.row += dy;
+            MetalPrimitive::GlyphRun(g)
+        }
+        MetalPrimitive::ProportionalText(mut t) => {
+            t.row += dy;
+            MetalPrimitive::ProportionalText(t)
+        }
+        MetalPrimitive::Waveform(w) => MetalPrimitive::Waveform(w),
+        MetalPrimitive::WidgetInstance {
+            widget_type,
+            mut instance,
+            is_background,
+        } => {
+            // Convert cell offset to NDC offset
+            let ndc_dy = -(dy * viewport.cell_h / viewport.vp_h) * 2.0;
+            instance.ndc_min[1] += ndc_dy;
+            instance.ndc_max[1] += ndc_dy;
+            MetalPrimitive::WidgetInstance {
+                widget_type,
+                instance,
+                is_background,
+            }
+        }
+        MetalPrimitive::PushClipRect(r) => MetalPrimitive::PushClipRect(r),
+        MetalPrimitive::PopClipRect => MetalPrimitive::PopClipRect,
     }
 }
 

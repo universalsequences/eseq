@@ -1018,92 +1018,89 @@ fragment float4 waveform_frag(
                             )
                         })
                         .collect();
-                    // Partition widget instances into background (behind text) and foreground
+                    // Split primitives into segments at clip rect boundaries.
+                    // Each segment gets its own scissor rect for proper scroll clipping.
+                    let segments = split_prim_segments(&offset_prims, scissor, cell_w, cell_h);
+
                     self.compile_pending_sdf_pipelines();
-                    let (bg_runs, fg_runs) = partition_widget_instance_runs(&offset_prims);
-                    for (widget_type, instances) in &bg_runs {
-                        let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                            continue;
-                        };
-                        if instances.is_empty() { continue; }
-                        let byte_len = std::mem::size_of_val(instances.as_slice());
-                        let Some(wbuf) = (unsafe {
-                            self.device.newBufferWithBytes_length_options(
-                                NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                byte_len, MTLResourceOptions(0))
-                        }) else { continue; };
-                        enc.setRenderPipelineState(wpipe);
-                        unsafe {
-                            enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
-                            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                MTLPrimitiveType::Triangle, 0, 6, instances.len() as _);
+                    for (seg_scissor, seg_prims) in &segments {
+                        enc.setScissorRect(*seg_scissor);
+
+                        let (bg_runs, fg_runs) = partition_widget_instance_runs(seg_prims);
+                        for (widget_type, instances) in &bg_runs {
+                            let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                                continue;
+                            };
+                            if instances.is_empty() { continue; }
+                            let byte_len = std::mem::size_of_val(instances.as_slice());
+                            let Some(wbuf) = (unsafe {
+                                self.device.newBufferWithBytes_length_options(
+                                    NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                                    byte_len, MTLResourceOptions(0))
+                            }) else { continue; };
+                            enc.setRenderPipelineState(wpipe);
+                            unsafe {
+                                enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                    MTLPrimitiveType::Triangle, 0, 6, instances.len() as _);
+                            }
                         }
-                    }
 
-                    // Rect/Quad/GlyphRun primitives
-                    let prim_quads = {
-                        let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                        build_widget_primitive_quads(&offset_prims, atlas, vp_w, vp_h)
-                    };
-                    draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
-
-                    // Proportional text: separate atlas + linear-filtering pipeline.
-                    if let (Some(prop_atlas), Some(prop_pipe)) =
-                        (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
-                    {
-                        let prop_verts = build_proportional_text_quads(
-                            &offset_prims,
-                            prop_atlas,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                        );
-                        let prop_tex = prop_atlas.texture.clone();
-                        draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
-                    }
-
-                    if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
-                        let waveforms = collect_waveform_primitives(&offset_prims);
-                        self.draw_waveform_primitives(
-                            &enc,
-                            &waveform_pipeline,
-                            &waveforms,
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                        );
-                    }
-                    // Foreground widget instances (sliders, toggles, knobs, SDF widgets)
-                    for (widget_type, instances) in &fg_runs {
-                        let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                            continue;
+                        let prim_quads = {
+                            let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                            build_widget_primitive_quads(seg_prims, atlas, vp_w, vp_h)
                         };
-                        if instances.is_empty() {
-                            continue;
+                        draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
+
+                        if let (Some(prop_atlas), Some(prop_pipe)) =
+                            (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+                        {
+                            let prop_verts = build_proportional_text_quads(
+                                seg_prims,
+                                prop_atlas,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
+                            let prop_tex = prop_atlas.texture.clone();
+                            draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
                         }
-                        let byte_len = std::mem::size_of_val(instances.as_slice());
-                        let Some(wbuf) = (unsafe {
-                            self.device.newBufferWithBytes_length_options(
-                                NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                byte_len,
-                                MTLResourceOptions(0),
-                            )
-                        }) else {
-                            continue;
-                        };
-                        enc.setRenderPipelineState(wpipe);
-                        unsafe {
-                            enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
-                            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                MTLPrimitiveType::Triangle,
-                                0,
-                                6,
-                                instances.len() as _,
+
+                        if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
+                            let waveforms = collect_waveform_primitives(seg_prims);
+                            self.draw_waveform_primitives(
+                                &enc,
+                                &waveform_pipeline,
+                                &waveforms,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
                             );
                         }
+
+                        for (widget_type, instances) in &fg_runs {
+                            let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                                continue;
+                            };
+                            if instances.is_empty() { continue; }
+                            let byte_len = std::mem::size_of_val(instances.as_slice());
+                            let Some(wbuf) = (unsafe {
+                                self.device.newBufferWithBytes_length_options(
+                                    NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                                    byte_len, MTLResourceOptions(0))
+                            }) else { continue; };
+                            enc.setRenderPipelineState(wpipe);
+                            unsafe {
+                                enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                    MTLPrimitiveType::Triangle, 0, 6, instances.len() as _);
+                            }
+                        }
                     }
+                    // Restore tile scissor after segments
+                    enc.setScissorRect(scissor);
                 }
 
                 // ── Per-tile status bar (drawn ON TOP of widgets with full-tile scissor)
@@ -2469,6 +2466,8 @@ fragment float4 waveform_frag(
                 widget_render::MetalPrimitive::ProportionalText(_) => {}
                 widget_render::MetalPrimitive::Waveform(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
+                widget_render::MetalPrimitive::PushClipRect(_)
+                | widget_render::MetalPrimitive::PopClipRect => {}
             }
         }
         verts
@@ -2582,6 +2581,87 @@ fragment float4 waveform_frag(
         ]);
     }
 
+    /// Split a flat list of primitives into segments separated by PushClipRect/PopClipRect.
+    /// Each segment gets an associated scissor rect. Clip rects are intersected with the
+    /// current scissor (stacked) so nested scroll containers work correctly.
+    fn split_prim_segments<'a>(
+        primitives: &'a [widget_render::MetalPrimitive],
+        base_scissor: MTLScissorRect,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> Vec<(MTLScissorRect, &'a [widget_render::MetalPrimitive])> {
+        // Fast path: no clip rects at all
+        let has_clips = primitives.iter().any(|p| {
+            matches!(
+                p,
+                widget_render::MetalPrimitive::PushClipRect(_)
+                    | widget_render::MetalPrimitive::PopClipRect
+            )
+        });
+        if !has_clips {
+            return vec![(base_scissor, primitives)];
+        }
+
+        let mut segments = Vec::new();
+        let mut scissor_stack: Vec<MTLScissorRect> = vec![base_scissor];
+        let mut seg_start = 0;
+
+        for (i, prim) in primitives.iter().enumerate() {
+            match prim {
+                widget_render::MetalPrimitive::PushClipRect(rect) => {
+                    // Flush the current segment (excluding this marker)
+                    if i > seg_start {
+                        segments.push((*scissor_stack.last().unwrap(), &primitives[seg_start..i]));
+                    }
+                    // Compute new scissor = intersection of current and clip rect
+                    let clip_x = (rect.col * cell_w).max(0.0) as usize;
+                    let clip_y = (rect.row * cell_h).max(0.0) as usize;
+                    let clip_w = (rect.width * cell_w).max(0.0) as usize;
+                    let clip_h = (rect.height * cell_h).max(0.0) as usize;
+                    let current = scissor_stack.last().unwrap();
+                    let new_scissor = intersect_scissor_rects(
+                        *current,
+                        MTLScissorRect {
+                            x: clip_x,
+                            y: clip_y,
+                            width: clip_w,
+                            height: clip_h,
+                        },
+                    );
+                    scissor_stack.push(new_scissor);
+                    seg_start = i + 1;
+                }
+                widget_render::MetalPrimitive::PopClipRect => {
+                    // Flush the current segment
+                    if i > seg_start {
+                        segments.push((*scissor_stack.last().unwrap(), &primitives[seg_start..i]));
+                    }
+                    scissor_stack.pop();
+                    seg_start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        // Final segment
+        if seg_start < primitives.len() {
+            segments.push((*scissor_stack.last().unwrap(), &primitives[seg_start..]));
+        }
+        segments
+    }
+
+    fn intersect_scissor_rects(a: MTLScissorRect, b: MTLScissorRect) -> MTLScissorRect {
+        let x1 = a.x.max(b.x);
+        let y1 = a.y.max(b.y);
+        let x2 = (a.x + a.width).min(b.x + b.width);
+        let y2 = (a.y + a.height).min(b.y + b.height);
+        MTLScissorRect {
+            x: x1,
+            y: y1,
+            width: if x2 > x1 { x2 - x1 } else { 0 },
+            height: if y2 > y1 { y2 - y1 } else { 0 },
+        }
+    }
+
     /// Partition widget instances into background and foreground runs in a single pass.
     fn partition_widget_instance_runs(
         primitives: &[widget_render::MetalPrimitive],
@@ -2667,6 +2747,12 @@ fragment float4 waveform_frag(
                     is_background,
                 }
             }
+            widget_render::MetalPrimitive::PushClipRect(mut r) => {
+                r.col += col_off as f32;
+                r.row += row_off as f32;
+                widget_render::MetalPrimitive::PushClipRect(r)
+            }
+            widget_render::MetalPrimitive::PopClipRect => widget_render::MetalPrimitive::PopClipRect,
         }
     }
 

@@ -110,13 +110,24 @@ impl<'a> LayoutEngine<'a> {
             },
             DEFAULT_FONT_SIZE,
         )?;
+        // If any direct child has :flex, use viewport height so flex children
+        // can fill remaining space (e.g. a scroll container with :flex 1).
+        // Otherwise use measured content height to preserve existing behavior.
+        let has_flex_children = get_children(tree)
+            .iter()
+            .any(|child| get_prop_num(child, "flex").is_some_and(|f| f > 0.0));
+        let root_height = if has_flex_children {
+            (self.terminal_rows as f32).max(size.height)
+        } else {
+            size.height
+        };
         let mut layout = self.build_layout_node(
             tree,
             Rect {
                 row: 0.0,
                 col: 0.0,
                 width: size.width,
-                height: size.height,
+                height: root_height,
             },
             DEFAULT_FONT_SIZE,
         );
@@ -209,6 +220,23 @@ impl<'a> LayoutEngine<'a> {
             );
         }
 
+        // For scroll containers, inject content/viewport dimensions so the
+        // scroll event handler and renderer can compute scroll bounds.
+        if widget_type == "scroll" {
+            let content_height = children
+                .first()
+                .map(|c| c.rect.height)
+                .unwrap_or(0.0);
+            props.insert(
+                "_content_height".to_string(),
+                Value::Number(content_height as f64),
+            );
+            props.insert(
+                "_viewport_height".to_string(),
+                Value::Number(rect.height as f64),
+            );
+        }
+
         let focusable = matches!(props.get("focusable"), Some(Value::Bool(true)));
         LayoutNode {
             widget_id: 0,
@@ -263,6 +291,23 @@ fn node_has_event_handler(node: &LayoutNode) -> bool {
 }
 
 pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutNode> {
+    // Scroll containers: only hit-test within viewport rect, and adjust
+    // coordinates by scroll offset before recursing into children.
+    if node.widget_type == "scroll" {
+        if !rect_contains(node.rect, row, col) {
+            return None;
+        }
+        let state = widget_render::scroll::get_scroll_state(node.widget_id);
+        let adjusted_row = row + state.offset_y;
+        for child in node.children.iter().rev() {
+            if let Some(hit) = hit_test_layout(child, adjusted_row, col) {
+                return Some(hit);
+            }
+        }
+        // The scroll container itself is hittable (for scroll gestures)
+        return Some(node);
+    }
+
     // Container nodes: always recurse into children — their rects may be
     // clamped to the viewport while children extend beyond (scroll).
     for child in node.children.iter().rev() {
