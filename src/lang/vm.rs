@@ -389,12 +389,27 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::Map(map)
     });
 
-    // (get map :key) → value, or false if missing
+    // (get collection :key) → value, or nil if missing.
+    // Works on both Maps and keyword-value lists like (:label "foo" :children (...)).
     vm.register_native("get", |args| {
-        if let (Some(Value::Map(m)), Some(Value::Keyword(k))) = (args.first(), args.get(1)) {
-            m.get(k).map(|v| v.borrow().clone()).unwrap_or(Value::Nil)
-        } else {
-            Value::Nil
+        let Some(Value::Keyword(k)) = args.get(1) else {
+            return Value::Nil;
+        };
+        match args.first() {
+            Some(Value::Map(m)) => {
+                m.get(k).map(|v| v.borrow().clone()).unwrap_or(Value::Nil)
+            }
+            Some(Value::List(list)) => {
+                let mut i = 0;
+                while i + 1 < list.len() {
+                    if matches!(&*list[i].borrow(), Value::Keyword(kk) if kk == k) {
+                        return list[i + 1].borrow().clone();
+                    }
+                    i += 2;
+                }
+                Value::Nil
+            }
+            _ => Value::Nil,
         }
     });
 
@@ -1279,8 +1294,10 @@ impl VM {
 
     fn execute_from(&mut self, entry_chunk: usize) -> Result<Option<Value>, VMError> {
         self.execution_depth = self.execution_depth.saturating_add(1);
+        let previous_chunk = self.current_chunk;
         self.current_chunk = entry_chunk;
         let result = self.execute();
+        self.current_chunk = previous_chunk;
         self.execution_depth = self.execution_depth.saturating_sub(1);
         if result.is_ok() && self.execution_depth == 0 && !self.processing_reactive {
             self.process_dirty_reactive()?;

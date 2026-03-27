@@ -29,6 +29,7 @@ impl Editor {
         else {
             return false;
         };
+        let gen_before = widget_render::widget_state_generation();
         let output = {
             let Some(node) = self.widget_node_at_local(local_col, local_row) else {
                 return false;
@@ -46,23 +47,19 @@ impl Editor {
                 mouse.modifiers,
             )
         };
-
         if self.apply_widget_output(output) {
             true
-        } else {
-            // For mouse-down on widgets: force relayout in case internal state
-            // changed (e.g. tree expand/collapse). Return true to consume the click.
-            // For scroll events: return false so buffer scrolling still works.
-            if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                let has_widget = self.widget_node_at_local(local_col, local_row).is_some();
-                if has_widget {
-                    self.runtime.invalidate_layout();
-                    self.mark_needs_redraw();
-                }
-                has_widget
-            } else {
-                false
+        } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
+            let has_widget = self.widget_node_at_local(local_col, local_row).is_some();
+            // Only invalidate layout if widget state actually changed
+            // (e.g. tree expand/collapse bumps the generation counter).
+            if has_widget && widget_render::widget_state_generation() != gen_before {
+                self.runtime.invalidate_layout();
+                self.mark_needs_redraw();
             }
+            has_widget
+        } else {
+            false
         }
     }
 
@@ -228,25 +225,32 @@ impl Editor {
         if let Some(node) = start_node.as_ref()
             && widget_render::widget_captures_drag(&node.widget_type)
         {
-            // Clamp drag to widget bounds in terminal-cell screen space
-            let scroll = self.total_scroll_top();
-            let screen_row = node.rect.row - scroll;
-            let screen_height = node.rect.height;
-            let clamped_col = end.0.clamp(
-                content_col as f32 + node.rect.col,
-                content_col as f32 + node.rect.col + (node.rect.width - 1.0).max(0.0),
-            );
-            let clamped_row = end.1.clamp(
-                content_row as f32 + screen_row,
-                content_row as f32 + screen_row + (screen_height - 1.0).max(0.0),
-            );
+            let (drag_col, drag_row) = if widget_render::widget_unclamped_drag(&node.widget_type) {
+                // Pass raw mouse position — widget handles value clamping itself
+                (end.0, end.1)
+            } else {
+                // Clamp drag to widget bounds in terminal-cell screen space
+                let scroll = self.total_scroll_top();
+                let screen_row = node.rect.row - scroll;
+                let screen_height = node.rect.height;
+                (
+                    end.0.clamp(
+                        content_col as f32 + node.rect.col,
+                        content_col as f32 + node.rect.col + (node.rect.width - 1.0).max(0.0),
+                    ),
+                    end.1.clamp(
+                        content_row as f32 + screen_row,
+                        content_row as f32 + screen_row + (screen_height - 1.0).max(0.0),
+                    ),
+                )
+            };
             let output = self.dispatch_widget_mouse_event(
                 node,
                 mouse.kind,
                 content_col,
                 content_row,
-                clamped_col,
-                clamped_row,
+                drag_col,
+                drag_row,
                 Some(start),
                 None,
                 mouse.modifiers,

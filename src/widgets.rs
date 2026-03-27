@@ -14,6 +14,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "knob",
         "meter",
         "text-input",
+        "number-picker",
         "select",
         "v-stack",
         "h-stack",
@@ -78,6 +79,12 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
                 i += 1;
             }
         }
+    }
+
+    // text-input and number-picker are always focusable
+    if widget_type == "text-input" || widget_type == "number-picker" {
+        map.entry("focusable".to_string())
+            .or_insert_with(|| Rc::new(RefCell::new(Value::Bool(true))));
     }
 
     if !children.is_empty() {

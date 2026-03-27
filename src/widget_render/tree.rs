@@ -14,7 +14,7 @@ use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, MetalRectPrimitive, WidgetInstance,
+    MetalPrimitive, MetalProportionalTextPrimitive, WidgetInstance,
     WidgetViewport, ndc_bounds,
 };
 #[cfg(target_os = "macos")]
@@ -78,7 +78,17 @@ fn get_item_field(item: &Value, key: &str) -> Option<Value> {
 }
 
 /// Walk nested items, producing a flat list of visible rows.
-fn flatten_items(items: &Value, depth: usize, parent_path: &[usize], expanded: &HashSet<Vec<usize>>, rows: &mut Vec<TreeRow>) {
+/// When `expand_all` is true, all folder nodes are treated as expanded regardless
+/// of the `expanded` set — used when a search filter is active so every matching
+/// path is visible.
+fn flatten_items(
+    items: &Value,
+    depth: usize,
+    parent_path: &[usize],
+    expanded: &HashSet<Vec<usize>>,
+    expand_all: bool,
+    rows: &mut Vec<TreeRow>,
+) {
     let Value::List(list) = items else { return };
     for (i, item_rc) in list.iter().enumerate() {
         let item = item_rc.borrow();
@@ -96,7 +106,7 @@ fn flatten_items(items: &Value, depth: usize, parent_path: &[usize], expanded: &
         let mut path = parent_path.to_vec();
         path.push(i);
 
-        let is_expanded = has_children && expanded.contains(&path);
+        let is_expanded = has_children && (expand_all || expanded.contains(&path));
 
         rows.push(TreeRow {
             depth,
@@ -109,10 +119,24 @@ fn flatten_items(items: &Value, depth: usize, parent_path: &[usize], expanded: &
 
         if is_expanded {
             if let Some(ref children_val) = children {
-                flatten_items(children_val, depth + 1, &path, expanded, rows);
+                flatten_items(children_val, depth + 1, &path, expanded, expand_all, rows);
             }
         }
     }
+}
+
+/// Read :expand-all from a raw Value node (measure phase).
+fn get_expand_all_value(node: &Value) -> bool {
+    let Value::Map(map) = node else { return false };
+    match map.get("expand-all") {
+        Some(rc) => matches!(&*rc.borrow(), Value::Bool(true)),
+        None => false,
+    }
+}
+
+/// Read :expand-all from LayoutNode props (render/event phase).
+fn get_expand_all_prop(props: &HashMap<String, Value>) -> bool {
+    matches!(props.get("expand-all"), Some(Value::Bool(true)))
 }
 
 /// Extract the :items prop from a raw Value node (measure phase).
@@ -128,15 +152,6 @@ fn get_items_value(node: &Value) -> Value {
 /// Extract :items from a LayoutNode's props (render/event phase).
 fn get_items_from_props(props: &HashMap<String, Value>) -> Value {
     props.get("items").cloned().unwrap_or(Value::Nil)
-}
-
-/// Compute row height in cell units.
-fn row_height_cells(ctx: &MeasureCtx<'_>, font_size: f32) -> f32 {
-    if let Some(measurer) = ctx.text_measurer {
-        measurer.line_height_px(font_size) / ctx.cell_h
-    } else {
-        1.0
-    }
 }
 
 /// Convert a keyword-value list like (:label "foo" :path "/bar") to a Value::Map.
@@ -164,6 +179,16 @@ fn item_to_map(item: &Value) -> Value {
     }
 }
 
+/// Toggle a tree node's expand/collapse state.
+fn toggle_expand(state: &mut TreeState, path: &[usize]) {
+    let path_vec = path.to_vec();
+    if state.expanded.contains(&path_vec) {
+        state.expanded.remove(&path_vec);
+    } else {
+        state.expanded.insert(path_vec);
+    }
+}
+
 /// Build an action map for event dispatch.
 /// Converts the item to a proper map so Lisp `(get item :label)` works.
 fn make_action_value(action: &str, item: &Value) -> Value {
@@ -182,8 +207,10 @@ fn make_action_value(action: &str, item: &Value) -> Value {
 // ── Widget definition ────────────────────────────────────────────────────────
 
 pub struct TreeWidget;
+pub struct TreeRowBgWidget;
 
 pub static TREE_WIDGET: TreeWidget = TreeWidget;
+pub static TREE_ROW_BG_WIDGET: TreeRowBgWidget = TreeRowBgWidget;
 
 const INDENT_CELLS: f32 = 1.5;
 
@@ -206,25 +233,16 @@ impl WidgetDefinition for TreeWidget {
         node: &Value,
         _children: &[Value],
         constraints: Constraints,
-        ctx: &MeasureCtx<'_>,
+        _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let items = get_items_value(node);
-        // We don't have widget_id during measure, so use an empty expanded set
-        // for initial measurement. The actual height will be correct after the
-        // first render when TreeState is populated.
-        // For subsequent renders, we need to get the state somehow — but widget_id
-        // isn't available here. We'll use a conservative approach: measure with
-        // all nodes collapsed (items count at depth 0 only).
-        // Actually, since size_affecting_props includes "items" and the items
-        // data doesn't change when we toggle expand, the widget won't re-measure
-        // on toggle. We need a different approach.
-        //
-        // Solution: store the flattened row count in a thread-local keyed by
-        // items pointer identity, updated during build_metal_primitives.
+        let expand_all = get_expand_all_value(node);
+        // widget_id isn't available during measure, so we use LAST_EXPANDED
+        // (synced from set_tree_state) to get the current expanded set.
         let mut rows = Vec::new();
         let expanded = get_last_known_expanded(&items);
-        flatten_items(&items, 0, &[], &expanded, &mut rows);
+        flatten_items(&items, 0, &[], &expanded, expand_all, &mut rows);
 
         let rh = ROW_HEIGHT;
 
@@ -246,9 +264,10 @@ impl WidgetDefinition for TreeWidget {
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         let items = get_items_from_props(props);
+        let expand_all = get_expand_all_prop(props);
         let expanded = get_last_known_expanded(&items);
         let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &expanded, &mut rows);
+        flatten_items(&items, 0, &[], &expanded, expand_all, &mut rows);
 
         let fg = crate::backend::Color {
             r: 0.88,
@@ -305,9 +324,10 @@ impl WidgetDefinition for TreeWidget {
         }
 
         let items = get_items_from_props(&node.props);
+        let expand_all = get_expand_all_prop(&node.props);
         let mut state = get_tree_state(node.widget_id);
         let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &state.expanded, &mut rows);
+        flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
 
         let rh = ROW_HEIGHT;
 
@@ -323,12 +343,7 @@ impl WidgetDefinition for TreeWidget {
         let row = &rows[row_idx];
 
         if row.has_children {
-            // Toggle expand/collapse
-            if state.expanded.contains(&row.path) {
-                state.expanded.remove(&row.path);
-            } else {
-                state.expanded.insert(row.path.clone());
-            }
+            toggle_expand(&mut state, &row.path);
             set_tree_state(node.widget_id, state);
             MouseEventOutcome::Dispatch(WidgetEvent::Custom(
                 make_action_value("toggle", &row.item_value),
@@ -343,9 +358,10 @@ impl WidgetDefinition for TreeWidget {
 
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
         let items = get_items_from_props(&node.props);
+        let expand_all = get_expand_all_prop(&node.props);
         let mut state = get_tree_state(node.widget_id);
         let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &state.expanded, &mut rows);
+        flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
         if rows.is_empty() {
             return None;
         }
@@ -364,7 +380,7 @@ impl WidgetDefinition for TreeWidget {
             KeyCode::Right => {
                 let row = &rows[state.selected_row];
                 if row.has_children && !row.expanded {
-                    state.expanded.insert(row.path.clone());
+                    toggle_expand(&mut state, &row.path);
                     set_tree_state(node.widget_id, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else if row.has_children && row.expanded {
@@ -379,7 +395,7 @@ impl WidgetDefinition for TreeWidget {
             KeyCode::Left => {
                 let row = &rows[state.selected_row];
                 if row.has_children && row.expanded {
-                    state.expanded.remove(&row.path);
+                    toggle_expand(&mut state, &row.path);
                     set_tree_state(node.widget_id, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else if row.depth > 0 {
@@ -402,12 +418,7 @@ impl WidgetDefinition for TreeWidget {
             KeyCode::Enter => {
                 let row = &rows[state.selected_row];
                 if row.has_children {
-                    // Toggle
-                    if state.expanded.contains(&row.path) {
-                        state.expanded.remove(&row.path);
-                    } else {
-                        state.expanded.insert(row.path.clone());
-                    }
+                    toggle_expand(&mut state, &row.path);
                     set_tree_state(node.widget_id, state);
                     Some(WidgetEvent::Custom(
                         make_action_value("toggle", &row.item_value),
@@ -478,9 +489,10 @@ impl WidgetDefinition for TreeWidget {
         _viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
         let items = get_items_from_props(&node.props);
+        let expand_all = get_expand_all_prop(&node.props);
         let state = get_tree_state(node.widget_id);
         let mut rows = Vec::new();
-        flatten_items(&items, 0, &[], &state.expanded, &mut rows);
+        flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
 
         // Update the last-known expanded state for measure() to use
         update_last_known_expanded(&state.expanded);
@@ -496,9 +508,7 @@ impl WidgetDefinition for TreeWidget {
 
         let rh = ROW_HEIGHT;
 
-        let default_even = Color { r: 0.04, g: 0.04, b: 0.05, a: 1.0 };
         let default_odd = Color { r: 0.06, g: 0.06, b: 0.07, a: 1.0 };
-        let bg_even = resolve_named_color(&node.props, "row-bg-even", default_even);
         let bg_odd = resolve_named_color(&node.props, "row-bg-odd", default_odd);
         let selected_bg = resolve_named_color(&node.props, "selected-bg", theme::WIDGET_FOCUS_BG());
         let folder_fg = resolve_named_color(&node.props, "folder-color", theme::WIDGET_LABEL_FG());
@@ -510,23 +520,42 @@ impl WidgetDefinition for TreeWidget {
         for (i, row) in rows.iter().enumerate() {
             let y = node.rect.row + i as f32 * rh;
 
-            // Row background (zebra + selection)
-            let bg = if i == state.selected_row {
-                selected_bg
-            } else if i % 2 == 0 {
-                bg_even
-            } else {
-                bg_odd
-            };
-            prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
-                rect: Rect {
+            // Row background — Finder-style: even rows transparent, odd rows
+            // subtle rounded rect, selected row blue rounded rect.
+            let is_selected = i == state.selected_row;
+            let show_bg = is_selected || i % 2 == 1;
+            if show_bg {
+                let bg = if is_selected { selected_bg } else { bg_odd };
+                let row_inset = 0.15; // horizontal inset for rounded rect
+                let row_rect = Rect {
                     row: y,
-                    col: node.rect.col,
-                    width: node.rect.width,
+                    col: node.rect.col + row_inset,
+                    width: node.rect.width - row_inset * 2.0,
                     height: rh,
-                },
-                color: bg,
-            }));
+                };
+                let (ndc_min, ndc_max) = ndc_bounds(row_rect, _viewport);
+                let px_w = row_rect.width * _viewport.cell_w;
+                let px_h = row_rect.height * _viewport.cell_h;
+                prims.push(MetalPrimitive::WidgetInstance {
+                    widget_type: "tree-row".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: 0.0,
+                        orientation: 0.0,
+                        itime: _viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
+                        color_a: [bg.r, bg.g, bg.b, bg.a],
+                        color_b: [0.0; 4],
+                        color_c: [0.0, 0.0, 1.0, 1.0],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: true,
+                });
+            }
 
             let indent = row.depth as f32 * INDENT_CELLS;
             let x = node.rect.col + indent + 0.5; // small left margin
@@ -609,7 +638,31 @@ fn update_last_known_expanded(expanded: &HashSet<Vec<usize>>) {
     });
 }
 
-// ── Metal shader ─────────────────────────────────────────────────────────────
+// ── Row background widget ────────────────────────────────────────────────────
+
+impl WidgetDefinition for TreeRowBgWidget {
+    fn names(&self) -> &'static [&'static str] {
+        &["tree-row"]
+    }
+
+    fn measure(
+        &self,
+        _node: &Value,
+        _children: &[Value],
+        _constraints: Constraints,
+        _ctx: &MeasureCtx<'_>,
+        _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
+    ) -> Option<Size> {
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
+        Some(TREE_ROW_BG_SHADER)
+    }
+}
+
+// ── Metal shaders ────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
 const TREE_CHEVRON_SHADER: &str = r#"
@@ -670,3 +723,26 @@ fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {
 
 /// Fixed row height in cells. Matches what measure() uses.
 const ROW_HEIGHT: f32 = 1.25;
+
+#[cfg(target_os = "macos")]
+const TREE_ROW_BG_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 uv = in.uv;
+    float aspect = in.aspect;
+    float4 col = in.color_a;
+
+    // Rounded rect in UV space
+    float2 p = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
+    float r = 0.75;  // corner radius
+    float2 half_size = float2(aspect - r, 1.0 - r);
+    float2 q = abs(p) - half_size;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+
+    float edge = fwidth(d) * 1.0;
+    float mask = smoothstep(edge, -edge, d);
+
+    if (mask < 0.002) { discard_fragment(); }
+    return float4(col.rgb, col.a * mask);
+}
+"#;

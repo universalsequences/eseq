@@ -43,6 +43,11 @@ impl Editor {
                 return self.activate_focused();
             }
         }
+        // Click landed outside any focusable widget → blur
+        if self.active_leaf().focused_widget_id.is_some() {
+            self.active_leaf_mut().focused_widget_id = None;
+            self.mark_needs_redraw();
+        }
         false
     }
 
@@ -55,7 +60,9 @@ impl Editor {
     }
 
     pub(super) fn handle_focus_key(&mut self, key: KeyEvent) -> bool {
-        if !self.active_buffer().read_only || !self.has_focusable_widgets() {
+        let widgets_active = self.active_buffer().read_only
+            || self.active_buffer().view_mode == crate::editor::ViewMode::UiOnly;
+        if !widgets_active || !self.has_focusable_widgets() {
             return false;
         }
 
@@ -158,57 +165,84 @@ impl Editor {
         // Auto-focus first widget if nothing is focused
         if focused_id.is_none() {
             self.active_leaf_mut().focused_widget_id = Some(focusable_nodes[0].0);
+            self.adjust_widget_scroll(focusable_nodes[0].1);
             self.mark_needs_redraw();
             return;
         }
 
         let current_id = focused_id.unwrap();
-        let current_idx = focusable_nodes
+        let cur = focusable_nodes
             .iter()
-            .position(|(id, _, _, _, _)| *id == current_id)
-            .unwrap_or(0);
-
-        let next_idx = match direction {
-            KeyCode::Down | KeyCode::Right => {
-                (current_idx + 1).min(focusable_nodes.len() - 1)
-            }
-            KeyCode::Up | KeyCode::Left => {
-                current_idx.saturating_sub(1)
-            }
-            _ => current_idx,
+            .find(|(id, _, _, _, _)| *id == current_id);
+        let Some(&(_, cur_row, cur_col, cur_w, cur_h)) = cur else {
+            return;
         };
+        let cur_cy = cur_row + cur_h * 0.5;
+        let cur_cx = cur_col + cur_w * 0.5;
 
-        // When already at the first focusable and scrolling up, keep scrolling
-        // the viewport toward the top so content above the first widget is visible.
-        if next_idx == current_idx && current_idx == 0 && matches!(direction, KeyCode::Up | KeyCode::Left) {
-            let leaf = self.active_leaf_mut();
-            leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_sub(3);
+        // 2D spatial navigation: find the nearest focusable widget in the
+        // requested direction.  The primary-axis distance is weighted 1×,
+        // the secondary axis 3× so we strongly prefer staying on-axis.
+        let mut best: Option<(u64, f32, f32)> = None; // (id, row, score)
+
+        for &(id, row, col, w, h) in &focusable_nodes {
+            if id == current_id {
+                continue;
+            }
+            let cy = row + h * 0.5;
+            let cx = col + w * 0.5;
+
+            let (primary, secondary, in_direction) = match direction {
+                KeyCode::Down => (cy - cur_cy, (cx - cur_cx).abs(), cy > cur_cy),
+                KeyCode::Up => (cur_cy - cy, (cx - cur_cx).abs(), cy < cur_cy),
+                KeyCode::Right => (cx - cur_cx, (cy - cur_cy).abs(), cx > cur_cx),
+                KeyCode::Left => (cur_cx - cx, (cy - cur_cy).abs(), cx < cur_cx),
+                _ => continue,
+            };
+
+            if !in_direction {
+                continue;
+            }
+
+            let score = primary + secondary * 3.0;
+
+            if best.is_none() || score < best.unwrap().2 {
+                best = Some((id, row, score));
+            }
+        }
+
+        if let Some((next_id, next_row, _)) = best {
+            self.active_leaf_mut().focused_widget_id = Some(next_id);
+            self.adjust_widget_scroll(next_row);
             self.mark_needs_redraw();
             return;
         }
 
-        // Similarly, when at the last focusable and scrolling down, keep scrolling
-        // the viewport so content below the last widget is visible.
-        if next_idx == current_idx && current_idx == focusable_nodes.len() - 1 && matches!(direction, KeyCode::Down | KeyCode::Right) {
-            let max_scroll = self
-                .runtime
-                .current_layout
-                .as_ref()
-                .map(|l| {
-                    let viewport_height = self.runtime.layout_rows();
-                    ((l.rect.row + l.rect.height).ceil() as u16)
-                        .saturating_sub(viewport_height)
-                })
-                .unwrap_or(0);
-            let leaf = self.active_leaf_mut();
-            leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_add(3).min(max_scroll);
-            self.mark_needs_redraw();
-            return;
+        // No candidate in that direction — scroll the viewport if at the edge
+        match direction {
+            KeyCode::Up | KeyCode::Left => {
+                let leaf = self.active_leaf_mut();
+                leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_sub(3);
+                self.mark_needs_redraw();
+            }
+            KeyCode::Down | KeyCode::Right => {
+                let max_scroll = self
+                    .runtime
+                    .current_layout
+                    .as_ref()
+                    .map(|l| {
+                        let viewport_height = self.runtime.layout_rows();
+                        ((l.rect.row + l.rect.height).ceil() as u16)
+                            .saturating_sub(viewport_height)
+                    })
+                    .unwrap_or(0);
+                let leaf = self.active_leaf_mut();
+                leaf.widget_scroll_top =
+                    leaf.widget_scroll_top.saturating_add(3).min(max_scroll);
+                self.mark_needs_redraw();
+            }
+            _ => {}
         }
-
-        self.active_leaf_mut().focused_widget_id = Some(focusable_nodes[next_idx].0);
-        self.adjust_widget_scroll(focusable_nodes[next_idx].1);
-        self.mark_needs_redraw();
     }
 
     pub(super) fn adjust_widget_scroll(&mut self, focused_row: f32) {
@@ -274,10 +308,6 @@ impl Editor {
         match tree {
             Some(tree) => {
                 self.runtime.restore_widget_tree(tree);
-                // Only auto-focus if this tile doesn't already have a focused widget
-                if self.active_leaf().focused_widget_id.is_none() {
-                    self.auto_focus_first_widget();
-                }
             }
             None => {
                 self.clear_widget_focus();
@@ -286,7 +316,9 @@ impl Editor {
     }
 
     pub(super) fn auto_focus_first_widget(&mut self) {
-        if !self.active_buffer().read_only {
+        let widgets_active = self.active_buffer().read_only
+            || self.active_buffer().view_mode == crate::editor::ViewMode::UiOnly;
+        if !widgets_active {
             self.active_leaf_mut().focused_widget_id = None;
             return;
         }

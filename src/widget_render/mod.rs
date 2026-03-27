@@ -4,8 +4,10 @@ pub mod hslider;
 pub mod hstack;
 pub mod knob;
 pub mod label;
+pub mod number_picker;
 pub mod scroll;
 pub mod sdf_widget;
+pub mod text_input;
 pub mod tree;
 pub mod tabs;
 pub mod time_view;
@@ -406,6 +408,12 @@ pub trait WidgetDefinition: Sync {
     fn captures_drag(&self) -> bool {
         false
     }
+    /// When true, drag is NOT clamped to widget bounds — the raw mouse position
+    /// is passed through. Useful for number-picker style drag-to-edit where the
+    /// full viewport height should map to the value range.
+    fn unclamped_drag(&self) -> bool {
+        false
+    }
     fn handle_event(&self, _node: &LayoutNode, _event: WidgetEvent) -> Option<EventOutput> {
         None
     }
@@ -441,8 +449,11 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &hstack::HSTACK_WIDGET,
     &box_widget::BOX_WIDGET,
     &grid::GRID_WIDGET,
+    &number_picker::NUMBER_PICKER_WIDGET,
     &scroll::SCROLL_WIDGET,
+    &text_input::TEXT_INPUT_WIDGET,
     &tree::TREE_WIDGET,
+    &tree::TREE_ROW_BG_WIDGET,
 ];
 
 pub fn widget_definition(widget_type: &str) -> Option<&'static dyn WidgetDefinition> {
@@ -524,7 +535,9 @@ fn collect_metal_primitives_recursive(
 
     // If a container node is focused, emit a background highlight rect.
     // This renders before children (correct z-order: highlight under content).
-    if node_is_focused && is_layout_widget_type(&node.widget_type) {
+    // Skip for widgets that render their own focus styling (e.g. text-input).
+    let custom_focus = node.widget_type == "text-input" || node.widget_type == "number-picker";
+    if node_is_focused && is_layout_widget_type(&node.widget_type) && !custom_focus {
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: node.rect,
             color: crate::theme::WIDGET_FOCUS_BG(),
@@ -544,17 +557,17 @@ fn collect_metal_primitives_recursive(
         primitives.push(MetalPrimitive::PushClipRect(node.rect));
 
         for child in &node.children {
-            let mut child_primitives = Vec::new();
+            let start = primitives.len();
             collect_metal_primitives_recursive(
                 child,
                 node_viewport,
                 _scroll_top,
                 _max_rows,
-                &mut child_primitives,
+                primitives,
             );
-            // Offset child primitives by negative scroll offset (shift content up)
-            for prim in child_primitives {
-                primitives.push(offset_primitive_y(prim, -offset_y, node_viewport));
+            // Offset child primitives in-place by negative scroll offset
+            for prim in &mut primitives[start..] {
+                offset_primitive_y_mut(prim, -offset_y, node_viewport);
             }
         }
 
@@ -578,44 +591,22 @@ fn collect_metal_primitives_recursive(
     }
 }
 
-/// Shift a metal primitive vertically by `dy` cells.
+/// Shift a metal primitive vertically by `dy` cells (in-place).
 #[cfg(target_os = "macos")]
-fn offset_primitive_y(prim: MetalPrimitive, dy: f32, viewport: WidgetViewport) -> MetalPrimitive {
+fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetViewport) {
     match prim {
-        MetalPrimitive::Rect(mut r) => {
-            r.rect.row += dy;
-            MetalPrimitive::Rect(r)
-        }
-        MetalPrimitive::Quad(mut q) => {
-            q.y += dy;
-            MetalPrimitive::Quad(q)
-        }
-        MetalPrimitive::GlyphRun(mut g) => {
-            g.row += dy;
-            MetalPrimitive::GlyphRun(g)
-        }
-        MetalPrimitive::ProportionalText(mut t) => {
-            t.row += dy;
-            MetalPrimitive::ProportionalText(t)
-        }
-        MetalPrimitive::Waveform(w) => MetalPrimitive::Waveform(w),
-        MetalPrimitive::WidgetInstance {
-            widget_type,
-            mut instance,
-            is_background,
-        } => {
-            // Convert cell offset to NDC offset
+        MetalPrimitive::Rect(r) => r.rect.row += dy,
+        MetalPrimitive::Quad(q) => q.y += dy,
+        MetalPrimitive::GlyphRun(g) => g.row += dy,
+        MetalPrimitive::ProportionalText(t) => t.row += dy,
+        MetalPrimitive::Waveform(w) => w.rect.row += dy,
+        MetalPrimitive::WidgetInstance { instance, .. } => {
             let ndc_dy = -(dy * viewport.cell_h / viewport.vp_h) * 2.0;
             instance.ndc_min[1] += ndc_dy;
             instance.ndc_max[1] += ndc_dy;
-            MetalPrimitive::WidgetInstance {
-                widget_type,
-                instance,
-                is_background,
-            }
         }
-        MetalPrimitive::PushClipRect(r) => MetalPrimitive::PushClipRect(r),
-        MetalPrimitive::PopClipRect => MetalPrimitive::PopClipRect,
+        MetalPrimitive::PushClipRect(r) => r.row += dy,
+        MetalPrimitive::PopClipRect => {}
     }
 }
 
@@ -652,6 +643,12 @@ pub fn widget_captures_drag(widget_type: &str) -> bool {
     }
     widget_definition(widget_type)
         .map(WidgetDefinition::captures_drag)
+        .unwrap_or(false)
+}
+
+pub fn widget_unclamped_drag(widget_type: &str) -> bool {
+    widget_definition(widget_type)
+        .map(WidgetDefinition::unclamped_drag)
         .unwrap_or(false)
 }
 
