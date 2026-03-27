@@ -658,7 +658,7 @@ impl WidgetDefinition for TreeRowBgWidget {
 
     #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(TREE_ROW_BG_SHADER)
+        Some(super::ROUNDED_RECT_SHADER)
     }
 }
 
@@ -724,25 +724,3 @@ fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {
 /// Fixed row height in cells. Matches what measure() uses.
 const ROW_HEIGHT: f32 = 1.25;
 
-#[cfg(target_os = "macos")]
-const TREE_ROW_BG_SHADER: &str = r#"
-fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
-{
-    float2 uv = in.uv;
-    float aspect = in.aspect;
-    float4 col = in.color_a;
-
-    // Rounded rect in UV space
-    float2 p = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
-    float r = 0.75;  // corner radius
-    float2 half_size = float2(aspect - r, 1.0 - r);
-    float2 q = abs(p) - half_size;
-    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-
-    float edge = fwidth(d) * 1.0;
-    float mask = smoothstep(edge, -edge, d);
-
-    if (mask < 0.002) { discard_fragment(); }
-    return float4(col.rgb, col.a * mask);
-}
-"#;

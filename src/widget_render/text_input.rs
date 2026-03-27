@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    resolve_named_color, styled_cell,
+    get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
@@ -37,10 +37,17 @@ struct TextInputState {
 
 thread_local! {
     static STATES: RefCell<HashMap<u64, TextInputState>> = RefCell::new(HashMap::new());
-    /// Cursor X offsets cached during measure().
-    /// Key: (text_value, font_size_bits) → offsets[i] = cell-width of text[0..i].
-    static CURSOR_X_CACHE: RefCell<HashMap<(String, u32), Vec<f32>>> =
-        RefCell::new(HashMap::new());
+    /// Per-character cell widths cached during measure().
+    /// Stores widths for the most recent (text, font_size) pair only.
+    static CHAR_WIDTH_CACHE: RefCell<Option<CharWidthCache>> = RefCell::new(None);
+}
+
+#[derive(Clone)]
+struct CharWidthCache {
+    text: String,
+    font_size_bits: u32,
+    /// char_widths[i] = cell-width of the i-th character.
+    char_widths: Vec<f32>,
 }
 
 fn get_state(widget_id: u64) -> TextInputState {
@@ -66,18 +73,21 @@ fn get_placeholder(props: &HashMap<String, Value>) -> String {
     }
 }
 
-fn cached_cursor_x(text: &str, font_size: f32, cursor_pos: usize) -> Option<f32> {
-    CURSOR_X_CACHE.with(|c| {
-        c.borrow()
-            .get(&(text.to_string(), font_size.to_bits()))
-            .and_then(|offsets| offsets.get(cursor_pos).copied())
+/// Sum per-character widths up to cursor_pos from cache. Falls back to approximation.
+#[cfg(target_os = "macos")]
+fn cursor_x_from_char_cache(text: &str, font_size: f32, cursor_pos: usize, cell_w: f32) -> f32 {
+    CHAR_WIDTH_CACHE.with(|c| {
+        let cache = c.borrow();
+        if let Some(ref entry) = *cache {
+            if entry.text == text && entry.font_size_bits == font_size.to_bits() {
+                return entry.char_widths.iter().take(cursor_pos).sum();
+            }
+        }
+        // Fallback: approximate
+        cursor_pos as f32 * font_size * 0.55 / cell_w
     })
 }
 
-#[cfg(target_os = "macos")]
-fn approx_cursor_x(cursor_pos: usize, font_size: f32, cell_w: f32) -> f32 {
-    cursor_pos as f32 * font_size * 0.55 / cell_w
-}
 
 // ── Widget definition ───────────────────────────────────────────────────────
 
@@ -119,23 +129,24 @@ impl WidgetDefinition for TextInputWidget {
             .map(f64_to_f32)
             .unwrap_or(1.5);
 
-        // Cache per-character cursor offsets for proportional text
+        // Cache per-character widths for cursor positioning (O(n) measurements)
         if let Some(measurer) = ctx.text_measurer {
             let font_size = get_prop_num(node, "font-size")
                 .map(f64_to_f32)
                 .unwrap_or(ctx.inherited_font_size);
             let text = get_prop_str(node, "value").unwrap_or_default();
             let chars: Vec<char> = text.chars().collect();
-            let mut offsets = Vec::with_capacity(chars.len() + 1);
-            offsets.push(0.0);
-            for i in 1..=chars.len() {
-                let substr: String = chars[..i].iter().collect();
-                let px_w = measurer.measure_text_px(&substr, font_size);
-                offsets.push(px_w / ctx.cell_w);
+            let mut char_widths = Vec::with_capacity(chars.len());
+            for ch in &chars {
+                let px_w = measurer.measure_text_px(&ch.to_string(), font_size);
+                char_widths.push(px_w / ctx.cell_w);
             }
-            CURSOR_X_CACHE.with(|c| {
-                c.borrow_mut()
-                    .insert((text, font_size.to_bits()), offsets);
+            CHAR_WIDTH_CACHE.with(|c| {
+                *c.borrow_mut() = Some(CharWidthCache {
+                    text,
+                    font_size_bits: font_size.to_bits(),
+                    char_widths,
+                });
             });
         }
 
@@ -317,9 +328,13 @@ impl WidgetDefinition for TextInputWidget {
         }
     }
 
+    fn renders_own_focus(&self) -> bool {
+        true
+    }
+
     #[cfg(target_os = "macos")]
     fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(TEXT_INPUT_BG_SHADER)
+        Some(super::ROUNDED_RECT_SHADER)
     }
 
     #[cfg(target_os = "macos")]
@@ -334,14 +349,7 @@ impl WidgetDefinition for TextInputWidget {
         let state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
 
-        let font_size = node
-            .props
-            .get("font-size")
-            .and_then(|v| match v {
-                Value::Number(n) => Some(*n as f32),
-                _ => None,
-            })
-            .unwrap_or(DEFAULT_FONT_SIZE);
+        let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
         let bg_transparent = matches!(
             node.props.get("bg"),
@@ -501,8 +509,9 @@ impl WidgetDefinition for TextInputWidget {
         // ── Cursor ──
         if is_focused {
             let cursor_pos = state.cursor_pos.min(text.chars().count());
-            let cursor_x_offset = cached_cursor_x(&text, font_size, cursor_pos)
-                .unwrap_or_else(|| approx_cursor_x(cursor_pos, font_size, viewport.cell_w));
+            let cursor_x_offset = cursor_x_from_char_cache(
+                &text, font_size, cursor_pos, viewport.cell_w,
+            );
 
             let cursor_col = text_col + cursor_x_offset;
             let cursor_rect = Rect {
@@ -521,29 +530,3 @@ impl WidgetDefinition for TextInputWidget {
     }
 }
 
-// ── Metal shader ─────────────────────────────────────────────────────────────
-
-#[cfg(target_os = "macos")]
-const TEXT_INPUT_BG_SHADER: &str = r#"
-fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
-{
-    float2 uv = in.uv;
-    float aspect = in.aspect;
-    float4 col = in.color_a;
-
-    // Aspect-corrected [-aspect, aspect] x [-1, 1]
-    float2 p = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
-
-    // Rounded rect SDF
-    float r = 0.75;
-    float2 half_size = float2(aspect - r, 1.0 - r);
-    float2 q = abs(p) - half_size;
-    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-
-    float edge = fwidth(d) * 1.2;
-    float mask = smoothstep(edge, -edge, d);
-
-    if (mask < 0.002) { discard_fragment(); }
-    return float4(col.rgb, col.a * mask);
-}
-"#;

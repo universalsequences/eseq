@@ -333,9 +333,13 @@ impl WidgetDefinition for NumberPickerWidget {
     }
 
     #[cfg(target_os = "macos")]
+    fn renders_own_focus(&self) -> bool {
+        true
+    }
+
     fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
         match widget_type {
-            "number-picker" => Some(NUMBER_PICKER_BG_SHADER),
+            "number-picker" => Some(super::ROUNDED_RECT_SHADER),
             "number-picker-tri" => Some(NUMBER_PICKER_TRI_SHADER),
             _ => None,
         }
@@ -353,14 +357,7 @@ impl WidgetDefinition for NumberPickerWidget {
         let state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
 
-        let font_size = node
-            .props
-            .get("font-size")
-            .and_then(|v| match v {
-                Value::Number(n) => Some(*n as f32),
-                _ => None,
-            })
-            .unwrap_or(DEFAULT_FONT_SIZE);
+        let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
         let bg_color = resolve_named_color(
             &node.props,
@@ -542,28 +539,6 @@ impl WidgetDefinition for NumberPickerWidget {
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "macos")]
-const NUMBER_PICKER_BG_SHADER: &str = r#"
-fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
-{
-    float2 uv = in.uv;
-    float aspect = in.aspect;
-    float4 col = in.color_a;
-
-    float2 p = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
-
-    float r = 0.75;
-    float2 half_size = float2(aspect - r, 1.0 - r);
-    float2 q = abs(p) - half_size;
-    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
-
-    float edge = fwidth(d) * 1.2;
-    float mask = smoothstep(edge, -edge, d);
-
-    if (mask < 0.002) { discard_fragment(); }
-    return float4(col.rgb, col.a * mask);
-}
-"#;
 
 #[cfg(target_os = "macos")]
 const NUMBER_PICKER_TRI_SHADER: &str = r#"

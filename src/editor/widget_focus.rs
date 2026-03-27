@@ -51,6 +51,11 @@ impl Editor {
         false
     }
 
+    fn widgets_active(&self) -> bool {
+        self.active_buffer().read_only
+            || self.active_buffer().view_mode == crate::editor::ViewMode::UiOnly
+    }
+
     pub(super) fn has_focusable_widgets(&self) -> bool {
         self.runtime
             .current_layout
@@ -60,9 +65,7 @@ impl Editor {
     }
 
     pub(super) fn handle_focus_key(&mut self, key: KeyEvent) -> bool {
-        let widgets_active = self.active_buffer().read_only
-            || self.active_buffer().view_mode == crate::editor::ViewMode::UiOnly;
-        if !widgets_active || !self.has_focusable_widgets() {
+        if !self.widgets_active() || !self.has_focusable_widgets() {
             return false;
         }
 
@@ -316,9 +319,7 @@ impl Editor {
     }
 
     pub(super) fn auto_focus_first_widget(&mut self) {
-        let widgets_active = self.active_buffer().read_only
-            || self.active_buffer().view_mode == crate::editor::ViewMode::UiOnly;
-        if !widgets_active {
+        if !self.widgets_active() {
             self.active_leaf_mut().focused_widget_id = None;
             return;
         }

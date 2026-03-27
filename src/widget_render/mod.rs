@@ -409,9 +409,13 @@ pub trait WidgetDefinition: Sync {
         false
     }
     /// When true, drag is NOT clamped to widget bounds — the raw mouse position
-    /// is passed through. Useful for number-picker style drag-to-edit where the
-    /// full viewport height should map to the value range.
+    /// is passed through.
     fn unclamped_drag(&self) -> bool {
+        false
+    }
+    /// When true, the default container focus highlight is suppressed — the
+    /// widget renders its own focus styling (e.g. focus ring).
+    fn renders_own_focus(&self) -> bool {
         false
     }
     fn handle_event(&self, _node: &LayoutNode, _event: WidgetEvent) -> Option<EventOutput> {
@@ -536,8 +540,10 @@ fn collect_metal_primitives_recursive(
     // If a container node is focused, emit a background highlight rect.
     // This renders before children (correct z-order: highlight under content).
     // Skip for widgets that render their own focus styling (e.g. text-input).
-    let custom_focus = node.widget_type == "text-input" || node.widget_type == "number-picker";
-    if node_is_focused && is_layout_widget_type(&node.widget_type) && !custom_focus {
+    let renders_own_focus = widget_definition(&node.widget_type)
+        .map(WidgetDefinition::renders_own_focus)
+        .unwrap_or(false);
+    if node_is_focused && is_layout_widget_type(&node.widget_type) && !renders_own_focus {
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: node.rect,
             color: crate::theme::WIDGET_FOCUS_BG(),
@@ -728,6 +734,30 @@ pub fn styled_cell(ch: char, fg: Color, bg: Option<Color>) -> Cell {
         },
     }
 }
+
+/// Shared rounded-rect SDF shader used by tree-row, text-input, and number-picker.
+#[cfg(target_os = "macos")]
+pub const ROUNDED_RECT_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 uv = in.uv;
+    float aspect = in.aspect;
+    float4 col = in.color_a;
+
+    float2 p = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
+
+    float r = 0.75;
+    float2 half_size = float2(aspect - r, 1.0 - r);
+    float2 q = abs(p) - half_size;
+    float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+
+    float edge = fwidth(d) * 1.2;
+    float mask = smoothstep(edge, -edge, d);
+
+    if (mask < 0.002) { discard_fragment(); }
+    return float4(col.rgb, col.a * mask);
+}
+"#;
 
 #[cfg(target_os = "macos")]
 pub fn ndc_bounds(rect: Rect, viewport: WidgetViewport) -> ([f32; 2], [f32; 2]) {
