@@ -15,6 +15,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "meter",
         "text-input",
         "number-picker",
+        "dropdown",
         "select",
         "v-stack",
         "h-stack",
@@ -82,7 +83,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     }
 
     // text-input and number-picker are always focusable
-    if widget_type == "text-input" || widget_type == "number-picker" {
+    if widget_type == "text-input" || widget_type == "number-picker" || widget_type == "dropdown" {
         map.entry("focusable".to_string())
             .or_insert_with(|| Rc::new(RefCell::new(Value::Bool(true))));
     }

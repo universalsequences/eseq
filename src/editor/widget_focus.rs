@@ -14,6 +14,11 @@ impl Editor {
         content_col: u16,
         content_row: u16,
     ) -> bool {
+        // If an overlay (dropdown menu) is active, skip focus changes —
+        // the overlay intercept in try_handle_widget_mouse_precise handles it.
+        if crate::widget_render::overlay_widget_id().is_some() {
+            return false;
+        }
         if !self.has_focusable_widgets() {
             return false;
         }
@@ -138,15 +143,18 @@ impl Editor {
         let Some(node) = find_node_by_id(&layout, focused_id) else {
             return false;
         };
-        let output = map_key_event(
+        let widget_event = map_key_event(
             &node,
             WidgetKeyEvent {
                 code: key.code,
                 modifiers: key.modifiers,
             },
-        )
-        .and_then(|event| handle_event(&node, event));
-        if output.is_none() {
+        );
+        // If key_event returned Some, the widget consumed the key — even if
+        // handle_event produces no callback (e.g. cursor moves, menu navigation).
+        let consumed = widget_event.is_some();
+        let output = widget_event.and_then(|event| handle_event(&node, event));
+        if !consumed {
             return false;
         }
         let _ = self.apply_widget_output(output);

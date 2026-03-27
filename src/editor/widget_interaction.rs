@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use crate::layout::{LayoutNode, hit_test_layout};
 use crate::tile::{WidgetClick, WidgetGesture};
@@ -29,6 +29,48 @@ impl Editor {
         else {
             return false;
         };
+        // Overlay (dropdown menu, etc.) intercepts clicks before normal hit-test
+        if widget_render::overlay_widget_id().is_some()
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+        {
+            let scroll_top = self.total_scroll_top();
+            let overlay_local_row = local_row + scroll_top;
+            if widget_render::overlay_contains(local_col, overlay_local_row) {
+                // Click inside overlay → dispatch to overlay widget
+                if let Some(overlay_id) = widget_render::overlay_widget_id() {
+                    let Some(layout) = self.runtime.current_layout.clone() else {
+                        return false;
+                    };
+                    if let Some(node) =
+                        super::widget_focus::find_node_by_id(&layout, overlay_id)
+                    {
+                        let output = self.dispatch_widget_mouse_event(
+                            &node,
+                            mouse.kind,
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                            None,
+                            None,
+                            mouse.modifiers,
+                        );
+                        let _ = self.apply_widget_output(output);
+                        return true;
+                    }
+                }
+            } else {
+                // Click outside overlay → dismiss and close the dropdown state
+                if let Some(id) = widget_render::overlay_widget_id() {
+                    widget_render::dropdown::close_dropdown(id);
+                }
+                widget_render::clear_overlay();
+                self.mark_needs_redraw();
+                // Don't return — let the click pass through to normal handling
+                // (e.g., clicking another dropdown should open it)
+            }
+        }
+
         let gen_before = widget_render::widget_state_generation();
         let output = {
             let Some(node) = self.widget_node_at_local(local_col, local_row) else {

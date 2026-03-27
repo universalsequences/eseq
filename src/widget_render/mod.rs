@@ -1,4 +1,5 @@
 pub mod box_widget;
+pub mod dropdown;
 pub mod grid;
 pub mod hslider;
 pub mod hstack;
@@ -17,6 +18,7 @@ pub mod vslider;
 pub mod vstack;
 pub mod waveform;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -39,6 +41,59 @@ pub fn bump_widget_state_generation() {
 
 pub fn widget_state_generation() -> u64 {
     WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
+}
+
+// ── Overlay system ───────────────────────────────────────────────────────────
+// Only one overlay (dropdown menu, etc.) can be active at a time.
+
+struct OverlayInfo {
+    widget_id: u64,
+    /// Hit-test bounds in layout space (screen-relative, post-scroll).
+    rect: Rect,
+}
+
+thread_local! {
+    static OVERLAY_INFO: RefCell<Option<OverlayInfo>> = RefCell::new(None);
+    #[cfg(target_os = "macos")]
+    static OVERLAY_PRIMITIVES: RefCell<Vec<MetalPrimitive>> = RefCell::new(Vec::new());
+}
+
+pub fn set_overlay(widget_id: u64, rect: Rect) {
+    OVERLAY_INFO.with(|o| *o.borrow_mut() = Some(OverlayInfo { widget_id, rect }));
+}
+
+pub fn clear_overlay() {
+    OVERLAY_INFO.with(|o| *o.borrow_mut() = None);
+    #[cfg(target_os = "macos")]
+    OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().clear());
+    bump_widget_state_generation();
+}
+
+pub fn overlay_widget_id() -> Option<u64> {
+    OVERLAY_INFO.with(|o| o.borrow().as_ref().map(|s| s.widget_id))
+}
+
+pub fn overlay_contains(local_col: f32, local_row: f32) -> bool {
+    OVERLAY_INFO.with(|o| {
+        if let Some(ref s) = *o.borrow() {
+            local_row >= s.rect.row
+                && local_row < s.rect.row + s.rect.height
+                && local_col >= s.rect.col
+                && local_col < s.rect.col + s.rect.width
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub fn push_overlay_primitive(prim: MetalPrimitive) {
+    OVERLAY_PRIMITIVES.with(|o| o.borrow_mut().push(prim));
+}
+
+#[cfg(target_os = "macos")]
+fn drain_overlay_primitives() -> Vec<MetalPrimitive> {
+    OVERLAY_PRIMITIVES.with(|o| std::mem::take(&mut *o.borrow_mut()))
 }
 
 // ── Flex-style alignment enums ──────────────────────────────────────────────
@@ -453,6 +508,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &hstack::HSTACK_WIDGET,
     &box_widget::BOX_WIDGET,
     &grid::GRID_WIDGET,
+    &dropdown::DROPDOWN_WIDGET,
     &number_picker::NUMBER_PICKER_WIDGET,
     &scroll::SCROLL_WIDGET,
     &text_input::TEXT_INPUT_WIDGET,
@@ -520,10 +576,13 @@ pub fn collect_metal_primitives(
     viewport: WidgetViewport,
     scroll_top: u16,
     max_rows: u16,
-) -> Vec<MetalPrimitive> {
+) -> (Vec<MetalPrimitive>, Vec<MetalPrimitive>) {
     let mut primitives = Vec::new();
     collect_metal_primitives_recursive(node, viewport, scroll_top, max_rows, &mut primitives);
-    primitives
+    // Overlay content (dropdown menus, etc.) returned separately so the
+    // renderer can draw it in its own pass on top of everything.
+    let overlay = drain_overlay_primitives();
+    (primitives, overlay)
 }
 
 #[cfg(target_os = "macos")]
@@ -735,7 +794,9 @@ pub fn styled_cell(ch: char, fg: Color, bg: Option<Color>) -> Cell {
     }
 }
 
-/// Shared rounded-rect SDF shader used by tree-row, text-input, and number-picker.
+/// Shared rounded-rect SDF shader used by tree-row, text-input, number-picker, dropdown.
+/// When `corner_radius > 0`, uses that as the radius (in normalized space).
+/// Otherwise defaults to 0.75 (pill-like for small widgets).
 #[cfg(target_os = "macos")]
 pub const ROUNDED_RECT_SHADER: &str = r#"
 fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
@@ -746,7 +807,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float2 p = float2((uv.x - 0.5) * 2.0 * aspect, (uv.y - 0.5) * 2.0);
 
-    float r = 0.75;
+    float r = in.corner_radius > 0.0 ? in.corner_radius : 0.75;
+    r = min(r, min(aspect, 1.0));
     float2 half_size = float2(aspect - r, 1.0 - r);
     float2 q = abs(p) - half_size;
     float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;

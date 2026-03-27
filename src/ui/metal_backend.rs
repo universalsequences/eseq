@@ -39,8 +39,7 @@ mod inner {
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
     use crate::layout::{Rect, TextMeasurer};
     use crate::theme;
-    use crate::tile::TileId;
-    use crate::widget_render::{self, MetalPrimitive, WidgetInstance, WidgetViewport};
+    use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
     /// Lightweight TextMeasurer that delegates to `SizedFontCache` for font
     /// metrics without needing a GPU atlas. Used by the layout engine.
@@ -179,15 +178,16 @@ struct WidgetInstance {
 struct WidgetVaryings {
     float4 position [[position]];
     float2 uv;
-    float  value_t    [[flat]];
-    float  itime      [[flat]];
-    float4 uniform_a  [[flat]];
-    float4 uniform_b  [[flat]];
-    float4 color_a    [[flat]];
-    float4 color_b    [[flat]];
-    float4 color_c    [[flat]];
-    float4 color_d    [[flat]];
-    float  aspect     [[flat]];
+    float  value_t       [[flat]];
+    float  itime         [[flat]];
+    float4 uniform_a     [[flat]];
+    float4 uniform_b     [[flat]];
+    float4 color_a       [[flat]];
+    float4 color_b       [[flat]];
+    float4 color_c       [[flat]];
+    float4 color_d       [[flat]];
+    float  aspect        [[flat]];
+    float  corner_radius [[flat]];
 };
 
 float sdf_rounded_rect(float2 p, float2 half_size, float radius) {
@@ -235,6 +235,7 @@ vertex WidgetVaryings widget_vert(
     out.color_c = inst.color_c;
     out.color_d = inst.color_d;
     out.aspect = inst.pixel_aspect;
+    out.corner_radius = inst.corner_radius;
     return out;
 }
 "#;
@@ -583,19 +584,6 @@ fragment float4 waveform_frag(
         last_precise_mouse: Option<(f32, f32)>,
         last_window_bg: Option<Color>,
         start_time: Instant,
-        /// Per-tile widget primitive cache.
-        /// Key: (layout_cache_key, widget_state_generation, focused_widget_id, scroll_top)
-        /// Avoids re-collecting primitives for tiles whose widget tree hasn't changed.
-        widget_prim_cache: HashMap<TileId, (WidgetPrimCacheKey, Vec<MetalPrimitive>)>,
-    }
-
-    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-    struct WidgetPrimCacheKey {
-        layout_cache_key: u64,
-        widget_state_gen: u64,
-        focused_widget_id: Option<u64>,
-        scroll_top: u16,
-        scroll_left: u16,
     }
 
     impl MetalBackend {
@@ -637,7 +625,6 @@ fragment float4 waveform_frag(
                 last_precise_mouse: None,
                 last_window_bg: None,
                 start_time: Instant::now(),
-                widget_prim_cache: HashMap::new(),
             })
         }
 
@@ -999,58 +986,20 @@ fragment float4 waveform_frag(
                         .max(0.0)
                         .round() as u16;
 
-                    // Check per-tile primitive cache to avoid re-collecting
-                    // when the widget tree and widget state haven't changed.
-                    let cache_key = WidgetPrimCacheKey {
-                        layout_cache_key: tile.frame.widget_layout_cache_key,
-                        widget_state_gen: widget_render::widget_state_generation(),
-                        focused_widget_id: tile.frame.focused_widget_id,
-                        scroll_top: tile.frame.widget_scroll_top,
-                        scroll_left: tile.frame.widget_scroll_left,
-                    };
-                    let primitives = if let Some((cached_key, cached)) =
-                        self.widget_prim_cache.get(&tile.tile_id)
-                    {
-                        if *cached_key == cache_key {
-                            cached.clone()
-                        } else {
-                            let prims = widget_render::collect_metal_primitives(
-                                layout,
-                                WidgetViewport {
-                                    cell_w,
-                                    cell_h,
-                                    vp_w,
-                                    vp_h,
-                                    time_seconds,
-                                    focused_widget_id: tile.frame.focused_widget_id,
-                                    focused_branch: false,
-                                },
-                                tile.frame.widget_scroll_top,
-                                inner_rows,
-                            );
-                            self.widget_prim_cache
-                                .insert(tile.tile_id, (cache_key, prims.clone()));
-                            prims
-                        }
-                    } else {
-                        let prims = widget_render::collect_metal_primitives(
-                            layout,
-                            WidgetViewport {
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                                time_seconds,
-                                focused_widget_id: tile.frame.focused_widget_id,
-                                focused_branch: false,
-                            },
-                            tile.frame.widget_scroll_top,
-                            inner_rows,
-                        );
-                        self.widget_prim_cache
-                            .insert(tile.tile_id, (cache_key, prims.clone()));
-                        prims
-                    };
+                    let (primitives, overlay_prims) = widget_render::collect_metal_primitives(
+                        layout,
+                        WidgetViewport {
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            time_seconds,
+                            focused_widget_id: tile.frame.focused_widget_id,
+                            focused_branch: false,
+                        },
+                        tile.frame.widget_scroll_top,
+                        inner_rows,
+                    );
                     // Offset primitives to tile's screen position,
                     // shifted by both text scroll (vertical) and hscroll (horizontal)
                     // so widgets move with the text.
@@ -1155,6 +1104,151 @@ fragment float4 waveform_frag(
                     }
                     // Restore tile scissor after segments
                     enc.setScissorRect(scissor);
+
+                    // ── Overlay pass (dropdown menus, etc.) ──
+                    // Rendered after all segments with full tile scissor so it
+                    // covers everything underneath (including text).
+                    if !overlay_prims.is_empty() {
+                        // Overlay primitives use screen-space coords (no scroll),
+                        // offset only by tile position.
+                        let overlay_col_off = col_off as i32;
+                        let overlay_row_off = row_off as i32;
+                        let offset_overlay: Vec<_> = overlay_prims
+                            .into_iter()
+                            .map(|p| {
+                                offset_primitive(
+                                    p,
+                                    overlay_col_off,
+                                    overlay_row_off,
+                                    cell_w,
+                                    cell_h,
+                                    vp_w,
+                                    vp_h,
+                                )
+                            })
+                            .collect();
+
+                        let (bg_runs, fg_runs) =
+                            partition_widget_instance_runs(&offset_overlay);
+                        for (widget_type, instances) in &bg_runs {
+                            let Some(wpipe) = self.widget_pipelines.get(widget_type)
+                            else {
+                                continue;
+                            };
+                            if instances.is_empty() {
+                                continue;
+                            }
+                            let byte_len =
+                                std::mem::size_of_val(instances.as_slice());
+                            let Some(wbuf) = (unsafe {
+                                self.device
+                                    .newBufferWithBytes_length_options(
+                                        NonNull::new(
+                                            instances.as_ptr() as *mut _,
+                                        )
+                                        .unwrap(),
+                                        byte_len,
+                                        MTLResourceOptions(0),
+                                    )
+                            }) else {
+                                continue;
+                            };
+                            enc.setRenderPipelineState(wpipe);
+                            unsafe {
+                                enc.setVertexBuffer_offset_atIndex(
+                                    Some(&wbuf),
+                                    0,
+                                    0,
+                                );
+                                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                    MTLPrimitiveType::Triangle,
+                                    0,
+                                    6,
+                                    instances.len() as _,
+                                );
+                            }
+                        }
+
+                        let prim_quads = {
+                            let atlas = self
+                                .atlas
+                                .as_mut()
+                                .ok_or(BackendError::MetalError)?;
+                            build_widget_primitive_quads(
+                                &offset_overlay,
+                                atlas,
+                                vp_w,
+                                vp_h,
+                            )
+                        };
+                        draw_text_verts(
+                            &enc,
+                            &self.device,
+                            &pipeline,
+                            &atlas_texture,
+                            &prim_quads,
+                        );
+
+                        if let (Some(prop_atlas), Some(prop_pipe)) =
+                            (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+                        {
+                            let prop_verts = build_proportional_text_quads(
+                                &offset_overlay,
+                                prop_atlas,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
+                            let prop_tex = prop_atlas.texture.clone();
+                            draw_text_verts(
+                                &enc,
+                                &self.device,
+                                prop_pipe,
+                                &prop_tex,
+                                &prop_verts,
+                            );
+                        }
+
+                        for (widget_type, instances) in &fg_runs {
+                            let Some(wpipe) = self.widget_pipelines.get(widget_type)
+                            else {
+                                continue;
+                            };
+                            if instances.is_empty() {
+                                continue;
+                            }
+                            let byte_len =
+                                std::mem::size_of_val(instances.as_slice());
+                            let Some(wbuf) = (unsafe {
+                                self.device
+                                    .newBufferWithBytes_length_options(
+                                        NonNull::new(
+                                            instances.as_ptr() as *mut _,
+                                        )
+                                        .unwrap(),
+                                        byte_len,
+                                        MTLResourceOptions(0),
+                                    )
+                            }) else {
+                                continue;
+                            };
+                            enc.setRenderPipelineState(wpipe);
+                            unsafe {
+                                enc.setVertexBuffer_offset_atIndex(
+                                    Some(&wbuf),
+                                    0,
+                                    0,
+                                );
+                                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                                    MTLPrimitiveType::Triangle,
+                                    0,
+                                    6,
+                                    instances.len() as _,
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // ── Per-tile status bar (drawn ON TOP of widgets with full-tile scissor)
@@ -1818,7 +1912,7 @@ fragment float4 waveform_frag(
                 };
             }
             let max_rows = (vp_h / atlas.cell_h as f32).floor() as u16 - 1;
-            let primitive_scene = frame
+            let (primitive_scene, _overlay) = frame
                 .widget_layout
                 .as_ref()
                 .map(|layout| {
