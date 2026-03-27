@@ -14,10 +14,21 @@ impl Editor {
         content_col: u16,
         content_row: u16,
     ) -> bool {
-        // If an overlay (dropdown menu) is active, skip focus changes —
-        // the overlay intercept in try_handle_widget_mouse_precise handles it.
+        // If an overlay (dropdown menu) is active and click is inside it,
+        // skip focus — the overlay intercept handles it. If outside, dismiss
+        // the overlay and proceed with normal focus logic.
         if crate::widget_render::overlay_widget_id().is_some() {
-            return false;
+            let scroll_top = self.active_leaf().widget_scroll_top as f32;
+            let local_row = precise_row - content_row as f32 + scroll_top;
+            let local_col = precise_col - content_col as f32;
+            if crate::widget_render::overlay_contains(local_col, local_row + scroll_top) {
+                return false;
+            }
+            // Dismiss overlay and fall through to normal focus handling
+            if let Some(id) = crate::widget_render::overlay_widget_id() {
+                crate::widget_render::dropdown::close_dropdown(id);
+            }
+            crate::widget_render::clear_overlay();
         }
         if !self.has_focusable_widgets() {
             return false;

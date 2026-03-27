@@ -333,7 +333,7 @@ impl WidgetDefinition for DropdownWidget {
         let hover_bg = resolve_named_color(
             &node.props,
             "hover-bg",
-            Color { r: 0.25, g: 0.52, b: 0.96, a: 1.0 },
+            Color { r: 0.00, g: 0.35, b: 0.82, a: 1.0 },
         );
         let check_color = resolve_named_color(
             &node.props,
@@ -479,7 +479,7 @@ impl WidgetDefinition for DropdownWidget {
                         width: node.rect.width - 0.3,
                         height: MENU_ROW_HEIGHT,
                     };
-                    emit_rounded_rect_overlay(hl_rect, hover_bg, 0.15, viewport);
+                    emit_rounded_rect_overlay(hl_rect, hover_bg, 0.0, viewport);
                 }
 
                 // Check mark for selected item
