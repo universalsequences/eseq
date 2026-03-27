@@ -1441,7 +1441,7 @@ impl App {
         }
     }
 
-    pub(super) fn register_sample_path(&mut self, sample_name: &str, path: PathBuf) {
+    pub fn register_sample_path(&mut self, sample_name: &str, path: PathBuf) {
         self.sample_path_registry
             .insert(sample_name.to_string(), path);
     }

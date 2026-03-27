@@ -11,7 +11,7 @@ use crossterm::event::Event;
 use eseqlisp::backend::Backend;
 use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::vm::Value;
-use eseqlisp::{Editor, EditorConfig, Runtime};
+use eseqlisp::{Editor, EditorConfig, HostCommand, HostEvent, Runtime};
 
 use sequencer::engine;
 use sequencer::sequencer::{SequencerState, StepParam};
@@ -59,7 +59,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Collect node IDs for param pushing to audiograph
-    let track_pan_ids: Vec<i32> = app.graph.track_node_ids.iter().map(|n| n.pan_id).collect();
+    let track_pan_ids: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(
+        app.graph.track_node_ids.iter().map(|n| n.pan_id).collect(),
+    ));
     let effect_descriptors = app.graph.effect_descriptors.clone();
     let lg_raw = lg_ptr.0;
 
@@ -94,6 +96,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("pans", build_param_list(&state, 0, StepParam::Pan)),
             ("track-volumes", build_track_volumes(&state)),
             ("effects", build_effects_value(&state, 0, &effect_descriptors, &selected_steps)),
+            ("track-params", build_track_params(&state, 0)),
+            ("tp-attack", Value::Number(state.pattern.track_params[0].get_attack_ms() as f64)),
+            ("tp-release", Value::Number(state.pattern.track_params[0].get_release_ms() as f64)),
+            ("tp-swing", Value::Number(state.pattern.track_params[0].get_swing() as f64)),
+            ("tp-send", Value::Number(state.pattern.track_params[0].get_send() as f64)),
+            ("tp-num-steps", Value::Number(state.pattern.track_params[0].get_num_steps() as f64)),
+            ("tp-gate", Value::Bool(state.pattern.track_params[0].is_gate_on())),
+            ("tp-poly", Value::Bool(state.pattern.track_params[0].is_polyphonic())),
+            ("tp-timebase", Value::String(state.pattern.track_params[0].get_timebase().label().to_string())),
+            ("tp-swing-resolution", Value::String(state.pattern.track_params[0].get_swing_resolution().label().to_string())),
             ("selected-steps", build_selection_value(&selected_steps)),
             ("step-has-plocks", build_step_has_plocks(&state, 0, &effect_descriptors)),
         ],
@@ -147,13 +159,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // seq-set-track — switch current track
+    let st = state.clone();
     let ct = current_track.clone();
     runtime.register_native("seq-set-track", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-set-track: expected track number".into());
         };
         let track = *track as usize;
-        if track >= track_count {
+        if track >= st.active_track_count() {
             return Err(format!("seq-set-track: track {track} out of range").into());
         }
         ct.store(track, Ordering::Relaxed);
@@ -175,7 +188,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         st.pattern.track_params[track].set_volume(vol);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         // Push volume to audiograph's stereo panner node
-        if let Some(&pan_id) = pan_ids.get(track) {
+        let pan_ids_lock = pan_ids.lock().unwrap();
+        if let Some(&pan_id) = pan_ids_lock.get(track) {
             unsafe {
                 sequencer::audiograph::params_push_wrapper(
                     lg_raw,
@@ -371,6 +385,207 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Value::Number(bpm as f64))
     });
 
+    // seq-set-track-param — set a track parameter on the current track
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-track-param", move |args, _ctx| {
+        let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
+            (args.first(), args.get(1))
+        else {
+            return Err("seq-set-track-param: expected (:param value)".into());
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let tp = &st.pattern.track_params[track];
+        match param_name.as_str() {
+            "attack" => {
+                let v = (*val as f32).clamp(0.0, 500.0);
+                tp.set_attack_ms(v);
+                Ok(Value::Number(v as f64))
+            }
+            "release" => {
+                let v = (*val as f32).clamp(0.0, 2000.0);
+                tp.set_release_ms(v);
+                Ok(Value::Number(v as f64))
+            }
+            "swing" => {
+                let v = (*val as f32).clamp(50.0, 75.0);
+                tp.set_swing(v);
+                Ok(Value::Number(v as f64))
+            }
+            "num-steps" => {
+                let v = (*val as usize).clamp(1, 64);
+                tp.set_num_steps(v);
+                Ok(Value::Number(v as f64))
+            }
+            "send" => {
+                let v = (*val as f32).clamp(0.0, 1.0);
+                tp.set_send(v);
+                Ok(Value::Number(v as f64))
+            }
+            "gate" => {
+                let want_on = *val != 0.0;
+                if want_on != tp.is_gate_on() {
+                    tp.toggle_gate();
+                }
+                Ok(Value::Bool(tp.is_gate_on()))
+            }
+            "poly" => {
+                let want_on = *val != 0.0;
+                if want_on != tp.is_polyphonic() {
+                    tp.toggle_polyphonic();
+                }
+                Ok(Value::Bool(tp.is_polyphonic()))
+            }
+            other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),
+        }
+        .map(|v| {
+            st.publish_scheduler_snapshot();
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+            v
+        })
+    });
+
+    // seq-search-samples — recursively search samples/ for .wav files matching a query
+    // Pre-scan the sample tree once and cache it for fast filtering.
+    let sample_index: Vec<(String, String, String)> = {
+        let mut index = Vec::new();
+        let samples_dir = std::path::Path::new("samples");
+        if samples_dir.is_dir() {
+            let mut stack = vec![samples_dir.to_path_buf()];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if let Some(ext) = path.extension() {
+                        if ext.eq_ignore_ascii_case("wav") {
+                            let name = path
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
+                            let parent = path
+                                .parent()
+                                .and_then(|p| p.file_name())
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .to_string();
+                            let full_path = path.to_string_lossy().to_string();
+                            index.push((name, parent, full_path));
+                        }
+                    }
+                }
+            }
+            index.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        }
+        eprintln!("metal_seq: indexed {} samples", index.len());
+        index
+    };
+    runtime.register_native("seq-search-samples", move |args, _ctx| {
+        let query = match args.first() {
+            Some(Value::String(s)) => s.to_lowercase(),
+            _ => String::new(),
+        };
+        let results: Vec<Rc<RefCell<Value>>> = sample_index
+            .iter()
+            .filter(|(name, _, _)| query.is_empty() || name.to_lowercase().contains(&query))
+            .take(100) // cap results for UI performance
+            .map(|(name, parent, full_path)| {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "name".to_string(),
+                    Rc::new(RefCell::new(Value::String(name.clone()))),
+                );
+                map.insert(
+                    "parent".to_string(),
+                    Rc::new(RefCell::new(Value::String(parent.clone()))),
+                );
+                map.insert(
+                    "path".to_string(),
+                    Rc::new(RefCell::new(Value::String(full_path.clone()))),
+                );
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect();
+        Ok(Value::List(results))
+    });
+
+    // seq-sample-tree — build hierarchical tree of samples/ for the tree widget
+    fn build_sample_tree_value(dir: &std::path::Path) -> Value {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Value::List(vec![]);
+        };
+        let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+        let mut files: Vec<(String, String)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                dirs.push((name, path));
+            } else if let Some(ext) = path.extension() {
+                if ext.eq_ignore_ascii_case("wav") {
+                    files.push((name, path.to_string_lossy().to_string()));
+                }
+            }
+        }
+        dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+        let mut items: Vec<Rc<RefCell<Value>>> = Vec::new();
+
+        // Directories become folder nodes with children
+        for (name, path) in &dirs {
+            let children = build_sample_tree_value(path);
+            // Skip empty directories
+            if matches!(&children, Value::List(l) if l.is_empty()) {
+                continue;
+            }
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "label".to_string(),
+                Rc::new(RefCell::new(Value::String(name.clone()))),
+            );
+            map.insert(
+                "children".to_string(),
+                Rc::new(RefCell::new(children)),
+            );
+            items.push(Rc::new(RefCell::new(Value::Map(map))));
+        }
+
+        // Files become leaf nodes with :path
+        for (name, full_path) in &files {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "label".to_string(),
+                Rc::new(RefCell::new(Value::String(name.clone()))),
+            );
+            map.insert(
+                "path".to_string(),
+                Rc::new(RefCell::new(Value::String(full_path.clone()))),
+            );
+            items.push(Rc::new(RefCell::new(Value::Map(map))));
+        }
+
+        Value::List(items)
+    }
+
+    let sample_tree = build_sample_tree_value(std::path::Path::new("samples"));
+    eprintln!("metal_seq: sample tree built");
+    runtime.register_native("seq-sample-tree", move |_args, _ctx| {
+        Ok(sample_tree.clone())
+    });
+
     // 4. Create editor with Metal backend
     let init_src = std::fs::read_to_string("init.lisp")
         .or_else(|_| std::fs::read_to_string("../eseqlisp/init.lisp"))
@@ -383,6 +598,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
+
+    // Load sample browser mode
+    match std::fs::read_to_string("metal-seq-browser.lisp") {
+        Ok(browser_src) => {
+            match editor.runtime_mut().eval_str(&browser_src) {
+                Ok(_) => eprintln!("metal_seq: browser loaded OK"),
+                Err(e) => eprintln!("metal_seq: browser eval error: {e:?}"),
+            }
+        }
+        Err(e) => eprintln!("metal_seq: browser file not found: {e}"),
+    }
 
     let mut backend = MetalBackend::new().map_err(|_| "Metal backend creation failed")?;
     backend.initialize().map_err(|_| "Metal backend init failed")?;
@@ -516,6 +742,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // 1b. Drain host commands (sample browser etc.)
+        for command in editor.drain_host_commands() {
+            if let HostCommand::Custom { name, payload } = command {
+                match name.as_str() {
+                    "audition-sample" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        if let Some(path_str) = path_str {
+                            let path = Path::new(&path_str);
+                            let track = current_track.load(Ordering::Relaxed);
+                            match sequencer::sampler::load_wav_buffer(lg_raw, path) {
+                                Ok((new_buffer_id, new_name)) => {
+                                    app.graph_controller()
+                                        .send_buffer_to_all_voices(track, new_buffer_id);
+                                    app.graph.track_buffer_ids[track] = new_buffer_id;
+                                    app.tracks[track] = new_name.clone();
+                                    app.register_sample_path(&new_name, path.to_path_buf());
+                                    if track < app.sampler_paths.len() {
+                                        app.sampler_paths[track] = Some(path.to_path_buf());
+                                    }
+                                    track_names[track] = new_name.clone();
+                                    // Update reactive state
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    editor.handle_host_event(HostEvent::Status(
+                                        format!("Audition: {new_name}"),
+                                    ));
+                                }
+                                Err(e) => {
+                                    editor.handle_host_event(HostEvent::Status(
+                                        format!("Error loading sample: {e}"),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    "add-track-sample" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        if let Some(path_str) = path_str {
+                            let path = Path::new(&path_str);
+                            match app.graph_controller().add_track(path) {
+                                Ok(idx) => {
+                                    let new_name = app.tracks[idx].clone();
+                                    track_names.push(new_name.clone());
+                                    // Update pan IDs for new track
+                                    track_pan_ids.lock().unwrap().push(
+                                        app.graph.track_node_ids[idx].pan_id,
+                                    );
+                                    // Update reactive state
+                                    let ct = current_track.load(Ordering::Relaxed);
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
+                                    rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
+                                    rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                                    rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(
+                                        format!("Added track {}: {new_name}", idx + 1),
+                                    ));
+                                }
+                                Err(e) => {
+                                    editor.handle_host_event(HostEvent::Status(
+                                        format!("Error adding track: {e}"),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        editor.handle_host_event(HostEvent::Status(
+                            format!("Unknown host command: {other}"),
+                        ));
+                    }
+                }
+            }
+        }
+
         // 2. Sync reactive state AFTER events
         let ct = current_track.load(Ordering::Relaxed);
         {
@@ -537,8 +843,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "transposes", build_param_list(&state, ct, StepParam::Transpose));
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &effect_descriptors, &selected_steps));
-                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &effect_descriptors));
+                rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
+                sync_track_params(rt, &state, ct);
+                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
                 prev_current_track = ct;
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
@@ -563,7 +870,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "transposes", build_param_list(&state, ct, StepParam::Transpose));
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &effect_descriptors));
+                sync_track_params(rt, &state, ct);
+                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
                 needs_reactive_cycle = true;
@@ -572,9 +880,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ui_ep != prev_ui_epoch {
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &effect_descriptors, &selected_steps));
+                rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
+                sync_track_params(rt, &state, ct);
                 rt.set_reactive("SEQ", "selected-steps", build_selection_value(&selected_steps));
-                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &effect_descriptors));
+                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
                 prev_ui_epoch = ui_ep;
                 needs_reactive_cycle = true;
             }
@@ -758,6 +1067,52 @@ fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Value {
         .map(|s| Rc::new(RefCell::new(Value::Bool(set.contains(&s)))))
         .collect();
     Value::List(items)
+}
+
+/// Extract the :path string from a host-command payload dict.
+fn extract_path_from_payload(payload: &Value) -> Option<String> {
+    if let Value::Map(map) = payload {
+        if let Some(cell) = map.get("path") {
+            if let Value::String(s) = &*cell.borrow() {
+                return Some(s.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Push individual tp-* reactive fields for the current track.
+fn sync_track_params(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize) {
+    let tp = &state.pattern.track_params[track];
+    rt.set_reactive("SEQ", "tp-attack", Value::Number(tp.get_attack_ms() as f64));
+    rt.set_reactive("SEQ", "tp-release", Value::Number(tp.get_release_ms() as f64));
+    rt.set_reactive("SEQ", "tp-swing", Value::Number(tp.get_swing() as f64));
+    rt.set_reactive("SEQ", "tp-send", Value::Number(tp.get_send() as f64));
+    rt.set_reactive("SEQ", "tp-num-steps", Value::Number(tp.get_num_steps() as f64));
+    rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
+    rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp.is_polyphonic()));
+    rt.set_reactive("SEQ", "tp-timebase", Value::String(tp.get_timebase().label().to_string()));
+    rt.set_reactive("SEQ", "tp-swing-resolution", Value::String(tp.get_swing_resolution().label().to_string()));
+}
+
+/// Build a Lisp Value::Map of track parameters for the current track.
+fn build_track_params(state: &Arc<SequencerState>, track: usize) -> Value {
+    use std::collections::HashMap;
+    let tp = &state.pattern.track_params[track];
+    eprintln!("build_track_params: track={track} attack={} gate={} vol={}", tp.get_attack_ms(), tp.is_gate_on(), tp.get_volume());
+    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    map.insert("gate".into(), Rc::new(RefCell::new(Value::Bool(tp.is_gate_on()))));
+    map.insert("attack".into(), Rc::new(RefCell::new(Value::Number(tp.get_attack_ms() as f64))));
+    map.insert("release".into(), Rc::new(RefCell::new(Value::Number(tp.get_release_ms() as f64))));
+    map.insert("swing".into(), Rc::new(RefCell::new(Value::Number(tp.get_swing() as f64))));
+    map.insert("swing-resolution".into(), Rc::new(RefCell::new(Value::String(tp.get_swing_resolution().label().to_string()))));
+    map.insert("num-steps".into(), Rc::new(RefCell::new(Value::Number(tp.get_num_steps() as f64))));
+    map.insert("volume".into(), Rc::new(RefCell::new(Value::Number(tp.get_volume() as f64))));
+    map.insert("pan".into(), Rc::new(RefCell::new(Value::Number(tp.get_pan() as f64))));
+    map.insert("timebase".into(), Rc::new(RefCell::new(Value::String(tp.get_timebase().label().to_string()))));
+    map.insert("send".into(), Rc::new(RefCell::new(Value::Number(tp.get_send() as f64))));
+    map.insert("poly".into(), Rc::new(RefCell::new(Value::Bool(tp.is_polyphonic()))));
+    Value::Map(map)
 }
 
 /// Build a Lisp Value::List of bools indicating which steps have any p-locks on the given track.

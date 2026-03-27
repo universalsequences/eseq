@@ -308,7 +308,7 @@ impl GraphController<'_> {
             vec![crate::sequencer::PatternSnapshot::new_default(0, &[])];
     }
 
-    pub(super) fn send_buffer_to_all_voices(&self, track: usize, buffer_id: i32) {
+    pub fn send_buffer_to_all_voices(&self, track: usize, buffer_id: i32) {
         if track < self.app.graph.track_voice_lids.len() {
             for &lid in &self.app.graph.track_voice_lids[track] {
                 unsafe {

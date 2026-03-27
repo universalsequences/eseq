@@ -173,7 +173,7 @@
         :background (if SEQ.playing "pause-btn" "play-btn")
         :on-click |x y r| (seq-toggle-play))
       (box :background "led-panel" :height 3 :width 40
-        (h-stack :gap 0 :align :baseline :padding 1
+        (h-stack :gap 0 :align :baseline :padding 2
           (label (fmt "{:>2}" (+ (floor (/ (mod SEQ.playhead 16) 4)) 1))
             :font-size 20 :width 4
             :color '(rgba 0.1 0.7 0.9 1)
@@ -269,6 +269,78 @@
                      :value (nth SEQ.track-volumes i)
                      :material (aqua-slider-material)
                      :on-change (lambda (v) (seq-set-track-volume i v)))))))
+
+    ; Track parameters for current track
+    (h-stack :gap 1.5
+      ; Gate toggle
+      (v-stack :align :center :gap 0.25
+        (label "gate" :font-size 9 :color :gray :bg :transparent)
+        (box :width 4 :height 2
+          :bg (if SEQ.tp-gate :blue :dark-gray)
+          :on-click |x y r|
+            (seq-set-track-param :gate (if SEQ.tp-gate 0 1))
+          (label (if SEQ.tp-gate "ON" "OFF")
+            :font-size 11 :color :white :bg :transparent)))
+      ; Poly toggle
+      (v-stack :align :center :gap 0.25
+        (label "poly" :font-size 9 :color :gray :bg :transparent)
+        (box :width 4 :height 2
+          :bg (if SEQ.tp-poly :blue :dark-gray)
+          :on-click |x y r|
+            (seq-set-track-param :poly (if SEQ.tp-poly 0 1))
+          (label (if SEQ.tp-poly "ON" "OFF")
+            :font-size 11 :color :white :bg :transparent)))
+      ; Attack
+      (v-stack :align :center :gap 0.25
+        (label (fmt "atk {:.0}" SEQ.tp-attack)
+          :font-size 9 :color :gray :bg :transparent)
+        (box :width 10 :height 2
+          (hslider :min 0 :max 500
+            :value SEQ.tp-attack
+            :material (aqua-slider-material)
+            :on-change (lambda (v) (seq-set-track-param :attack v)))))
+      ; Release
+      (v-stack :align :center :gap 0.25
+        (label (fmt "rel {:.0}" SEQ.tp-release)
+          :font-size 9 :color :gray :bg :transparent)
+        (box :width 10 :height 2
+          (hslider :min 0 :max 2000
+            :value SEQ.tp-release
+            :material (aqua-slider-material)
+            :on-change (lambda (v) (seq-set-track-param :release v)))))
+      ; Swing
+      (v-stack :align :center :gap 0.25
+        (label (fmt "swg {:.1}" SEQ.tp-swing)
+          :font-size 9 :color :gray :bg :transparent)
+        (box :width 8 :height 2
+          (hslider :min 50 :max 75
+            :value SEQ.tp-swing
+            :material (aqua-slider-material)
+            :on-change (lambda (v) (seq-set-track-param :swing v)))))
+      ; Send
+      (v-stack :align :center :gap 0.25
+        (label (fmt "send {:.2}" SEQ.tp-send)
+          :font-size 9 :color :gray :bg :transparent)
+        (box :width 8 :height 2
+          (hslider :min 0 :max 1
+            :value SEQ.tp-send
+            :material (aqua-slider-material)
+            :on-change (lambda (v) (seq-set-track-param :send v)))))
+      ; Steps
+      (v-stack :align :center :gap 0.25
+        (label (fmt "steps {}" SEQ.tp-num-steps)
+          :font-size 9 :color :gray :bg :transparent)
+        (box :width 8 :height 2
+          (hslider :min 1 :max 64
+            :value SEQ.tp-num-steps
+            :material (aqua-slider-material)
+            :on-change (lambda (v) (seq-set-track-param :num-steps v)))))
+      ; Read-only labels
+      (v-stack :gap 0.25
+        (label (fmt "timebase: {}" SEQ.tp-timebase)
+          :font-size 9 :color :gray :bg :transparent)
+        (label (fmt "swing-res: {}" SEQ.tp-swing-resolution)
+          :font-size 9 :color :gray :bg :transparent)))
 
     ; Effect chain for current track
     (h-stack :gap 1
