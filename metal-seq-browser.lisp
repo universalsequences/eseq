@@ -95,6 +95,10 @@
     (sbrowser-add-track item)
     (sbrowser-audition item)))
 
+(def sbrowser-load-preset (name)
+  (host-command "load-instrument-preset" (dict :name name))
+  (status (str "Load preset: " name)))
+
 ;; ── Search bar widget ──
 
 (def sbrowser-header ()
@@ -113,6 +117,26 @@
           :font-size 9
           :color (if (sbrowser-audition-mode?) :gray :white)
           :bg :transparent)))))
+
+(def sbrowser-instrument-header ()
+  (box :padding 0.25
+    (v-stack :gap 0.2
+      (h-stack :gap 0.5 :align :center
+        (label (if (= SEQ.sidebar-instrument-name "") "Instrument" SEQ.sidebar-instrument-name)
+          :font-size 12
+          :color :white
+          :bg :transparent)
+        (box :bg :dark-gray :width 8.2 :height 1.5 :align :center
+          (label (sbrowser-mode-label)
+            :font-size 9
+            :color :gray
+            :bg :transparent)))
+      (label
+        (str "Current preset: "
+          (if (= SEQ.sidebar-loaded-preset "") "none" SEQ.sidebar-loaded-preset))
+        :font-size 9
+        :color :gray
+        :bg :transparent))))
 
 (def sbrowser-create-header ()
   (box :padding 0.25
@@ -154,6 +178,27 @@
               :color :white
               :bg :transparent)))))))
 
+(def sbrowser-presets-panel ()
+  (box :background "browser-panel-bg" :padding 0 :flex 1
+    (if (= (len SEQ.sidebar-presets) 0)
+      (box :padding 1
+        (label "No presets found for this instrument."
+          :font-size 10
+          :color :gray
+          :bg :transparent))
+      (scroll :flex 1
+        (tree
+          :row-bg-even  '(0.16 0.16 0.17)
+          :row-bg-odd   '(0.19 0.19 0.20)
+          :selected-bg  '(0.00 0.35 0.82)
+          :folder-color '(0.88 0.88 0.89)
+          :file-color   '(0.88 0.88 0.89)
+          :chevron-color '(0.50 0.50 0.53)
+          :items SEQ.sidebar-preset-tree
+          :expand-all false
+          :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
+          :on-activate (lambda (item) (sbrowser-load-preset (get item :label))))))))
+
 ;; ── Build widgets ──
 
 (def sbrowser-build-widgets ()
@@ -161,21 +206,25 @@
     (list
       (sbrowser-create-header)
       (sbrowser-create-picker))
-    (let ((header (sbrowser-header)))
-      (list header
-        (box :background "browser-panel-bg" :padding 0 :flex 1
-          (scroll :flex 1
-            (tree
-              :row-bg-even  '(0.16 0.16 0.17)
-              :row-bg-odd   '(0.19 0.19 0.20)
-              :selected-bg  '(0.00 0.35 0.82)
-              :folder-color '(0.88 0.88 0.89)
-              :file-color   '(0.62 0.62 0.65)
-              :chevron-color '(0.50 0.50 0.53)
-              :items (seq-filter-sample-tree sbrowser-filter)
-              :expand-all (not (= sbrowser-filter ""))
-              :on-select (lambda (item) (sbrowser-select-item item))
-              :on-activate (lambda (item) (sbrowser-select-item item)))))))))
+    (if (= SEQ.sidebar-kind "instrument")
+      (list
+        (sbrowser-instrument-header)
+        (sbrowser-presets-panel))
+      (let ((header (sbrowser-header)))
+        (list header
+          (box :background "browser-panel-bg" :padding 0 :flex 1
+            (scroll :flex 1
+              (tree
+                :row-bg-even  '(0.16 0.16 0.17)
+                :row-bg-odd   '(0.19 0.19 0.20)
+                :selected-bg  '(0.00 0.35 0.82)
+                :folder-color '(0.88 0.88 0.89)
+                :file-color   '(0.62 0.62 0.65)
+                :chevron-color '(0.50 0.50 0.53)
+                :items (seq-filter-sample-tree sbrowser-filter SEQ.sidebar-selected-sample)
+                :expand-all (not (= sbrowser-filter ""))
+                :on-select (lambda (item) (sbrowser-select-item item))
+                :on-activate (lambda (item) (sbrowser-select-item item))))))))))
 
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──
 

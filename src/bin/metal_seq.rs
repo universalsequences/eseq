@@ -87,7 +87,7 @@ fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNode> {
     items
 }
 
-fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
+fn sample_tree_nodes_to_value(items: &[SampleTreeNode], selected_path: Option<&str>) -> Value {
     Value::List(
         items.iter()
             .map(|item| {
@@ -99,7 +99,7 @@ fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
                 if !item.children.is_empty() {
                     map.insert(
                         "children".to_string(),
-                        Rc::new(RefCell::new(sample_tree_nodes_to_value(&item.children))),
+                        Rc::new(RefCell::new(sample_tree_nodes_to_value(&item.children, selected_path))),
                     );
                 }
                 if let Some(path) = &item.path {
@@ -107,6 +107,12 @@ fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
                         "path".to_string(),
                         Rc::new(RefCell::new(Value::String(path.clone()))),
                     );
+                    if selected_path.is_some_and(|selected| selected == path) {
+                        map.insert(
+                            "selected".to_string(),
+                            Rc::new(RefCell::new(Value::Bool(true))),
+                        );
+                    }
                 }
                 Rc::new(RefCell::new(Value::Map(map)))
             })
@@ -238,6 +244,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("compiling", Value::Bool(false)),
             ("recording", Value::Bool(false)),
             ("record-armed", build_record_armed_value(&record_armed.lock().unwrap())),
+            ("sidebar-kind", Value::String("sampler".to_string())),
+            ("sidebar-instrument-name", Value::String(String::new())),
+            ("sidebar-loaded-preset", Value::String(String::new())),
+            ("sidebar-selected-sample", Value::String(String::new())),
+            ("sidebar-presets", Value::List(vec![])),
+            ("sidebar-preset-tree", Value::List(vec![])),
         ],
         false,
     );
@@ -754,7 +766,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let sample_tree_nodes = build_sample_tree_node(std::path::Path::new("samples"));
-    let sample_tree = sample_tree_nodes_to_value(&sample_tree_nodes);
+    let sample_tree = sample_tree_nodes_to_value(&sample_tree_nodes, None);
     eprintln!("metal_seq: sample tree built");
     runtime.register_native("seq-sample-tree", move |_args, _ctx| {
         Ok(sample_tree.clone())
@@ -764,8 +776,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(Value::String(s)) => s.trim().to_lowercase(),
             _ => String::new(),
         };
+        let selected_path = match args.get(1) {
+            Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
+            _ => None,
+        };
         let filtered = filter_sample_tree_nodes(&sample_tree_nodes, &query_lower);
-        Ok(sample_tree_nodes_to_value(&filtered))
+        Ok(sample_tree_nodes_to_value(&filtered, selected_path))
     });
     runtime.register_native("seq-saved-instruments", move |_args, _ctx| {
         Ok(Value::List(
@@ -1070,6 +1086,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "load-instrument-preset" => {
+                        if let Value::Map(ref map) = payload {
+                            let preset_name = map
+                                .get("name")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::String(name) => Some(name.clone()),
+                                    _ => None,
+                                });
+                            if let Some(preset_name) = preset_name {
+                                let track = current_track.load(Ordering::Relaxed);
+                                match load_instrument_preset_into_track(&mut app, track, &preset_name) {
+                                    Ok(()) => {
+                                        let rt = editor.runtime_mut();
+                                        sync_sidebar_browser(rt, &app, track);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(
+                                            format!("Loaded preset '{preset_name}'"),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        editor.handle_host_event(HostEvent::Status(
+                                            format!("Error loading preset: {e}"),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "add-effect" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(cell) = map.get("name") {
@@ -1132,6 +1178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
                 sync_track_params(rt, &state, ct, &selected_steps);
                 rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
+                sync_sidebar_browser(rt, &app, ct);
                 prev_current_track = ct;
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
@@ -1158,6 +1205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                 sync_track_params(rt, &state, ct, &selected_steps);
                 rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
+                sync_sidebar_browser(rt, &app, ct);
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
                 needs_reactive_cycle = true;
@@ -1170,6 +1218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_track_params(rt, &state, ct, &selected_steps);
                 rt.set_reactive("SEQ", "selected-steps", build_selection_value(&selected_steps));
                 rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
+                sync_sidebar_browser(rt, &app, ct);
                 // Sync recording state
                 let rec_on = recording.load(Ordering::Relaxed);
                 rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
@@ -1384,6 +1433,156 @@ fn build_available_effects() -> Value {
         .map(|n| Rc::new(RefCell::new(Value::String(n))))
         .collect();
     Value::List(items)
+}
+
+fn build_string_list(items: &[String]) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = items
+        .iter()
+        .map(|item| Rc::new(RefCell::new(Value::String(item.clone()))))
+        .collect();
+    Value::List(items)
+}
+
+fn build_flat_tree_items(items: &[String], selected_item: Option<&str>) -> Value {
+    use std::collections::HashMap;
+    let items: Vec<Rc<RefCell<Value>>> = items
+        .iter()
+        .map(|item| {
+            let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+            map.insert(
+                "label".to_string(),
+                Rc::new(RefCell::new(Value::String(item.clone()))),
+            );
+            if selected_item.is_some_and(|selected| selected == item) {
+                map.insert(
+                    "selected".to_string(),
+                    Rc::new(RefCell::new(Value::Bool(true))),
+                );
+            }
+            Rc::new(RefCell::new(Value::Map(map)))
+        })
+        .collect();
+    Value::List(items)
+}
+
+fn current_custom_instrument_name(app: &ui::App, track: usize) -> Option<String> {
+    if app.tracks.is_empty() || app.is_sampler_track(track) {
+        None
+    } else if let Some(Some(engine_id)) = app.graph.track_engine_ids.get(track) {
+        app.editor
+            .engine_registry
+            .get(*engine_id)
+            .map(|engine| engine.name.clone())
+    } else {
+        app.tracks.get(track).cloned()
+    }
+}
+
+fn visible_preset_items_for_track(app: &ui::App, track: usize) -> Vec<String> {
+    let Some(name) = current_custom_instrument_name(app, track) else {
+        return Vec::new();
+    };
+    let mut items: Vec<String> = sequencer::lisp_effect::load_instrument_presets(&name)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|preset| preset.name)
+        .collect();
+    items.sort();
+    items
+}
+
+fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
+    if app.is_sampler_track(track) {
+        let selected_sample = app
+            .sampler_paths
+            .get(track)
+            .and_then(|path| path.as_ref())
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default();
+        rt.set_reactive("SEQ", "sidebar-kind", Value::String("sampler".to_string()));
+        rt.set_reactive("SEQ", "sidebar-instrument-name", Value::String(String::new()));
+        rt.set_reactive("SEQ", "sidebar-loaded-preset", Value::String(String::new()));
+        rt.set_reactive("SEQ", "sidebar-selected-sample", Value::String(selected_sample));
+        rt.set_reactive("SEQ", "sidebar-presets", Value::List(vec![]));
+        rt.set_reactive("SEQ", "sidebar-preset-tree", Value::List(vec![]));
+        return;
+    }
+
+    let instrument_name = current_custom_instrument_name(app, track).unwrap_or_default();
+    let loaded_preset = app
+        .state
+        .pattern
+        .track_sound_state
+        .lock()
+        .unwrap()
+        .get(track)
+        .and_then(|meta| meta.loaded_preset.clone())
+        .unwrap_or_default();
+    let preset_items = visible_preset_items_for_track(app, track);
+
+    rt.set_reactive("SEQ", "sidebar-kind", Value::String("instrument".to_string()));
+    rt.set_reactive("SEQ", "sidebar-instrument-name", Value::String(instrument_name));
+    rt.set_reactive("SEQ", "sidebar-loaded-preset", Value::String(loaded_preset.clone()));
+    rt.set_reactive("SEQ", "sidebar-selected-sample", Value::String(String::new()));
+    rt.set_reactive("SEQ", "sidebar-presets", build_string_list(&preset_items));
+    rt.set_reactive(
+        "SEQ",
+        "sidebar-preset-tree",
+        build_flat_tree_items(&preset_items, if loaded_preset.is_empty() { None } else { Some(loaded_preset.as_str()) }),
+    );
+}
+
+fn load_instrument_preset_into_track(
+    app: &mut ui::App,
+    track: usize,
+    preset_name: &str,
+) -> Result<(), String> {
+    let instrument_name = current_custom_instrument_name(app, track)
+        .ok_or_else(|| "Current track is not a custom instrument".to_string())?;
+    let presets = sequencer::lisp_effect::load_instrument_presets(&instrument_name)
+        .map_err(|e| e.to_string())?;
+    let preset = presets
+        .into_iter()
+        .find(|preset| preset.name == preset_name)
+        .ok_or_else(|| format!("Preset '{preset_name}' not found"))?;
+    let desc = app
+        .graph
+        .instrument_descriptors
+        .get(track)
+        .cloned()
+        .ok_or_else(|| "Instrument descriptor unavailable".to_string())?;
+
+    {
+        let slot = &app.state.pattern.instrument_slots[track];
+        for (param_idx, param) in desc.params.iter().enumerate() {
+            let value = preset
+                .params
+                .get(&param.name)
+                .copied()
+                .unwrap_or(param.default);
+            let clamped = param.clamp(value);
+            slot.defaults.set(param_idx, clamped);
+        }
+    }
+
+    app.state.pattern.instrument_base_note_offsets[track]
+        .store(preset.base_note_offset.to_bits(), Ordering::Relaxed);
+    app.state.schedule_mod_resync();
+    app.state.publish_scheduler_snapshot();
+    let engine_id = app.graph.track_engine_ids.get(track).and_then(|id| *id);
+    if let Some(meta) = app
+        .state
+        .pattern
+        .track_sound_state
+        .lock()
+        .unwrap()
+        .get_mut(track)
+    {
+        meta.engine_id = engine_id;
+        meta.loaded_preset = Some(preset.name.clone());
+        meta.dirty = false;
+    }
+    Ok(())
 }
 
 /// Extract the :path string from a host-command payload dict.
