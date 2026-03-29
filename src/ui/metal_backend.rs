@@ -555,6 +555,7 @@ fragment float4 waveform_frag(
 
     #[derive(Clone, Copy, Hash, PartialEq, Eq)]
     struct WidgetSceneCacheKey {
+        owner_frame_key: u64,
         layout_identity: usize,
         layout_cache_key: u64,
         widget_state_generation: u64,
@@ -659,6 +660,7 @@ fragment float4 waveform_frag(
 
         fn widget_scene_cache_key(
             &self,
+            owner_frame_key: u64,
             layout: &crate::layout::LayoutNode,
             layout_cache_key: u64,
             viewport: WidgetViewport,
@@ -666,6 +668,7 @@ fragment float4 waveform_frag(
             max_rows: u16,
         ) -> u64 {
             let key = WidgetSceneCacheKey {
+                owner_frame_key,
                 layout_identity: layout as *const crate::layout::LayoutNode as usize,
                 layout_cache_key,
                 widget_state_generation: widget_render::widget_state_generation(),
@@ -696,6 +699,7 @@ fragment float4 waveform_frag(
 
         fn widget_scene_for_layout(
             &mut self,
+            owner_frame_key: u64,
             layout_cache_key: u64,
             layout: &crate::layout::LayoutNode,
             viewport: WidgetViewport,
@@ -709,8 +713,14 @@ fragment float4 waveform_frag(
                 return primitives;
             }
 
-            let cache_key =
-                self.widget_scene_cache_key(layout, layout_cache_key, viewport, scroll_top, max_rows);
+            let cache_key = self.widget_scene_cache_key(
+                owner_frame_key,
+                layout,
+                layout_cache_key,
+                viewport,
+                scroll_top,
+                max_rows,
+            );
             if let Some(scene) = self.cached_widget_scenes.get(&cache_key) {
                 let mut primitives = scene.primitives.clone();
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
@@ -1095,8 +1105,11 @@ fragment float4 waveform_frag(
                         focused_widget_id: tile.frame.focused_widget_id,
                         focused_branch: false,
                         tile_content_rows: inner_rows as f32,
+                        scroll_top: tile.frame.widget_scroll_top,
+                        scroll_left: tile.frame.widget_scroll_left,
                     };
                     let primitives = self.widget_scene_for_layout(
+                        tile.frame.text_cache_key,
                         tile.frame.widget_layout_cache_key,
                         layout,
                         viewport,
@@ -1223,11 +1236,11 @@ fragment float4 waveform_frag(
                     // Rendered after all segments with full tile scissor so it
                     // covers everything underneath (including text).
                     if !overlay_prims.is_empty() {
-                        // Overlay primitives are in screen-space (post-scroll within
-                        // the widget tree) but still need the buffer-level widget
-                        // scroll and tile offset applied.
-                        let overlay_col_off = col_off as f32 - tile.frame.widget_scroll_left;
-                        let overlay_row_off = row_off as f32 - widget_scroll;
+                        // Overlay primitives are already in post-scroll tile-local
+                        // coordinates; only the tile origin offset still needs to
+                        // be applied before drawing.
+                        let overlay_col_off = col_off as f32;
+                        let overlay_row_off = row_off as f32;
                         let offset_overlay: Vec<_> = overlay_prims
                             .into_iter()
                             .map(|p| {
@@ -2016,6 +2029,7 @@ fragment float4 waveform_frag(
                 .as_ref()
                 .map(|layout| {
                     self.widget_scene_for_layout(
+                        frame.text_cache_key,
                         frame.widget_layout_cache_key,
                         layout,
                         WidgetViewport {
@@ -2027,6 +2041,8 @@ fragment float4 waveform_frag(
                             focused_widget_id: frame.focused_widget_id,
                             focused_branch: false,
                             tile_content_rows: max_rows as f32,
+                            scroll_top: frame.widget_scroll_top,
+                            scroll_left: frame.widget_scroll_left,
                         },
                         frame.widget_scroll_top,
                         max_rows,

@@ -17,8 +17,54 @@ pub static TABS_WIDGET: TabsWidget = TabsWidget;
 /// Height of the tab bar header (text row + underline row)
 const HEADER_HEIGHT: f32 = 2.0;
 
-fn header_height(aspect: f32) -> f32 {
-    aspect * HEADER_HEIGHT
+fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -> bool {
+    match props.get(key) {
+        Some(Value::Bool(value)) => *value,
+        _ => default,
+    }
+}
+
+fn header_height(props: &HashMap<String, Value>, _aspect: f32) -> f32 {
+    get_f32_prop(props, "header-height", HEADER_HEIGHT)
+}
+
+fn compact_tab_widths(props: &HashMap<String, Value>, items: &[String]) -> Vec<f32> {
+    let tab_pad = get_f32_prop(props, "tab-padding", 0.75);
+    items.iter()
+        .map(|label| label.chars().count() as f32 + tab_pad * 2.0)
+        .collect()
+}
+
+fn compact_gap(props: &HashMap<String, Value>) -> f32 {
+    get_f32_prop(props, "gap", 0.75)
+}
+
+fn compact_total_width(props: &HashMap<String, Value>, items: &[String]) -> f32 {
+    let widths = compact_tab_widths(props, items);
+    let gap = compact_gap(props);
+    widths.iter().sum::<f32>() + gap * (widths.len().saturating_sub(1) as f32)
+}
+
+fn compact_hit_index(
+    props: &HashMap<String, Value>,
+    items: &[String],
+    rel_col: f32,
+) -> Option<usize> {
+    let widths = compact_tab_widths(props, items);
+    let gap = compact_gap(props);
+    let mut cursor = get_f32_prop(props, "padding", 0.0);
+    for (idx, width) in widths.iter().enumerate() {
+        if rel_col >= cursor && rel_col < cursor + *width {
+            return Some(idx);
+        }
+        cursor += *width + gap;
+    }
+    None
+}
+
+fn header_height_for_value(node: &Value, aspect: f32) -> f32 {
+    let props = crate::layout::get_map(node).unwrap_or_default();
+    header_height(&props, aspect)
 }
 
 fn get_items(props: &HashMap<String, Value>) -> Vec<String> {
@@ -42,17 +88,37 @@ fn tui_render_header(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellB
     }
     let selected = get_f32_prop(props, "value", 0.0) as usize;
     let pad = get_f32_prop(props, "padding", 0.0).round() as u16;
+    let compact = get_bool_prop(props, "compact", false);
 
     let row_u16 = rect.row.round() as u16;
-    let col_u16 = rect.col.round() as u16 + pad;
-    let width_u16 = (rect.width.round() as u16).saturating_sub(pad * 2);
-    let tab_width = width_u16 / items.len().max(1) as u16;
+    let col_u16 = rect.col.round() as u16;
+
+    let spans: Vec<(u16, u16)> = if compact {
+        let gap = compact_gap(props).round() as u16;
+        let tab_pad = get_f32_prop(props, "tab-padding", 0.75).round() as u16;
+        let mut cursor = col_u16 + pad;
+        items.iter()
+            .map(|label| {
+                let width = label.chars().count() as u16 + tab_pad * 2;
+                let span = (cursor, width);
+                cursor = cursor.saturating_add(width + gap);
+                span
+            })
+            .collect()
+    } else {
+        let width_u16 = (rect.width.round() as u16).saturating_sub(pad * 2);
+        let tab_width = width_u16 / items.len().max(1) as u16;
+        items.iter()
+            .enumerate()
+            .map(|(i, _)| (col_u16 + pad + (i as u16) * tab_width, tab_width))
+            .collect()
+    };
 
     for (i, label) in items.iter().enumerate() {
-        let tab_col = col_u16 + (i as u16) * tab_width;
+        let (tab_col, tab_width) = spans[i];
         let is_selected = i == selected;
         let fg = if is_selected {
-            theme::GREEN()
+            theme::WHITE()
         } else {
             theme::BRIGHT_BLACK()
         };
@@ -74,7 +140,7 @@ fn tui_render_header(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellB
         for c in 0..tab_width {
             let ch = if is_selected { '\u{2500}' } else { ' ' };
             let line_fg = if is_selected {
-                theme::GREEN()
+                theme::WHITE()
             } else {
                 theme::BRIGHT_BLACK()
             };
@@ -104,8 +170,10 @@ impl WidgetDefinition for TabsWidget {
         _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
-        let _ = node;
-        let header_h = header_height(constraints.aspect);
+        let props = crate::layout::get_map(node).unwrap_or_default();
+        let compact = get_bool_prop(&props, "compact", false);
+        let items = get_items(&props);
+        let header_h = header_height(&props, constraints.aspect);
         let inner = Constraints {
             min_width: constraints.min_width,
             max_width: constraints.max_width,
@@ -119,7 +187,18 @@ impl WidgetDefinition for TabsWidget {
             .map(|s| s.height)
             .fold(0.0_f32, f32::max);
         Some(Size {
-            width: constraints.max_width,
+            width: if compact {
+                let max_child_width = children
+                    .iter()
+                    .filter_map(|child| measure_child(child, inner))
+                    .map(|s| s.width)
+                    .fold(0.0_f32, f32::max);
+                let header_width = compact_total_width(&props, &items)
+                    + get_f32_prop(&props, "padding", 0.0) * 2.0;
+                max_child_width.max(header_width)
+            } else {
+                constraints.max_width
+            },
             height: header_h + max_child_height,
         })
     }
@@ -153,7 +232,8 @@ impl WidgetDefinition for TabsWidget {
             .filter_map(|child| measure_child(child, child_constraints))
             .map(|size| size.height)
             .fold(0.0_f32, f32::max);
-        let header_h = (area.height - tallest_child_height).clamp(HEADER_HEIGHT, area.height);
+        let min_header_h = header_height_for_value(node, 1.0);
+        let header_h = (area.height - tallest_child_height).clamp(min_header_h, area.height);
         let child_h = (area.height - header_h).max(0.0);
 
         let child_area = Rect {
@@ -196,10 +276,17 @@ impl WidgetDefinition for TabsWidget {
                     return MouseEventOutcome::Consume;
                 }
                 let rel_col = local_col - node.rect.col;
-                let tab_width = node.rect.width / items.len() as f32;
-                let clicked = (rel_col / tab_width).floor() as usize;
-                let clicked = clicked.min(items.len() - 1);
-                MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(clicked as f64)))
+                let clicked = if get_bool_prop(&node.props, "compact", false) {
+                    compact_hit_index(&node.props, &items, rel_col)
+                } else {
+                    let tab_width = node.rect.width / items.len() as f32;
+                    Some(((rel_col / tab_width).floor() as usize).min(items.len() - 1))
+                };
+                if let Some(clicked) = clicked {
+                    MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(clicked as f64)))
+                } else {
+                    MouseEventOutcome::Consume
+                }
             }
             _ => MouseEventOutcome::Ignore,
         }
@@ -236,7 +323,7 @@ impl WidgetDefinition for TabsWidget {
 
         // Only render the header portion (HEADER_HEIGHT text rows)
         let padding = get_f32_prop(&node.props, "padding", 0.0);
-        let header_h = header_height(aspect);
+        let header_h = header_height(&node.props, aspect);
         let header_rect = Rect {
             row: node.rect.row,
             col: node.rect.col,
@@ -246,20 +333,27 @@ impl WidgetDefinition for TabsWidget {
 
         let inner_width = (header_rect.width - padding * 2.0).max(0.0);
         let tab_col_start = header_rect.col + padding;
-        let tab_width = inner_width / items.len() as f32;
+        let compact = get_bool_prop(&node.props, "compact", false);
+        let compact_widths = compact_tab_widths(&node.props, &items);
+        let gap = compact_gap(&node.props);
         let mut prims = Vec::new();
-
-        // Header background
-        prims.push(super::MetalPrimitive::Rect(super::MetalRectPrimitive {
-            rect: header_rect,
-            color: theme::BG(),
-        }));
 
         for (i, label) in items.iter().enumerate() {
             let is_selected = i == selected;
-            let tab_col = tab_col_start + (i as f32) * tab_width;
+            let (tab_col, tab_width) = if compact {
+                let tab_col = tab_col_start
+                    + compact_widths
+                        .iter()
+                        .take(i)
+                        .sum::<f32>()
+                    + gap * i as f32;
+                (tab_col, compact_widths[i])
+            } else {
+                let tab_width = inner_width / items.len() as f32;
+                (tab_col_start + (i as f32) * tab_width, tab_width)
+            };
             let fg = if is_selected {
-                theme::GREEN()
+                theme::WHITE()
             } else {
                 theme::BRIGHT_BLACK()
             };
@@ -284,7 +378,7 @@ impl WidgetDefinition for TabsWidget {
                     y: (header_rect.row + header_h - underline_height) * viewport.cell_w,
                     width: tab_width * viewport.cell_w,
                     height: underline_height * viewport.cell_w,
-                    color: theme::GREEN(),
+                    color: theme::WHITE(),
                 }));
             }
         }

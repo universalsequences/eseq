@@ -536,7 +536,6 @@ pub fn sdf_widget_background_primitives(
     let px_h = rect.height * viewport.cell_h;
     let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
     const NO_HIT_REGION: f32 = -1.0;
-    const FULL_UV_BOUNDS: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
     // Resolve state uniforms from the box's props
     let mut uniform_a = [0.0; 4];
@@ -567,7 +566,7 @@ pub fn sdf_widget_background_primitives(
             uniform_b,
             color_a: [0.0; 4],
             color_b: [NO_HIT_REGION, 0.0, 0.0, 0.0],
-            color_c: FULL_UV_BOUNDS,
+            color_c: [0.0, 0.0, 1.0, 1.0],
             color_d: [0.0; 4],
             corner_radius: 0.0,
             pixel_aspect,

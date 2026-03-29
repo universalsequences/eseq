@@ -1395,6 +1395,11 @@ impl Editor {
         self.active_leaf().widget_scroll_left
     }
 
+    pub fn reset_widget_scroll_left(&mut self) {
+        self.active_leaf_mut().widget_scroll_left = 0.0;
+        self.mark_needs_redraw();
+    }
+
     /// Combined vertical scroll: widget scroll + text scroll.
     pub fn total_scroll_top(&self) -> f32 {
         self.widget_scroll_top() + self.active_buffer().scroll_top as f32
@@ -1470,6 +1475,10 @@ impl Editor {
 
     pub fn set_layout_aspect(&mut self, aspect: f32) {
         self.runtime.set_layout_aspect(aspect);
+    }
+
+    pub fn layout_aspect(&self) -> f32 {
+        self.runtime.layout_aspect()
     }
 
     pub fn set_text_measurer(
@@ -1994,11 +2003,8 @@ impl Editor {
                     if let Some((local_col, local_row)) =
                         crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)
                     {
-                        let scroll_top = self.total_scroll_top();
-                        let scroll_left = self.active_leaf().widget_scroll_left;
-                        let layout_row = local_row + scroll_top;
-                        let _layout_col = local_col + scroll_left;
-                        if crate::widget_render::dropdown::hover_overlay(overlay_id, layout_row) {
+                        let _local_col = local_col;
+                        if crate::widget_render::dropdown::hover_overlay(overlay_id, local_row) {
                             self.mark_needs_redraw();
                         }
                     }
@@ -2851,6 +2857,7 @@ impl Editor {
 
         // Process widget tree rendering (stored per-buffer)
         if let Some(tree) = self.runtime.take_pending_widget_tree() {
+            crate::widget_render::clear_overlay();
             match tree {
                 Value::Nil | Value::Bool(false) => {
                     let buffer = self.active_buffer_mut();
@@ -2884,6 +2891,7 @@ impl Editor {
                 EffectTarget::BufferName(name) => self.ensure_scratch_buffer_named(&name),
             };
             if self.active_buffer_idx() == buffer_idx {
+                crate::widget_render::clear_overlay();
                 let buffer = &mut self.buffers[buffer_idx];
                 buffer.widget_tree = Some(pending.tree);
                 buffer.widget_tree_source = pending.source_buffer_id;

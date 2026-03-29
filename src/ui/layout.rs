@@ -195,7 +195,7 @@ impl<'a> LayoutEngine<'a> {
             measure_builtin_leaf(node, &widget_type, constraints.aspect)
         };
 
-        Some(clamp_size(size, constraints))
+        Some(clamp_size_for_node(node, size, constraints))
     }
 
     fn build_layout_node(&self, node: &Value, rect: Rect, inherited_font_size: f32) -> LayoutNode {
@@ -541,6 +541,22 @@ fn clamp_size(size: Size, constraints: Constraints) -> Size {
         width: size
             .width
             .clamp(constraints.min_width, constraints.max_width),
+        height: size
+            .height
+            .clamp(constraints.min_height, constraints.max_height),
+    }
+}
+
+fn clamp_size_for_node(node: &Value, size: Size, constraints: Constraints) -> Size {
+    let unclamped_width = get_map(node)
+        .and_then(|map| map.get("no-clamp-width").cloned())
+        .is_some_and(|value| matches!(value, Value::Bool(true)));
+    Size {
+        width: if unclamped_width {
+            size.width.max(constraints.min_width)
+        } else {
+            size.width.clamp(constraints.min_width, constraints.max_width)
+        },
         height: size
             .height
             .clamp(constraints.min_height, constraints.max_height),

@@ -244,6 +244,18 @@ pub fn build_render_frame(
     viewport_height: usize,
 ) -> RenderFrame {
     editor.set_layout_viewport(viewport_width as u16, viewport_height as u16);
+    if let Some(layout) = editor.widget_layout() {
+        let aspect = editor.layout_aspect();
+        let max_h = (crate::ui::hit::max_extent(&layout, aspect).0 as f32
+            - viewport_width as f32)
+            .max(0.0);
+        let leaf = editor.active_leaf_mut();
+        if leaf.widget_scroll_left > max_h {
+            leaf.widget_scroll_left = max_h;
+        }
+    } else {
+        editor.active_leaf_mut().widget_scroll_left = 0.0;
+    }
     editor.sync_text_horizontal_scroll(viewport_width as u16);
     if editor.active_buffer().view_mode != ViewMode::UiOnly {
         editor.active_buffer_mut().adjust_scroll(viewport_height);

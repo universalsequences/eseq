@@ -14,24 +14,19 @@ use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 /// Compute the bounding rect that covers the box itself and all its children.
 /// This ensures the SDF background covers the full scrollable content.
 fn content_extent(node: &LayoutNode) -> Rect {
-    let padding = get_prop_num_from_layout(node, "padding");
     let mut rect = node.rect;
     for child in &node.children {
         let cr = child_extent(child);
-        // Add padding on the right/bottom side of the content
-        let right = (cr.col + cr.width + padding).max(rect.col + rect.width);
-        let bottom = (cr.row + cr.height + padding).max(rect.row + rect.height);
+        // Use the child's actual laid out inset rather than raw padding.
+        // This keeps the background extent aligned with aspect-corrected vertical padding.
+        let inset_x = (child.rect.col - node.rect.col).max(0.0);
+        let inset_y = (child.rect.row - node.rect.row).max(0.0);
+        let right = (cr.col + cr.width + inset_x).max(rect.col + rect.width);
+        let bottom = (cr.row + cr.height + inset_y).max(rect.row + rect.height);
         rect.width = right - rect.col;
         rect.height = bottom - rect.row;
     }
     rect
-}
-
-fn get_prop_num_from_layout(node: &LayoutNode, key: &str) -> f32 {
-    match node.props.get(key) {
-        Some(Value::Number(n)) => *n as f32,
-        _ => 0.0,
-    }
 }
 
 fn child_extent(node: &LayoutNode) -> Rect {

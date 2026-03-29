@@ -3,12 +3,15 @@ use std::collections::HashMap;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
-    get_f32_prop, metal_widget_instance, ndc_bounds, resolve_named_color, styled_cell,
+    CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MouseEventOutcome,
+    WidgetDefinition, WidgetEvent, get_f32_prop, metal_widget_instance, ndc_bounds,
+    resolve_named_color, styled_cell,
 };
 #[cfg(target_os = "macos")]
 use super::sdf_widget;
-use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{
+    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+};
 use crate::theme;
 use crate::vm::Value;
 
@@ -18,6 +21,53 @@ pub static VSLIDER_WIDGET: VerticalSliderWidget = VerticalSliderWidget;
 
 fn fill_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED())
+}
+
+fn items(props: &HashMap<String, Value>) -> Vec<String> {
+    match props.get("items") {
+        Some(Value::List(list)) => list
+            .iter()
+            .filter_map(|v| match &*v.borrow() {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => vec![],
+    }
+}
+
+fn selected_label(props: &HashMap<String, Value>) -> String {
+    let labels = items(props);
+    let value = get_f32_prop(props, "value", 0.0).round() as usize;
+    labels.get(value).cloned().unwrap_or_default()
+}
+
+fn render_item_chars(
+    props: &HashMap<String, Value>,
+    rect: Rect,
+    mut put: impl FnMut(u16, u16, char, crate::backend::Color),
+) {
+    let text = selected_label(props);
+    let chars: Vec<char> = text.chars().take(rect.height.round() as usize).collect();
+    let fg = resolve_named_color(props, "color", theme::WIDGET_LABEL_FG());
+    let row_u16 = rect.row.round() as u16;
+    let col_u16 = rect.col.round() as u16;
+    let height_u16 = rect.height.round() as u16;
+    let width_u16 = rect.width.round() as u16;
+    let text_col = col_u16 + width_u16.saturating_sub(1) / 2;
+    let start = if chars.len() < height_u16 as usize {
+        (height_u16 as usize - chars.len()) / 2
+    } else {
+        0
+    };
+    for row_off in 0..height_u16 {
+        let ch = row_off
+            .checked_sub(start as u16)
+            .and_then(|idx| chars.get(idx as usize))
+            .copied()
+            .unwrap_or(' ');
+        put(row_u16 + row_off, text_col, ch, fg);
+    }
 }
 
 /// Compute normalized value and origin for bipolar support.
@@ -43,6 +93,13 @@ fn normalize_with_origin(props: &HashMap<String, Value>) -> (f32, f32) {
 
 /// TUI render for vertical slider: fill from origin toward value.
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
+    if !items(props).is_empty() {
+        render_item_chars(props, rect, |row, col, ch, fg| {
+            buf.set(row, col, styled_cell(ch, fg, None));
+        });
+        return;
+    }
+
     let (t, origin_t) = normalize_with_origin(props);
 
     let row_u16 = rect.row.round() as u16;
@@ -207,6 +264,33 @@ impl WidgetDefinition for VerticalSliderWidget {
         node: &LayoutNode,
         viewport: super::WidgetViewport,
     ) -> Vec<MetalPrimitive> {
+        if !items(&node.props).is_empty() {
+            let font_size = node
+                .props
+                .get("font-size")
+                .and_then(|v| match v {
+                    Value::Number(n) => Some(*n as f32),
+                    _ => None,
+                })
+                .unwrap_or(DEFAULT_FONT_SIZE);
+            let mut prims = Vec::new();
+            render_item_chars(&node.props, node.rect, |row, col, ch, fg| {
+                if ch != ' ' {
+                    prims.push(MetalPrimitive::ProportionalText(
+                        MetalProportionalTextPrimitive {
+                            row: row as f32,
+                            col: col as f32,
+                            text: ch.to_string(),
+                            font_size,
+                            fg,
+                            bg: theme::BG(),
+                        },
+                    ));
+                }
+            });
+            return prims;
+        }
+
         let (t, origin_t) = normalize_with_origin(&node.props);
         let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
         let px_w = node.rect.width * viewport.cell_w;

@@ -59,6 +59,24 @@ fn set_state(widget_id: u64, state: DropdownState) {
     super::bump_widget_state_generation();
 }
 
+fn close_other_dropdowns(active_widget_id: u64) {
+    STATES.with(|s| {
+        let mut changed = false;
+        for (&widget_id, state) in s.borrow_mut().iter_mut() {
+            if widget_id == active_widget_id || !state.open {
+                continue;
+            }
+            state.open = false;
+            state.hovered_idx = None;
+            state.scroll_offset = 0.0;
+            changed = true;
+        }
+        if changed {
+            super::bump_widget_state_generation();
+        }
+    });
+}
+
 /// Close the dropdown for a given widget_id (called when overlay is dismissed externally).
 pub fn close_dropdown(widget_id: u64) {
     STATES.with(|s| {
@@ -70,7 +88,7 @@ pub fn close_dropdown(widget_id: u64) {
     });
 }
 
-/// Update hovered item based on mouse position in layout-space.
+/// Update hovered item based on mouse position in tile-local overlay space.
 /// Returns true if the hover state changed.
 pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
     STATES.with(|s| {
@@ -300,6 +318,7 @@ impl WidgetDefinition for DropdownWidget {
             MouseEventOutcome::Consume
         } else {
             // Open the dropdown
+            close_other_dropdowns(node.widget_id);
             state.open = true;
             state.hovered_idx = selected_index(&options, &get_selected(&node.props));
             state.scroll_offset = 0.0;
@@ -322,6 +341,7 @@ impl WidgetDefinition for DropdownWidget {
             // Up/Down are NOT consumed — they fall through to focus navigation.
             match key.code {
                 KeyCode::Enter | KeyCode::Char(' ') => {
+                    close_other_dropdowns(node.widget_id);
                     state.open = true;
                     state.hovered_idx = selected_index(&options, &selected);
                     set_state(node.widget_id, state);
@@ -589,8 +609,8 @@ impl WidgetDefinition for DropdownWidget {
 
         // ── Menu overlay (when open) ──
         if state.open && !options.is_empty() {
-            let parent_scroll_offset = super::scroll::any_active_scroll_offset();
-            let screen_row = node.rect.row - parent_scroll_offset;
+            let screen_col = node.rect.col - viewport.scroll_left;
+            let screen_row = node.rect.row - viewport.scroll_top;
             let viewport_rows = viewport.tile_content_rows;
 
             let geo = compute_menu_geometry(
@@ -621,7 +641,7 @@ impl WidgetDefinition for DropdownWidget {
 
             let menu_rect = Rect {
                 row: geo.menu_top,
-                col: node.rect.col,
+                col: screen_col,
                 width: menu_width,
                 height: geo.visible_height,
             };
@@ -671,7 +691,7 @@ impl WidgetDefinition for DropdownWidget {
                 if is_hovered {
                     let hl_rect = Rect {
                         row: item_y,
-                        col: node.rect.col + 0.15,
+                        col: screen_col + 0.15,
                         width: menu_width - 0.3,
                         height: MENU_ROW_HEIGHT,
                     };
@@ -679,7 +699,7 @@ impl WidgetDefinition for DropdownWidget {
                 }
 
                 // Check mark for selected item
-                let label_col = node.rect.col + PADDING_H;
+                let label_col = screen_col + PADDING_H;
                 if sel_idx == Some(i) {
                     super::push_overlay_primitive(MetalPrimitive::ProportionalText(
                         MetalProportionalTextPrimitive {
@@ -709,7 +729,7 @@ impl WidgetDefinition for DropdownWidget {
             // Scrollbar indicator (when content is taller than visible area)
             if needs_scrollbar {
                 let track_margin = SCROLLBAR_MARGIN;
-                let bar_col = node.rect.col + menu_width - SCROLLBAR_WIDTH - track_margin;
+                let bar_col = screen_col + menu_width - SCROLLBAR_WIDTH - track_margin;
                 let track_top = geo.menu_top + track_margin;
                 let track_height = geo.visible_height - track_margin * 2.0;
                 let thumb_ratio = (geo.visible_height / geo.content_height).clamp(0.05, 1.0);

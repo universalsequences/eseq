@@ -266,6 +266,11 @@ pub struct WidgetViewport {
     /// Tile content area height in rows (excludes status bar).
     /// Used by overlays (dropdowns) to clamp to the visible tile region.
     pub tile_content_rows: f32,
+    /// Total vertical scroll already applied before tile-position offset.
+    /// This includes tile-level widget scroll and any ancestor scroll widgets.
+    pub scroll_top: f32,
+    /// Total horizontal scroll already applied before tile-position offset.
+    pub scroll_left: f32,
 }
 
 #[cfg(target_os = "macos")]
@@ -617,13 +622,14 @@ fn collect_metal_primitives_recursive(
     }
 
     let node_viewport = WidgetViewport {
+        scroll_top: _scroll_top,
         focused_branch,
         ..viewport
     };
 
     // Scroll container: clip children to viewport rect and offset by scroll amount
     if node.widget_type == "scroll" {
-        let state = scroll::get_scroll_state(node.widget_id);
+        let state = scroll::sync_node_state(node);
         let offset_y = state.offset_y;
 
         primitives.push(MetalPrimitive::PushClipRect(node.rect));
@@ -647,6 +653,22 @@ fn collect_metal_primitives_recursive(
 
         // Scrollbar rendered AFTER children so it draws on top
         primitives.extend(widget_primitives_for_node(node, node_viewport));
+        return;
+    }
+
+    if node.widget_type == "box" && node.props.contains_key("background") {
+        primitives.push(MetalPrimitive::PushClipRect(node.rect));
+        primitives.extend(widget_primitives_for_node(node, node_viewport));
+        for child in &node.children {
+            collect_metal_primitives_recursive(
+                child,
+                node_viewport,
+                _scroll_top,
+                _max_rows,
+                primitives,
+            );
+        }
+        primitives.push(MetalPrimitive::PopClipRect);
         return;
     }
 

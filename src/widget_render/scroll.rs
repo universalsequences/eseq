@@ -12,11 +12,12 @@ use super::{MetalPrimitive, WidgetInstance, WidgetViewport, ndc_bounds};
 
 // ── Scroll state ─────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ScrollState {
     pub offset_y: f32,
     pub content_height: f32,
     pub viewport_height: f32,
+    pub synced_selection: Option<String>,
 }
 
 impl Default for ScrollState {
@@ -25,6 +26,7 @@ impl Default for ScrollState {
             offset_y: 0.0,
             content_height: 0.0,
             viewport_height: 0.0,
+            synced_selection: None,
         }
     }
 }
@@ -39,8 +41,14 @@ pub fn get_scroll_state(widget_id: u64) -> ScrollState {
 }
 
 pub fn set_scroll_state(widget_id: u64, state: ScrollState) {
-    SCROLL_STATES.with(|s| s.borrow_mut().insert(widget_id, state));
-    super::bump_widget_state_generation();
+    let changed = SCROLL_STATES.with(|s| {
+        let mut states = s.borrow_mut();
+        let old = states.insert(widget_id, state.clone());
+        old.as_ref() != Some(&state)
+    });
+    if changed {
+        super::bump_widget_state_generation();
+    }
 }
 
 /// Per-event scroll context for child widgets that need to map pointer input
@@ -57,6 +65,48 @@ pub fn set_current_event_scroll_offset(offset_y: Option<f32>) {
 fn clamp_offset(state: &mut ScrollState) {
     let max_scroll = (state.content_height - state.viewport_height).max(0.0);
     state.offset_y = state.offset_y.clamp(0.0, max_scroll);
+}
+
+fn sync_selected_child_into_view(node: &LayoutNode, state: &mut ScrollState) {
+    let Some(child) = node.children.first() else {
+        return;
+    };
+    let Some((selection_key, selected_row, row_height)) =
+        super::tree::selection_view_hint(child)
+    else {
+        state.synced_selection = None;
+        return;
+    };
+    if state.synced_selection.as_deref() == Some(selection_key.as_str()) {
+        return;
+    }
+
+    let row_top = selected_row as f32 * row_height;
+    let row_bottom = row_top + row_height;
+    if row_top < state.offset_y {
+        state.offset_y = row_top;
+    } else if row_bottom > state.offset_y + state.viewport_height {
+        state.offset_y = row_bottom - state.viewport_height;
+    }
+    state.synced_selection = Some(selection_key);
+    clamp_offset(state);
+}
+
+pub(crate) fn sync_node_state(node: &LayoutNode) -> ScrollState {
+    let content_height = node
+        .props
+        .get("_content_height")
+        .and_then(|v| if let Value::Number(n) = v { Some(*n as f32) } else { None })
+        .unwrap_or(0.0);
+    let viewport_height = node.rect.height;
+
+    let mut state = get_scroll_state(node.widget_id);
+    state.content_height = content_height;
+    state.viewport_height = viewport_height;
+    sync_selected_child_into_view(node, &mut state);
+    clamp_offset(&mut state);
+    set_scroll_state(node.widget_id, state.clone());
+    state
 }
 
 // ── Widget definition ────────────────────────────────────────────────────────
@@ -203,19 +253,9 @@ impl WidgetDefinition for ScrollWidget {
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
-        // Update scroll state dimensions from layout
-        let content_height = node
-            .props
-            .get("_content_height")
-            .and_then(|v| if let Value::Number(n) = v { Some(*n as f32) } else { None })
-            .unwrap_or(0.0);
-        let viewport_height = node.rect.height;
-
-        let mut state = get_scroll_state(node.widget_id);
-        state.content_height = content_height;
-        state.viewport_height = viewport_height;
-        clamp_offset(&mut state);
-        set_scroll_state(node.widget_id, state.clone());
+        let state = sync_node_state(node);
+        let content_height = state.content_height;
+        let viewport_height = state.viewport_height;
 
         // No scrollbar if content fits
         if content_height <= viewport_height || viewport_height <= 0.0 {
