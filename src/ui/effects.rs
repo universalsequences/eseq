@@ -231,7 +231,7 @@ impl App {
         true
     }
 
-    pub(super) fn next_free_custom_slot(&self) -> Option<usize> {
+    pub fn next_free_custom_slot(&self) -> Option<usize> {
         if self.tracks.is_empty() {
             return None;
         }
@@ -553,7 +553,7 @@ impl App {
         }
     }
 
-    fn start_effect_compile(&mut self, name: &str, slot_idx: usize) {
+    pub fn start_effect_compile(&mut self, name: &str, slot_idx: usize) {
         let source = match lisp_effect::load_effect_source(name) {
             Ok(s) => s,
             Err(e) => {
@@ -578,7 +578,47 @@ impl App {
         });
     }
 
-    pub(super) fn apply_compiled_effect(
+    /// Poll for async compile completion. Returns a status message if something finished.
+    pub fn poll_pending_compile(&mut self) -> Option<String> {
+        let pending = self.editor.pending_compile.as_ref()?;
+        match pending.receiver.try_recv() {
+            Ok(Ok(compile_result)) => {
+                let target = match &pending.target {
+                    CompileTarget::Effect { name, slot_idx, track } => {
+                        CompileTarget::Effect { name: name.clone(), slot_idx: *slot_idx, track: *track }
+                    }
+                    CompileTarget::Instrument { name } => {
+                        CompileTarget::Instrument { name: name.clone() }
+                    }
+                };
+                self.editor.pending_compile = None;
+                match target {
+                    CompileTarget::Effect { name, slot_idx, track } => {
+                        self.apply_compiled_effect(compile_result, &name, slot_idx, track);
+                        Some(format!("Loaded effect: {name}"))
+                    }
+                    CompileTarget::Instrument { name } => {
+                        self.apply_compiled_instrument(compile_result, &name);
+                        Some(format!("Loaded instrument: {name}"))
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                self.editor.pending_compile = None;
+                Some(format!("Compile error: {e}"))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.editor.pending_compile.as_mut().unwrap().tick += 1;
+                None
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.editor.pending_compile = None;
+                Some("Compile thread crashed".to_string())
+            }
+        }
+    }
+
+    pub fn apply_compiled_effect(
         &mut self,
         result: lisp_effect::CompileResult,
         name: &str,

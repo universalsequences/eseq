@@ -14,15 +14,16 @@ use eseqlisp::vm::Value;
 use eseqlisp::{Editor, EditorConfig, HostCommand, HostEvent, Runtime};
 
 use sequencer::engine;
-use sequencer::sequencer::{SequencerState, StepParam};
+use sequencer::sequencer::{KeyboardTrigger, SequencerState, StepParam, Timebase, MAX_STEPS};
 use sequencer::ui;
+use std::sync::atomic::AtomicBool;
 
 const DEFAULT_SAMPLES: &[&str] = &[
     "samples/producers/Boom-Bap/Boom-Bap Kick 51.wav",
     "samples/producers/madlib/Snare SwaggedOut 3.wav",
     "samples/producers/donda/PABLO HAT.wav",
 ];
-const NUM_STEPS: usize = 16;
+const PAGE_SIZE: usize = 16;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Init audio engine
@@ -72,10 +73,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // UI-only counter for changes that shouldn't affect pattern_epoch (e.g. volume, selection)
     let ui_epoch = Arc::new(AtomicUsize::new(0));
 
+    // Recording state shared between native functions and event loop
+    let recording = Arc::new(AtomicBool::new(false));
+    let record_armed: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(vec![false; track_names.len()]));
+    // Keyboard trigger sender for live playing when armed
+    let keyboard_tx = app.graph.keyboard_tx.clone();
+    // Keyboard octave offset for live playing
+    let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    // Held keys for recording: (key_char, transpose, step_at_press, press_instant)
+    let held_notes: Arc<Mutex<Vec<(char, f32, usize, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+
     // 3. Set up eseqlisp runtime with sequencer natives
     let mut runtime = Runtime::new();
 
-    let ct = current_track.clone();
     let track_count = track_names.len();
 
     // Register SEQ reactive namespace
@@ -84,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![
             ("playing", Value::Bool(false)),
             ("bpm", Value::Number(120.0)),
-            ("num-steps", Value::Number(NUM_STEPS as f64)),
+            ("num-steps", Value::Number(PAGE_SIZE as f64)),
             ("num-tracks", Value::Number(track_count as f64)),
             ("current-track", Value::Number(0.0)),
             ("playhead", Value::Number(0.0)),
@@ -106,8 +116,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("tp-poly", Value::Bool(state.pattern.track_params[0].is_polyphonic())),
             ("tp-timebase", Value::String(state.pattern.track_params[0].get_timebase().label().to_string())),
             ("tp-swing-resolution", Value::String(state.pattern.track_params[0].get_swing_resolution().label().to_string())),
+            ("available-effects", build_available_effects()),
             ("selected-steps", build_selection_value(&selected_steps)),
             ("step-has-plocks", build_step_has_plocks(&state, 0, &effect_descriptors)),
+            ("compiling", Value::Bool(false)),
+            ("recording", Value::Bool(false)),
+            ("record-armed", build_record_armed_value(&record_armed.lock().unwrap())),
         ],
         false,
     );
@@ -122,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("seq-toggle-step: expected step number".into());
         };
         let step = *step as usize;
-        if step >= NUM_STEPS {
+        if step >= MAX_STEPS {
             return Err(format!("seq-toggle-step: step {step} out of range").into());
         }
         let track = ct.load(Ordering::Relaxed);
@@ -140,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("seq-set-step-param: expected (step :param value)".into());
         };
         let step = *step as usize;
-        if step >= NUM_STEPS {
+        if step >= MAX_STEPS {
             return Err(format!("seq-set-step-param: step {step} out of range").into());
         }
         let param = match param_name.as_str() {
@@ -414,7 +428,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(Value::Number(v as f64))
             }
             "num-steps" => {
-                let v = (*val as usize).clamp(1, 64);
+                let v = (*val as usize).clamp(1, MAX_STEPS);
                 tp.set_num_steps(v);
                 Ok(Value::Number(v as f64))
             }
@@ -444,6 +458,115 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui_ep.fetch_add(1, Ordering::Relaxed);
             v
         })
+    });
+
+    // seq-double-track-pattern — duplicate current track pattern to double its length
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-double-track-pattern", move |_args, _ctx| {
+        let track = ct.load(Ordering::Relaxed);
+        let new_len = st.duplicate_track_pattern(track);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(new_len as f64))
+    });
+
+    // seq-halve-track-pattern — halve current track pattern length
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-halve-track-pattern", move |_args, _ctx| {
+        let track = ct.load(Ordering::Relaxed);
+        let new_len = st.halve_track_pattern(track);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(new_len as f64))
+    });
+
+    // seq-set-timebase — set the default timebase for the current track (by label string)
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-timebase", move |args, _ctx| {
+        let label = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => return Err("seq-set-timebase: expected string label".into()),
+        };
+        let normalized = label.to_ascii_lowercase();
+        let tb = Timebase::LABELS
+            .iter()
+            .position(|l| l.to_ascii_lowercase() == normalized)
+            .map(|i| Timebase::ALL[i])
+            .ok_or_else(|| format!("seq-set-timebase: unknown timebase '{label}'"))?;
+        let track = ct.load(Ordering::Relaxed);
+        st.pattern.track_params[track].set_timebase(tb);
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::String(tb.label().to_string()))
+    });
+
+    // seq-plock-timebase — set a timebase p-lock on selected steps
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-plock-timebase", move |args, _ctx| {
+        let label = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => return Err("seq-plock-timebase: expected string label".into()),
+        };
+        let normalized = label.to_ascii_lowercase();
+        let tb = Timebase::LABELS
+            .iter()
+            .position(|l| l.to_ascii_lowercase() == normalized)
+            .map(|i| Timebase::ALL[i])
+            .ok_or_else(|| format!("seq-plock-timebase: unknown timebase '{label}'"))?;
+        let track = ct.load(Ordering::Relaxed);
+        let steps = sel.lock().unwrap();
+        for &step in steps.iter() {
+            st.pattern.timebase_plocks[track].set(step, tb);
+        }
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::String(tb.label().to_string()))
+    });
+
+    // seq-toggle-record — toggle recording mode (requires at least one armed track)
+    let rec = recording.clone();
+    let ra = record_armed.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-record", move |_args, _ctx| {
+        let any_armed = ra.lock().unwrap().iter().any(|a| *a);
+        if any_armed {
+            let was = rec.load(Ordering::Relaxed);
+            rec.store(!was, Ordering::Relaxed);
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Bool(!was))
+        } else {
+            Ok(Value::Bool(false))
+        }
+    });
+
+    // seq-toggle-record-arm — toggle record arm for a given track index
+    let ra = record_armed.clone();
+    let rec = recording.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-record-arm", move |args, _ctx| {
+        let Some(Value::Number(track_idx)) = args.first() else {
+            return Err("seq-toggle-record-arm: expected track index".into());
+        };
+        let track = *track_idx as usize;
+        let mut armed = ra.lock().unwrap();
+        if track < armed.len() {
+            armed[track] = !armed[track];
+            // If no tracks armed, turn off recording
+            if !armed.iter().any(|a| *a) {
+                rec.store(false, Ordering::Relaxed);
+            }
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Bool(armed[track]))
+        } else {
+            Ok(Value::Bool(false))
+        }
     });
 
     // seq-search-samples — recursively search samples/ for .wav files matching a query
@@ -599,17 +722,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
 
-    // Load sample browser mode
-    match std::fs::read_to_string("metal-seq-browser.lisp") {
-        Ok(browser_src) => {
-            match editor.runtime_mut().eval_str(&browser_src) {
-                Ok(_) => eprintln!("metal_seq: browser loaded OK"),
-                Err(e) => eprintln!("metal_seq: browser eval error: {e:?}"),
-            }
-        }
-        Err(e) => eprintln!("metal_seq: browser file not found: {e}"),
-    }
-
     let mut backend = MetalBackend::new().map_err(|_| "Metal backend creation failed")?;
     backend.initialize().map_err(|_| "Metal backend init failed")?;
 
@@ -656,7 +768,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Duration::from_millis(50)
         };
         match backend.poll_event(timeout) {
-            Some(Event::Key(key)) => editor.handle_key(key),
+            Some(Event::Key(key)) => {
+                // Intercept keyboard for live recording when any track is armed
+                let any_armed = record_armed.lock().unwrap().iter().any(|a| *a);
+                let intercepted = if any_armed {
+                    handle_recording_key(
+                        &key, &state, &record_armed, &recording, &keyboard_tx,
+                        &keyboard_octave, &current_track, &held_notes,
+                    )
+                } else {
+                    false
+                };
+                // Only pass Press events to the editor (Release is only for note-off)
+                if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
+                    editor.handle_key(key);
+                }
+            }
             Some(Event::Mouse(mouse)) => {
                 let (precise_col, precise_row) = backend
                     .take_last_precise_mouse()
@@ -689,6 +816,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if widget_handled {
                 continue;
             }
+
+            // In UI mode, apply pixel deltas directly for smooth sub-cell scrolling.
+            if editor.is_ui_scroll_mode() {
+                let scroll_speed = 0.05; // cells per pixel-delta
+                let delta_cells_y = delta_y * scroll_speed;
+                let delta_cells_x = delta_x * scroll_speed;
+                editor.apply_smooth_widget_scroll(delta_cells_x, delta_cells_y);
+                continue;
+            }
+
             scroll_accum_y += delta_y;
             let line_px = backend.viewport_size().1.max(1) as f32 / (rows.max(1) as f32);
             let threshold = line_px.max(20.0);
@@ -791,6 +928,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     track_pan_ids.lock().unwrap().push(
                                         app.graph.track_node_ids[idx].pan_id,
                                     );
+                                    // Extend record_armed for new track
+                                    record_armed.lock().unwrap().push(false);
                                     // Update reactive state
                                     let ct = current_track.load(Ordering::Relaxed);
                                     let rt = editor.runtime_mut();
@@ -813,6 +952,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "add-effect" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(cell) = map.get("name") {
+                                if let Value::String(effect_name) = &*cell.borrow() {
+                                    let effect_name = effect_name.clone();
+                                    app.ui.cursor_track = current_track.load(Ordering::Relaxed);
+                                    if let Some(slot_idx) = app.next_free_custom_slot() {
+                                        app.start_effect_compile(&effect_name, slot_idx);
+                                        editor.runtime_mut().set_reactive("SEQ", "compiling", Value::Bool(true));
+                                    } else {
+                                        editor.handle_host_event(HostEvent::Status(
+                                            "No free effect slots available".to_string(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     other => {
                         editor.handle_host_event(HostEvent::Status(
                             format!("Unknown host command: {other}"),
@@ -820,6 +977,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+        }
+
+        // 1c. Poll for async effect compilation
+        if let Some(status) = app.poll_pending_compile() {
+            let ct = current_track.load(Ordering::Relaxed);
+            let rt = editor.runtime_mut();
+            rt.set_reactive("SEQ", "compiling", Value::Bool(false));
+            rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
+            rt.run_reactive_cycle();
+            editor.refresh_runtime_side_effects();
+            editor.handle_host_event(HostEvent::Status(status));
         }
 
         // 2. Sync reactive state AFTER events
@@ -844,7 +1012,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                 rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
-                sync_track_params(rt, &state, ct);
+                sync_track_params(rt, &state, ct, &selected_steps);
                 rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
                 prev_current_track = ct;
                 prev_pattern_epoch = epoch;
@@ -870,7 +1038,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "transposes", build_param_list(&state, ct, StepParam::Transpose));
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                sync_track_params(rt, &state, ct);
+                sync_track_params(rt, &state, ct, &selected_steps);
                 rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
@@ -881,9 +1049,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                 rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
-                sync_track_params(rt, &state, ct);
+                sync_track_params(rt, &state, ct, &selected_steps);
                 rt.set_reactive("SEQ", "selected-steps", build_selection_value(&selected_steps));
                 rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
+                // Sync recording state
+                let rec_on = recording.load(Ordering::Relaxed);
+                rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
+                let armed = record_armed.lock().unwrap();
+                rt.set_reactive("SEQ", "record-armed", build_record_armed_value(&armed));
+                // Sync to app for TUI recording logic
+                app.ui.recording = rec_on;
+                for (i, a) in armed.iter().enumerate() {
+                    if i < app.graph.record_armed.len() {
+                        app.graph.record_armed[i] = *a;
+                    }
+                }
                 prev_ui_epoch = ui_ep;
                 needs_reactive_cycle = true;
             }
@@ -932,7 +1112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Build a Lisp Value::List of bools from the step pattern for a given track.
 fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = (0..NUM_STEPS)
+    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|s| {
             Rc::new(RefCell::new(Value::Bool(
                 state.pattern.patterns[track].is_active(s),
@@ -944,11 +1124,20 @@ fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Value {
 
 /// Build a Lisp Value::List of floats for a given step param on a given track.
 fn build_param_list(state: &Arc<SequencerState>, track: usize, param: StepParam) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = (0..NUM_STEPS)
+    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|s| {
             let val = state.pattern.step_data[track].get(s, param);
             Rc::new(RefCell::new(Value::Number(val as f64)))
         })
+        .collect();
+    Value::List(items)
+}
+
+/// Build a Lisp Value::List of bools for record-armed state per track.
+fn build_record_armed_value(armed: &[bool]) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = armed
+        .iter()
+        .map(|a| Rc::new(RefCell::new(Value::Bool(*a))))
         .collect();
     Value::List(items)
 }
@@ -1060,11 +1249,21 @@ fn build_effects_value(
     Value::List(slots)
 }
 
-/// Build a Lisp Value::List of bools (16 entries) indicating which steps are selected.
+/// Build a Lisp Value::List of bools indicating which steps are selected.
 fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Value {
     let set = selected.lock().unwrap();
-    let items: Vec<Rc<RefCell<Value>>> = (0..NUM_STEPS)
+    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|s| Rc::new(RefCell::new(Value::Bool(set.contains(&s)))))
+        .collect();
+    Value::List(items)
+}
+
+/// Build list of available effect names from the effects/ directory.
+fn build_available_effects() -> Value {
+    let names = sequencer::lisp_effect::list_saved_effects();
+    let items: Vec<Rc<RefCell<Value>>> = names
+        .into_iter()
+        .map(|n| Rc::new(RefCell::new(Value::String(n))))
         .collect();
     Value::List(items)
 }
@@ -1082,7 +1281,7 @@ fn extract_path_from_payload(payload: &Value) -> Option<String> {
 }
 
 /// Push individual tp-* reactive fields for the current track.
-fn sync_track_params(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize) {
+fn sync_track_params(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize, selected: &Arc<Mutex<HashSet<usize>>>) {
     let tp = &state.pattern.track_params[track];
     rt.set_reactive("SEQ", "tp-attack", Value::Number(tp.get_attack_ms() as f64));
     rt.set_reactive("SEQ", "tp-release", Value::Number(tp.get_release_ms() as f64));
@@ -1091,7 +1290,16 @@ fn sync_track_params(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize
     rt.set_reactive("SEQ", "tp-num-steps", Value::Number(tp.get_num_steps() as f64));
     rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
     rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp.is_polyphonic()));
-    rt.set_reactive("SEQ", "tp-timebase", Value::String(tp.get_timebase().label().to_string()));
+    // Resolve timebase: show p-locked value from first selected step, otherwise track default
+    let timebase_label = {
+        let sel = selected.lock().unwrap();
+        sel.iter().copied().min()
+            .and_then(|step| state.pattern.timebase_plocks[track].get(step))
+            .unwrap_or_else(|| tp.get_timebase())
+            .label()
+            .to_string()
+    };
+    rt.set_reactive("SEQ", "tp-timebase", Value::String(timebase_label));
     rt.set_reactive("SEQ", "tp-swing-resolution", Value::String(tp.get_swing_resolution().label().to_string()));
 }
 
@@ -1123,7 +1331,7 @@ fn build_step_has_plocks(
 ) -> Value {
     let chain = &state.pattern.effect_chains[track];
     let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
-    let items: Vec<Rc<RefCell<Value>>> = (0..NUM_STEPS)
+    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|step| {
             let has_plock = (0..num_slots).any(|slot_idx| {
                 let Some(slot) = chain.get(slot_idx) else {
@@ -1136,4 +1344,229 @@ fn build_step_has_plocks(
         })
         .collect();
     Value::List(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use eseqlisp::parser::{ASTParser, Parser, ParserError, Token};
+
+    fn parse_expression_at(tokens: &[Token], pos: &mut usize) -> Result<(), ParserError> {
+        match tokens.get(*pos) {
+            Some(Token::LeftParen) => {
+                *pos += 1;
+                while let Some(token) = tokens.get(*pos) {
+                    match token {
+                        Token::RightParen => {
+                            *pos += 1;
+                            return Ok(());
+                        }
+                        _ => parse_expression_at(tokens, pos)?,
+                    }
+                }
+                Err(ParserError::UnexpectedEOF)
+            }
+            Some(Token::Quote) => {
+                *pos += 1;
+                match tokens.get(*pos) {
+                    Some(Token::Symbol(_)) => {
+                        *pos += 1;
+                        Ok(())
+                    }
+                    Some(Token::LeftParen) => parse_expression_at(tokens, pos),
+                    Some(Token::Number(_))
+                    | Some(Token::RightParen)
+                    | Some(Token::Pipe)
+                    | Some(Token::Quote)
+                    | Some(Token::String(_))
+                    | Some(Token::Keyword(_))
+                    | Some(Token::Backtick)
+                    | Some(Token::Comma) => Err(ParserError::InvalidQuote),
+                    None => Err(ParserError::UnexpectedEOF),
+                }
+            }
+            Some(Token::Pipe) => {
+                *pos += 1;
+                loop {
+                    match tokens.get(*pos) {
+                        Some(Token::Pipe) => {
+                            *pos += 1;
+                            break;
+                        }
+                        Some(Token::Symbol(_)) | Some(Token::LeftParen) => {
+                            parse_expression_at(tokens, pos)?
+                        }
+                        Some(_) => return Err(ParserError::InvalidLambda),
+                        None => return Err(ParserError::UnexpectedEOF),
+                    }
+                }
+                parse_expression_at(tokens, pos)
+            }
+            Some(Token::Backtick) | Some(Token::Comma) => {
+                *pos += 1;
+                parse_expression_at(tokens, pos)
+            }
+            Some(Token::Number(_))
+            | Some(Token::String(_))
+            | Some(Token::Symbol(_))
+            | Some(Token::Keyword(_)) => {
+                *pos += 1;
+                Ok(())
+            }
+            Some(Token::RightParen) => Err(ParserError::ExpectedLeftParen),
+            None => Err(ParserError::UnexpectedEOF),
+        }
+    }
+
+    #[test]
+    fn metal_seq_grid_lisp_parses() {
+        let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read metal-seq-grid.lisp");
+        let tokens = Parser::new(src).parse().expect("tokenize metal-seq-grid.lisp");
+        let mut pos = 0;
+        while pos < tokens.len() {
+            if let Err(err) = parse_expression_at(&tokens, &mut pos) {
+                let start = pos.saturating_sub(8);
+                let end = (pos + 8).min(tokens.len());
+                panic!("parse metal-seq-grid.lisp at token {pos}: {err:?}\ncontext: {:?}", &tokens[start..end]);
+            }
+        }
+        ASTParser::new(tokens).parse().expect("parse metal-seq-grid.lisp");
+    }
+}
+
+/// Map keyboard character to semitone offset (piano-style layout).
+fn note_from_key(c: char) -> Option<i32> {
+    match c {
+        'a' => Some(0),  // C
+        'w' => Some(1),  // C#
+        's' => Some(2),  // D
+        'e' => Some(3),  // D#
+        'd' => Some(4),  // E
+        'f' => Some(5),  // F
+        't' => Some(6),  // F#
+        'g' => Some(7),  // G
+        'y' => Some(8),  // G#
+        'h' => Some(9),  // A
+        'u' => Some(10), // A#
+        'j' => Some(11), // B
+        'k' => Some(12), // C+1
+        'o' => Some(13), // C#+1
+        'l' => Some(14), // D+1
+        _ => None,
+    }
+}
+
+/// Intercept keyboard events for live recording.
+/// Returns true if the key was consumed (music note key while armed).
+fn handle_recording_key(
+    key: &crossterm::event::KeyEvent,
+    state: &Arc<SequencerState>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    recording: &Arc<AtomicBool>,
+    keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
+    keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
+    current_track: &Arc<AtomicUsize>,
+    held_notes: &Arc<Mutex<Vec<(char, f32, usize, Instant)>>>,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind};
+
+    let c = match key.code {
+        KeyCode::Char(c) => c,
+        _ => return false,
+    };
+
+    // Octave shift keys (only on press)
+    if c == 'z' || c == 'x' {
+        if key.kind == KeyEventKind::Press {
+            let delta = if c == 'z' { -12 } else { 12 };
+            keyboard_octave.fetch_add(delta, Ordering::Relaxed);
+        }
+        return true;
+    }
+
+    let note = match note_from_key(c) {
+        Some(n) => n,
+        None => return false,
+    };
+
+    let octave = keyboard_octave.load(Ordering::Relaxed);
+    let transpose = (note + octave) as f32;
+
+    match key.kind {
+        KeyEventKind::Press => {
+            // Suppress key repeat — only trigger on first press
+            let mut held = held_notes.lock().unwrap();
+            if held.iter().any(|(k, _, _, _)| *k == c) {
+                return true;
+            }
+
+            let armed = record_armed.lock().unwrap();
+
+            // Send note-on to audio thread for all armed tracks
+            for (track, a) in armed.iter().enumerate() {
+                if *a {
+                    let _ = keyboard_tx.send(KeyboardTrigger {
+                        track,
+                        transpose,
+                        velocity: 1.0,
+                        note_off: false,
+                    });
+                }
+            }
+
+            // Record the step at press time
+            let ct = current_track.load(Ordering::Relaxed);
+            let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed) as usize;
+            held.push((c, transpose, playhead, Instant::now()));
+            true
+        }
+        KeyEventKind::Release => {
+            // Find and remove the held note
+            let held_entry = {
+                let mut held = held_notes.lock().unwrap();
+                let pos = held.iter().position(|(k, _, _, _)| *k == c);
+                pos.map(|idx| held.remove(idx))
+            };
+
+            let armed = record_armed.lock().unwrap();
+
+            // Send note-off to audio thread for all armed tracks
+            for (track, a) in armed.iter().enumerate() {
+                if *a {
+                    let _ = keyboard_tx.send(KeyboardTrigger {
+                        track,
+                        transpose,
+                        velocity: 0.0,
+                        note_off: true,
+                    });
+                }
+            }
+
+            // Record into pattern if recording + playing
+            if let Some((_key, note_transpose, step_at_press, press_time)) = held_entry {
+                if recording.load(Ordering::Relaxed) && state.is_playing() {
+                    let bpm = state.transport.bpm.load(Ordering::Relaxed) as f64;
+                    let secs_per_step = 60.0 / bpm / 4.0;
+                    let hold_secs = press_time.elapsed().as_secs_f64();
+                    let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
+
+                    for (track, a) in armed.iter().enumerate() {
+                        if !*a { continue; }
+                        let num_steps = state.pattern.track_params[track].get_num_steps();
+                        let local_step = step_at_press % num_steps;
+                        if !state.pattern.patterns[track].is_active(local_step) {
+                            state.pattern.patterns[track].toggle_step(local_step);
+                        }
+                        state.pattern.chord_data[track].add_note(local_step, note_transpose);
+                        let first_note = state.pattern.chord_data[track].get(local_step, 0);
+                        state.pattern.step_data[track].set(local_step, StepParam::Transpose, first_note);
+                        state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
+                        state.pattern.step_data[track].set(local_step, StepParam::Duration, duration_steps);
+                    }
+                    state.publish_scheduler_snapshot();
+                }
+            }
+            true
+        }
+        _ => true, // consume Repeat events too
+    }
 }

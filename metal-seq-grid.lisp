@@ -1,11 +1,73 @@
 ; Minimal Metal Sequencer - Step Grid UI
 ; C-p to toggle play/stop, Esc to deselect
 
+(load "../eseqlisp/themes.lisp")
+(mac-osx-theme)
+(load "metal-seq-browser.lisp")
+(load "metal-seq-fx.lisp")
+(load "metal-seq-mixer.lisp")
+(load "metal-seq-transport.lisp")
+
 (bind-key "C-p" "seq-toggle-play")
 (bind-key "ESC" "seq-clear-selection")
 
 ; 0=vel 1=dur 2=transpose 3=pan
 (defstate param-mode 0)
+
+(def page-size 16)
+
+;; ── Step cursor ──
+(defstate cursor-step 0)
+
+(def current-step ()
+  (min cursor-step (- (max 1 SEQ.tp-num-steps) 1)))
+
+(def page-count ()
+  (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
+
+(def visible-page ()
+  (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
+
+(def playhead-page ()
+  (min (floor (/ (mod SEQ.playhead (max 1 SEQ.tp-num-steps)) page-size))
+    (- (page-count) 1)))
+
+(def page-offset ()
+  (* (visible-page) page-size))
+
+(def page-button-width 2.8)
+
+(def page-button-gap 0.4)
+
+(def page-slot-width ()
+  (+ page-button-width page-button-gap))
+
+(def page-panel-width ()
+  (+ 0.4 (* (page-count) (page-slot-width))))
+
+(def step-index (i)
+  (+ (page-offset) i))
+
+(def step-visible? (i)
+  (< (step-index i) SEQ.tp-num-steps))
+
+(def cursor-left ()
+  (set! cursor-step (mod (- (current-step) 1) (max 1 SEQ.tp-num-steps))))
+
+(def cursor-right ()
+  (set! cursor-step (mod (+ (current-step) 1) (max 1 SEQ.tp-num-steps))))
+
+(def cursor-toggle ()
+  (seq-toggle-step (current-step)))
+
+(def goto-page (page)
+  (set! cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1))))
+
+;; Cursor keys scoped to *metal* buffer via mode
+(define-mode "seq-grid-mode" :read-only true)
+(mode-bind-key "seq-grid-mode" "LEFT" "cursor-left")
+(mode-bind-key "seq-grid-mode" "RIGHT" "cursor-right")
+(mode-bind-key "seq-grid-mode" "RET" "cursor-toggle")
 
 (def param-values ()
   (if (= param-mode 0) SEQ.velocities
@@ -37,18 +99,47 @@
       (if (= param-mode 2) :yellow
         :red))))
 
+(def param-name ()
+  (if (= param-mode 0) "Velocity"
+    (if (= param-mode 1) "Duration"
+      (if (= param-mode 2) "Transpose"
+        "Pan"))))
+
 (def param-origin ()
   (if (= param-mode 2) 0
     (if (= param-mode 3) 0
       (param-min))))
 
+;; ── Step cursor highlight ──
+
+(defwidget cursor-highlight
+  :width 1 :height 1
+  :shader (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height 0.3)
+      (material :color (rgba 0.18 0.25 0.35 0.9)))))
+
 ;; ── Aqua material for sliders ──
+
+
+(defmacro aqua-slider-material2 ()
+    `(material
+       :lighting (lighting :edge-min -0.2015 :edge-max 0.01413
+         :light (vec3 -0.1 -1.1 0.5) :shininess 71.0)
+       :color
+       (let ((base (mix (rgba 0.1 0.1 0.1 1) (rgba 1.0 1.0 1.0 1)
+                        (smoothstep -0.02 0 d)))
+             (lit (+ 0.6 (* 0.4 diffuse)))
+             (shine (* 0.25 specular)))
+         (+ (* base (rgba lit lit lit 1.0))
+            (rgba shine shine shine 0.0)))))
 
 (defmacro aqua-slider-material ()
   `(material
-     :lighting (lighting :edge-min -0.35 :edge-max 0.5
-       :light (vec3 -0.5 -1.0 1.5) :shininess 32.0)
-     :color (aqua-color (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0))))
+     :lighting (lighting :edge-min -0.215 :edge-max 0.413
+       :light (vec3 -0.1 -1.1 1.5) :shininess 81.0)
+     :color (aqua-color (rgba 0.15 0.15 0.88 1.0) (rgba 0.50 0.50 0.92 1.0))))
+
+     
 
 ;; ── Aqua widgets ──
 
@@ -56,15 +147,15 @@
   `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
             (__base (mix ,base1
                 ,base2
-                (smoothstep -0.5 0.5 __ny)))
-            (__glass (smoothstep 0.1 -0.65 __ny))
-            (__edge-fade (smoothstep 0.0 -0.26 d))
-            (__hi (* __glass __edge-fade 0.655))
+                (smoothstep -0.1 3 __ny)))
+            (__glass (smoothstep 0.05 -0.65 __ny))
+            (__edge-fade (smoothstep 0.01 -0.16 d))
+            (__hi (* __glass __edge-fade 0.2655))
             (__spec (* specular __edge-fade 0.3))
-            (__bot (* (smoothstep 0.3 0.5 __ny)
+            (__bot (* (smoothstep 0.3 0.15 __ny)
                 (smoothstep 0.65 0.5 __ny)
-                __edge-fade 0.12))
-            (__rim (smoothstep -0.03 -0.0983 d)))
+                __edge-fade 0.02))
+            (__rim (smoothstep 0.9 -0.0183 d)))
           (+ (* __base (rgba __rim __rim __rim 1.0))
             (rgba (+ __hi __spec __bot)
               (+ __hi __spec __bot)
@@ -76,16 +167,16 @@
   :paint-margin 1
   :state (active plocked selected)
   :shader
-  (let ((sel-y (if (= selected 1) (* 0.3 (cos (* 3 itime))) 0)))
+  (let ((sel-y (if (= selected 1) (* 0.03 (cos (* 3 itime))) 0)))
     (sdf/translate 0 sel-y
       (sdf/layer
         (sdf/fill (+ (* 0.001 (smoothstep 0 0.1 (* y x))) (sdf/fill-rounded-rect -0.01 0.85))
           (material
             :lighting
-            (lighting :edge-min -0.35 :edge-max 0.5
-              :light (vec3 (cos (* 0.3 itime)) -1.0 (+ (* 0.2 (cos itime)) 1.5)) :shininess 32.0)
+            (lighting :edge-min -0.15 :edge-max 0.5
+              :light (vec3 0.1 -1.0 1.5) :shininess 62.0)
             :color
-            (* (if (= active 1) 1 0.7) (aqua-color (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0)))
+            (* (if (= active 1) 1 0.7) (aqua-color (rgba 0.15 0.15 0.15 1.0) (rgba 0.30 0.30 0.92 1.0)))
             :shadow (shadow
               :color (rgba 0 0 0 0.3)
               :blur 0.15
@@ -105,60 +196,8 @@
             :color
             (* (if (= active 1) 1 0.3)
                (aqua-color
-                 (if (= plocked 1) (rgba 0.05 0.15 0.1 1.0) (rgba 0.3 0.3 0.85 1.0))
+                 (if (= plocked 1) (rgba 0.75 0.15 0.5 1.0) (rgba 0.3 0.3 0.85 1.0))
                  (if (= plocked 1) (rgba 0.4 0.135 0.95 1.0) (rgba 0.90 0.50 0.82 1.0))))))))))
-
-;; ── Play/Pause buttons ──
-
-(defwidget play-btn
-  :width 4 :height 3
-  :paint-margin 1
-  :shader
-  (sdf/layer
-    (sdf/fill
-      (let ((p1x -0.5) (p1y -0.7) (p2x -0.5) (p2y 0.7) (p3x 0.8) (p3y 0.0))
-        (let ((d1 (- (* (- p2x p1x) (- y p1y)) (* (- p2y p1y) (- x p1x))))
-              (d2 (- (* (- p3x p2x) (- y p2y)) (* (- p3y p2y) (- x p2x))))
-              (d3 (- (* (- p1x p3x) (- y p3y)) (* (- p1y p3y) (- x p3x)))))
-          (max (max d1 d2) d3)))
-      (material
-        :lighting (lighting :edge-min -0.35 :edge-max 0.5
-          :light (vec3 0.0 -1.0 1.5) :shininess 32.0)
-        :color (aqua-color (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0))
-        :shadow (shadow :color (rgba 0 0 0 0.3) :blur 0.15 :offset (vec2 0 0.05))))))
-
-(defwidget pause-btn
-  :width 4 :height 3
-  :paint-margin 1
-  :shader
-  (sdf/layer
-    (sdf/fill
-      (sdf/union
-        (sdf/translate -0.35 0 (sdf/rect 0.18 0.6))
-        (sdf/translate 0.35 0 (sdf/rect 0.18 0.6)))
-      (material
-        :lighting (lighting :edge-min -0.35 :edge-max 0.5
-          :light (vec3 0.0 -1.0 1.5) :shininess 32.0)
-        :color (aqua-color (rgba 0.15 0.25 0.35 1.0) (rgba 0.20 0.50 0.92 1.0))
-        :shadow (shadow :color (rgba 0 0 0 0.3) :blur 0.15 :offset (vec2 0 0.05))))))
-
-;; ── LED display panel ──
-
-(defwidget led-panel
-  :width 20 :height 3
-  :paint-margin 0.5
-  :shader
-  (sdf/layer
-    (sdf/fill (sdf/fill-rounded-rect 0.02 0.083)
-      (material
-        :color
-        (let ((__ny y)
-              (__base (mix (rgba 0.08 0.08 0.08 1.0)
-                           (rgba 0.13 0.19 0.19 1.0)
-                           (smoothstep -0.35 1.95 __ny)))
-              (__vignette (* (smoothstep -0.02 -0.013 (sdf/fill-rounded-rect 0.02 0.083)) 0.15)))
-          (+ __base (rgba __vignette __vignette __vignette 0)))
-        :shadow (shadow :color (rgba 0 0 0 0.5) :blur 0.1 :offset (vec2 0 0.03))))))
 
 ;; ── Main UI ──
 
@@ -166,37 +205,6 @@
   (v-stack
     :padding 1
     :gap 1
-    
-    ; Transport bar: play button + LED display
-    (h-stack :gap 1 :align :center
-      (box :width 4 :height 3
-        :background (if SEQ.playing "pause-btn" "play-btn")
-        :on-click |x y r| (seq-toggle-play))
-      (box :background "led-panel" :height 3 :width 40
-        (h-stack :gap 0 :align :baseline :padding 2
-          (label (fmt "{:>2}" (+ (floor (/ (mod SEQ.playhead 16) 4)) 1))
-            :font-size 20 :width 4
-            :color '(rgba 0.1 0.7 0.9 1)
-            :bg :transparent)
-          (label "|" :font-size 20 :width 2
-            :color '(rgba 0.05 0.4 0.5 1)
-            :bg :transparent)
-          (label (fmt "{:>2}" (+ (mod (mod SEQ.playhead 16) 4) 1))
-            :font-size 20 :width 4
-            :color '(rgba 0.1 0.7 0.9 1)
-            :bg :transparent)
-          (label "|" :font-size 20 :width 2
-            :color '(rgba 0.05 0.4 0.5 1)
-            :bg :transparent)
-          (label (fmt "{:>2}" (+ (mod SEQ.playhead 16) 1))
-            :font-size 20 :width 4
-            :color '(rgba 0.1 0.7 0.9 1)
-            :bg :transparent)
-          (label "" :width 4 :bg :transparent)
-          (label (str "BPM " SEQ.bpm)
-            :font-size 16 :width 12
-            :color '(rgba 0.1 0.7 0.9 1)
-            :bg :transparent))))
     
     ; Param mode selector
     (h-stack :gap 0.5
@@ -226,51 +234,73 @@
           :bg :transparent)))
     
     ; Step columns: vslider + aqua step toggle + step number
-    (grid :cols 16 :col-width 3
-      (each (zip SEQ.steps (range 0 16)) |(active i)|
-        (v-stack :align :center :gap 0.5
-          (vslider :height 4
-            :min (param-min) :max (param-max)
-            :origin (param-origin)
-            :value (nth (param-values) i)
-            :material (aqua-slider-material)
-            :on-change (lambda (v)
-              (if (seq-has-selection?)
-                (seq-set-step-param-plock (param-keyword) v)
-                (seq-set-step-param i (param-keyword) v))))
-          (box :on-click (lambda (evt)
-                (if (get evt :shift)
-                  (seq-select-step i)
-                  (do (seq-clear-selection) (seq-toggle-step i))))
-            :active (if active 1 0)
-            :plocked 1
-            :selected (if (= 1 (nth SEQ.selected-steps i)) 1 0)
-            :background "aqua-button"
-            :align :center :width 3 :height 1.5
-            (tick :active (if active 1 0)
-                  :plocked (if (nth SEQ.step-has-plocks i) 1 0)
-                  :selected (if (nth SEQ.selected-steps i) 1 0)))
-          (label (str (+ i 1)) :font-size 10
-            :color (if (nth SEQ.selected-steps i) :yellow
-                    (if (= (mod SEQ.playhead 16) i) :white :gray))))))
+    (grid :cols 16 :col-width 4
+      (each (range 0 page-size) |i|
+        (let ((step (step-index i))
+              (visible (step-visible? i)))
+          (box :padding 0.25 :background (if visible (if (= (current-step) step) "cursor-highlight" nil) nil)
+            :on-click (lambda (evt)
+              (if visible
+                (do
+                  (set! cursor-step step)
+                  (if (get evt :shift)
+                    (seq-select-step step)
+                    (do (seq-clear-selection) (seq-toggle-step step))))
+                nil))
+            (v-stack :align :center :gap 0.5
+              (vslider :height 4
+                :min (param-min) :max (param-max)
+                :origin (param-origin)
+                :value (nth (param-values) step)
+                :material (aqua-slider-material)
+                :on-change (lambda (v)
+                  (if visible
+                    (if (seq-has-selection?)
+                      (seq-set-step-param-plock (param-keyword) v)
+                      (seq-set-step-param step (param-keyword) v))
+                    nil)))
+              (box
+                :active (if visible (if (nth SEQ.steps step) 1 0) 0)
+                :plocked 1
+                :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
+                :background "aqua-button"
+                :align :center :width 3 :height 1.5
+                (tick :active (if visible (if (nth SEQ.steps step) 1 0) 0)
+                      :plocked (if visible (if (nth SEQ.step-has-plocks step) 1 0) 0)
+                      :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)))
+              (label (if visible (str (+ step 1)) "")
+                :font-size 10 :bg :transparent
+                :color (if visible
+                        (if (nth SEQ.selected-steps step) :yellow
+                          (if (= SEQ.playhead step) :white :gray))
+                        :gray))))))) 
 
-    ; Mixer — track list with volume sliders
-    (v-stack :gap 0.5
-      (each SEQ.track-names |name i|
-        (h-stack :gap 1 :align :center
-          (box :width 14 :height 1
-               :bg (if (= SEQ.current-track i) :blue :dark-gray)
-               :on-click |x y r| (seq-set-track i)
-            (label name :font-size 11
-                   :color (if (= SEQ.current-track i) :white :gray)
-                   :bg :transparent))
-          (box :flex 1
-            (hslider :min 0 :max 1
-                     :value (nth SEQ.track-volumes i)
-                     :material (aqua-slider-material)
-                     :on-change (lambda (v) (seq-set-track-volume i v)))))))
+    ; Step cursor info
+    (h-stack :gap 1 :align :center
+      (box :width 11.5 :height 1.3
+        (label (fmt "Step {}  {}" (+ (current-step) 1) (param-name))
+          :font-size 11 :color :gray :bg :transparent))
+      (number-picker :value (nth (param-values) (current-step))
+        :min (param-min) :max (param-max) :decimals 2
+        :on-change (lambda (v) (seq-set-step-param (current-step) (param-keyword) v))
+        :width 8 :height 1.3 :font-size 11)
+      (box :background "transport-btn-bg" :padding 0 :height 1.5
+        (box :width (page-panel-width) :height 1 :padding 0.0125
+          (h-stack :gap 0.4 :align :center
+            (h-stack :gap 0.4 :align :center
+              (each (range 0 (page-count)) |page|
+                (v-stack :gap 0.06 :align :center :height 1.25
+                  (box :width page-button-width  :align :center
+                    :bg (if (= page (visible-page)) :blue :dark-gray)
+                    :on-click |x y r| (goto-page page)
+                    (label (str (+ page 1))
+                      :font-size 10
+                      :color (if (= page (visible-page)) :white :gray)
+                      :bg :transparent))
+                  (box :width 1.4 :height 0.08
+                    :bg (if (= page (playhead-page)) :white :transparent)))))))))
 
-    ; Track parameters for current track
+    ; Track parameters — row 1
     (h-stack :gap 1.5
       ; Gate toggle
       (v-stack :align :center :gap 0.25
@@ -292,8 +322,12 @@
             :font-size 11 :color :white :bg :transparent)))
       ; Attack
       (v-stack :align :center :gap 0.25
-        (label (fmt "atk {:.0}" SEQ.tp-attack)
-          :font-size 9 :color :gray :bg :transparent)
+        (h-stack :gap 0.25 :align :baseline
+          (label "atk" :font-size 9 :color :gray :bg :transparent)
+          (number-picker :value SEQ.tp-attack :min 0 :max 500 :decimals 0
+            :noui true :font-size 9 :text-color :gray
+            :on-change (lambda (v) (seq-set-track-param :attack v))
+            :width 4 :height 1))
         (box :width 10 :height 2
           (hslider :min 0 :max 500
             :value SEQ.tp-attack
@@ -301,17 +335,28 @@
             :on-change (lambda (v) (seq-set-track-param :attack v)))))
       ; Release
       (v-stack :align :center :gap 0.25
-        (label (fmt "rel {:.0}" SEQ.tp-release)
-          :font-size 9 :color :gray :bg :transparent)
+        (h-stack :gap 0.25 :align :baseline
+          (label "rel" :font-size 9 :color :gray :bg :transparent)
+          (number-picker :value SEQ.tp-release :min 0 :max 2000 :decimals 0
+            :noui true :font-size 9 :text-color :gray
+            :on-change (lambda (v) (seq-set-track-param :release v))
+            :width 4 :height 1))
         (box :width 10 :height 2
           (hslider :min 0 :max 2000
             :value SEQ.tp-release
             :material (aqua-slider-material)
-            :on-change (lambda (v) (seq-set-track-param :release v)))))
+            :on-change (lambda (v) (seq-set-track-param :release v))))))
+
+    ; Track parameters — row 2
+    (h-stack :gap 1.5
       ; Swing
       (v-stack :align :center :gap 0.25
-        (label (fmt "swg {:.1}" SEQ.tp-swing)
-          :font-size 9 :color :gray :bg :transparent)
+        (h-stack :gap 0.25 :align :baseline
+          (label "swg" :font-size 9 :color :gray :bg :transparent)
+          (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
+            :noui true :font-size 9 :text-color :gray
+            :on-change (lambda (v) (seq-set-track-param :swing v))
+            :width 4 :height 1))
         (box :width 8 :height 2
           (hslider :min 50 :max 75
             :value SEQ.tp-swing
@@ -319,8 +364,12 @@
             :on-change (lambda (v) (seq-set-track-param :swing v)))))
       ; Send
       (v-stack :align :center :gap 0.25
-        (label (fmt "send {:.2}" SEQ.tp-send)
-          :font-size 9 :color :gray :bg :transparent)
+        (h-stack :gap 0.25 :align :baseline
+          (label "send" :font-size 9 :color :gray :bg :transparent)
+          (number-picker :value SEQ.tp-send :min 0 :max 1 :decimals 2
+            :noui true :font-size 9 :text-color :gray
+            :on-change (lambda (v) (seq-set-track-param :send v))
+            :width 4 :height 1))
         (box :width 8 :height 2
           (hslider :min 0 :max 1
             :value SEQ.tp-send
@@ -328,40 +377,42 @@
             :on-change (lambda (v) (seq-set-track-param :send v)))))
       ; Steps
       (v-stack :align :center :gap 0.25
-        (label (fmt "steps {}" SEQ.tp-num-steps)
-          :font-size 9 :color :gray :bg :transparent)
+        (h-stack :gap 0.25 :align :baseline
+          (label "steps" :font-size 9 :color :gray :bg :transparent)
+          (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
+            :noui true :font-size 9 :text-color :gray
+            :on-change (lambda (v) (seq-set-track-param :num-steps v))
+            :width 3 :height 1))
         (box :width 8 :height 2
-          (hslider :min 1 :max 64
+          (hslider :min 1 :max 256
             :value SEQ.tp-num-steps
             :material (aqua-slider-material)
             :on-change (lambda (v) (seq-set-track-param :num-steps v)))))
-      ; Read-only labels
-      (v-stack :gap 0.25
-        (label (fmt "timebase: {}" SEQ.tp-timebase)
-          :font-size 9 :color :gray :bg :transparent)
-        (label (fmt "swing-res: {}" SEQ.tp-swing-resolution)
-          :font-size 9 :color :gray :bg :transparent)))
+      ; Timebase
+      (v-stack :align :center :gap 0.25
+        (label "timebase" :font-size 9 :color :gray :bg :transparent)
+        (dropdown :value SEQ.tp-timebase
+          :options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh")
+          :on-change (lambda (v)
+            (if (seq-has-selection?)
+              (seq-plock-timebase v)
+              (seq-set-timebase v)))
+          :width 6 :height 1.5 :font-size 11))
+      ; Swing resolution
+      (v-stack :align :center :gap 0.25
+        (h-stack :gap 0.25 :align :baseline
+          (label "sw-res" :font-size 9 :color :gray :bg :transparent)
+          (number-picker :value SEQ.tp-swing-resolution :min 1 :max 64 :decimals 0
+            :noui true :font-size 9 :text-color :gray
+            :width 3 :height 1))))))
 
-    ; Effect chain for current track
-    (h-stack :gap 1
-      (each SEQ.effects |fx slot-idx|
-        (box :width 20 :bg '(rgba 0.08 0.1 0.12 1)
-             :padding 0.5
-          (v-stack :gap 0.5
-            (label (get fx :name) :font-size 12 :color :white :bg :transparent)
-            (each (get fx :params) |p pi|
-              (h-stack :gap 0.5 :align :center
-                (label (get p :name) :font-size 9 :width 8
-                       :color :gray :bg :transparent)
-                (box :width 10
-                  (hslider :min (get p :min) :max (get p :max)
-                           :value (get p :value)
-                           :material (aqua-slider-material)
-                           :on-change (lambda (v)
-                             (if (seq-has-selection?)
-                               (seq-set-effect-plock slot-idx (get p :idx) v)
-                               (seq-set-effect-param slot-idx (get p :idx) v)))))))))))))
+; Layout: samples | metal | mixer on top, fx on bottom
+(set-layout '(:rows
+  0.05 (:buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+  0.8 (:cols 0.2 (:buf "*samples*" :hide-status true :min-width 25 :max-width 40)
+         0.6 (:buf "*metal*" :hide-status false :min-width 25)
+         0.2 (:buf "*mixer*" :hide-status true :min-width 25 :max-width 30))
+  0.2 (:buf "*fx*" :hide-status true :min-height 11 :max-height 11)))
 
-
-(delete-other-windows)
-(split-window-right "*metal*")
+; Set mode after buffer exists (effect-buffer creates it above)
+(set-buffer-mode-for "*metal*" "seq-grid-mode")
