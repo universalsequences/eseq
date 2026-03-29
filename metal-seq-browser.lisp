@@ -5,6 +5,42 @@
 ;; ── State ──
 (def sbrowser-filter (state ""))
 (def sbrowser-source-buffer "")
+(defstate sbrowser-mode "audition")
+
+(def sbrowser-audition-mode? ()
+  (= sbrowser-mode "audition"))
+
+(def sbrowser-track-type-mode? ()
+  (= sbrowser-mode "track-type"))
+
+(def sbrowser-create-sampler-mode? ()
+  (= sbrowser-mode "create-sampler"))
+
+(def sbrowser-mode-label ()
+  (if (sbrowser-audition-mode?) "audition" "create"))
+
+(def sbrowser-reset-to-audition ()
+  (set! sbrowser-mode "audition")
+  (set! sbrowser-filter ""))
+
+(def sbrowser-enter-create-track-mode ()
+  (set! sbrowser-filter "")
+  (set! sbrowser-mode "track-type"))
+
+(def sbrowser-toggle-create-track-mode ()
+  (if (sbrowser-audition-mode?)
+    (sbrowser-enter-create-track-mode)
+    (sbrowser-reset-to-audition)))
+
+(def sbrowser-enter-create-sampler-mode ()
+  (set! sbrowser-filter "")
+  (set! sbrowser-mode "create-sampler")
+  (status "Create track: choose a sample"))
+
+(def sbrowser-add-instrument-track (name)
+  (host-command "add-track-instrument" (dict :name name))
+  (sbrowser-reset-to-audition)
+  (status (str "Add instrument track: " name)))
 
 ;; ── SDF widgets ──
 
@@ -50,40 +86,96 @@
     (if path
       (do
         (host-command "add-track-sample" (dict :path path))
+        (sbrowser-reset-to-audition)
         (status (str "Add track: " (get item :label))))
       (status "Select a sample file, not a folder"))))
+
+(def sbrowser-select-item (item)
+  (if (sbrowser-create-sampler-mode?)
+    (sbrowser-add-track item)
+    (sbrowser-audition item)))
 
 ;; ── Search bar widget ──
 
 (def sbrowser-header ()
   (box :padding 0.25
-    (text-input
-      :value sbrowser-filter
-      :placeholder "Search samples..."
-      :on-change (lambda (v) (set! sbrowser-filter v))
-      :width 50
-      :height 1.5
-      :font-size 12
-      (mag-glass))))
+    (h-stack :gap 0.5 :align :center
+      (text-input
+        :value sbrowser-filter
+        :placeholder "Search samples..."
+        :on-change (lambda (v) (set! sbrowser-filter v))
+        :width 30
+        :height 1.5
+        :font-size 12
+        (mag-glass))
+      (box :bg :dark-gray :width 8.2 :height 1.5 :align :center
+        (label (sbrowser-mode-label)
+          :font-size 9
+          :color (if (sbrowser-audition-mode?) :gray :white)
+          :bg :transparent)))))
+
+(def sbrowser-create-header ()
+  (box :padding 0.25
+    (h-stack :gap 0.5 :align :center
+      (label "Create track"
+        :font-size 12
+        :color :white
+        :bg :transparent)
+      (box :bg :blue :width 8.2 :height 1.5 :align :center
+        (label (sbrowser-mode-label)
+          :font-size 9
+          :color :white
+          :bg :transparent)))))
+
+(def sbrowser-create-picker ()
+  (box :background "browser-panel-bg" :padding 0 :flex 1
+    (scroll :flex 1
+      (v-stack :gap 0.5 :padding 1
+        (label "Choose a sound source"
+          :font-size 13
+          :color :white
+          :bg :transparent)
+        (box :bg :blue :height 2.6 :padding 0.75
+          :on-click |x y r| (sbrowser-enter-create-sampler-mode)
+          (v-stack :gap 0.15
+            (label "Sampler"
+              :font-size 12
+              :color :white
+              :bg :transparent)
+            (label "Browse samples, then click one to create the track."
+              :font-size 9
+              :color :white
+              :bg :transparent)))
+        (each (seq-saved-instruments) |name|
+          (box :bg :dark-gray :height 2.2 :padding 0.6
+            :on-click |x y r| (sbrowser-add-instrument-track name)
+            (label name
+              :font-size 11
+              :color :white
+              :bg :transparent)))))))
 
 ;; ── Build widgets ──
 
 (def sbrowser-build-widgets ()
-  (let ((header (sbrowser-header)))
-    (list header
-      (box :background "browser-panel-bg" :padding 0 :flex 1
-        (scroll :flex 1
-          (tree
-            :row-bg-even  '(0.16 0.16 0.17)
-            :row-bg-odd   '(0.19 0.19 0.20)
-            :selected-bg  '(0.00 0.35 0.82)
-            :folder-color '(0.88 0.88 0.89)
-            :file-color   '(0.62 0.62 0.65)
-            :chevron-color '(0.50 0.50 0.53)
-            :items (seq-filter-sample-tree sbrowser-filter)
-            :expand-all (not (= sbrowser-filter ""))
-            :on-select (lambda (item) (sbrowser-audition item))
-            :on-activate (lambda (item) (sbrowser-add-track item))))))))
+  (if (sbrowser-track-type-mode?)
+    (list
+      (sbrowser-create-header)
+      (sbrowser-create-picker))
+    (let ((header (sbrowser-header)))
+      (list header
+        (box :background "browser-panel-bg" :padding 0 :flex 1
+          (scroll :flex 1
+            (tree
+              :row-bg-even  '(0.16 0.16 0.17)
+              :row-bg-odd   '(0.19 0.19 0.20)
+              :selected-bg  '(0.00 0.35 0.82)
+              :folder-color '(0.88 0.88 0.89)
+              :file-color   '(0.62 0.62 0.65)
+              :chevron-color '(0.50 0.50 0.53)
+              :items (seq-filter-sample-tree sbrowser-filter)
+              :expand-all (not (= sbrowser-filter ""))
+              :on-select (lambda (item) (sbrowser-select-item item))
+              :on-activate (lambda (item) (sbrowser-select-item item)))))))))
 
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──
 
@@ -95,6 +187,7 @@
 (def sample-browser-here ()
   (set! sbrowser-source-buffer (current-buffer-name))
   (set! sbrowser-filter "")
+  (set! sbrowser-mode "audition")
   (switch-to-buffer "*samples*"))
 
 (bind-key "C-x s" "sample-browser-here")

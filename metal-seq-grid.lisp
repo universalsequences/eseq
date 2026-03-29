@@ -285,9 +285,9 @@
         :on-change (lambda (v) (seq-set-step-param (current-step) (param-keyword) v))
         :width 8 :height 1.3 :font-size 11)
       (box :background "transport-btn-bg" :padding 0 :height 1.5
-        (box :width (page-panel-width) :height 1 :padding 0.0125
-          (h-stack :gap 0.4 :align :center
-            (h-stack :gap 0.4 :align :center
+        (box :width (page-panel-width) :height 1.4 :padding 0.0525
+          (h-stack :gap 0.4 :padding 0.3
+            (h-stack :gap 0.4 
               (each (range 0 (page-count)) |page|
                 (v-stack :gap 0.06 :align :center :height 1.25
                   (box :width page-button-width  :align :center
@@ -409,9 +409,9 @@
 ; Layout: samples | metal | mixer on top, fx on bottom
 (set-layout '(:rows
   0.05 (:buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-  0.8 (:cols 0.2 (:buf "*samples*" :hide-status true :min-width 25 :max-width 40)
+  0.8 (:cols 0.2 (:buf "*samples*" :hide-status true :borderless true :min-width 25 :max-width 40)
          0.6 (:buf "*metal*" :hide-status false :min-width 25)
-         0.2 (:buf "*mixer*" :hide-status true :min-width 25 :max-width 30))
+         0.2 (:buf "*mixer*" :hide-status true :borderless true :min-width 25 :max-width 30))
   0.2 (:buf "*fx*" :hide-status true :min-height 11 :max-height 11)))
 
 ; Set mode after buffer exists (effect-buffer creates it above)
