@@ -2,6 +2,7 @@
 name = "eseqlisp"
 version = "0.1.0"
 edition = "2024"
+autoexamples = false
 
 [dependencies]
 ratatui = "0.29"
@@ -34,3 +35,19 @@ objc2-core-graphics = { version = "0.3", features = [
 ] }
 winit = "0.29"
 etagere = "0.2"
+
+[[example]]
+name = "embed"
+path = "examples/embed.rs"
+
+[[example]]
+name = "metal_window"
+path = "examples/metal_window.rs"
+
+[[example]]
+name = "piano_roll_embed"
+path = "examples/piano_roll_embed.rs"
+
+[[example]]
+name = "piano_roll_embed_metal"
+path = "examples/piano_roll_embed_metal.rs"

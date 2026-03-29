@@ -666,6 +666,22 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::List(result)
     });
 
+    // (chunks list n) -> list of sub-lists, each up to n elements
+    vm.register_native("chunks", |args| {
+        let (Some(Value::List(list)), Some(Value::Number(n))) = (args.first(), args.get(1)) else {
+            return Value::List(vec![]);
+        };
+        let size = *n as usize;
+        if size == 0 {
+            return Value::List(vec![]);
+        }
+        Value::List(
+            list.chunks(size)
+                .map(|chunk| Rc::new(RefCell::new(Value::List(chunk.to_vec()))))
+                .collect(),
+        )
+    });
+
     // (range end) or (range start end) -> list of numbers
     vm.register_native("range", |args| {
         let (start, end) = match args.as_slice() {

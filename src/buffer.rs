@@ -136,6 +136,9 @@ impl Buffer {
         if viewport_height == 0 {
             return;
         }
+        let max_scroll = self.lines.len().saturating_sub(viewport_height);
+        self.scroll_top = self.scroll_top.min(max_scroll);
+
         if self.cursor.0 < self.scroll_top {
             self.scroll_top = self.cursor.0;
         }
@@ -775,6 +778,19 @@ mod tests {
         buffer.delete_char_before();
         assert_eq!(buffer.text(), "😀z");
         assert_eq!(buffer.cursor, (0, 1));
+    }
+
+    #[test]
+    fn adjust_scroll_clamps_stale_scroll_top_after_buffer_shrinks() {
+        let mut buffer = Buffer::from_text(0, "*test*", "a\nb\nc\nd\ne\nf");
+        buffer.scroll_top = 5;
+        buffer.cursor = (0, 0);
+
+        buffer.set_text("a\nb");
+        buffer.scroll_top = 5;
+        buffer.adjust_scroll(4);
+
+        assert_eq!(buffer.scroll_top, 0);
     }
 }
 

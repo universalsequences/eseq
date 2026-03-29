@@ -67,7 +67,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float yPad = 0.18;
     float halfH = 0.5 - yPad;
     float halfW = max(t * 0.5, 0.0);
-    float cr = 0.12;
+    float cr = 0.18;
     cr = min(cr, min(halfH, max(halfW * aspect, 0.001)));
 
     float2 p = float2((uv.x - halfW) * aspect, uv.y - 0.5);
@@ -124,6 +124,10 @@ impl WidgetDefinition for HorizontalSliderWidget {
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         tui_render(props, rect, buf);
+    }
+
+    fn captures_drag(&self) -> bool {
+        true
     }
 
     fn mouse_event(

@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    get_f32_prop, resolve_named_color, styled_cell,
+    get_bool_prop, get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
@@ -87,7 +87,7 @@ impl WidgetDefinition for NumberPickerWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["value", "width", "height", "font-size", "decimals"]
+        &["value", "width", "height", "font-size", "decimals", "noui"]
     }
 
     fn measure(
@@ -356,14 +356,10 @@ impl WidgetDefinition for NumberPickerWidget {
         let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
         let state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
+        let noui = get_bool_prop(&node.props, "noui", false);
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
-        let bg_color = resolve_named_color(
-            &node.props,
-            "bg-color",
-            Color { r: 0.14, g: 0.14, b: 0.16, a: 1.0 },
-        );
         let text_color = resolve_named_color(
             &node.props,
             "text-color",
@@ -374,16 +370,6 @@ impl WidgetDefinition for NumberPickerWidget {
             "edit-color",
             Color { r: 1.0, g: 0.95, b: 0.25, a: 1.0 },
         );
-        let ring_color = resolve_named_color(
-            &node.props,
-            "ring-color",
-            Color { r: 0.25, g: 0.52, b: 0.96, a: 1.0 },
-        );
-        let tri_color = resolve_named_color(
-            &node.props,
-            "tri-color",
-            Color { r: 0.60, g: 0.60, b: 0.65, a: 1.0 },
-        );
         let cursor_color = resolve_named_color(
             &node.props,
             "cursor-color",
@@ -392,102 +378,124 @@ impl WidgetDefinition for NumberPickerWidget {
 
         let mut prims = Vec::new();
 
-        // ── Focus ring ──
-        if is_focused {
-            let ring_v = RING_WIDTH;
-            let ring_h = RING_WIDTH * viewport.cell_h / viewport.cell_w;
-            let ring_rect = Rect {
-                row: node.rect.row - ring_v,
-                col: node.rect.col - ring_h,
-                width: node.rect.width + ring_h * 2.0,
-                height: node.rect.height + ring_v * 2.0,
-            };
-            let (ndc_min, ndc_max) = ndc_bounds(ring_rect, viewport);
-            let px_w = ring_rect.width * viewport.cell_w;
-            let px_h = ring_rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
-                widget_type: "number-picker".to_string(),
-                instance: WidgetInstance {
-                    ndc_min,
-                    ndc_max,
-                    value_t: 0.0,
-                    orientation: 0.0,
-                    itime: viewport.time_seconds,
-                    uniform_a: [0.0; 4],
-                    uniform_b: [0.0; 4],
-                    color_a: [ring_color.r, ring_color.g, ring_color.b, ring_color.a],
-                    color_b: [0.0; 4],
-                    color_c: [0.0; 4],
-                    color_d: [0.0; 4],
-                    corner_radius: 0.0,
-                    pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-                },
-                is_background: true,
-            });
-        }
+        if !noui {
+            let bg_color = resolve_named_color(
+                &node.props,
+                "bg-color",
+                Color { r: 0.14, g: 0.14, b: 0.16, a: 1.0 },
+            );
+            let ring_color = resolve_named_color(
+                &node.props,
+                "ring-color",
+                Color { r: 0.25, g: 0.52, b: 0.96, a: 1.0 },
+            );
+            let tri_color = resolve_named_color(
+                &node.props,
+                "tri-color",
+                Color { r: 0.60, g: 0.60, b: 0.65, a: 1.0 },
+            );
 
-        // ── Background ──
-        {
-            let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
-            let px_w = node.rect.width * viewport.cell_w;
-            let px_h = node.rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
-                widget_type: "number-picker".to_string(),
-                instance: WidgetInstance {
-                    ndc_min,
-                    ndc_max,
-                    value_t: 0.0,
-                    orientation: 0.0,
-                    itime: viewport.time_seconds,
-                    uniform_a: [0.0; 4],
-                    uniform_b: [0.0; 4],
-                    color_a: [bg_color.r, bg_color.g, bg_color.b, bg_color.a],
-                    color_b: [0.0; 4],
-                    color_c: [0.0; 4],
-                    color_d: [0.0; 4],
-                    corner_radius: 0.0,
-                    pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-                },
-                is_background: true,
-            });
-        }
+            // ── Focus ring ──
+            if is_focused {
+                let ring_v = RING_WIDTH;
+                let ring_h = RING_WIDTH * viewport.cell_h / viewport.cell_w;
+                let ring_rect = Rect {
+                    row: node.rect.row - ring_v,
+                    col: node.rect.col - ring_h,
+                    width: node.rect.width + ring_h * 2.0,
+                    height: node.rect.height + ring_v * 2.0,
+                };
+                let (ndc_min, ndc_max) = ndc_bounds(ring_rect, viewport);
+                let px_w = ring_rect.width * viewport.cell_w;
+                let px_h = ring_rect.height * viewport.cell_h;
+                prims.push(MetalPrimitive::WidgetInstance {
+                    widget_type: "number-picker".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: 0.0,
+                        orientation: 0.0,
+                        itime: viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
+                        color_a: [ring_color.r, ring_color.g, ring_color.b, ring_color.a],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: true,
+                });
+            }
 
-        // ── Triangle indicator ──
-        {
-            let tri_h = node.rect.height * 0.5;
-            let tri_w = tri_h * 1.5;
-            let tri_rect = Rect {
-                row: node.rect.row + (node.rect.height - tri_h) * 0.5,
-                col: node.rect.col + TEXT_PADDING_H * 0.6,
-                width: tri_w,
-                height: tri_h,
-            };
-            let (ndc_min, ndc_max) = ndc_bounds(tri_rect, viewport);
-            let px_w = tri_rect.width * viewport.cell_w;
-            let px_h = tri_rect.height * viewport.cell_h;
-            prims.push(MetalPrimitive::WidgetInstance {
-                widget_type: "number-picker-tri".to_string(),
-                instance: WidgetInstance {
-                    ndc_min,
-                    ndc_max,
-                    value_t: 0.0,
-                    orientation: 0.0,
-                    itime: viewport.time_seconds,
-                    uniform_a: [0.0; 4],
-                    uniform_b: [0.0; 4],
-                    color_a: [tri_color.r, tri_color.g, tri_color.b, tri_color.a],
-                    color_b: [0.0; 4],
-                    color_c: [0.0; 4],
-                    color_d: [0.0; 4],
-                    corner_radius: 0.0,
-                    pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-                },
-                is_background: false,
-            });
+            // ── Background ──
+            {
+                let (ndc_min, ndc_max) = ndc_bounds(node.rect, viewport);
+                let px_w = node.rect.width * viewport.cell_w;
+                let px_h = node.rect.height * viewport.cell_h;
+                prims.push(MetalPrimitive::WidgetInstance {
+                    widget_type: "number-picker".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: 0.0,
+                        orientation: 0.0,
+                        itime: viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
+                        color_a: [bg_color.r, bg_color.g, bg_color.b, bg_color.a],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: true,
+                });
+            }
+
+            // ── Triangle indicator ──
+            {
+                let tri_h = node.rect.height * 0.5;
+                let tri_w = tri_h * 1.5;
+                let tri_rect = Rect {
+                    row: node.rect.row + (node.rect.height - tri_h) * 0.5,
+                    col: node.rect.col + TEXT_PADDING_H * 0.6,
+                    width: tri_w,
+                    height: tri_h,
+                };
+                let (ndc_min, ndc_max) = ndc_bounds(tri_rect, viewport);
+                let px_w = tri_rect.width * viewport.cell_w;
+                let px_h = tri_rect.height * viewport.cell_h;
+                prims.push(MetalPrimitive::WidgetInstance {
+                    widget_type: "number-picker-tri".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: 0.0,
+                        orientation: 0.0,
+                        itime: viewport.time_seconds,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
+                        color_a: [tri_color.r, tri_color.g, tri_color.b, tri_color.a],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: false,
+                });
+            }
         }
 
         // ── Value text ──
-        let text_col = node.rect.col + TEXT_PADDING_H + TRIANGLE_WIDTH;
+        let text_col = if noui {
+            node.rect.col + TEXT_PADDING_H
+        } else {
+            node.rect.col + TEXT_PADDING_H + TRIANGLE_WIDTH
+        };
         let text_row = node.rect.row + (node.rect.height - 1.0) * 0.5;
         let transparent = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 

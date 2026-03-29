@@ -285,7 +285,28 @@ impl Editor {
             // Reserve 1 row for global status bar
             height: (total_height as f32 - 1.0).max(0.0),
         };
+        // Enforce min-size constraints before computing rects
+        Self::enforce_min_sizes_node(&mut self.tile_root, area);
+        let old_rects = std::mem::take(&mut self.cached_tile_rects);
         self.cached_tile_rects = self.tile_root.compute_rects(area);
+        // If rects changed, invalidate all inactive tile layouts so they recompute
+        if old_rects != self.cached_tile_rects {
+            let mut buf_indices: Vec<usize> = Vec::new();
+            for id in self.tile_root.leaf_ids() {
+                if id == self.active_tile {
+                    continue;
+                }
+                if let Some(leaf) = self.tile_root.find_leaf_mut(id) {
+                    leaf.cached_inactive_frame = None;
+                    if !buf_indices.contains(&leaf.buffer_idx) {
+                        buf_indices.push(leaf.buffer_idx);
+                    }
+                }
+            }
+            for buf_idx in buf_indices {
+                self.refresh_inactive_tile_layouts_for_buffer(buf_idx);
+            }
+        }
     }
 
     /// Find which tile contains the given screen coordinate.
@@ -430,6 +451,167 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    /// Apply a declarative layout spec, replacing the entire tile tree.
+    pub fn apply_layout_spec(&mut self, spec: crate::runtime::LayoutSpec) {
+        use crate::buffer::Buffer as Buf;
+        use crate::runtime::LayoutSpec;
+        use crate::tile::TileSplit;
+
+        let fallback_buf = self.active_leaf().buffer_idx;
+
+        fn build(
+            spec: LayoutSpec,
+            bufs: &[Buf],
+            fallback: usize,
+            next_id: &mut TileId,
+        ) -> TileNode {
+            match spec {
+                LayoutSpec::Buffer { name, hide_status, borderless, min_width, min_height, max_width, max_height } => {
+                    let buf_idx = bufs.iter().position(|b| b.name == name).unwrap_or(fallback);
+                    let id = *next_id;
+                    *next_id += 1;
+                    let mut leaf = TileLeaf::new(id, buf_idx);
+                    leaf.show_status = !hide_status;
+                    leaf.show_border = !borderless;
+                    leaf.min_width = min_width;
+                    leaf.min_height = min_height;
+                    leaf.max_width = max_width;
+                    leaf.max_height = max_height;
+                    TileNode::Leaf(leaf)
+                }
+                LayoutSpec::Rows(panes) => {
+                    build_split(panes, SplitDir::Horizontal, bufs, fallback, next_id)
+                }
+                LayoutSpec::Cols(panes) => {
+                    build_split(panes, SplitDir::Vertical, bufs, fallback, next_id)
+                }
+            }
+        }
+
+        fn build_split(
+            panes: Vec<(f32, LayoutSpec)>,
+            dir: SplitDir,
+            bufs: &[Buf],
+            fallback: usize,
+            next_id: &mut TileId,
+        ) -> TileNode {
+            assert!(!panes.is_empty());
+            if panes.len() == 1 {
+                return build(panes.into_iter().next().unwrap().1, bufs, fallback, next_id);
+            }
+            let mut iter = panes.into_iter();
+            let (ratio, first_spec) = iter.next().unwrap();
+            let rest: Vec<(f32, LayoutSpec)> = iter.collect();
+
+            let child_a = build(first_spec, bufs, fallback, next_id);
+            let child_b = if rest.len() == 1 {
+                build(rest.into_iter().next().unwrap().1, bufs, fallback, next_id)
+            } else {
+                let rest_total: f32 = rest.iter().map(|(r, _)| r).sum();
+                let rescaled: Vec<(f32, LayoutSpec)> = if rest_total > 0.0 {
+                    rest.into_iter().map(|(r, s)| (r / rest_total, s)).collect()
+                } else {
+                    rest
+                };
+                build_split(rescaled, dir, bufs, fallback, next_id)
+            };
+
+            let split_id = *next_id;
+            *next_id += 1;
+            TileNode::Split(TileSplit {
+                id: split_id,
+                dir,
+                ratio,
+                a: Box::new(child_a),
+                b: Box::new(child_b),
+            })
+        }
+
+        let new_root = build(spec, &self.buffers, fallback_buf, &mut self.next_tile_id);
+        self.tile_root = new_root;
+        // Enforce min-size constraints on initial ratios
+        self.enforce_min_sizes_recursive();
+        // Set active tile to first leaf
+        let ids = self.tile_root.leaf_ids();
+        if !ids.is_empty() {
+            self.active_tile = ids[0];
+        }
+        self.sync_runtime_context();
+        self.restore_buffer_widget_tree();
+        self.mark_needs_redraw();
+    }
+
+    /// Walk the tile tree and clamp split ratios to respect min-width/min-height.
+    fn enforce_min_sizes_recursive(&mut self) {
+        let rects = self.cached_tile_rects.clone();
+        if rects.is_empty() {
+            return;
+        }
+        // Get the total area from the union of all tile rects
+        let total_area = {
+            let mut min_col = f32::MAX;
+            let mut min_row = f32::MAX;
+            let mut max_col = 0.0f32;
+            let mut max_row = 0.0f32;
+            for (_, r) in &rects {
+                min_col = min_col.min(r.col);
+                min_row = min_row.min(r.row);
+                max_col = max_col.max(r.col + r.width);
+                max_row = max_row.max(r.row + r.height);
+            }
+            Rect {
+                col: min_col,
+                row: min_row,
+                width: max_col - min_col,
+                height: max_row - min_row,
+            }
+        };
+        Self::enforce_min_sizes_node(&mut self.tile_root, total_area);
+    }
+
+    fn enforce_min_sizes_node(node: &mut TileNode, area: Rect) {
+        let TileNode::Split(split) = node else { return };
+        let total = match split.dir {
+            SplitDir::Vertical => area.width,
+            SplitDir::Horizontal => area.height,
+        };
+        if total > 0.0 {
+            let a_min = match split.dir {
+                SplitDir::Vertical => split.a.min_width(),
+                SplitDir::Horizontal => split.a.min_height(),
+            };
+            let b_min = match split.dir {
+                SplitDir::Vertical => split.b.min_width(),
+                SplitDir::Horizontal => split.b.min_height(),
+            };
+            let a_max = match split.dir {
+                SplitDir::Vertical => split.a.max_width(),
+                SplitDir::Horizontal => split.a.max_height(),
+            };
+            let b_max = match split.dir {
+                SplitDir::Vertical => split.b.max_width(),
+                SplitDir::Horizontal => split.b.max_height(),
+            };
+            // Enforce minimums
+            if a_min > 0.0 {
+                split.ratio = split.ratio.max(a_min / total);
+            }
+            if b_min > 0.0 {
+                split.ratio = split.ratio.min(1.0 - b_min / total);
+            }
+            // Enforce maximums
+            if a_max < f32::MAX {
+                split.ratio = split.ratio.min(a_max / total);
+            }
+            if b_max < f32::MAX {
+                split.ratio = split.ratio.max(1.0 - b_max / total);
+            }
+        }
+        let (a_rect, b_rect) = crate::tile::split_rect(area, split.dir, split.ratio);
+        Self::enforce_min_sizes_node(&mut split.a, a_rect);
+        Self::enforce_min_sizes_node(&mut split.b, b_rect);
+    }
+
     /// Cycle active tile to the next leaf in order.
     pub fn cycle_active_tile(&mut self) {
         let ids = self.tile_root.leaf_ids();
@@ -476,8 +658,22 @@ impl Editor {
             return;
         }
 
+        // During drag/mouseup, if the active tile has an ongoing widget gesture,
+        // keep routing to that tile so the gesture isn't broken by crossing tile borders.
+        let has_active_gesture = self.active_leaf().active_widget_gesture.is_some();
+        let force_active = has_active_gesture
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            );
+
         // Find which tile this mouse event targets
-        if let Some(tile_id) = self.tile_at_screen(screen_col, screen_row) {
+        let target_tile = if force_active {
+            Some(self.active_tile)
+        } else {
+            self.tile_at_screen(screen_col, screen_row)
+        };
+        if let Some(tile_id) = target_tile {
             let persist_selection = matches!(
                 mouse.kind,
                 MouseEventKind::Down(MouseButton::Left)
@@ -486,6 +682,13 @@ impl Editor {
                     | MouseEventKind::ScrollLeft
                     | MouseEventKind::ScrollRight
             );
+            // Clicking a tile clears widget focus on all other tiles.
+            if persist_selection
+                && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && tile_id != self.active_tile
+            {
+                self.tile_root.clear_focus_except(tile_id);
+            }
             self.route_pointer_event_to_tile(tile_id, border_inset, persist_selection, |editor| {
                 let Some((content_col, content_row, content_width, content_height)) =
                     editor.tile_content_area(tile_id, border_inset)
@@ -674,7 +877,7 @@ impl Editor {
         self.show_transient_message(format!("view: {}", mode.label()));
         if mode == ViewMode::UiOnly {
             self.active_buffer_mut().scroll_top = 0;
-            self.active_leaf_mut().widget_scroll_top = 0;
+            self.active_leaf_mut().widget_scroll_top = 0.0;
         }
     }
 
@@ -749,7 +952,59 @@ impl Editor {
         precise_row: f32,
     ) {
         if let Some(split) = self.tile_root.find_split_mut(split_id) {
-            split.ratio = split_ratio_for_point(area, dir, precise_col, precise_row);
+            let mut ratio = split_ratio_for_point(area, dir, precise_col, precise_row);
+            // Enforce minimum sizes from layout spec
+            let total = match dir {
+                SplitDir::Vertical => area.width,
+                SplitDir::Horizontal => area.height,
+            };
+            if total > 0.0 {
+                let a_min = match dir {
+                    SplitDir::Vertical => split.a.min_width(),
+                    SplitDir::Horizontal => split.a.min_height(),
+                };
+                let b_min = match dir {
+                    SplitDir::Vertical => split.b.min_width(),
+                    SplitDir::Horizontal => split.b.min_height(),
+                };
+                let a_max = match dir {
+                    SplitDir::Vertical => split.a.max_width(),
+                    SplitDir::Horizontal => split.a.max_height(),
+                };
+                let b_max = match dir {
+                    SplitDir::Vertical => split.b.max_width(),
+                    SplitDir::Horizontal => split.b.max_height(),
+                };
+                if a_min > 0.0 {
+                    ratio = ratio.max(a_min / total);
+                }
+                if b_min > 0.0 {
+                    ratio = ratio.min(1.0 - b_min / total);
+                }
+                if a_max < f32::MAX {
+                    ratio = ratio.min(a_max / total);
+                }
+                if b_max < f32::MAX {
+                    ratio = ratio.max(1.0 - b_max / total);
+                }
+            }
+            split.ratio = ratio;
+            // Recompute layouts for all inactive tiles with their new dimensions
+            let mut buf_indices: Vec<usize> = Vec::new();
+            for id in self.tile_root.leaf_ids() {
+                if id == self.active_tile {
+                    continue;
+                }
+                if let Some(leaf) = self.tile_root.find_leaf_mut(id) {
+                    leaf.cached_inactive_frame = None;
+                    if !buf_indices.contains(&leaf.buffer_idx) {
+                        buf_indices.push(leaf.buffer_idx);
+                    }
+                }
+            }
+            for buf_idx in buf_indices {
+                self.refresh_inactive_tile_layouts_for_buffer(buf_idx);
+            }
             self.mark_needs_redraw();
         }
     }
@@ -925,11 +1180,12 @@ impl Editor {
         }
 
         let result = match state.direction {
-            SearchDirection::Forward => self.active_buffer().find_forward(&state.input, state.origin),
-            SearchDirection::Backward => {
-                self.active_buffer()
-                    .find_backward(&state.input, state.origin)
-            }
+            SearchDirection::Forward => self
+                .active_buffer()
+                .find_forward(&state.input, state.origin),
+            SearchDirection::Backward => self
+                .active_buffer()
+                .find_backward(&state.input, state.origin),
         };
 
         if let Some(start) = result {
@@ -955,7 +1211,10 @@ impl Editor {
         }
 
         let start = match direction {
-            SearchDirection::Forward => state.current_match.map(|found| found.end).unwrap_or(state.origin),
+            SearchDirection::Forward => state
+                .current_match
+                .map(|found| found.end)
+                .unwrap_or(state.origin),
             SearchDirection::Backward => state
                 .current_match
                 .map(|found| found.start)
@@ -1074,7 +1333,11 @@ impl Editor {
             .buffers
             .iter()
             .filter(|buffer| buffer.id == self.active_buffer().id)
-            .chain(self.buffers.iter().filter(|buffer| buffer.id != self.active_buffer().id))
+            .chain(
+                self.buffers
+                    .iter()
+                    .filter(|buffer| buffer.id != self.active_buffer().id),
+            )
         {
             if let Some(cursor) = find_definition_in_text(&buffer.text(), symbol) {
                 return Some(DefinitionLocation {
@@ -1124,17 +1387,52 @@ impl Editor {
         out
     }
 
-    pub fn widget_scroll_top(&self) -> u16 {
+    pub fn widget_scroll_top(&self) -> f32 {
         self.active_leaf().widget_scroll_top
     }
 
-    pub fn widget_scroll_left(&self) -> u16 {
+    pub fn widget_scroll_left(&self) -> f32 {
         self.active_leaf().widget_scroll_left
     }
 
     /// Combined vertical scroll: widget scroll + text scroll.
     pub fn total_scroll_top(&self) -> f32 {
-        self.widget_scroll_top() as f32 + self.active_buffer().scroll_top as f32
+        self.widget_scroll_top() + self.active_buffer().scroll_top as f32
+    }
+
+    /// Whether widget viewport scrolling should be smooth (sub-cell).
+    /// True when widgets are visible (UiOnly or Both mode with a widget layout).
+    pub fn is_ui_scroll_mode(&self) -> bool {
+        let mode = self.active_buffer().view_mode;
+        mode != ViewMode::TextOnly && self.runtime.current_layout.is_some()
+    }
+
+    /// Apply smooth (sub-cell) scroll deltas to the widget viewport.
+    /// `delta_cells_x` and `delta_cells_y` are in cell units (fractional).
+    pub fn apply_smooth_widget_scroll(&mut self, delta_cells_x: f32, delta_cells_y: f32) {
+        let content_height = self.runtime.layout_rows();
+        let max_v = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .map(|l| (l.rect.row + l.rect.height).ceil() - content_height as f32)
+            .unwrap_or(0.0)
+            .max(0.0);
+
+        let max_h = {
+            let vp = self.runtime.layout_cols() as f32;
+            let aspect = self.runtime.layout_aspect();
+            self.runtime
+                .current_layout
+                .as_ref()
+                .map(|l| (crate::ui::hit::max_extent(l, aspect).0 as f32 - vp).max(0.0))
+                .unwrap_or(0.0)
+        };
+
+        let leaf = self.active_leaf_mut();
+        leaf.widget_scroll_top = (leaf.widget_scroll_top - delta_cells_y).clamp(0.0, max_v);
+        leaf.widget_scroll_left = (leaf.widget_scroll_left - delta_cells_x).clamp(0.0, max_h);
+        self.mark_needs_redraw();
     }
 
     pub fn focused_widget_id(&self) -> Option<u64> {
@@ -1427,6 +1725,18 @@ impl Editor {
             return;
         }
 
+        // Focused widget keys take priority over global bindings
+        // (so Enter/arrows work in number-pickers, dropdowns, etc.)
+        if self.handle_focused_widget_key(key) {
+            println!("handle widget key early returned");
+            return;
+        }
+
+        if self.handle_focus_key(key) {
+            println!("handle focus key early returned");
+            return;
+        }
+
         // Check direct keybinding before treating as chord prefix.
         // This allows e.g. "ESC" to fire even when "ESC ." chords exist.
         {
@@ -1446,28 +1756,31 @@ impl Editor {
             return;
         }
 
-        if self.handle_focused_widget_key(key) {
-            return;
-        }
-
-        if self.handle_focus_key(key) {
-            return;
-        }
-
         if self.handle_mode_input_key(key) {
             return;
         }
 
         // Check mode-specific keybindings
-        if let BufferMode::Named(ref mode_name) = self.active_buffer().mode {
-            if let Some(handler) = self
-                .mode_registry
-                .get(mode_name)
-                .and_then(|mode| mode.keybindings.get(&key_str(key)))
-                .cloned()
-            {
-                self.call_lisp_handler(&handler);
-                return;
+        {
+            let ks = key_str(key);
+            let mode = &self.active_buffer().mode;
+            eprintln!(
+                "mode-keybinding check: key='{}' buffer='{}' mode={:?}",
+                ks,
+                self.active_buffer().name,
+                mode
+            );
+            if let BufferMode::Named(mode_name) = mode {
+                if let Some(handler) = self
+                    .mode_registry
+                    .get(mode_name)
+                    .and_then(|mode| mode.keybindings.get(&ks))
+                    .cloned()
+                {
+                    eprintln!("  → matched handler: {}", handler);
+                    self.call_lisp_handler(&handler);
+                    return;
+                }
             }
         }
 
@@ -1676,6 +1989,20 @@ impl Editor {
                 self.last_mouse_precise = None;
             }
             MouseEventKind::Moved => {
+                // Update dropdown hover when overlay is open
+                if let Some(overlay_id) = crate::widget_render::overlay_widget_id() {
+                    if let Some((local_col, local_row)) =
+                        crate::ui::hit::to_local(precise_col, precise_row, content_col, content_row)
+                    {
+                        let scroll_top = self.total_scroll_top();
+                        let scroll_left = self.active_leaf().widget_scroll_left;
+                        let layout_row = local_row + scroll_top;
+                        let _layout_col = local_col + scroll_left;
+                        if crate::widget_render::dropdown::hover_overlay(overlay_id, layout_row) {
+                            self.mark_needs_redraw();
+                        }
+                    }
+                }
                 if widgets_visible {
                     self.update_sdf_hover(
                         content_col,
@@ -1701,7 +2028,7 @@ impl Editor {
                 if !text_visible {
                     // UI-only: scroll widget viewport
                     let leaf = self.active_leaf_mut();
-                    leaf.widget_scroll_top = leaf.widget_scroll_top.saturating_sub(3);
+                    leaf.widget_scroll_top = (leaf.widget_scroll_top - 3.0).max(0.0);
                     self.mark_needs_redraw();
                 } else if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Up);
@@ -1736,13 +2063,14 @@ impl Editor {
                         .current_layout
                         .as_ref()
                         .map(|l| {
-                            ((l.rect.row + l.rect.height).ceil() as u16)
-                                .saturating_sub(content_height)
+                            ((l.rect.row + l.rect.height).ceil())
+                                - content_height as f32
                         })
-                        .unwrap_or(0);
+                        .unwrap_or(0.0)
+                        .max(0.0);
                     let leaf = self.active_leaf_mut();
                     leaf.widget_scroll_top =
-                        leaf.widget_scroll_top.saturating_add(3).min(max_scroll);
+                        (leaf.widget_scroll_top + 3.0).min(max_scroll);
                     self.mark_needs_redraw();
                 } else if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Down);
@@ -1759,7 +2087,7 @@ impl Editor {
             MouseEventKind::ScrollLeft => {
                 if self.active_buffer().view_mode == ViewMode::TextOnly {
                     let leaf = self.active_leaf_mut();
-                    leaf.widget_scroll_left = leaf.widget_scroll_left.saturating_sub(3);
+                    leaf.widget_scroll_left = (leaf.widget_scroll_left - 3.0).max(0.0);
                     self.mark_needs_redraw();
                     return;
                 }
@@ -1774,7 +2102,7 @@ impl Editor {
                 {
                     if widgets_visible {
                         let leaf = self.active_leaf_mut();
-                        leaf.widget_scroll_left = leaf.widget_scroll_left.saturating_sub(3);
+                        leaf.widget_scroll_left = (leaf.widget_scroll_left - 3.0).max(0.0);
                         self.mark_needs_redraw();
                     }
                 }
@@ -1783,7 +2111,7 @@ impl Editor {
                 if let Some(max_scroll) = self.max_text_horizontal_scroll(content_width) {
                     let leaf = self.active_leaf_mut();
                     leaf.widget_scroll_left =
-                        leaf.widget_scroll_left.saturating_add(3).min(max_scroll);
+                        (leaf.widget_scroll_left + 3.0).min(max_scroll as f32);
                     self.mark_needs_redraw();
                     return;
                 }
@@ -1800,7 +2128,7 @@ impl Editor {
                         let max_scroll = self.max_horizontal_scroll(content_width);
                         let leaf = self.active_leaf_mut();
                         leaf.widget_scroll_left =
-                            leaf.widget_scroll_left.saturating_add(3).min(max_scroll);
+                            (leaf.widget_scroll_left + 3.0).min(max_scroll as f32);
                         self.mark_needs_redraw();
                     }
                 }
@@ -1826,7 +2154,7 @@ impl Editor {
     pub fn sync_text_horizontal_scroll(&mut self, viewport_width: u16) {
         let Some(max_scroll) = self.max_text_horizontal_scroll(viewport_width) else {
             if self.active_buffer().view_mode != ViewMode::UiOnly {
-                self.active_leaf_mut().widget_scroll_left = 0;
+                self.active_leaf_mut().widget_scroll_left = 0.0;
             }
             return;
         };
@@ -1834,7 +2162,7 @@ impl Editor {
         let cursor_col = self.active_buffer().cursor.1;
         let viewport_width = viewport_width as usize;
         let leaf = self.active_leaf_mut();
-        let scroll_left = leaf.widget_scroll_left as usize;
+        let scroll_left = leaf.widget_scroll_left.floor() as usize;
 
         let next_scroll = if cursor_col < scroll_left {
             cursor_col
@@ -1844,7 +2172,7 @@ impl Editor {
             scroll_left
         };
 
-        leaf.widget_scroll_left = next_scroll.min(max_scroll as usize) as u16;
+        leaf.widget_scroll_left = (next_scroll.min(max_scroll as usize) as f32).floor();
     }
 
     /// Maximum horizontal scroll: how far right content extends past the viewport.
@@ -1860,23 +2188,22 @@ impl Editor {
         let view_mode = self.active_buffer().view_mode;
 
         // Widget layout extent: max right edge of root's direct children.
-        let layout_width = if view_mode != ViewMode::TextOnly
-            && self.active_buffer().widget_tree.is_some()
-        {
-            // Use bounded extent: only count nodes whose left edge starts
-            // within the viewport. This prevents h-stacks with many clipped
-            // children (e.g. 10 effect boxes) from inflating the scroll range,
-            // while still detecting legitimate overflow (e.g. a grid whose
-            // visible cells extend past the viewport).
-            let aspect = self.runtime.layout_aspect();
-            self.runtime
-                .current_layout
-                .as_ref()
-                .map(|l| crate::ui::hit::max_extent_bounded(l, aspect, vp as f32).0 as usize)
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let layout_width =
+            if view_mode != ViewMode::TextOnly && self.active_buffer().widget_tree.is_some() {
+                // Use bounded extent: only count nodes whose left edge starts
+                // within the viewport. This prevents h-stacks with many clipped
+                // children (e.g. 10 effect boxes) from inflating the scroll range,
+                // while still detecting legitimate overflow (e.g. a grid whose
+                // visible cells extend past the viewport).
+                let aspect = self.runtime.layout_aspect();
+                self.runtime
+                    .current_layout
+                    .as_ref()
+                    .map(|l| crate::ui::hit::max_extent_bounded(l, aspect, vp as f32).0 as usize)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
         // Text line width (only when text is visible).
         let max_line = if view_mode == ViewMode::UiOnly {
@@ -1892,7 +2219,9 @@ impl Editor {
 
         let content_width = layout_width.max(max_line);
         let result = content_width.saturating_sub(vp) as u16;
-        eprintln!("[MAX-H-SCROLL] view_mode={view_mode:?} layout_width={layout_width} max_line={max_line} vp={vp} result={result}");
+        eprintln!(
+            "[MAX-H-SCROLL] view_mode={view_mode:?} layout_width={layout_width} max_line={max_line} vp={vp} result={result}"
+        );
         result
     }
 
@@ -2144,24 +2473,41 @@ impl Editor {
 
     fn refresh_inactive_tile_layouts_for_buffer(&mut self, buffer_idx: usize) {
         let tree = self.buffers[buffer_idx].widget_tree.clone();
-        let layout = tree
-            .as_ref()
-            .and_then(|tree| self.runtime.layout_snapshot_for_tree(tree));
-        let layout_revision = self.runtime.layout_revision();
         let tile_ids = self.tile_root.leaf_ids();
-        for tile_id in tile_ids {
-            if tile_id == self.active_tile {
-                continue;
+        // Collect tile viewports first to avoid borrow issues
+        let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
+            .into_iter()
+            .filter(|id| *id != self.active_tile)
+            .filter_map(|id| {
+                let leaf = self.tile_root.find_leaf(id)?;
+                if leaf.buffer_idx != buffer_idx {
+                    return None;
+                }
+                // Find this tile's rect to get its actual viewport size
+                let rect = self
+                    .cached_tile_rects
+                    .iter()
+                    .find(|(tid, _)| *tid == id)
+                    .map(|(_, r)| r);
+                let (cols, rows) = match rect {
+                    Some(r) => (r.width as u16, r.height.max(1.0) as u16),
+                    None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
+                };
+                Some((id, cols, rows))
+            })
+            .collect();
+
+        for (tile_id, cols, rows) in tiles_to_update {
+            let layout = tree.as_ref().and_then(|tree| {
+                self.runtime
+                    .layout_snapshot_for_tree_with_viewport(tree, Some((cols, rows)))
+            });
+            let layout_revision = self.runtime.layout_revision();
+            if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
+                leaf.cached_layout = layout;
+                leaf.layout_revision = layout_revision;
+                leaf.cached_inactive_frame = None;
             }
-            let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) else {
-                continue;
-            };
-            if leaf.buffer_idx != buffer_idx {
-                continue;
-            }
-            leaf.cached_layout = layout.clone();
-            leaf.layout_revision = layout_revision;
-            leaf.cached_inactive_frame = None;
         }
         self.mark_needs_redraw();
     }
@@ -2551,6 +2897,17 @@ impl Editor {
             }
         }
 
+        // Process set-buffer-mode-for (after buffer creation so targets exist)
+        for (buf_name, mode_name) in self.runtime.take_pending_set_mode_for() {
+            let mode_def = self.mode_registry.get(&mode_name).cloned();
+            if let Some(buf) = self.buffers.iter_mut().find(|b| b.name == buf_name) {
+                buf.mode = BufferMode::Named(mode_name.clone());
+                if let Some(mode_def) = &mode_def {
+                    buf.read_only = mode_def.read_only;
+                }
+            }
+        }
+
         if let Some(path) = self.runtime.take_pending_save_as() {
             match self.active_buffer_mut().save_as(path) {
                 Ok(path) => self.show_transient_message(format!("Saved {}", path.display())),
@@ -2616,6 +2973,9 @@ impl Editor {
                 }
                 crate::runtime::TileOp::OtherWindow => {
                     self.cycle_active_tile();
+                }
+                crate::runtime::TileOp::SetLayout(spec) => {
+                    self.apply_layout_spec(spec);
                 }
                 crate::runtime::TileOp::SetWindowBuffer(name) => {
                     if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
@@ -2770,7 +3130,6 @@ impl CompletionState {
         }
     }
 }
-
 
 fn normalize_region(a: (usize, usize), b: (usize, usize)) -> ((usize, usize), (usize, usize)) {
     if a < b { (a, b) } else { (b, a) }

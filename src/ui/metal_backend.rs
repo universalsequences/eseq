@@ -2,11 +2,14 @@
 #[cfg(target_os = "macos")]
 mod inner {
     use std::collections::{HashMap, VecDeque};
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     use std::ptr::NonNull;
     use std::time::{Duration, Instant};
 
     use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     };
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
@@ -545,6 +548,26 @@ fragment float4 waveform_frag(
         row: i32,
     }
 
+    #[derive(Clone)]
+    struct CachedWidgetScene {
+        primitives: Vec<widget_render::MetalPrimitive>,
+    }
+
+    #[derive(Clone, Copy, Hash, PartialEq, Eq)]
+    struct WidgetSceneCacheKey {
+        layout_identity: usize,
+        layout_cache_key: u64,
+        widget_state_generation: u64,
+        focused_widget_id: Option<u64>,
+        scroll_top_bits: u32,
+        max_rows: u16,
+        cell_w_bits: u32,
+        cell_h_bits: u32,
+        vp_w_bits: u32,
+        vp_h_bits: u32,
+        tile_content_rows_bits: u32,
+    }
+
     // ── Backend ───────────────────────────────────────────────────────────────
 
     pub struct MetalBackend {
@@ -568,6 +591,7 @@ fragment float4 waveform_frag(
         cached_text_quads: Vec<Vertex>,
         cached_text_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
         cached_text_vertex_count: usize,
+        cached_widget_scenes: HashMap<u64, CachedWidgetScene>,
         stats: RenderStats,
         // Winit
         event_loop: Option<EventLoop<()>>,
@@ -610,6 +634,7 @@ fragment float4 waveform_frag(
                 cached_text_quads: Vec::new(),
                 cached_text_buffer: None,
                 cached_text_vertex_count: 0,
+                cached_widget_scenes: HashMap::new(),
                 stats: RenderStats::new(),
                 event_loop: None,
                 window: None,
@@ -630,6 +655,81 @@ fragment float4 waveform_frag(
 
         fn elapsed_time_seconds(&self) -> f32 {
             self.start_time.elapsed().as_secs_f32()
+        }
+
+        fn widget_scene_cache_key(
+            &self,
+            layout: &crate::layout::LayoutNode,
+            layout_cache_key: u64,
+            viewport: WidgetViewport,
+            scroll_top: f32,
+            max_rows: u16,
+        ) -> u64 {
+            let key = WidgetSceneCacheKey {
+                layout_identity: layout as *const crate::layout::LayoutNode as usize,
+                layout_cache_key,
+                widget_state_generation: widget_render::widget_state_generation(),
+                focused_widget_id: viewport.focused_widget_id,
+                scroll_top_bits: scroll_top.to_bits(),
+                max_rows,
+                cell_w_bits: viewport.cell_w.to_bits(),
+                cell_h_bits: viewport.cell_h.to_bits(),
+                vp_w_bits: viewport.vp_w.to_bits(),
+                vp_h_bits: viewport.vp_h.to_bits(),
+                tile_content_rows_bits: viewport.tile_content_rows.to_bits(),
+            };
+            let mut hasher = DefaultHasher::new();
+            key.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        fn refresh_widget_scene_time(
+            primitives: &mut [widget_render::MetalPrimitive],
+            time_seconds: f32,
+        ) {
+            for primitive in primitives {
+                if let widget_render::MetalPrimitive::WidgetInstance { instance, .. } = primitive {
+                    instance.itime = time_seconds;
+                }
+            }
+        }
+
+        fn widget_scene_for_layout(
+            &mut self,
+            layout_cache_key: u64,
+            layout: &crate::layout::LayoutNode,
+            viewport: WidgetViewport,
+            scroll_top: f32,
+            max_rows: u16,
+        ) -> Vec<widget_render::MetalPrimitive> {
+            if widget_render::overlay_widget_id().is_some() {
+                let (mut primitives, _overlay) =
+                    widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
+                Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
+                return primitives;
+            }
+
+            let cache_key =
+                self.widget_scene_cache_key(layout, layout_cache_key, viewport, scroll_top, max_rows);
+            if let Some(scene) = self.cached_widget_scenes.get(&cache_key) {
+                let mut primitives = scene.primitives.clone();
+                Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
+                return primitives;
+            }
+
+            let (mut primitives, _overlay) =
+                widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
+            Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
+            if self.cached_widget_scenes.len() >= 128 {
+                self.cached_widget_scenes.clear();
+            }
+            self.cached_widget_scenes.insert(
+                cache_key,
+                CachedWidgetScene {
+                    primitives: primitives.clone(),
+                },
+            );
+            primitives
         }
 
         pub fn take_last_precise_mouse(&mut self) -> Option<(f32, f32)> {
@@ -854,7 +954,7 @@ fragment float4 waveform_frag(
                 }) else {
                     continue;
                 };
-                enc.setRenderPipelineState(pipeline);
+                enc.setRenderPipelineState(&pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(&instance_buffer), 0, 0);
                     enc.setFragmentBuffer_offset_atIndex(Some(&waveform_buffer), 0, 1);
@@ -932,7 +1032,7 @@ fragment float4 waveform_frag(
                 }) else {
                     return;
                 };
-                enc.setRenderPipelineState(pipeline);
+                enc.setRenderPipelineState(&pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(&vbuf), 0, 0);
                     enc.setFragmentTexture_atIndex(Some(atlas_tex), 0);
@@ -966,7 +1066,7 @@ fragment float4 waveform_frag(
                 enc.setScissorRect(scissor);
 
                 // ── Text content (shifted by horizontal scroll) ──────────────
-                let hscroll = tile.frame.widget_scroll_left as i32;
+                let hscroll = tile.frame.widget_scroll_left.round() as i32;
                 let offset = TileOffset {
                     col: col_off as i32 - hscroll,
                     row: row_off as i32,
@@ -986,27 +1086,41 @@ fragment float4 waveform_frag(
                         .max(0.0)
                         .round() as u16;
 
-                    let (primitives, overlay_prims) = widget_render::collect_metal_primitives(
+                    let viewport = WidgetViewport {
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                        time_seconds,
+                        focused_widget_id: tile.frame.focused_widget_id,
+                        focused_branch: false,
+                        tile_content_rows: inner_rows as f32,
+                    };
+                    let primitives = self.widget_scene_for_layout(
+                        tile.frame.widget_layout_cache_key,
                         layout,
-                        WidgetViewport {
-                            cell_w,
-                            cell_h,
-                            vp_w,
-                            vp_h,
-                            time_seconds,
-                            focused_widget_id: tile.frame.focused_widget_id,
-                            focused_branch: false,
-                        },
+                        viewport,
                         tile.frame.widget_scroll_top,
                         inner_rows,
                     );
+                    let overlay_prims = if widget_render::overlay_widget_id().is_some() {
+                        let (_, overlay) = widget_render::collect_metal_primitives(
+                            layout,
+                            viewport,
+                            tile.frame.widget_scroll_top,
+                            inner_rows,
+                        );
+                        overlay
+                    } else {
+                        Vec::new()
+                    };
                     // Offset primitives to tile's screen position,
                     // shifted by both text scroll (vertical) and hscroll (horizontal)
                     // so widgets move with the text.
-                    let text_scroll = tile.frame.text_scroll_top as i32;
-                    let widget_scroll = tile.frame.widget_scroll_top as i32;
-                    let widget_col_off = col_off as i32 - hscroll;
-                    let widget_row_off = row_off as i32 - text_scroll - widget_scroll;
+                    let text_scroll = tile.frame.text_scroll_top as f32;
+                    let widget_scroll = tile.frame.widget_scroll_top;
+                    let widget_col_off = col_off as f32 - tile.frame.widget_scroll_left;
+                    let widget_row_off = row_off as f32 - text_scroll - widget_scroll;
                     let offset_prims: Vec<_> = primitives
                         .into_iter()
                         .map(|p| {
@@ -1109,10 +1223,11 @@ fragment float4 waveform_frag(
                     // Rendered after all segments with full tile scissor so it
                     // covers everything underneath (including text).
                     if !overlay_prims.is_empty() {
-                        // Overlay primitives use screen-space coords (no scroll),
-                        // offset only by tile position.
-                        let overlay_col_off = col_off as i32;
-                        let overlay_row_off = row_off as i32;
+                        // Overlay primitives are in screen-space (post-scroll within
+                        // the widget tree) but still need the buffer-level widget
+                        // scroll and tile offset applied.
+                        let overlay_col_off = col_off as f32 - tile.frame.widget_scroll_left;
+                        let overlay_row_off = row_off as f32 - widget_scroll;
                         let offset_overlay: Vec<_> = overlay_prims
                             .into_iter()
                             .map(|p| {
@@ -1334,7 +1449,7 @@ fragment float4 waveform_frag(
                 }
 
                 // ── Thin pixel borders (drawn AFTER content, on top) ─────────
-                if has_multiple_tiles {
+                if has_multiple_tiles && tile.show_border {
                     let border_color = if tile.is_active {
                         theme::BORDER_ACTIVE()
                     } else {
@@ -1752,13 +1867,22 @@ fragment float4 waveform_frag(
                         *modifiers = winit_mods_to_crossterm(mods.state());
                     }
                     WindowEvent::KeyboardInput { event: kev, .. } => {
-                        if kev.state != ElementState::Pressed {
-                            return;
-                        }
-                        if let Some(ev) =
-                            translate_key(&kev.logical_key, &kev.physical_key, *modifiers)
-                        {
-                            pending.push_back(ev);
+                        match kev.state {
+                            ElementState::Pressed => {
+                                if let Some(ev) =
+                                    translate_key(&kev.logical_key, &kev.physical_key, *modifiers)
+                                {
+                                    pending.push_back(ev);
+                                }
+                            }
+                            ElementState::Released => {
+                                // Emit Release events for note-off handling in sequencer
+                                if let Some(ev) =
+                                    translate_key_with_state(&kev.logical_key, &kev.physical_key, *modifiers, kev.state)
+                                {
+                                    pending.push_back(ev);
+                                }
+                            }
                         }
                     }
                     WindowEvent::CursorMoved { position, .. } => {
@@ -1818,34 +1942,23 @@ fragment float4 waveform_frag(
                         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                             return;
                         }
-                        let kind = match delta {
+                        match delta {
                             MouseScrollDelta::LineDelta(x, y) => {
-                                if y > 0.0 {
-                                    Some(MouseEventKind::ScrollUp)
-                                } else if y < 0.0 {
-                                    Some(MouseEventKind::ScrollDown)
-                                } else if x > 0.0 {
-                                    Some(MouseEventKind::ScrollLeft)
-                                } else if x < 0.0 {
-                                    Some(MouseEventKind::ScrollRight)
-                                } else {
-                                    None
-                                }
+                                // Convert line deltas to pixel deltas and route through
+                                // the unified pending_scroll path. This allows lib.rs to
+                                // apply smooth sub-cell scrolling in UI mode, while still
+                                // quantizing to cell steps in text mode.
+                                let line_h = (cell_size.1 as f32).max(20.0);
+                                pending_scroll.push_back((
+                                    (x * line_h, y * line_h),
+                                    *cursor_pos,
+                                ));
                             }
                             MouseScrollDelta::PixelDelta(delta) => {
                                 pending_scroll
                                     .push_back(((delta.x as f32, delta.y as f32), *cursor_pos));
-                                None
                             }
                         };
-                        if let Some(kind) = kind {
-                            pending.push_back(Event::Mouse(MouseEvent {
-                                kind,
-                                column: cursor_cell.0,
-                                row: cursor_cell.1,
-                                modifiers: *modifiers,
-                            }));
-                        }
                     }
                     WindowEvent::TouchpadMagnify { delta, phase, .. } => {
                         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
@@ -1876,7 +1989,14 @@ fragment float4 waveform_frag(
 
             self.compile_pending_sdf_pipelines();
 
-            let (Some(pipeline), Some(atlas)) = (&self.pipeline, &mut self.atlas) else {
+            let Some(pipeline) = self.pipeline.clone() else {
+                return Ok(());
+            };
+            let Some((cell_w, cell_h)) = self
+                .atlas
+                .as_ref()
+                .map(|atlas| (atlas.cell_w as f32, atlas.cell_h as f32))
+            else {
                 return Ok(());
             };
 
@@ -1888,11 +2008,35 @@ fragment float4 waveform_frag(
             let texture = drawable.texture();
             let vp_w = texture.width() as f32;
             let vp_h = texture.height() as f32;
-            let cell_w = atlas.cell_w as f32;
-            let cell_h = atlas.cell_h as f32;
-
             // ── Build/cached text vertex data ───────────────────────────────
             let mut text_upload_bytes = 0;
+            let max_rows = (vp_h / cell_h).floor() as u16 - 1;
+            let primitive_scene = frame
+                .widget_layout
+                .as_ref()
+                .map(|layout| {
+                    self.widget_scene_for_layout(
+                        frame.widget_layout_cache_key,
+                        layout,
+                        WidgetViewport {
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            time_seconds,
+                            focused_widget_id: frame.focused_widget_id,
+                            focused_branch: false,
+                            tile_content_rows: max_rows as f32,
+                        },
+                        frame.widget_scroll_top,
+                        max_rows,
+                    )
+                })
+                .unwrap_or_default();
+
+            let Some(atlas) = &mut self.atlas else {
+                return Ok(());
+            };
             if self.cached_text_key != Some(frame.text_cache_key) {
                 self.cached_text_quads = build_text_quads(frame, atlas, vp_w, vp_h);
                 self.cached_text_key = Some(frame.text_cache_key);
@@ -1911,27 +2055,6 @@ fragment float4 waveform_frag(
                     }
                 };
             }
-            let max_rows = (vp_h / atlas.cell_h as f32).floor() as u16 - 1;
-            let (primitive_scene, _overlay) = frame
-                .widget_layout
-                .as_ref()
-                .map(|layout| {
-                    widget_render::collect_metal_primitives(
-                        layout,
-                        WidgetViewport {
-                            cell_w: atlas.cell_w as f32,
-                            cell_h: atlas.cell_h as f32,
-                            vp_w,
-                            vp_h,
-                            time_seconds,
-                            focused_widget_id: frame.focused_widget_id,
-                            focused_branch: false,
-                        },
-                        frame.widget_scroll_top,
-                        max_rows,
-                    )
-                })
-                .unwrap_or_default();
             let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
             let (primitive_bg_runs, primitive_instance_runs) =
                 partition_widget_instance_runs(&primitive_scene);
@@ -1990,7 +2113,7 @@ fragment float4 waveform_frag(
             }
 
             if let Some(vbuf) = &text_vbuf {
-                enc.setRenderPipelineState(pipeline);
+                enc.setRenderPipelineState(&pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(vbuf), 0, 0);
                     enc.setFragmentTexture_atIndex(Some(&atlas.texture), 0);
@@ -2003,7 +2126,7 @@ fragment float4 waveform_frag(
             }
 
             if let Some(vbuf) = &label_vbuf {
-                enc.setRenderPipelineState(pipeline);
+                enc.setRenderPipelineState(&pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(vbuf), 0, 0);
                     enc.setFragmentTexture_atIndex(Some(&atlas.texture), 0);
@@ -2219,6 +2342,11 @@ fragment float4 waveform_frag(
             let base_y_px = run.row * mono_cell_h;
             let mut pen_x = base_x_px;
 
+            // Vertical centering: offset glyph bitmap so it's centered within
+            // one mono cell height (widgets center text assuming 1.0 cell units).
+            let line_h = prop_atlas.line_height(size_tenths);
+            let y_offset = (mono_cell_h - line_h) * 0.5;
+
             for ch in run.text.chars() {
                 let Some(entry) = prop_atlas.get_or_rasterize(ch, size_tenths) else {
                     continue;
@@ -2235,7 +2363,7 @@ fragment float4 waveform_frag(
 
                 // Glyph bitmap starts 2px before pen (padding), spans full line height.
                 let gx0 = pen_x - 2.0;
-                let gy0 = base_y_px;
+                let gy0 = base_y_px + y_offset;
                 let gx1 = gx0 + entry.raster_w as f32;
                 let gy1 = gy0 + entry.raster_h as f32;
 
@@ -2856,8 +2984,8 @@ fragment float4 waveform_frag(
     /// Offset a MetalPrimitive by (col_off, row_off) cells (signed for scroll).
     fn offset_primitive(
         prim: widget_render::MetalPrimitive,
-        col_off: i32,
-        row_off: i32,
+        col_off: f32,
+        row_off: f32,
         cell_w: f32,
         cell_h: f32,
         vp_w: f32,
@@ -2865,28 +2993,28 @@ fragment float4 waveform_frag(
     ) -> widget_render::MetalPrimitive {
         match prim {
             widget_render::MetalPrimitive::Rect(mut r) => {
-                r.rect.col += col_off as f32;
-                r.rect.row += row_off as f32;
+                r.rect.col += col_off;
+                r.rect.row += row_off;
                 widget_render::MetalPrimitive::Rect(r)
             }
             widget_render::MetalPrimitive::Quad(mut q) => {
-                q.x += col_off as f32;
-                q.y += row_off as f32;
+                q.x += col_off;
+                q.y += row_off;
                 widget_render::MetalPrimitive::Quad(q)
             }
             widget_render::MetalPrimitive::GlyphRun(mut g) => {
-                g.col += col_off;
-                g.row += row_off as f32;
+                g.col += col_off.round() as i32;
+                g.row += row_off;
                 widget_render::MetalPrimitive::GlyphRun(g)
             }
             widget_render::MetalPrimitive::ProportionalText(mut p) => {
-                p.col += col_off as f32;
-                p.row += row_off as f32;
+                p.col += col_off;
+                p.row += row_off;
                 widget_render::MetalPrimitive::ProportionalText(p)
             }
             widget_render::MetalPrimitive::Waveform(mut w) => {
-                w.rect.col += col_off as f32;
-                w.rect.row += row_off as f32;
+                w.rect.col += col_off;
+                w.rect.row += row_off;
                 widget_render::MetalPrimitive::Waveform(w)
             }
             widget_render::MetalPrimitive::WidgetInstance {
@@ -2894,8 +3022,8 @@ fragment float4 waveform_frag(
                 mut instance,
                 is_background,
             } => {
-                let ndc_dx = (col_off as f32 * cell_w / vp_w) * 2.0;
-                let ndc_dy = -(row_off as f32 * cell_h / vp_h) * 2.0;
+                let ndc_dx = (col_off * cell_w / vp_w) * 2.0;
+                let ndc_dy = -(row_off * cell_h / vp_h) * 2.0;
                 instance.ndc_min[0] += ndc_dx;
                 instance.ndc_max[0] += ndc_dx;
                 instance.ndc_min[1] += ndc_dy;
@@ -2907,8 +3035,8 @@ fragment float4 waveform_frag(
                 }
             }
             widget_render::MetalPrimitive::PushClipRect(mut r) => {
-                r.col += col_off as f32;
-                r.row += row_off as f32;
+                r.col += col_off;
+                r.row += row_off;
                 widget_render::MetalPrimitive::PushClipRect(r)
             }
             widget_render::MetalPrimitive::PopClipRect => widget_render::MetalPrimitive::PopClipRect,
@@ -2938,6 +3066,29 @@ fragment float4 waveform_frag(
             translate_logical_key(key)?
         };
         Some(Event::Key(KeyEvent::new(code, mods)))
+    }
+
+    fn translate_key_with_state(
+        key: &Key,
+        physical_key: &PhysicalKey,
+        mods: KeyModifiers,
+        state: ElementState,
+    ) -> Option<Event> {
+        let code = if mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
+            translate_physical_shortcut_key(physical_key).or_else(|| translate_logical_key(key))?
+        } else {
+            translate_logical_key(key)?
+        };
+        let kind = match state {
+            ElementState::Pressed => KeyEventKind::Press,
+            ElementState::Released => KeyEventKind::Release,
+        };
+        Some(Event::Key(KeyEvent {
+            code,
+            modifiers: mods,
+            kind,
+            state: crossterm::event::KeyEventState::NONE,
+        }))
     }
 
     fn translate_logical_key(key: &Key) -> Option<KeyCode> {

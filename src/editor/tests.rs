@@ -2803,7 +2803,7 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
             8,
         );
 
-        assert_eq!(editor.widget_scroll_left(), 0);
+        assert_eq!(editor.widget_scroll_left(), 0.0);
     }
 
     #[test]
@@ -2821,7 +2821,7 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
             10,
             8,
         );
-        assert_eq!(editor.widget_scroll_left(), 0);
+        assert_eq!(editor.widget_scroll_left(), 0.0);
 
         editor.active_buffer_mut().cursor = (1, 0);
         editor.handle_mouse(
@@ -2832,7 +2832,7 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
             8,
         );
 
-        assert_eq!(editor.widget_scroll_left(), 3);
+        assert_eq!(editor.widget_scroll_left(), 3.0);
     }
 
     #[test]
@@ -2850,13 +2850,13 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
             10,
             8,
         );
-        assert_eq!(editor.widget_scroll_left(), 3);
+        assert_eq!(editor.widget_scroll_left(), 3.0);
 
         editor.active_buffer_mut().cursor = (0, 0);
         let frame = crate::frame::build_render_frame(&mut editor, 10, 8);
 
-        assert_eq!(editor.widget_scroll_left(), 0);
-        assert_eq!(frame.widget_scroll_left, 0);
+        assert_eq!(editor.widget_scroll_left(), 0.0);
+        assert_eq!(frame.widget_scroll_left, 0.0);
     }
 
     #[test]
@@ -2866,7 +2866,7 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
         editor.open_scratch_buffer("*test*", "01234567890123456789");
         editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
         editor.set_layout_viewport(10, 8);
-        editor.active_leaf_mut().widget_scroll_left = 6;
+        editor.active_leaf_mut().widget_scroll_left = 6.0;
 
         editor.handle_mouse(
             mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 1),
@@ -2886,7 +2886,7 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
         editor.open_scratch_buffer("*test*", "01234567890123456789");
         editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
         editor.set_layout_viewport(10, 8);
-        editor.active_leaf_mut().widget_scroll_left = 6;
+        editor.active_leaf_mut().widget_scroll_left = 6.0;
 
         editor.handle_mouse(
             mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1),
@@ -2922,12 +2922,12 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
         editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
         editor.set_layout_viewport(10, 8);
         editor.active_buffer_mut().cursor = (0, 9);
-        editor.active_leaf_mut().widget_scroll_left = 0;
+        editor.active_leaf_mut().widget_scroll_left = 0.0;
 
         editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
         assert_eq!(editor.active_buffer().cursor, (0, 10));
-        assert_eq!(editor.widget_scroll_left(), 1);
+        assert_eq!(editor.widget_scroll_left(), 1.0);
     }
 
     #[test]
@@ -2936,7 +2936,7 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
         let mut editor = Editor::new(runtime, EditorConfig::default());
         editor.open_scratch_buffer("*test*", "01234567890123456789");
         editor.set_layout_viewport(10, 8);
-        editor.active_leaf_mut().widget_scroll_left = 6;
+        editor.active_leaf_mut().widget_scroll_left = 6.0;
 
         editor.handle_mouse(
             mouse_event(MouseEventKind::Down(MouseButton::Left), 4, 1),
@@ -2956,12 +2956,12 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
         editor.open_scratch_buffer("*test*", "01234567890123456789");
         editor.set_layout_viewport(10, 8);
         editor.active_buffer_mut().cursor = (0, 9);
-        editor.active_leaf_mut().widget_scroll_left = 0;
+        editor.active_leaf_mut().widget_scroll_left = 0.0;
 
         editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
 
         assert_eq!(editor.active_buffer().cursor, (0, 10));
-        assert_eq!(editor.widget_scroll_left(), 1);
+        assert_eq!(editor.widget_scroll_left(), 1.0);
     }
 
     #[test]
@@ -3870,8 +3870,14 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
             if let Some(st) = map.get("__shader_type") {
                 if let Value::String(name) = &*st.borrow() {
                     let def = sdf_widget_def(name).unwrap();
-                    eprintln!("=== vslider fill-relative shader ===");
-                    eprintln!("shader:\n{}", def.shader_source);
+                    assert!(
+                        def.shader_source.contains("(0.32 * aspect)"),
+                        "expected native vslider width term in shader source"
+                    );
+                    assert!(
+                        def.shader_source.contains("(aspect * y)"),
+                        "expected native vslider y remap in shader source"
+                    );
                 }
             }
         }

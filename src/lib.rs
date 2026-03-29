@@ -184,10 +184,22 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
             if widget_handled {
                 continue;
             }
-            // Accumulate pixel deltas for text buffer scrolling.
+
+            // In UI mode, apply pixel deltas directly for smooth sub-cell scrolling.
+            // Use the same cells-per-pixel ratio as the scroll widget (0.05).
+            if editor.is_ui_scroll_mode() {
+                let scroll_speed = 0.05; // cells per pixel-delta
+                let delta_cells_y = delta_y * scroll_speed;
+                let delta_cells_x = delta_x * scroll_speed;
+                editor.apply_smooth_widget_scroll(delta_cells_x, delta_cells_y);
+                continue;
+            }
+
+            let line_px = backend.viewport_size().1.max(1) as f32 / (rows.max(1) as f32);
+
+            // Accumulate pixel deltas for text buffer scrolling (cell-based).
             // Only emit ScrollUp/Down after accumulating ~1 line of pixels.
             scroll_accum_y += delta_y;
-            let line_px = backend.viewport_size().1.max(1) as f32 / (rows.max(1) as f32); // approx pixels per cell row
             let threshold = line_px.max(20.0); // at least 20px per scroll step
             while scroll_accum_y > threshold {
                 scroll_accum_y -= threshold;

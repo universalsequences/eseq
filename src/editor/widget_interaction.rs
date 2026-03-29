@@ -131,7 +131,7 @@ impl Editor {
             return;
         }
 
-        let widget_col = local_col + self.active_leaf().widget_scroll_left as f32 - node.rect.col;
+        let widget_col = local_col + self.active_leaf().widget_scroll_left - node.rect.col;
         let widget_row = local_row + self.total_scroll_top() - node.rect.row;
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let px_w = node.rect.width * cell_w;
@@ -171,7 +171,7 @@ impl Editor {
         if !self.is_double_click_candidate(node.widget_id, precise_col, precise_row) {
             return false;
         }
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
+        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
         let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) else {
             return false;
@@ -238,7 +238,7 @@ impl Editor {
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
             return;
         };
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
+        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
         let gesture_data = begin_widget_gesture_data(&node, scrolled_col, scrolled_row);
         if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
@@ -335,9 +335,9 @@ impl Editor {
         local_row: f32,
     ) -> Option<LayoutNode> {
         let layout = self.runtime.current_layout.as_ref()?;
-        let widget_scroll = self.widget_scroll_top() as f32;
+        let widget_scroll = self.widget_scroll_top();
         let text_scroll = self.active_buffer().scroll_top as f32;
-        let hscroll = self.active_leaf().widget_scroll_left as f32;
+        let hscroll = self.active_leaf().widget_scroll_left;
 
         let layout_col = local_col + hscroll;
         let layout_row = local_row + widget_scroll + text_scroll;
@@ -458,7 +458,7 @@ impl Editor {
 
         let buffer = self.active_buffer();
         let scroll_left = if buffer.view_mode != crate::editor::ViewMode::UiOnly {
-            self.active_leaf().widget_scroll_left as usize
+            self.active_leaf().widget_scroll_left.floor() as usize
         } else {
             0
         };
@@ -484,7 +484,7 @@ impl Editor {
         modifiers: KeyModifiers,
     ) -> Option<crate::widget_render::EventOutput> {
         let total_scroll_top = self.total_scroll_top();
-        let total_scroll_left = self.active_leaf().widget_scroll_left as f32;
+        let total_scroll_left = self.active_leaf().widget_scroll_left;
         let local_col = precise_col - content_col as f32 + total_scroll_left;
         let local_row = precise_row - content_row as f32 + total_scroll_top;
         let drag_start = drag_start.map(|(start_col, start_row)| {
@@ -547,7 +547,7 @@ impl Editor {
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
             return;
         };
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
+        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
         let Some(widget_event) = map_magnify_event(&node, scrolled_col, scrolled_row, delta) else {
             return;
@@ -565,6 +565,14 @@ impl Editor {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
+        // If a dropdown overlay is open, intercept scroll events for it
+        if let Some(overlay_id) = widget_render::overlay_widget_id() {
+            if widget_render::dropdown::scroll_overlay(overlay_id, delta_y) {
+                self.mark_needs_redraw();
+                return true;
+            }
+        }
+
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
         else {
@@ -573,7 +581,7 @@ impl Editor {
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
             return false;
         };
-        let scrolled_col = local_col + self.active_leaf().widget_scroll_left as f32;
+        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
 
         // Try the leaf widget first

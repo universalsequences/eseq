@@ -92,7 +92,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float xPad = 0.18;
     float halfW = 0.5 - xPad;
     float halfH = max(fill_span * 0.5, 0.0);
-    float cr = 0.12;
+    float cr = 0.063;
     cr = min(cr, min(halfW * aspect, max(halfH, 0.001)));
 
     // Center of fill bar in uv space (uv.y: 0=top, 1=bottom; t=1 → top)
@@ -154,6 +154,10 @@ impl WidgetDefinition for VerticalSliderWidget {
 
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         tui_render(props, rect, buf);
+    }
+
+    fn captures_drag(&self) -> bool {
+        true
     }
 
     fn mouse_event(

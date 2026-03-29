@@ -9,8 +9,7 @@ use crate::audio::register_audio_natives;
 use crate::buffer::BufferTextStyle;
 use crate::host::{BufferId, HostCommand};
 use crate::layout::{
-    LayoutEngine, LayoutNode, TextMeasurer, format_layout_tree_lines, reuse_layout_node,
-    same_layout_geometry,
+    LayoutEngine, LayoutNode, TextMeasurer, reuse_layout_node, same_layout_geometry,
 };
 use crate::reactive::ReactiveRegistry;
 use crate::vm::{EffectTarget, PendingWidgetTree, VM, Value, register_core_natives};
@@ -100,65 +99,90 @@ fn compute_origin_t(map: &HashMap<String, Rc<RefCell<Value>>>) -> f64 {
     }
 }
 
-/// Structural hash of a Value tree, avoiding heap allocation.
-fn hash_value(v: &Value, hasher: &mut impl Hasher) {
-    std::mem::discriminant(v).hash(hasher);
-    match v {
-        Value::Number(n) => n.to_bits().hash(hasher),
-        Value::String(s) | Value::Symbol(s) | Value::Keyword(s) => s.hash(hasher),
-        Value::Bool(b) => b.hash(hasher),
-        Value::Nil => {}
-        Value::List(items) => {
-            items.len().hash(hasher);
-            for item in items {
-                hash_value(&item.borrow(), hasher);
+fn expr_to_source(expr: &crate::parser::Expression) -> String {
+    use crate::parser::Expression;
+
+    match expr {
+        Expression::Symbol(s) => s.clone(),
+        Expression::Keyword(s) => format!(":{s}"),
+        Expression::String(s) => format!("{s:?}"),
+        Expression::QuoteSymbol(s) => format!("'{s}"),
+        Expression::QuoteList(items) => {
+            let inner = items.iter().map(expr_to_source).collect::<Vec<_>>().join(" ");
+            format!("'({inner})")
+        }
+        Expression::Number(n) => {
+            if n.fract() == 0.0 {
+                format!("{n:.1}")
+            } else {
+                n.to_string()
             }
         }
-        Value::Map(map) => {
-            map.len().hash(hasher);
-            for (k, v) in map {
-                k.hash(hasher);
-                hash_value(&v.borrow(), hasher);
-            }
+        Expression::List(items) => {
+            let inner = items.iter().map(expr_to_source).collect::<Vec<_>>().join(" ");
+            format!("({inner})")
         }
-        _ => {} // NativeFunction/Closure won't appear in quoted material exprs
+        Expression::Quasiquote(inner) => format!("`{}", expr_to_source(inner)),
+        Expression::Unquote(inner) => format!(",{}", expr_to_source(inner)),
     }
 }
 
-/// Build the SDF expression that wraps a material in the appropriate fill shape
-/// template for a given widget type.
+fn parse_one_expr(src: &str) -> Result<crate::parser::Expression, String> {
+    let tokens = crate::parser::Parser::new(src.to_string())
+        .parse()
+        .map_err(|e| format!("{e:?}"))?;
+    let mut ast = crate::parser::ASTParser::new(tokens);
+    ast.parse()
+        .map_err(|e| format!("{e:?}"))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "expected one expression".to_string())
+}
+
+/// Build an exact SDF expression for a built-in slider material so `d` and
+/// lighting operate on the same geometry as the native widget shader.
 fn build_material_shader_expr(
     widget_type: &str,
     material_expr: &crate::parser::Expression,
-) -> Option<crate::parser::Expression> {
-    use crate::parser::Expression;
-
-    match widget_type {
-        "slider" | "hslider" => {
-            // (sdf/layer (sdf/fill (__hslider-fill) <material>))
-            Some(Expression::List(vec![
-                Expression::Symbol("sdf/layer".into()),
-                Expression::List(vec![
-                    Expression::Symbol("sdf/fill".into()),
-                    Expression::List(vec![Expression::Symbol("__hslider-fill".into())]),
-                    material_expr.clone(),
-                ]),
-            ]))
-        }
-        "vslider" => {
-            // (sdf/layer (__vslider-fill-with-material <material>))
-            // Normalizes y to [-1,1] so material gradients work the same
-            // as on hslider (where y is naturally in [-1,1]).
-            Some(Expression::List(vec![
-                Expression::Symbol("sdf/layer".into()),
-                Expression::List(vec![
-                    Expression::Symbol("__vslider-fill-with-material".into()),
-                    material_expr.clone(),
-                ]),
-            ]))
-        }
-        _ => None,
-    }
+) -> Result<crate::parser::Expression, String> {
+    let material_src = expr_to_source(material_expr);
+    let src = match widget_type {
+        "slider" | "hslider" => format!(
+            r#"
+            (sdf/layer
+              (if (> value_t 0.005)
+                (sdf/fill
+                  (let ((__half_w (* 0.5 aspect value_t))
+                        (__half_h 0.32)
+                        (__radius (min 0.18 (min __half_h (max __half_w 0.001)))))
+                    (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 value_t))))
+                          (y (* 0.5 y)))
+                      (sdf/rounded-rect __half_w __half_h __radius)))
+                  {material_src})
+                (sdf/paint (sdf/rect 0.0 0.0) (rgba 0.0 0.0 0.0 0.0))))
+            "#
+        ),
+        "vslider" => format!(
+            r#"
+            (sdf/layer
+              (let ((__fill_lo (min value_t origin_t))
+                    (__fill_hi (max value_t origin_t))
+                    (__fill_span (- __fill_hi __fill_lo)))
+                (if (> __fill_span 0.005)
+                  (sdf/fill
+                    (let ((__half_w (* 0.32 aspect))
+                          (__half_h (* 0.5 __fill_span))
+                          (__radius (min 0.063 (min __half_w (max (* 0.5 __fill_span) 0.001)))))
+                      (let ((x (* 0.5 aspect x))
+                            (y (* 0.5 (+ (* aspect y) (- (+ __fill_lo __fill_hi) 1.0)))))
+                        (sdf/rounded-rect __half_w __half_h __radius)))
+                    {material_src})
+                  (sdf/paint (sdf/rect 0.0 0.0) (rgba 0.0 0.0 0.0 0.0)))))
+            "#
+        ),
+        _ => return Err(format!("widget type '{widget_type}' does not support :material")),
+    };
+    parse_one_expr(&src)
 }
 
 /// Compile a :material value for a built-in widget, caching the result.
@@ -169,20 +193,10 @@ fn compile_widget_material(
     macros: &HashMap<String, crate::compiler::MacroDef>,
     state_binding_keys: &[String],
 ) -> Result<String, String> {
-    let mut hasher = DefaultHasher::new();
-    widget_type.hash(&mut hasher);
-    hash_value(material_val, &mut hasher);
-    let cache_key = hasher.finish();
-
-    if let Some(name) = MATERIAL_SHADER_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
-        return Ok(name);
-    }
-
     let material_expr =
         crate::lang::sdf_codegen::value_to_expression(material_val).map_err(|e| e.to_string())?;
 
-    let shader_expr = build_material_shader_expr(widget_type, &material_expr)
-        .ok_or_else(|| format!("widget type '{}' does not support :material", widget_type))?;
+    let shader_expr = build_material_shader_expr(widget_type, &material_expr)?;
 
     // For vslider, add origin_t so it gets a uniform slot.
     let mut bindings: std::collections::HashSet<String> =
@@ -191,6 +205,15 @@ fn compile_widget_material(
         bindings.insert("origin_t".to_string());
     }
     let expanded = expand_sdf_expression(&shader_expr, macros);
+    let mut hasher = DefaultHasher::new();
+    widget_type.hash(&mut hasher);
+    expr_to_source(&expanded).hash(&mut hasher);
+    let cache_key = hasher.finish();
+
+    if let Some(name) = MATERIAL_SHADER_CACHE.with(|c| c.borrow().get(&cache_key).cloned()) {
+        return Ok(name);
+    }
+
     let mut state_symbols = crate::lang::sdf_codegen::collect_state_symbols(&expanded, &bindings);
     state_symbols.truncate(crate::widget_render::sdf_widget::MAX_SDF_STATE_UNIFORMS);
     let output =
@@ -222,6 +245,23 @@ pub enum TileOp {
     DeleteOtherWindows,
     OtherWindow,
     SetWindowBuffer(String),
+    SetLayout(LayoutSpec),
+}
+
+/// Declarative layout specification for `set-layout`.
+#[derive(Debug, Clone)]
+pub enum LayoutSpec {
+    Buffer {
+        name: String,
+        hide_status: bool,
+        borderless: bool,
+        min_width: Option<f32>,
+        min_height: Option<f32>,
+        max_width: Option<f32>,
+        max_height: Option<f32>,
+    },
+    Rows(Vec<(f32, LayoutSpec)>),
+    Cols(Vec<(f32, LayoutSpec)>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,6 +289,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_mode_defs: Vec<(String, bool, Option<String>, Option<String>)>, // (name, read_only, on_enter, on_key)
     pub pending_mode_bindings: Vec<(String, String, String)>, // (mode, key, handler)
     pub pending_set_mode: Option<String>,
+    pub pending_set_mode_for: Vec<(String, String)>, // (buffer_name, mode_name)
     pub pending_open_file: Option<String>,
     pub pending_widget_tree: Option<Value>,
     pub pending_buffer_widget_trees: Vec<PendingWidgetTree>,
@@ -366,6 +407,13 @@ impl NativeContext {
         self.shared.borrow_mut().pending_set_mode = Some(mode);
     }
 
+    pub fn set_buffer_mode_for(&mut self, buffer_name: String, mode: String) {
+        self.shared
+            .borrow_mut()
+            .pending_set_mode_for
+            .push((buffer_name, mode));
+    }
+
     pub fn open_file(&mut self, path: String) {
         self.shared.borrow_mut().pending_open_file = Some(path);
     }
@@ -466,6 +514,13 @@ impl NativeContext {
             .push(TileOp::OtherWindow);
     }
 
+    pub fn set_layout(&mut self, spec: LayoutSpec) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::SetLayout(spec));
+    }
+
     pub fn set_window_buffer(&mut self, name: String) {
         self.shared
             .borrow_mut()
@@ -506,6 +561,7 @@ pub struct Runtime {
     cached_completion_symbols: Option<Vec<String>>,
     cached_completion_metadata: Option<HashMap<String, SymbolMetadata>>,
     pub reactive_registry: ReactiveRegistry,
+    #[cfg(test)]
     rendered_layouts: Vec<Vec<String>>,
     pub current_layout: Option<Arc<LayoutNode>>,
     layout_revision: u64,
@@ -540,6 +596,7 @@ impl Runtime {
             cached_completion_symbols: None,
             cached_completion_metadata: None,
             reactive_registry: ReactiveRegistry::new(),
+            #[cfg(test)]
             rendered_layouts: Vec::new(),
             current_layout: None,
             layout_revision: 0,
@@ -555,6 +612,23 @@ impl Runtime {
         runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
         crate::theme::set_current(crate::theme::default_theme());
         register_audio_natives(&mut runtime);
+        // (load path) — read and evaluate a Lisp file; relative paths resolve from CWD.
+        runtime
+            .vm
+            .register_native_with_vm("load", |args, vm| {
+                let Some(Value::String(path_str)) = args.first() else {
+                    return Value::String("load: expects a string path".into());
+                };
+                let path = std::path::Path::new(path_str.as_str());
+                let source = match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(e) => return Value::String(format!("load: {e}")),
+                };
+                match vm.eval_str(&source) {
+                    Ok(v) => v.unwrap_or(Value::Bool(true)),
+                    Err(e) => Value::String(format!("load: eval error: {e:?}")),
+                }
+            });
         // Register SDF constructor functions that return self-quoting tagged lists.
         // These are compiled to Metal by the SDF codegen; at the Lisp level they
         // preserve their structure for later compilation.
@@ -1111,6 +1185,10 @@ impl Runtime {
         self.shared.borrow_mut().pending_set_mode.take()
     }
 
+    pub(crate) fn take_pending_set_mode_for(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.shared.borrow_mut().pending_set_mode_for)
+    }
+
     pub(crate) fn take_pending_widget_tree(&mut self) -> Option<Value> {
         self.shared.borrow_mut().pending_widget_tree.take()
     }
@@ -1196,6 +1274,7 @@ impl Runtime {
         }
     }
 
+    #[cfg(test)]
     pub fn drain_rendered_layouts(&mut self) -> Vec<Vec<String>> {
         std::mem::take(&mut self.rendered_layouts)
     }
@@ -1205,11 +1284,27 @@ impl Runtime {
     }
 
     pub fn layout_snapshot_for_tree(&mut self, tree: &Value) -> Option<Arc<LayoutNode>> {
+        self.layout_snapshot_for_tree_with_viewport(tree, None)
+    }
+
+    pub fn layout_snapshot_for_tree_with_viewport(
+        &mut self,
+        tree: &Value,
+        viewport: Option<(u16, u16)>,
+    ) -> Option<Arc<LayoutNode>> {
         let saved_tree = self.current_widget_tree.clone();
         let saved_layout = self.current_layout.clone();
         let saved_revision = self.layout_revision;
         let saved_dirty = self.dirty_widget_ids.clone();
+        #[cfg(test)]
         let saved_rendered_layouts = self.rendered_layouts.clone();
+        let saved_cols = self.layout_cols;
+        let saved_rows = self.layout_rows;
+
+        if let Some((cols, rows)) = viewport {
+            self.layout_cols = cols;
+            self.layout_rows = rows;
+        }
 
         self.current_widget_tree = Some(tree.clone());
         self.relayout_current_tree();
@@ -1219,7 +1314,12 @@ impl Runtime {
         self.current_layout = saved_layout;
         self.layout_revision = saved_revision;
         self.dirty_widget_ids = saved_dirty;
-        self.rendered_layouts = saved_rendered_layouts;
+        #[cfg(test)]
+        {
+            self.rendered_layouts = saved_rendered_layouts;
+        }
+        self.layout_cols = saved_cols;
+        self.layout_rows = saved_rows;
         snapshot
     }
 
@@ -1270,6 +1370,7 @@ impl Runtime {
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
         self.current_widget_tree = None;
+        #[cfg(test)]
         self.rendered_layouts.clear();
     }
 
@@ -1309,8 +1410,9 @@ impl Runtime {
         if let Some(existing) = self.current_layout.as_ref()
             && let Some(updated) = reuse_layout_node(existing.as_ref(), tree, &mut dirty_widget_ids)
         {
+            #[cfg(test)]
             self.rendered_layouts
-                .push(format_layout_tree_lines(&updated, 0));
+                .push(crate::layout::format_layout_tree_lines(&updated, 0));
             self.current_layout = Some(Arc::new(updated));
             self.dirty_widget_ids = dirty_widget_ids;
             if !self.dirty_widget_ids.is_empty() {
@@ -1335,8 +1437,9 @@ impl Runtime {
                 .current_layout
                 .as_ref()
                 .is_none_or(|existing| !same_layout_geometry(existing.as_ref(), &layout));
+            #[cfg(test)]
             self.rendered_layouts
-                .push(format_layout_tree_lines(&layout, 0));
+                .push(crate::layout::format_layout_tree_lines(&layout, 0));
             self.current_layout = Some(Arc::new(layout));
             if geometry_changed {
                 self.dirty_widget_ids.clear();

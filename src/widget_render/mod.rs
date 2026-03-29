@@ -73,6 +73,10 @@ pub fn overlay_widget_id() -> Option<u64> {
     OVERLAY_INFO.with(|o| o.borrow().as_ref().map(|s| s.widget_id))
 }
 
+pub fn get_overlay_rect() -> Option<Rect> {
+    OVERLAY_INFO.with(|o| o.borrow().as_ref().map(|s| s.rect))
+}
+
 pub fn overlay_contains(local_col: f32, local_row: f32) -> bool {
     OVERLAY_INFO.with(|o| {
         if let Some(ref s) = *o.borrow() {
@@ -259,6 +263,9 @@ pub struct WidgetViewport {
     pub time_seconds: f32,
     pub focused_widget_id: Option<u64>,
     pub focused_branch: bool,
+    /// Tile content area height in rows (excludes status bar).
+    /// Used by overlays (dropdowns) to clamp to the visible tile region.
+    pub tile_content_rows: f32,
 }
 
 #[cfg(target_os = "macos")]
@@ -574,7 +581,7 @@ pub fn widget_primitives_for_node(
 pub fn collect_metal_primitives(
     node: &LayoutNode,
     viewport: WidgetViewport,
-    scroll_top: u16,
+    scroll_top: f32,
     max_rows: u16,
 ) -> (Vec<MetalPrimitive>, Vec<MetalPrimitive>) {
     let mut primitives = Vec::new();
@@ -589,7 +596,7 @@ pub fn collect_metal_primitives(
 fn collect_metal_primitives_recursive(
     node: &LayoutNode,
     viewport: WidgetViewport,
-    _scroll_top: u16,
+    _scroll_top: f32,
     _max_rows: u16,
     primitives: &mut Vec<MetalPrimitive>,
 ) {

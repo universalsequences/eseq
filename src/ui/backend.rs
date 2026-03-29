@@ -158,9 +158,9 @@ pub struct RenderFrame {
     /// Currently focused widget ID for highlight rendering.
     pub focused_widget_id: Option<u64>,
     /// Widget scroll offset (rows to skip when rendering widget overlay).
-    pub widget_scroll_top: u16,
+    pub widget_scroll_top: f32,
     /// Widget horizontal scroll offset (cols to skip when rendering widget overlay).
-    pub widget_scroll_left: u16,
+    pub widget_scroll_left: f32,
     /// Text scroll offset — how many rows the text has scrolled.
     /// Used by Metal to sync widget vertical position with text scrolling.
     pub text_scroll_top: usize,
@@ -177,6 +177,7 @@ pub struct TileFrame {
     pub rect: Rect,         // screen position for this tile
     pub is_active: bool,    // colored border for active tile
     pub show_status: bool,  // whether to render per-tile status bar
+    pub show_border: bool,  // whether to render tile border
     pub frame: RenderFrame, // the per-buffer frame
 }
 

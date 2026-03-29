@@ -269,6 +269,21 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "set-buffer-mode-for",
+        "(set-buffer-mode-for buffer-name mode-name)",
+        "Set a named mode on a specific buffer (by name).",
+        |args, ctx| {
+            let (Some(Value::String(buf_name)), Some(Value::String(mode_name))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("set-buffer-mode-for expects (buffer-name mode-name)".to_string());
+            };
+            ctx.set_buffer_mode_for(buf_name.clone(), mode_name.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "current-buffer-mode",
         "(current-buffer-mode)",
         "Return the current buffer's mode name.",
@@ -682,6 +697,112 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
         "Cycle focus to the next tile (C-x o).",
         |_args, ctx| {
             ctx.other_window();
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
+        "set-layout",
+        "(set-layout spec)",
+        "Set the window layout declaratively. Spec is a nested list:\n\
+         (:rows ratio (:cols ratio \"buf-a\" ratio \"buf-b\" ...) ratio \"buf-c\" ...)\n\
+         :rows splits horizontally (top/bottom), :cols splits vertically (left/right).\n\
+         Each pane is preceded by its ratio (fraction of parent space).",
+        |args, ctx| {
+            use crate::runtime::LayoutSpec;
+
+            fn parse_spec(val: &Value) -> Result<LayoutSpec, String> {
+                match val {
+                    Value::String(s) => Ok(LayoutSpec::Buffer { name: s.clone(), hide_status: false, borderless: false, min_width: None, min_height: None, max_width: None, max_height: None }),
+                    Value::List(items) if !items.is_empty() && matches!(&*items[0].borrow(), Value::Keyword(k) if k == "buf") => {
+                        // (:buf "name" :hide-status true :min-width 20 :min-height 10)
+                        let name = items.get(1)
+                            .and_then(|v| match &*v.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .ok_or("(:buf ...) requires a buffer name string")?;
+                        let mut hide_status = false;
+                        let mut borderless = false;
+                        let mut min_width: Option<f32> = None;
+                        let mut min_height: Option<f32> = None;
+                        let mut max_width: Option<f32> = None;
+                        let mut max_height: Option<f32> = None;
+                        let mut i = 2;
+                        while i < items.len() {
+                            if let Value::Keyword(k) = &*items[i].borrow() {
+                                let key = k.clone();
+                                i += 1;
+                                if i < items.len() {
+                                    let v = items[i].borrow();
+                                    match key.as_str() {
+                                        "hide-status" => match &*v {
+                                            Value::Bool(b) => hide_status = *b,
+                                            Value::Symbol(s) if s == "true" => hide_status = true,
+                                            Value::Symbol(s) if s == "false" => hide_status = false,
+                                            _ => {}
+                                        },
+                                        "borderless" => match &*v {
+                                            Value::Bool(b) => borderless = *b,
+                                            Value::Symbol(s) if s == "true" => borderless = true,
+                                            Value::Symbol(s) if s == "false" => borderless = false,
+                                            _ => {}
+                                        },
+                                        "min-width" => if let Value::Number(n) = &*v { min_width = Some(*n as f32) },
+                                        "min-height" => if let Value::Number(n) = &*v { min_height = Some(*n as f32) },
+                                        "max-width" => if let Value::Number(n) = &*v { max_width = Some(*n as f32) },
+                                        "max-height" => if let Value::Number(n) = &*v { max_height = Some(*n as f32) },
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            i += 1;
+                        }
+                        Ok(LayoutSpec::Buffer { name, hide_status, borderless, min_width, min_height, max_width, max_height })
+                    }
+                    Value::List(items) => {
+                        if items.is_empty() {
+                            return Err("empty layout spec".into());
+                        }
+                        let first = items[0].borrow();
+                        let dir = match &*first {
+                            Value::Keyword(k) if k == "rows" => "rows",
+                            Value::Keyword(k) if k == "cols" => "cols",
+                            _ => return Err("layout list must start with :rows or :cols".into()),
+                        };
+                        // Parse alternating ratio/spec pairs: :rows 0.7 spec1 0.3 spec2
+                        let mut panes = Vec::new();
+                        let mut i = 1;
+                        while i < items.len() {
+                            let ratio_val = items[i].borrow();
+                            let ratio = match &*ratio_val {
+                                Value::Number(n) => *n as f32,
+                                _ => return Err(format!("expected ratio number at position {i}")),
+                            };
+                            drop(ratio_val);
+                            i += 1;
+                            if i >= items.len() {
+                                return Err("expected spec after ratio".into());
+                            }
+                            let spec = parse_spec(&items[i].borrow())?;
+                            panes.push((ratio, spec));
+                            i += 1;
+                        }
+                        if panes.is_empty() {
+                            return Err("no panes in layout spec".into());
+                        }
+                        Ok(match dir {
+                            "rows" => LayoutSpec::Rows(panes),
+                            _ => LayoutSpec::Cols(panes),
+                        })
+                    }
+                    _ => Err("layout spec must be a string or list".into()),
+                }
+            }
+
+            let spec_val = args.first().ok_or("set-layout: expected spec argument")?;
+            let spec = parse_spec(spec_val).map_err(|e| format!("set-layout: {e}"))?;
+            ctx.set_layout(spec);
             Ok(Value::Bool(true))
         },
     );

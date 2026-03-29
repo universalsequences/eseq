@@ -26,6 +26,11 @@ const PADDING_H: f32 = 0.6;
 const MENU_ROW_HEIGHT: f32 = 1.4;
 const MENU_PADDING_V: f32 = 0.3;
 const CHEVRON_WIDTH: f32 = 1.5;
+/// Extra right-side padding in the menu when a scrollbar is visible.
+const SCROLLBAR_WIDTH: f32 = 0.4;
+const SCROLLBAR_MARGIN: f32 = 0.15;
+/// Approximate cell width per character for proportional text width estimation.
+const APPROX_CHAR_WIDTH: f32 = 0.55;
 
 // ── Internal state ──────────────────────────────────────────────────────────
 
@@ -33,6 +38,12 @@ const CHEVRON_WIDTH: f32 = 1.5;
 struct DropdownState {
     open: bool,
     hovered_idx: Option<usize>,
+    /// Scroll offset (in content-space rows) when the menu is taller than the viewport.
+    scroll_offset: f32,
+    /// Visible menu height (set at render time, used by key_event/scroll for clamping).
+    visible_height: f32,
+    /// Full content height (set at render time).
+    content_height: f32,
 }
 
 thread_local! {
@@ -54,8 +65,65 @@ pub fn close_dropdown(widget_id: u64) {
         if let Some(state) = s.borrow_mut().get_mut(&widget_id) {
             state.open = false;
             state.hovered_idx = None;
+            state.scroll_offset = 0.0;
         }
     });
+}
+
+/// Update hovered item based on mouse position in layout-space.
+/// Returns true if the hover state changed.
+pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
+    STATES.with(|s| {
+        let mut states = s.borrow_mut();
+        let Some(state) = states.get_mut(&widget_id) else { return false };
+        if !state.open { return false; }
+
+        let overlay_rect = super::get_overlay_rect();
+        let menu_row = if let Some(rect) = overlay_rect {
+            let r = local_row - rect.row;
+            if r >= 0.0 && r < rect.height { r } else { -1.0 }
+        } else {
+            return false;
+        };
+
+        let new_idx = if menu_row >= 0.0 {
+            let content_row = menu_row + state.scroll_offset;
+            let idx = ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as isize;
+            // Derive option count from content_height
+            let option_count = ((state.content_height - MENU_PADDING_V * 2.0) / MENU_ROW_HEIGHT).round() as usize;
+            if idx >= 0 && (idx as usize) < option_count {
+                Some(idx as usize)
+            } else {
+                state.hovered_idx
+            }
+        } else {
+            state.hovered_idx
+        };
+
+        if new_idx != state.hovered_idx {
+            state.hovered_idx = new_idx;
+            super::bump_widget_state_generation();
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Scroll the open dropdown overlay by `delta_y` (trackpad pixel delta).
+/// Returns true if scroll was consumed.
+pub fn scroll_overlay(widget_id: u64, delta_y: f32) -> bool {
+    STATES.with(|s| {
+        let mut states = s.borrow_mut();
+        let Some(state) = states.get_mut(&widget_id) else { return false };
+        if !state.open || state.content_height <= state.visible_height { return false; }
+
+        let max_scroll = (state.content_height - state.visible_height).max(0.0);
+        let scroll_speed = 0.05;
+        state.scroll_offset = (state.scroll_offset - delta_y * scroll_speed).clamp(0.0, max_scroll);
+        super::bump_widget_state_generation();
+        true
+    })
 }
 
 fn get_options(props: &HashMap<String, Value>) -> Vec<String> {
@@ -83,6 +151,67 @@ fn get_selected(props: &HashMap<String, Value>) -> String {
 
 fn selected_index(options: &[String], selected: &str) -> Option<usize> {
     options.iter().position(|o| o == selected)
+}
+
+/// Computed menu placement and sizing.
+struct MenuGeometry {
+    /// Top of the visible menu in layout-space rows.
+    menu_top: f32,
+    /// Full content height (all items + padding).
+    content_height: f32,
+    /// Visible/clamped menu height (may be smaller than content_height).
+    visible_height: f32,
+    /// Maximum scroll offset.
+    max_scroll: f32,
+}
+
+/// Compute menu placement relative to trigger, clamping to viewport.
+/// When the menu doesn't fit below or above, it extends to fill the full
+/// viewport height (covering the trigger), matching native macOS behavior.
+fn compute_menu_geometry(
+    trigger_row: f32,
+    trigger_height: f32,
+    option_count: usize,
+    viewport_rows: f32,
+) -> MenuGeometry {
+    let content_height = option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
+    let gap = 0.15;
+    // Reserve space for the border so it isn't clipped by the tile scissor
+    let border_inset = 0.1;
+    let below_top = trigger_row + trigger_height + gap;
+
+    let (menu_top, visible_height) = if below_top + content_height + border_inset <= viewport_rows {
+        // Fits below trigger
+        (below_top, content_height)
+    } else if trigger_row - content_height - gap >= border_inset {
+        // Fits above trigger
+        (trigger_row - content_height - gap, content_height)
+    } else {
+        // Doesn't fit either way — fill viewport minus border insets
+        let h = (viewport_rows - border_inset * 2.0).min(content_height);
+        (border_inset, h)
+    };
+
+    let max_scroll = (content_height - visible_height).max(0.0);
+
+    MenuGeometry { menu_top, content_height, visible_height, max_scroll }
+}
+
+/// Ensure scroll offset keeps `hovered_idx` visible within the menu viewport.
+fn ensure_visible(state: &mut DropdownState, option_count: usize) {
+    let Some(idx) = state.hovered_idx else { return };
+    if state.visible_height <= 0.0 { return; }
+    let content_height = option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
+    let max_scroll = (content_height - state.visible_height).max(0.0);
+    let item_top = MENU_PADDING_V + idx as f32 * MENU_ROW_HEIGHT;
+    let item_bottom = item_top + MENU_ROW_HEIGHT;
+
+    if item_top < state.scroll_offset {
+        state.scroll_offset = item_top;
+    } else if item_bottom > state.scroll_offset + state.visible_height {
+        state.scroll_offset = item_bottom - state.visible_height;
+    }
+    state.scroll_offset = state.scroll_offset.clamp(0.0, max_scroll);
 }
 
 // ── Widget definition ───────────────────────────────────────────────────────
@@ -135,21 +264,27 @@ impl WidgetDefinition for DropdownWidget {
         let options = get_options(&node.props);
 
         if state.open {
-            // Check if click is in the menu area (overlay)
-            let scroll_offset = super::scroll::any_active_scroll_offset();
-            let screen_row = node.rect.row - scroll_offset;
-            let menu_top = screen_row + node.rect.height;
-            let menu_row = local_row - scroll_offset - menu_top;
+            // Use the overlay rect (registered at render time) for hit-testing.
+            // The overlay rect is in screen-space; local_row is in layout-space.
+            let overlay_rect = super::get_overlay_rect();
+            let menu_row = if let Some(rect) = overlay_rect {
+                let r = local_row - rect.row;
+                if r >= 0.0 && r < rect.height { r } else { -1.0 }
+            } else {
+                -1.0
+            };
 
             if menu_row >= 0.0 {
+                // Account for scroll offset: the visible window starts at scroll_offset
+                let content_row = menu_row + state.scroll_offset;
                 let item_idx =
-                    ((menu_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as usize;
+                    ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as usize;
                 if item_idx < options.len() {
                     state.open = false;
                     state.hovered_idx = None;
+                    state.scroll_offset = 0.0;
                     set_state(node.widget_id, state);
                     super::clear_overlay();
-                    // Return selected option
                     return MouseEventOutcome::Dispatch(WidgetEvent::Custom(
                         Value::String(options[item_idx].clone()),
                     ));
@@ -159,6 +294,7 @@ impl WidgetDefinition for DropdownWidget {
             // Click on trigger area or outside menu → close
             state.open = false;
             state.hovered_idx = None;
+            state.scroll_offset = 0.0;
             set_state(node.widget_id, state);
             super::clear_overlay();
             MouseEventOutcome::Consume
@@ -166,6 +302,7 @@ impl WidgetDefinition for DropdownWidget {
             // Open the dropdown
             state.open = true;
             state.hovered_idx = selected_index(&options, &get_selected(&node.props));
+            state.scroll_offset = 0.0;
             set_state(node.widget_id, state);
             MouseEventOutcome::Consume
         }
@@ -202,6 +339,7 @@ impl WidgetDefinition for DropdownWidget {
                     .map(|i| (i + 1).min(options.len() - 1))
                     .unwrap_or(0);
                 state.hovered_idx = Some(next);
+                ensure_visible(&mut state, options.len());
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
@@ -211,6 +349,7 @@ impl WidgetDefinition for DropdownWidget {
                     .map(|i| i.saturating_sub(1))
                     .unwrap_or(0);
                 state.hovered_idx = Some(prev);
+                ensure_visible(&mut state, options.len());
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
@@ -219,11 +358,13 @@ impl WidgetDefinition for DropdownWidget {
                     let value = options.get(idx).cloned().unwrap_or_default();
                     state.open = false;
                     state.hovered_idx = None;
+                    state.scroll_offset = 0.0;
                     set_state(node.widget_id, state);
                     super::clear_overlay();
                     Some(WidgetEvent::Custom(Value::String(value)))
                 } else {
                     state.open = false;
+                    state.scroll_offset = 0.0;
                     set_state(node.widget_id, state);
                     super::clear_overlay();
                     Some(WidgetEvent::Custom(Value::Nil))
@@ -232,6 +373,7 @@ impl WidgetDefinition for DropdownWidget {
             KeyCode::Esc => {
                 state.open = false;
                 state.hovered_idx = None;
+                state.scroll_offset = 0.0;
                 set_state(node.widget_id, state);
                 super::clear_overlay();
                 Some(WidgetEvent::Custom(Value::Nil))
@@ -300,7 +442,7 @@ impl WidgetDefinition for DropdownWidget {
     ) -> Vec<MetalPrimitive> {
         let selected = get_selected(&node.props);
         let options = get_options(&node.props);
-        let state = get_state(node.widget_id);
+        let mut state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
@@ -447,28 +589,82 @@ impl WidgetDefinition for DropdownWidget {
 
         // ── Menu overlay (when open) ──
         if state.open && !options.is_empty() {
-            let scroll_offset = super::scroll::any_active_scroll_offset();
-            let screen_row = node.rect.row - scroll_offset;
-            let menu_top = screen_row + node.rect.height + 0.15;
-            let menu_height =
-                options.len() as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
+            let parent_scroll_offset = super::scroll::any_active_scroll_offset();
+            let screen_row = node.rect.row - parent_scroll_offset;
+            let viewport_rows = viewport.tile_content_rows;
+
+            let geo = compute_menu_geometry(
+                screen_row,
+                node.rect.height,
+                options.len(),
+                viewport_rows,
+            );
+
+            // Persist geometry so key_event/scroll can operate correctly
+            state.visible_height = geo.visible_height;
+            state.content_height = geo.content_height;
+            state.scroll_offset = state.scroll_offset.clamp(0.0, geo.max_scroll);
+            // Ensure the hovered item is visible (e.g. when opening with a far-down selection)
+            ensure_visible(&mut state, options.len());
+            set_state(node.widget_id, state.clone());
+
+            // Menu width: at least trigger width, expanded to fit longest option
+            let needs_scrollbar = geo.content_height > geo.visible_height;
+            let check_col_width = 1.5; // space for ✓ mark
+            let text_left_pad = PADDING_H + check_col_width;
+            let scrollbar_pad = if needs_scrollbar { SCROLLBAR_WIDTH + SCROLLBAR_MARGIN * 2.0 } else { 0.0 };
+            let max_option_width = options.iter()
+                .map(|o| o.chars().count() as f32 * APPROX_CHAR_WIDTH)
+                .fold(0.0_f32, f32::max);
+            let content_width = text_left_pad + max_option_width + PADDING_H + scrollbar_pad;
+            let menu_width = content_width.max(node.rect.width);
+
             let menu_rect = Rect {
-                row: menu_top,
+                row: geo.menu_top,
                 col: node.rect.col,
-                width: node.rect.width,
-                height: menu_height,
+                width: menu_width,
+                height: geo.visible_height,
             };
 
-            // Register overlay for hit-testing
+            // Register overlay for hit-testing (visible rect only)
             super::set_overlay(node.widget_id, menu_rect);
 
-            // Menu background
-            emit_rounded_rect_overlay(menu_rect, menu_bg, 0.15, viewport);
+            // Menu border (slightly larger rect behind the background)
+            let border_width = 0.06;
+            let border_rect = Rect {
+                row: menu_rect.row - border_width,
+                col: menu_rect.col - border_width,
+                width: menu_rect.width + border_width * 2.0,
+                height: menu_rect.height + border_width * 2.0,
+            };
+            let border_color = Color { r: 0.45, g: 0.45, b: 0.48, a: 1.0 };
+            emit_rounded_rect_overlay(border_rect, border_color, 0.2, viewport);
 
-            // Menu items
+            // Menu background (slightly inset so the border is visible)
+            let inset = 0.06;
+            let bg_rect = Rect {
+                row: menu_rect.row + inset,
+                col: menu_rect.col + inset,
+                width: menu_rect.width - inset * 2.0,
+                height: menu_rect.height - inset * 2.0,
+            };
+            emit_rounded_rect_overlay(bg_rect, menu_bg, 0.12, viewport);
+
+            // Menu items — only emit those within the visible scroll window
             let sel_idx = selected_index(&options, &selected);
+            let scroll_off = state.scroll_offset;
             for (i, option) in options.iter().enumerate() {
-                let item_y = menu_top + MENU_PADDING_V + i as f32 * MENU_ROW_HEIGHT;
+                // Item position in content space (relative to menu content start)
+                let content_y = MENU_PADDING_V + i as f32 * MENU_ROW_HEIGHT;
+                // Position in visible space (subtract scroll, add menu_top)
+                let visible_y = content_y - scroll_off;
+
+                // Skip items fully outside the visible window
+                if visible_y + MENU_ROW_HEIGHT < 0.0 || visible_y >= geo.visible_height {
+                    continue;
+                }
+
+                let item_y = geo.menu_top + visible_y;
 
                 // Hover/selected highlight
                 let is_hovered = state.hovered_idx == Some(i);
@@ -476,7 +672,7 @@ impl WidgetDefinition for DropdownWidget {
                     let hl_rect = Rect {
                         row: item_y,
                         col: node.rect.col + 0.15,
-                        width: node.rect.width - 0.3,
+                        width: menu_width - 0.3,
                         height: MENU_ROW_HEIGHT,
                     };
                     emit_rounded_rect_overlay(hl_rect, hover_bg, 0.0, viewport);
@@ -508,6 +704,30 @@ impl WidgetDefinition for DropdownWidget {
                         bg: transparent,
                     },
                 ));
+            }
+
+            // Scrollbar indicator (when content is taller than visible area)
+            if needs_scrollbar {
+                let track_margin = SCROLLBAR_MARGIN;
+                let bar_col = node.rect.col + menu_width - SCROLLBAR_WIDTH - track_margin;
+                let track_top = geo.menu_top + track_margin;
+                let track_height = geo.visible_height - track_margin * 2.0;
+                let thumb_ratio = (geo.visible_height / geo.content_height).clamp(0.05, 1.0);
+                let thumb_height = (track_height * thumb_ratio).max(1.0);
+                let scroll_ratio = if geo.max_scroll > 0.0 {
+                    scroll_off / geo.max_scroll
+                } else {
+                    0.0
+                };
+                let thumb_top = track_top + scroll_ratio * (track_height - thumb_height);
+                let thumb_rect = Rect {
+                    row: thumb_top,
+                    col: bar_col,
+                    width: SCROLLBAR_WIDTH,
+                    height: thumb_height,
+                };
+                let thumb_color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.25 };
+                emit_rounded_rect_overlay(thumb_rect, thumb_color, 0.15, viewport);
             }
         } else if !state.open {
             // Ensure overlay is cleared when closed

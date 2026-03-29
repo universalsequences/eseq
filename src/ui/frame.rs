@@ -255,7 +255,7 @@ pub fn build_render_frame(
     let highlight_spans = editor.active_highlight_spans();
 
     let buf = editor.active_buffer();
-    let scroll_top = buf.scroll_top;
+    let scroll_top = buf.scroll_top.min(buf.lines.len());
     let match_pos = matching_paren(&buf.lines, buf.cursor);
     let (cursor_row, cursor_col) = buf.cursor;
 
@@ -479,29 +479,22 @@ fn build_tiled_render_frame_impl(
         .map(|(tile_id, rect)| {
             let leaf = editor.tile_root.find_leaf(*tile_id).unwrap();
             let buf = &editor.buffers[leaf.buffer_idx];
-            let frame_key = (
-                buf.revision,
-                leaf.layout_revision,
-                buf.scroll_top,
-                buf.view_mode,
-            );
-            let cached = leaf
-                .cached_inactive_frame
-                .as_ref()
-                .filter(|(key, _)| *key == frame_key)
-                .map(|(_, frame)| frame.clone());
             (
                 *tile_id,
                 *rect,
                 leaf.buffer_idx,
                 leaf.show_status,
+                leaf.show_border,
                 leaf.focused_widget_id,
                 leaf.widget_scroll_top,
                 leaf.widget_scroll_left,
                 leaf.layout_revision,
                 leaf.cached_layout.clone(),
-                frame_key,
-                cached,
+                buf.id,
+                buf.revision,
+                buf.scroll_top,
+                buf.view_mode,
+                leaf.cached_inactive_frame.clone(),
             )
         })
         .collect();
@@ -515,13 +508,17 @@ fn build_tiled_render_frame_impl(
         rect,
         buffer_idx,
         show_status,
+        show_border,
         focused_widget_id,
         widget_scroll_top,
         widget_scroll_left,
         layout_revision,
         cached_layout,
-        frame_key,
-        cached,
+        buffer_id,
+        buffer_revision,
+        buffer_scroll_top,
+        view_mode,
+        cached_frame,
     ) in tile_info
     {
         let is_active = tile_id == active_tile;
@@ -547,6 +544,20 @@ fn build_tiled_render_frame_impl(
             };
         }
 
+        let frame_key = (
+            buffer_id,
+            buffer_revision,
+            layout_revision,
+            buffer_scroll_top,
+            inner_width,
+            inner_height,
+            view_mode,
+        );
+        let cached = cached_frame
+            .as_ref()
+            .filter(|(key, _)| *key == frame_key)
+            .map(|(_, frame)| frame.clone());
+
         if is_active {
             // Active tile: use full build_render_frame (has highlights, etc.)
             let frame = build_render_frame(editor, inner_width, inner_height);
@@ -555,6 +566,7 @@ fn build_tiled_render_frame_impl(
                 rect,
                 is_active: true,
                 show_status,
+                show_border,
                 frame,
             });
         } else {
@@ -586,6 +598,7 @@ fn build_tiled_render_frame_impl(
                 rect,
                 is_active: false,
                 show_status,
+                show_border,
                 frame,
             });
         }
@@ -598,15 +611,15 @@ fn build_tiled_render_frame_impl(
 fn build_inactive_tile_frame_from_parts(
     buffer: &Buffer,
     focused_widget_id: Option<u64>,
-    widget_scroll_top: u16,
-    widget_scroll_left: u16,
+    widget_scroll_top: f32,
+    widget_scroll_left: f32,
     layout_revision: u64,
     cached_layout: Option<std::sync::Arc<crate::layout::LayoutNode>>,
     symbols: &[String],
     viewport_width: usize,
     viewport_height: usize,
 ) -> RenderFrame {
-    let scroll_top = buffer.scroll_top;
+    let scroll_top = buffer.scroll_top.min(buffer.lines.len());
     let (cursor_row, cursor_col) = buffer.cursor;
     let visible = scroll_top..(scroll_top + viewport_height).min(buffer.lines.len());
 

@@ -252,18 +252,19 @@ fn blit_cell_buffer_scrolled(
     cell_buf: &widget_render::CellBuffer,
     frame: &mut Frame,
     area: Rect,
-    scroll_top: u16,
-    scroll_left: u16,
+    scroll_top: f32,
+    scroll_left: f32,
 ) {
     let buf = frame.buffer_mut();
-    for (vis_row, src_row) in (scroll_top as usize..).enumerate() {
+    for (vis_row, src_row) in (scroll_top.floor() as usize..).enumerate() {
         if vis_row >= area.height as usize || src_row >= cell_buf.cells.len() {
             break;
         }
         let row = &cell_buf.cells[src_row];
-        for (col_idx, cell_opt) in row.iter().enumerate().skip(scroll_left as usize) {
+        let scroll_left_usize = scroll_left.floor() as usize;
+        for (col_idx, cell_opt) in row.iter().enumerate().skip(scroll_left_usize) {
             if let Some(cell) = cell_opt {
-                let x = area.x + (col_idx - scroll_left as usize) as u16;
+                let x = area.x + (col_idx - scroll_left_usize) as u16;
                 let y = area.y + vis_row as u16;
                 if x < area.right() && y < area.bottom() {
                     let ratatui_cell = &mut buf[(x, y)];
@@ -323,6 +324,7 @@ pub fn render_tiled(frame: &mut Frame, tiled: &TiledRenderFrame) {
             tile_area,
             tile.is_active,
             tile.show_status,
+            tile.show_border,
         );
     }
 
@@ -354,6 +356,7 @@ fn render_tile_in_area(
     tile_area: Rect,
     is_active: bool,
     show_status: bool,
+    show_border: bool,
 ) {
     let border_color = if is_active {
         to_rcolor(crate::theme::BORDER_ACTIVE())
@@ -379,11 +382,14 @@ fn render_tile_in_area(
         .map(|row| cells_to_line(row))
         .collect();
 
-    let text_widget = Paragraph::new(text_lines).block(
+    let block = if show_border {
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(border_color)),
-    );
+            .border_style(Style::default().fg(border_color))
+    } else {
+        Block::default().borders(Borders::NONE)
+    };
+    let text_widget = Paragraph::new(text_lines).block(block);
     frame.render_widget(text_widget, content_area);
 
     // ── Cursor (only for active tile) ──────────────────────────────────────

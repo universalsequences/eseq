@@ -132,19 +132,25 @@
      (sdf/rounded-rect (* aspect value_t) 0.64 0.24)))
 
 ;; Vertical slider fill bar with material and bipolar (origin_t) support.
-;; Normalizes y to [-1,1] so material gradients are in the same range as hslider.
-;; NOTE: vslider material rendering has known visual issues with the
-;; non-isotropic coordinate system — tabling for future improvement.
+;; Compute the fill shape in UV-like local coordinates so `d` matches the
+;; hardcoded slider geometry more closely. This keeps material edge logic
+;; from collapsing into an outline on tall, narrow sliders.
 (defmacro __vslider-fill-with-material (mat)
-  `(let ((y (* y (min aspect 1.0))))
-     (let ((__fill_lo (min value_t origin_t))
-           (__fill_hi (max value_t origin_t))
-           (__fill_span (- __fill_hi __fill_lo))
-           (__center_y (- 1.0 (+ __fill_lo __fill_hi))))
-       (sdf/fill
+  `(let ((__fill_lo (min value_t origin_t))
+         (__fill_hi (max value_t origin_t))
+         (__fill_span (- __fill_hi __fill_lo))
+         (__center_y (* 0.5 (- 1.0 (+ __fill_lo __fill_hi))))
+         (__half_h (* 0.5 __fill_span))
+         (__half_w (* 0.32 aspect))
+         (__radius (min (* 0.12 aspect) __half_h)))
+     (sdf/fill
+       (let ((x (* 0.5 aspect x))
+             (y (* 0.5 aspect y)))
          (sdf/translate 0.0 __center_y
-           (sdf/rounded-rect 0.64 __fill_span 0.12))
-         ,mat))))
+           (sdf/rounded-rect __half_w
+                             __half_h
+                             __radius)))
+       ,mat)))
 
 ;; All-in-one lit material color with curvature control.
 ;; edge-min/edge-max control the smoothstep on the SDF before normal estimation:

@@ -25,10 +25,19 @@ pub struct TileLeaf {
     pub id: TileId,
     pub buffer_idx: usize,
     pub show_status: bool,
+    pub show_border: bool,
+    /// Minimum tile width in cells (enforced during divider drag).
+    pub min_width: Option<f32>,
+    /// Minimum tile height in cells (enforced during divider drag).
+    pub min_height: Option<f32>,
+    /// Maximum tile width in cells.
+    pub max_width: Option<f32>,
+    /// Maximum tile height in cells.
+    pub max_height: Option<f32>,
     // Per-tile interaction state (moved from Editor)
     pub focused_widget_id: Option<u64>,
-    pub widget_scroll_top: u16,
-    pub widget_scroll_left: u16,
+    pub widget_scroll_top: f32,
+    pub widget_scroll_left: f32,
     pub active_widget_gesture: Option<WidgetGesture>,
     pub last_widget_click: Option<WidgetClick>,
     pub hit_grid_cache: Option<CachedHitGrid>,
@@ -37,9 +46,10 @@ pub struct TileLeaf {
     pub cached_layout: Option<Arc<LayoutNode>>,
     pub layout_revision: u64,
     /// Cached RenderFrame for inactive tile optimization.
-    /// Key is (buffer_revision, layout_revision, scroll_top, view_mode).
+    /// Key is (buffer_id, buffer_revision, layout_revision, scroll_top,
+    /// viewport_width, viewport_height, view_mode).
     pub cached_inactive_frame: Option<(
-        (u64, u64, usize, crate::editor::ViewMode),
+        (BufferId, u64, u64, usize, usize, usize, crate::editor::ViewMode),
         crate::backend::RenderFrame,
     )>,
 }
@@ -79,7 +89,7 @@ pub struct WidgetClick {
 
 pub struct CachedHitGrid {
     pub layout_revision: u64,
-    pub scroll_top: u16,
+    pub scroll_top: f32,
     pub grid: HitGrid,
 }
 
@@ -100,9 +110,14 @@ impl TileLeaf {
             id,
             buffer_idx,
             show_status: true,
+            show_border: true,
+            min_width: None,
+            min_height: None,
+            max_width: None,
+            max_height: None,
             focused_widget_id: None,
-            widget_scroll_top: 0,
-            widget_scroll_left: 0,
+            widget_scroll_top: 0.0,
+            widget_scroll_left: 0.0,
             active_widget_gesture: None,
             last_widget_click: None,
             hit_grid_cache: None,
@@ -127,6 +142,50 @@ impl TileNode {
                 r.extend(s.b.compute_rects(b_rect));
                 r
             }
+        }
+    }
+
+    /// Compute the minimum width of this subtree in cells.
+    pub fn min_width(&self) -> f32 {
+        match self {
+            TileNode::Leaf(leaf) => leaf.min_width.unwrap_or(0.0),
+            TileNode::Split(s) => match s.dir {
+                SplitDir::Vertical => s.a.min_width() + s.b.min_width(),
+                SplitDir::Horizontal => s.a.min_width().max(s.b.min_width()),
+            },
+        }
+    }
+
+    /// Compute the minimum height of this subtree in cells.
+    pub fn min_height(&self) -> f32 {
+        match self {
+            TileNode::Leaf(leaf) => leaf.min_height.unwrap_or(0.0),
+            TileNode::Split(s) => match s.dir {
+                SplitDir::Horizontal => s.a.min_height() + s.b.min_height(),
+                SplitDir::Vertical => s.a.min_height().max(s.b.min_height()),
+            },
+        }
+    }
+
+    /// Compute the maximum width of this subtree in cells.
+    pub fn max_width(&self) -> f32 {
+        match self {
+            TileNode::Leaf(leaf) => leaf.max_width.unwrap_or(f32::MAX),
+            TileNode::Split(s) => match s.dir {
+                SplitDir::Vertical => s.a.max_width() + s.b.max_width(),
+                SplitDir::Horizontal => s.a.max_width().min(s.b.max_width()),
+            },
+        }
+    }
+
+    /// Compute the maximum height of this subtree in cells.
+    pub fn max_height(&self) -> f32 {
+        match self {
+            TileNode::Leaf(leaf) => leaf.max_height.unwrap_or(f32::MAX),
+            TileNode::Split(s) => match s.dir {
+                SplitDir::Horizontal => s.a.max_height() + s.b.max_height(),
+                SplitDir::Vertical => s.a.max_height().min(s.b.max_height()),
+            },
         }
     }
 
@@ -156,6 +215,21 @@ impl TileNode {
                 let mut ids = s.a.leaf_ids();
                 ids.extend(s.b.leaf_ids());
                 ids
+            }
+        }
+    }
+
+    /// Clear `focused_widget_id` on every leaf except the one with `keep_id`.
+    pub fn clear_focus_except(&mut self, keep_id: TileId) {
+        match self {
+            TileNode::Leaf(leaf) => {
+                if leaf.id != keep_id {
+                    leaf.focused_widget_id = None;
+                }
+            }
+            TileNode::Split(s) => {
+                s.a.clear_focus_except(keep_id);
+                s.b.clear_focus_except(keep_id);
             }
         }
     }
@@ -330,7 +404,7 @@ impl TileNode {
 
 /// Divide a rect by direction and ratio.
 pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
-    let ratio = ratio.clamp(0.1, 0.9);
+    let ratio = ratio.clamp(0.0, 1.0);
     match dir {
         SplitDir::Horizontal => {
             // Stacked top/bottom — split height
