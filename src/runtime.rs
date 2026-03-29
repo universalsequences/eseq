@@ -1415,9 +1415,6 @@ impl Runtime {
                 .push(crate::layout::format_layout_tree_lines(&updated, 0));
             self.current_layout = Some(Arc::new(updated));
             self.dirty_widget_ids = dirty_widget_ids;
-            if !self.dirty_widget_ids.is_empty() {
-                self.layout_revision = self.layout_revision.wrapping_add(1);
-            }
             return;
         }
         let engine = if let Some(measurer) = self.text_measurer.as_deref() {

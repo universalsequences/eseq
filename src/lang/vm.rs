@@ -94,6 +94,7 @@ pub struct PendingWidgetTree {
 pub struct ReactiveDag {
     pub nodes: HashMap<NodeId, ReactiveNode>,
     pub edges: HashMap<NodeId, HashSet<NodeId>>,
+    pub dirty_nodes: HashSet<NodeId>,
     pub next_id: NodeId,
 }
 
@@ -912,6 +913,7 @@ impl ReactiveDag {
         Self {
             nodes: HashMap::new(),
             edges: HashMap::new(),
+            dirty_nodes: HashSet::new(),
             next_id: 0,
         }
     }
@@ -934,6 +936,7 @@ impl ReactiveDag {
     pub fn remove_node(&mut self, id: NodeId) {
         self.nodes.remove(&id);
         self.edges.remove(&id);
+        self.dirty_nodes.remove(&id);
         for dependents in self.edges.values_mut() {
             dependents.remove(&id);
         }
@@ -953,6 +956,19 @@ impl ReactiveDag {
             match node {
                 ReactiveNode::Derived { dirty, .. } | ReactiveNode::Effect { dirty, .. } => {
                     *dirty = true;
+                    self.dirty_nodes.insert(id);
+                }
+                ReactiveNode::Source { .. } => {}
+            }
+        }
+    }
+
+    pub fn clear_dirty(&mut self, id: NodeId) {
+        if let Some(node) = self.nodes.get_mut(&id) {
+            match node {
+                ReactiveNode::Derived { dirty, .. } | ReactiveNode::Effect { dirty, .. } => {
+                    *dirty = false;
+                    self.dirty_nodes.remove(&id);
                 }
                 ReactiveNode::Source { .. } => {}
             }
@@ -960,18 +976,7 @@ impl ReactiveDag {
     }
 
     pub fn topo_sort_dirty(&self) -> Vec<NodeId> {
-        let dirty = self
-            .nodes
-            .iter()
-            .filter_map(|(id, node)| match node {
-                ReactiveNode::Derived { dirty, .. } | ReactiveNode::Effect { dirty, .. }
-                    if *dirty =>
-                {
-                    Some(*id)
-                }
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
+        let dirty = self.dirty_nodes.clone();
 
         if dirty.is_empty() {
             return vec![];
@@ -1457,6 +1462,9 @@ impl VM {
             ..
         }) = self.dag.nodes.get_mut(&source_id)
         {
+            if *current_value == value {
+                return;
+            }
             *current_value = value;
             let dependents = dependents.clone().into_iter().collect::<Vec<_>>();
             for dependent in dependents {
@@ -2005,20 +2013,24 @@ impl VM {
                     let _ = self.tracking_stack.pop();
                     let new_value = computed.borrow().clone();
                     let mut changed_dependents = Vec::new();
+                    let mut should_clear_dirty = false;
 
                     if let Some(ReactiveNode::Derived {
                         value,
                         dependents,
-                        dirty,
                         ..
                     }) = self.dag.nodes.get_mut(&node_id)
                     {
                         let changed = *value != new_value;
                         *value = new_value.clone();
-                        *dirty = false;
+                        should_clear_dirty = true;
                         if changed {
                             changed_dependents = dependents.iter().copied().collect();
                         }
+                    }
+
+                    if should_clear_dirty {
+                        self.dag.clear_dirty(node_id);
                     }
 
                     for dependent in changed_dependents {
@@ -2035,11 +2047,7 @@ impl VM {
                 }
                 OpCode::EffectEnd(node_id) => {
                     let _ = self.tracking_stack.pop();
-                    if let Some(ReactiveNode::Effect { dirty, .. }) =
-                        self.dag.nodes.get_mut(&node_id)
-                    {
-                        *dirty = false;
-                    }
+                    self.dag.clear_dirty(node_id);
                     frames.last_mut().unwrap().pc += 1;
                 }
                 OpCode::LoadReactive(ns_idx, field_idx) => {
