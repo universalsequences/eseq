@@ -151,32 +151,32 @@
           :color :white
           :bg :transparent)))))
 
+(def sbrowser-create-items ()
+  (append
+    (list (dict :label "Sampler" :kind "sampler"))
+    (map (lambda (name)
+      (dict :label name :kind "instrument"))
+      (seq-saved-instruments))))
+
+(def sbrowser-select-create-item (item)
+  (if (= (get item :kind) "sampler")
+    (sbrowser-enter-create-sampler-mode)
+    (sbrowser-add-instrument-track (get item :label))))
+
 (def sbrowser-create-picker ()
   (box :background "browser-panel-bg" :padding 0 :flex 1
     (scroll :flex 1
-      (v-stack :gap 0.5 :padding 1
-        (label "Choose a sound source"
-          :font-size 13
-          :color :white
-          :bg :transparent)
-        (box :bg :blue :height 2.6 :padding 0.75
-          :on-click |x y r| (sbrowser-enter-create-sampler-mode)
-          (v-stack :gap 0.15
-            (label "Sampler"
-              :font-size 12
-              :color :white
-              :bg :transparent)
-            (label "Browse samples, then click one to create the track."
-              :font-size 9
-              :color :white
-              :bg :transparent)))
-        (each (seq-saved-instruments) |name|
-          (box :bg :dark-gray :height 2.2 :padding 0.6
-            :on-click |x y r| (sbrowser-add-instrument-track name)
-            (label name
-              :font-size 11
-              :color :white
-              :bg :transparent)))))))
+      (tree
+        :row-bg-even  '(0.16 0.16 0.17)
+        :row-bg-odd   '(0.19 0.19 0.20)
+        :selected-bg  '(0.00 0.35 0.82)
+        :folder-color '(0.88 0.88 0.89)
+        :file-color   '(0.88 0.88 0.89)
+        :chevron-color '(0.50 0.50 0.53)
+        :items (sbrowser-create-items)
+        :expand-all false
+        :on-select (lambda (item) (sbrowser-select-create-item item))
+        :on-activate (lambda (item) (sbrowser-select-create-item item))))))
 
 (def sbrowser-presets-panel ()
   (box :background "browser-panel-bg" :padding 0 :flex 1
@@ -195,6 +195,7 @@
           :file-color   '(0.88 0.88 0.89)
           :chevron-color '(0.50 0.50 0.53)
           :items SEQ.sidebar-preset-tree
+          :selected-label SEQ.sidebar-loaded-preset
           :expand-all false
           :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
           :on-activate (lambda (item) (sbrowser-load-preset (get item :label))))))))
@@ -221,7 +222,8 @@
                 :folder-color '(0.88 0.88 0.89)
                 :file-color   '(0.62 0.62 0.65)
                 :chevron-color '(0.50 0.50 0.53)
-                :items (seq-filter-sample-tree sbrowser-filter SEQ.sidebar-selected-sample)
+                :items (seq-filter-sample-tree sbrowser-filter)
+                :selected-path SEQ.sidebar-selected-sample
                 :expand-all (not (= sbrowser-filter ""))
                 :on-select (lambda (item) (sbrowser-select-item item))
                 :on-activate (lambda (item) (sbrowser-select-item item))))))))))

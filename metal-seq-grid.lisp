@@ -11,7 +11,7 @@
 (bind-key "C-p" "seq-toggle-play")
 (bind-key "ESC" "seq-clear-selection")
 
-; 0=vel 1=dur 2=transpose 3=pan
+; 0=vel 1=dur 2=transpose 3=pan 4=sync
 (defstate param-mode 0)
 
 (def page-size 16)
@@ -73,42 +73,52 @@
   (if (= param-mode 0) SEQ.velocities
     (if (= param-mode 1) SEQ.durations
       (if (= param-mode 2) SEQ.transposes
-        SEQ.pans))))
+        (if (= param-mode 3) SEQ.pans
+          SEQ.syncs)))))
 
 (def param-min ()
   (if (= param-mode 0) 0
     (if (= param-mode 1) 0.1
       (if (= param-mode 2) -12
-        -1))))
+        (if (= param-mode 3) -1
+          0)))))
 
 (def param-max ()
   (if (= param-mode 0) 1
     (if (= param-mode 1) 2
       (if (= param-mode 2) 12
-        1))))
+        (if (= param-mode 3) 1
+          (- (len SEQ.sync-labels) 1))))))
 
 (def param-keyword ()
   (if (= param-mode 0) :velocity
     (if (= param-mode 1) :duration
       (if (= param-mode 2) :transpose
-        :pan))))
+        (if (= param-mode 3) :pan
+          :sync)))))
 
 (def param-color ()
   (if (= param-mode 0) :blue
     (if (= param-mode 1) :green
       (if (= param-mode 2) :yellow
-        :red))))
+        (if (= param-mode 3) :red
+          :green)))))
 
 (def param-name ()
   (if (= param-mode 0) "Velocity"
     (if (= param-mode 1) "Duration"
       (if (= param-mode 2) "Transpose"
-        "Pan"))))
+        (if (= param-mode 3) "Pan"
+          "Sync")))))
 
 (def param-origin ()
   (if (= param-mode 2) 0
     (if (= param-mode 3) 0
-      (param-min))))
+      (if (= param-mode 4) 0
+        (param-min)))))
+
+(def sync-current-label ()
+  (nth SEQ.sync-labels (floor (+ 0.5 (nth SEQ.syncs (current-step))))))
 
 ;; ── Step cursor highlight ──
 
@@ -199,6 +209,16 @@
                  (if (= plocked 1) (rgba 0.75 0.15 0.5 1.0) (rgba 0.3 0.3 0.85 1.0))
                  (if (= plocked 1) (rgba 0.4 0.135 0.95 1.0) (rgba 0.90 0.50 0.82 1.0))))))))))
 
+(defwidget page-playhead-dot
+  :width 0.7 :height 0.7
+  :state (active)
+  :shader
+  (if (= active 1)
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.45)
+        (material :color (rgba 1 1 1 1))))
+    (rgba 0 0 0 0)))
+
 ;; ── Main UI ──
 
 (effect-buffer "*metal*"
@@ -231,6 +251,12 @@
         :on-click |x y r| (set! param-mode 3)
         (label "pan" :font-size 12
           :color (if (= param-mode 3) :white :gray)
+          :bg :transparent))
+      (box :width 8 :height 2
+        :bg (if (= param-mode 4) :green :dark-gray)
+        :on-click |x y r| (set! param-mode 4)
+        (label "syn" :font-size 12
+          :color (if (= param-mode 4) :white :gray)
           :bg :transparent)))
     
     ; Step columns: vslider + aqua step toggle + step number
@@ -249,9 +275,15 @@
                 nil))
             (v-stack :align :center :gap 0.5
               (vslider :height 4
+                :width (if (= param-mode 4) 3 2)
                 :min (param-min) :max (param-max)
                 :origin (param-origin)
                 :value (nth (param-values) step)
+                :items (if (= param-mode 4) SEQ.sync-labels '())
+                :font-size 11
+                :color (if visible
+                         (if (nth SEQ.steps step) :white :gray)
+                         :gray)
                 :material (aqua-slider-material)
                 :on-change (lambda (v)
                   (if visible
@@ -280,25 +312,28 @@
       (box :width 11.5 :height 1.3
         (label (fmt "Step {}  {}" (+ (current-step) 1) (param-name))
           :font-size 11 :color :gray :bg :transparent))
-      (number-picker :value (nth (param-values) (current-step))
-        :min (param-min) :max (param-max) :decimals 2
-        :on-change (lambda (v) (seq-set-step-param (current-step) (param-keyword) v))
-        :width 8 :height 1.3 :font-size 11)
-      (box :background "transport-btn-bg" :padding 0 :height 1.5
-        (box :width (page-panel-width) :height 1.4 :padding 0.0525
+      (if (= param-mode 4)
+        (box :width 8 :height 1.3
+          (label (sync-current-label)
+            :font-size 11 :color :white :bg :transparent))
+        (number-picker :value (nth (param-values) (current-step))
+          :min (param-min) :max (param-max) :decimals 2
+          :on-change (lambda (v) (seq-set-step-param (current-step) (param-keyword) v))
+          :width 8 :height 1.3 :font-size 11))
+      (box :background "transport-btn-bg" :padding 0 :height 1.8
+        (box :width (page-panel-width) :height 1.7 :padding 0.0525
           (h-stack :gap 0.4 :padding 0.3
             (h-stack :gap 0.4 
               (each (range 0 (page-count)) |page|
-                (v-stack :gap 0.06 :align :center :height 1.25
-                  (box :width page-button-width  :align :center
+                (box :width page-button-width :height 1.25 :align :center
                     :bg (if (= page (visible-page)) :blue :dark-gray)
                     :on-click |x y r| (goto-page page)
-                    (label (str (+ page 1))
-                      :font-size 10
-                      :color (if (= page (visible-page)) :white :gray)
-                      :bg :transparent))
-                  (box :width 1.4 :height 0.08
-                    :bg (if (= page (playhead-page)) :white :transparent)))))))))
+                    (v-stack :gap 0.02 :align :center
+                      (label (str (+ page 1))
+                        :font-size 10
+                        :color (if (= page (visible-page)) :white :gray)
+                        :bg :transparent)
+                      (page-playhead-dot :active (if (= page (playhead-page)) 1 0))))))))))
 
     ; Track parameters — row 1
     (h-stack :gap 1.5
@@ -409,10 +444,10 @@
 ; Layout: samples | metal | mixer on top, fx on bottom
 (set-layout '(:rows
   0.05 (:buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-  0.8 (:cols 0.2 (:buf "*samples*" :hide-status true :borderless true :min-width 25 :max-width 40)
+  0.8 (:cols 0.2 (:buf "*samples*" :hide-status true :borderless true :min-width 25 :max-width 32)
          0.6 (:buf "*metal*" :hide-status false :min-width 25)
-         0.2 (:buf "*mixer*" :hide-status true :borderless true :min-width 25 :max-width 30))
-  0.2 (:buf "*fx*" :hide-status true :min-height 11 :max-height 11)))
+         0.2 (:buf "*mixer*" :hide-status true :borderless true :min-width 25 :max-width 25))
+  0.2 (:buf "*fx*" :hide-status true :min-height 13 :max-height 13)))
 
 ; Set mode after buffer exists (effect-buffer creates it above)
 (set-buffer-mode-for "*metal*" "seq-grid-mode")

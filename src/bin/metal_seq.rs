@@ -14,7 +14,9 @@ use eseqlisp::vm::Value;
 use eseqlisp::{Editor, EditorConfig, HostCommand, HostEvent, Runtime};
 
 use sequencer::engine;
-use sequencer::sequencer::{KeyboardTrigger, SequencerState, StepParam, Timebase, MAX_STEPS};
+use sequencer::sequencer::{
+    KeyboardTrigger, SequencerState, StepParam, Timebase, MAX_STEPS, SYNC_RESOLUTIONS,
+};
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
 
@@ -31,6 +33,15 @@ struct SampleTreeNode {
     label_lower: String,
     path: Option<String>,
     children: Vec<SampleTreeNode>,
+}
+
+#[derive(Clone, Debug)]
+struct HeldKeyboardNote {
+    key: char,
+    transpose: f32,
+    step_at_press: usize,
+    press_time: Instant,
+    tracks: Vec<usize>,
 }
 
 fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNode> {
@@ -87,9 +98,10 @@ fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNode> {
     items
 }
 
-fn sample_tree_nodes_to_value(items: &[SampleTreeNode], selected_path: Option<&str>) -> Value {
+fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
     Value::List(
-        items.iter()
+        items
+            .iter()
             .map(|item| {
                 let mut map = std::collections::HashMap::new();
                 map.insert(
@@ -99,7 +111,7 @@ fn sample_tree_nodes_to_value(items: &[SampleTreeNode], selected_path: Option<&s
                 if !item.children.is_empty() {
                     map.insert(
                         "children".to_string(),
-                        Rc::new(RefCell::new(sample_tree_nodes_to_value(&item.children, selected_path))),
+                        Rc::new(RefCell::new(sample_tree_nodes_to_value(&item.children))),
                     );
                 }
                 if let Some(path) = &item.path {
@@ -107,12 +119,6 @@ fn sample_tree_nodes_to_value(items: &[SampleTreeNode], selected_path: Option<&s
                         "path".to_string(),
                         Rc::new(RefCell::new(Value::String(path.clone()))),
                     );
-                    if selected_path.is_some_and(|selected| selected == path) {
-                        map.insert(
-                            "selected".to_string(),
-                            Rc::new(RefCell::new(Value::Bool(true))),
-                        );
-                    }
                 }
                 Rc::new(RefCell::new(Value::Map(map)))
             })
@@ -203,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keyboard octave offset for live playing
     let keyboard_octave = Arc::new(std::sync::atomic::AtomicI32::new(0));
     // Held keys for recording: (key_char, transpose, step_at_press, press_instant)
-    let held_notes: Arc<Mutex<Vec<(char, f32, usize, Instant)>>> = Arc::new(Mutex::new(Vec::new()));
+    let held_notes: Arc<Mutex<Vec<HeldKeyboardNote>>> = Arc::new(Mutex::new(Vec::new()));
 
     // 3. Set up eseqlisp runtime with sequencer natives
     let mut runtime = Runtime::new();
@@ -222,28 +228,89 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("playhead", Value::Number(0.0)),
             ("track-names", build_track_names(&track_names)),
             ("steps", build_steps_value(&state, 0)),
-            ("velocities", build_param_list(&state, 0, StepParam::Velocity)),
-            ("durations", build_param_list(&state, 0, StepParam::Duration)),
-            ("transposes", build_param_list(&state, 0, StepParam::Transpose)),
+            (
+                "velocities",
+                build_param_list(&state, 0, StepParam::Velocity),
+            ),
+            (
+                "durations",
+                build_param_list(&state, 0, StepParam::Duration),
+            ),
+            (
+                "transposes",
+                build_param_list(&state, 0, StepParam::Transpose),
+            ),
             ("pans", build_param_list(&state, 0, StepParam::Pan)),
+            ("syncs", build_param_list(&state, 0, StepParam::Sync)),
+            ("sync-labels", build_sync_labels()),
             ("track-volumes", build_track_volumes(&state)),
-            ("effects", build_effects_value(&state, 0, &effect_descriptors, &selected_steps)),
+            (
+                "effects",
+                build_effects_value(&state, 0, &effect_descriptors, &selected_steps),
+            ),
+            (
+                "instrument-panel",
+                build_instrument_panel_value(&app, 0, &selected_steps),
+            ),
             ("track-params", build_track_params(&state, 0)),
-            ("tp-attack", Value::Number(state.pattern.track_params[0].get_attack_ms() as f64)),
-            ("tp-release", Value::Number(state.pattern.track_params[0].get_release_ms() as f64)),
-            ("tp-swing", Value::Number(state.pattern.track_params[0].get_swing() as f64)),
-            ("tp-send", Value::Number(state.pattern.track_params[0].get_send() as f64)),
-            ("tp-num-steps", Value::Number(state.pattern.track_params[0].get_num_steps() as f64)),
-            ("tp-gate", Value::Bool(state.pattern.track_params[0].is_gate_on())),
-            ("tp-poly", Value::Bool(state.pattern.track_params[0].is_polyphonic())),
-            ("tp-timebase", Value::String(state.pattern.track_params[0].get_timebase().label().to_string())),
-            ("tp-swing-resolution", Value::String(state.pattern.track_params[0].get_swing_resolution().label().to_string())),
+            (
+                "tp-attack",
+                Value::Number(state.pattern.track_params[0].get_attack_ms() as f64),
+            ),
+            (
+                "tp-release",
+                Value::Number(state.pattern.track_params[0].get_release_ms() as f64),
+            ),
+            (
+                "tp-swing",
+                Value::Number(state.pattern.track_params[0].get_swing() as f64),
+            ),
+            (
+                "tp-send",
+                Value::Number(state.pattern.track_params[0].get_send() as f64),
+            ),
+            (
+                "tp-num-steps",
+                Value::Number(state.pattern.track_params[0].get_num_steps() as f64),
+            ),
+            (
+                "tp-gate",
+                Value::Bool(state.pattern.track_params[0].is_gate_on()),
+            ),
+            (
+                "tp-poly",
+                Value::Bool(state.pattern.track_params[0].is_polyphonic()),
+            ),
+            (
+                "tp-timebase",
+                Value::String(
+                    state.pattern.track_params[0]
+                        .get_timebase()
+                        .label()
+                        .to_string(),
+                ),
+            ),
+            (
+                "tp-swing-resolution",
+                Value::String(
+                    state.pattern.track_params[0]
+                        .get_swing_resolution()
+                        .label()
+                        .to_string(),
+                ),
+            ),
             ("available-effects", build_available_effects()),
             ("selected-steps", build_selection_value(&selected_steps)),
-            ("step-has-plocks", build_step_has_plocks(&state, 0, &effect_descriptors)),
+            (
+                "step-has-plocks",
+                build_step_has_plocks(&state, 0, &effect_descriptors),
+            ),
             ("compiling", Value::Bool(false)),
             ("recording", Value::Bool(false)),
-            ("record-armed", build_record_armed_value(&record_armed.lock().unwrap())),
+            (
+                "record-armed",
+                build_record_armed_value(&record_armed.lock().unwrap()),
+            ),
             ("sidebar-kind", Value::String("sampler".to_string())),
             ("sidebar-instrument-name", Value::String(String::new())),
             ("sidebar-loaded-preset", Value::String(String::new())),
@@ -290,6 +357,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "duration" | "dur" => StepParam::Duration,
             "transpose" => StepParam::Transpose,
             "pan" => StepParam::Pan,
+            "sync" | "syn" => StepParam::Sync,
             "speed" => StepParam::Speed,
             other => return Err(format!("seq-set-step-param: unknown param :{other}").into()),
         };
@@ -320,8 +388,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pan_ids = track_pan_ids.clone();
     let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-set-track-volume", move |args, _ctx| {
-        let (Some(Value::Number(track)), Some(Value::Number(vol))) =
-            (args.first(), args.get(1))
+        let (Some(Value::Number(track)), Some(Value::Number(vol))) = (args.first(), args.get(1))
         else {
             return Err("seq-set-track-volume: expected (track volume)".into());
         };
@@ -487,6 +554,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "duration" | "dur" => StepParam::Duration,
             "transpose" => StepParam::Transpose,
             "pan" => StepParam::Pan,
+            "sync" | "syn" => StepParam::Sync,
             "speed" => StepParam::Speed,
             other => return Err(format!("unknown param :{other}").into()),
         };
@@ -766,22 +834,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let sample_tree_nodes = build_sample_tree_node(std::path::Path::new("samples"));
-    let sample_tree = sample_tree_nodes_to_value(&sample_tree_nodes, None);
+    let sample_tree = sample_tree_nodes_to_value(&sample_tree_nodes);
     eprintln!("metal_seq: sample tree built");
-    runtime.register_native("seq-sample-tree", move |_args, _ctx| {
-        Ok(sample_tree.clone())
-    });
+    runtime.register_native(
+        "seq-sample-tree",
+        move |_args, _ctx| Ok(sample_tree.clone()),
+    );
     runtime.register_native("seq-filter-sample-tree", move |args, _ctx| {
         let query_lower = match args.first() {
             Some(Value::String(s)) => s.trim().to_lowercase(),
             _ => String::new(),
         };
-        let selected_path = match args.get(1) {
-            Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
-            _ => None,
-        };
         let filtered = filter_sample_tree_nodes(&sample_tree_nodes, &query_lower);
-        Ok(sample_tree_nodes_to_value(&filtered, selected_path))
+        Ok(sample_tree_nodes_to_value(&filtered))
     });
     runtime.register_native("seq-saved-instruments", move |_args, _ctx| {
         Ok(Value::List(
@@ -806,7 +871,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
 
     let mut backend = MetalBackend::new().map_err(|_| "Metal backend creation failed")?;
-    backend.initialize().map_err(|_| "Metal backend init failed")?;
+    backend
+        .initialize()
+        .map_err(|_| "Metal backend init failed")?;
 
     {
         let (cell_w, cell_h) = backend.cell_dimensions();
@@ -844,7 +911,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 1. Poll events FIRST
         let playing_now = state.transport.playing.load(Ordering::Relaxed);
         let timeout = if playing_now {
-            frame_interval.saturating_sub(last_render_at.elapsed()).max(Duration::from_millis(8))
+            frame_interval
+                .saturating_sub(last_render_at.elapsed())
+                .max(Duration::from_millis(8))
         } else if editor.needs_redraw() {
             Duration::from_millis(4)
         } else {
@@ -856,8 +925,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let any_armed = record_armed.lock().unwrap().iter().any(|a| *a);
                 let intercepted = if any_armed {
                     handle_recording_key(
-                        &key, &state, &record_armed, &recording, &keyboard_tx,
-                        &keyboard_octave, &current_track, &held_notes,
+                        &key,
+                        &state,
+                        &record_armed,
+                        &recording,
+                        &keyboard_tx,
+                        &keyboard_octave,
+                        &current_track,
+                        &held_notes,
                     )
                 } else {
                     false
@@ -984,17 +1059,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     track_names[track] = new_name.clone();
                                     // Update reactive state
                                     let rt = editor.runtime_mut();
-                                    rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "track-names",
+                                        build_track_names(&track_names),
+                                    );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
-                                    editor.handle_host_event(HostEvent::Status(
-                                        format!("Audition: {new_name}"),
-                                    ));
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Audition: {new_name}"
+                                    )));
                                 }
                                 Err(e) => {
-                                    editor.handle_host_event(HostEvent::Status(
-                                        format!("Error loading sample: {e}"),
-                                    ));
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error loading sample: {e}"
+                                    )));
                                 }
                             }
                         }
@@ -1009,36 +1088,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let new_name = app.tracks[idx].clone();
                                     track_names.push(new_name.clone());
                                     // Update pan IDs for new track
-                                    track_pan_ids.lock().unwrap().push(
-                                        app.graph.track_node_ids[idx].pan_id,
-                                    );
+                                    track_pan_ids
+                                        .lock()
+                                        .unwrap()
+                                        .push(app.graph.track_node_ids[idx].pan_id);
                                     // Extend record_armed for new track
                                     record_armed.lock().unwrap().push(false);
                                     // Update reactive state
                                     let rt = editor.runtime_mut();
-                                    rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
-                                    rt.set_reactive("SEQ", "current-track", Value::Number(idx as f64));
-                                    rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "num-tracks",
+                                        Value::Number(track_names.len() as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "current-track",
+                                        Value::Number(idx as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "track-names",
+                                        build_track_names(&track_names),
+                                    );
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
-                                    rt.set_reactive("SEQ", "velocities", build_param_list(&state, idx, StepParam::Velocity));
-                                    rt.set_reactive("SEQ", "durations", build_param_list(&state, idx, StepParam::Duration));
-                                    rt.set_reactive("SEQ", "transposes", build_param_list(&state, idx, StepParam::Transpose));
-                                    rt.set_reactive("SEQ", "pans", build_param_list(&state, idx, StepParam::Pan));
-                                    rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                                    rt.set_reactive("SEQ", "effects", build_effects_value(&state, idx, &app.graph.effect_descriptors, &selected_steps));
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "velocities",
+                                        build_param_list(&state, idx, StepParam::Velocity),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "durations",
+                                        build_param_list(&state, idx, StepParam::Duration),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "transposes",
+                                        build_param_list(&state, idx, StepParam::Transpose),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "pans",
+                                        build_param_list(&state, idx, StepParam::Pan),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "syncs",
+                                        build_param_list(&state, idx, StepParam::Sync),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "track-volumes",
+                                        build_track_volumes(&state),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "effects",
+                                        build_effects_value(
+                                            &state,
+                                            idx,
+                                            &app.graph.effect_descriptors,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "instrument-panel",
+                                        build_instrument_panel_value(&app, idx, &selected_steps),
+                                    );
                                     sync_track_params(rt, &state, idx, &selected_steps);
-                                    rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, idx, &app.graph.effect_descriptors));
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            idx,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                    editor.handle_host_event(HostEvent::Status(
-                                        format!("Added track {}: {new_name}", idx + 1),
-                                    ));
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Added track {}: {new_name}",
+                                        idx + 1
+                                    )));
                                 }
                                 Err(e) => {
-                                    editor.handle_host_event(HostEvent::Status(
-                                        format!("Error adding track: {e}"),
-                                    ));
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Error adding track: {e}"
+                                    )));
                                 }
                             }
                         }
@@ -1052,34 +1192,103 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             current_track.store(idx, Ordering::Relaxed);
                                             let new_name = app.tracks[idx].clone();
                                             track_names.push(new_name.clone());
-                                            track_pan_ids.lock().unwrap().push(
-                                                app.graph.track_node_ids[idx].pan_id,
-                                            );
+                                            track_pan_ids
+                                                .lock()
+                                                .unwrap()
+                                                .push(app.graph.track_node_ids[idx].pan_id);
                                             record_armed.lock().unwrap().push(false);
                                             let rt = editor.runtime_mut();
-                                            rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
-                                            rt.set_reactive("SEQ", "current-track", Value::Number(idx as f64));
-                                            rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
-                                            rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
-                                            rt.set_reactive("SEQ", "velocities", build_param_list(&state, idx, StepParam::Velocity));
-                                            rt.set_reactive("SEQ", "durations", build_param_list(&state, idx, StepParam::Duration));
-                                            rt.set_reactive("SEQ", "transposes", build_param_list(&state, idx, StepParam::Transpose));
-                                            rt.set_reactive("SEQ", "pans", build_param_list(&state, idx, StepParam::Pan));
-                                            rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                                            rt.set_reactive("SEQ", "effects", build_effects_value(&state, idx, &app.graph.effect_descriptors, &selected_steps));
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "num-tracks",
+                                                Value::Number(track_names.len() as f64),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "current-track",
+                                                Value::Number(idx as f64),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "track-names",
+                                                build_track_names(&track_names),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "steps",
+                                                build_steps_value(&state, idx),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "velocities",
+                                                build_param_list(&state, idx, StepParam::Velocity),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "durations",
+                                                build_param_list(&state, idx, StepParam::Duration),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "transposes",
+                                                build_param_list(&state, idx, StepParam::Transpose),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "pans",
+                                                build_param_list(&state, idx, StepParam::Pan),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "syncs",
+                                                build_param_list(&state, idx, StepParam::Sync),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "track-volumes",
+                                                build_track_volumes(&state),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "effects",
+                                                build_effects_value(
+                                                    &state,
+                                                    idx,
+                                                    &app.graph.effect_descriptors,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "instrument-panel",
+                                                build_instrument_panel_value(
+                                                    &app,
+                                                    idx,
+                                                    &selected_steps,
+                                                ),
+                                            );
                                             sync_track_params(rt, &state, idx, &selected_steps);
-                                            rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, idx, &app.graph.effect_descriptors));
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "step-has-plocks",
+                                                build_step_has_plocks(
+                                                    &state,
+                                                    idx,
+                                                    &app.graph.effect_descriptors,
+                                                ),
+                                            );
                                             rt.run_reactive_cycle();
                                             editor.refresh_runtime_side_effects();
                                             ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                            editor.handle_host_event(HostEvent::Status(
-                                                format!("Added instrument track {}: {new_name}", idx + 1),
-                                            ));
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Added instrument track {}: {new_name}",
+                                                idx + 1
+                                            )));
                                         }
                                         Err(e) => {
-                                            editor.handle_host_event(HostEvent::Status(
-                                                format!("Error adding instrument track: {e}"),
-                                            ));
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Error adding instrument track: {e}"
+                                            )));
                                         }
                                     }
                                 }
@@ -1088,31 +1297,335 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "load-instrument-preset" => {
                         if let Value::Map(ref map) = payload {
-                            let preset_name = map
-                                .get("name")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let preset_name =
+                                map.get("name").and_then(|cell| match &*cell.borrow() {
                                     Value::String(name) => Some(name.clone()),
                                     _ => None,
                                 });
                             if let Some(preset_name) = preset_name {
                                 let track = current_track.load(Ordering::Relaxed);
-                                match load_instrument_preset_into_track(&mut app, track, &preset_name) {
+                                match load_instrument_preset_into_track(
+                                    &mut app,
+                                    track,
+                                    &preset_name,
+                                ) {
                                     Ok(()) => {
                                         let rt = editor.runtime_mut();
                                         sync_sidebar_browser(rt, &app, track);
                                         rt.run_reactive_cycle();
                                         editor.refresh_runtime_side_effects();
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
-                                        editor.handle_host_event(HostEvent::Status(
-                                            format!("Loaded preset '{preset_name}'"),
-                                        ));
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Loaded preset '{preset_name}'"
+                                        )));
                                     }
                                     Err(e) => {
-                                        editor.handle_host_event(HostEvent::Status(
-                                            format!("Error loading preset: {e}"),
-                                        ));
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error loading preset: {e}"
+                                        )));
                                     }
                                 }
+                            }
+                        }
+                    }
+                    "set-instrument-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map
+                                .get("param-idx")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let value = map
+                                .get("value")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as f32),
+                                    _ => None,
+                                });
+                            if let (Some(param_idx), Some(user_val)) = (param_idx, value) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(desc) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .cloned()
+                                {
+                                    let stored = desc.clamp(desc.user_input_to_stored(user_val));
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetInstrumentParam {
+                                            track,
+                                            param_idx,
+                                            value: stored,
+                                        },
+                                    );
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-instrument-param-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map
+                                .get("param-idx")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map
+                                .get("label")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                });
+                            if let (Some(param_idx), Some(label)) = (param_idx, label) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(sequencer::effects::ParamKind::Enum { labels }) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .map(|d| &d.kind)
+                                {
+                                    if let Some(selected_idx) =
+                                        labels.iter().position(|item| item == &label)
+                                    {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentParam {
+                                                track,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-instrument-plock" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map
+                                .get("param-idx")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let value = map
+                                .get("value")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as f32),
+                                    _ => None,
+                                });
+                            if let (Some(param_idx), Some(user_val)) = (param_idx, value) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(desc) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .cloned()
+                                {
+                                    let stored = desc.clamp(desc.user_input_to_stored(user_val));
+                                    let steps: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetInstrumentPlockMulti {
+                                            track,
+                                            steps,
+                                            param_idx,
+                                            value: stored,
+                                        },
+                                    );
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-instrument-plock-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx = map
+                                .get("param-idx")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map
+                                .get("label")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                });
+                            if let (Some(param_idx), Some(label)) = (param_idx, label) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(sequencer::effects::ParamKind::Enum { labels }) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .map(|d| &d.kind)
+                                {
+                                    if let Some(selected_idx) =
+                                        labels.iter().position(|item| item == &label)
+                                    {
+                                        let steps: Vec<usize> =
+                                            selected_steps.lock().unwrap().iter().copied().collect();
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentPlockMulti {
+                                                track,
+                                                steps,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-effect-param-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx = map
+                                .get("slot-idx")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx = map
+                                .get("param-idx")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map
+                                .get("label")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                });
+                            if let (Some(slot_idx), Some(param_idx), Some(label)) =
+                                (slot_idx, param_idx, label)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let selected_idx = app
+                                    .graph
+                                    .effect_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.get(slot_idx))
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .and_then(|p| match &p.kind {
+                                        sequencer::effects::ParamKind::Enum { labels } => {
+                                            labels.iter().position(|item| item == &label)
+                                        }
+                                        _ => None,
+                                    })
+                                    .or_else(|| {
+                                        (slot_idx == 1 && param_idx == 2).then(|| {
+                                            sequencer::effects::SyncDivision::ALL
+                                                .iter()
+                                                .position(|div| div.label() == label)
+                                        })?
+                                    });
+                                if let Some(selected_idx) = selected_idx {
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetEffectParam {
+                                            track,
+                                            slot_idx,
+                                            param_idx,
+                                            value: selected_idx as f32,
+                                        },
+                                    );
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-effect-plock-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx = map
+                                .get("slot-idx")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx = map
+                                .get("param-idx")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map
+                                .get("label")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                });
+                            if let (Some(slot_idx), Some(param_idx), Some(label)) =
+                                (slot_idx, param_idx, label)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let selected_idx = app
+                                    .graph
+                                    .effect_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.get(slot_idx))
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .and_then(|p| match &p.kind {
+                                        sequencer::effects::ParamKind::Enum { labels } => {
+                                            labels.iter().position(|item| item == &label)
+                                        }
+                                        _ => None,
+                                    })
+                                    .or_else(|| {
+                                        (slot_idx == 1 && param_idx == 2).then(|| {
+                                            sequencer::effects::SyncDivision::ALL
+                                                .iter()
+                                                .position(|div| div.label() == label)
+                                        })?
+                                    });
+                                if let Some(selected_idx) = selected_idx {
+                                    let steps: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetEffectPlockMulti {
+                                            track,
+                                            slot_idx,
+                                            steps,
+                                            param_idx,
+                                            value: selected_idx as f32,
+                                        },
+                                    );
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-instrument-base-note" => {
+                        if let Value::Map(ref map) = payload {
+                            let value = map
+                                .get("value")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as f32),
+                                    _ => None,
+                                });
+                            if let Some(value) = value {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let clamped = value.clamp(-48.0, 48.0);
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetInstrumentBaseNoteOffset {
+                                        track,
+                                        value: clamped,
+                                    },
+                                );
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }
@@ -1124,7 +1637,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.ui.cursor_track = current_track.load(Ordering::Relaxed);
                                     if let Some(slot_idx) = app.next_free_custom_slot() {
                                         app.start_effect_compile(&effect_name, slot_idx);
-                                        editor.runtime_mut().set_reactive("SEQ", "compiling", Value::Bool(true));
+                                        editor.runtime_mut().set_reactive(
+                                            "SEQ",
+                                            "compiling",
+                                            Value::Bool(true),
+                                        );
                                     } else {
                                         editor.handle_host_event(HostEvent::Status(
                                             "No free effect slots available".to_string(),
@@ -1135,9 +1652,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     other => {
-                        editor.handle_host_event(HostEvent::Status(
-                            format!("Unknown host command: {other}"),
-                        ));
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Unknown host command: {other}"
+                        )));
                     }
                 }
             }
@@ -1148,7 +1665,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ct = current_track.load(Ordering::Relaxed);
             let rt = editor.runtime_mut();
             rt.set_reactive("SEQ", "compiling", Value::Bool(false));
-            rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
+            rt.set_reactive(
+                "SEQ",
+                "effects",
+                build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+            );
+            rt.set_reactive(
+                "SEQ",
+                "instrument-panel",
+                build_instrument_panel_value(&app, ct, &selected_steps),
+            );
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
             editor.handle_host_event(HostEvent::Status(status));
@@ -1167,17 +1693,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Track switch — rebuild everything
             if ct != prev_current_track {
+                editor.reset_widget_scroll_left();
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                rt.set_reactive("SEQ", "velocities", build_param_list(&state, ct, StepParam::Velocity));
-                rt.set_reactive("SEQ", "durations", build_param_list(&state, ct, StepParam::Duration));
-                rt.set_reactive("SEQ", "transposes", build_param_list(&state, ct, StepParam::Transpose));
+                rt.set_reactive(
+                    "SEQ",
+                    "velocities",
+                    build_param_list(&state, ct, StepParam::Velocity),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "durations",
+                    build_param_list(&state, ct, StepParam::Duration),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "transposes",
+                    build_param_list(&state, ct, StepParam::Transpose),
+                );
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
+                rt.set_reactive("SEQ", "syncs", build_param_list(&state, ct, StepParam::Sync));
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
+                rt.set_reactive(
+                    "SEQ",
+                    "effects",
+                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "instrument-panel",
+                    build_instrument_panel_value(&app, ct, &selected_steps),
+                );
                 sync_track_params(rt, &state, ct, &selected_steps);
-                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
+                rt.set_reactive(
+                    "SEQ",
+                    "step-has-plocks",
+                    build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                );
                 sync_sidebar_browser(rt, &app, ct);
                 prev_current_track = ct;
                 prev_pattern_epoch = epoch;
@@ -1186,25 +1739,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if playing != prev_playing {
-                editor.runtime_mut().set_reactive("SEQ", "playing", Value::Bool(playing));
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "playing", Value::Bool(playing));
                 prev_playing = playing;
                 needs_reactive_cycle = true;
             }
             if bpm != prev_bpm {
-                editor.runtime_mut().set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
                 prev_bpm = bpm;
                 needs_reactive_cycle = true;
             }
             if epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version {
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                rt.set_reactive("SEQ", "velocities", build_param_list(&state, ct, StepParam::Velocity));
-                rt.set_reactive("SEQ", "durations", build_param_list(&state, ct, StepParam::Duration));
-                rt.set_reactive("SEQ", "transposes", build_param_list(&state, ct, StepParam::Transpose));
+                rt.set_reactive(
+                    "SEQ",
+                    "velocities",
+                    build_param_list(&state, ct, StepParam::Velocity),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "durations",
+                    build_param_list(&state, ct, StepParam::Duration),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "transposes",
+                    build_param_list(&state, ct, StepParam::Transpose),
+                );
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
+                rt.set_reactive("SEQ", "syncs", build_param_list(&state, ct, StepParam::Sync));
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                rt.set_reactive(
+                    "SEQ",
+                    "effects",
+                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "instrument-panel",
+                    build_instrument_panel_value(&app, ct, &selected_steps),
+                );
                 sync_track_params(rt, &state, ct, &selected_steps);
-                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
+                rt.set_reactive(
+                    "SEQ",
+                    "step-has-plocks",
+                    build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                );
                 sync_sidebar_browser(rt, &app, ct);
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
@@ -1214,10 +1798,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ui_ep != prev_ui_epoch {
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
+                rt.set_reactive(
+                    "SEQ",
+                    "effects",
+                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "instrument-panel",
+                    build_instrument_panel_value(&app, ct, &selected_steps),
+                );
                 sync_track_params(rt, &state, ct, &selected_steps);
-                rt.set_reactive("SEQ", "selected-steps", build_selection_value(&selected_steps));
-                rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, ct, &app.graph.effect_descriptors));
+                rt.set_reactive(
+                    "SEQ",
+                    "selected-steps",
+                    build_selection_value(&selected_steps),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "step-has-plocks",
+                    build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                );
                 sync_sidebar_browser(rt, &app, ct);
                 // Sync recording state
                 let rec_on = recording.load(Ordering::Relaxed);
@@ -1235,7 +1836,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 needs_reactive_cycle = true;
             }
             if playhead != prev_playhead {
-                editor.runtime_mut().set_reactive("SEQ", "playhead", Value::Number(playhead as f64));
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "playhead",
+                    Value::Number(playhead as f64),
+                );
                 prev_playhead = playhead;
                 needs_reactive_cycle = true;
             }
@@ -1256,7 +1861,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if editor.needs_redraw() && last_render_at.elapsed() >= frame_interval {
             let tiled_frame =
                 eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
-            backend.render_tiled(&tiled_frame).map_err(|_| "render failed")?;
+            backend
+                .render_tiled(&tiled_frame)
+                .map_err(|_| "render failed")?;
             editor.clear_needs_redraw();
             last_render_at = Instant::now();
         }
@@ -1330,6 +1937,18 @@ fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
+fn build_sync_labels() -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = SYNC_RESOLUTIONS
+        .iter()
+        .map(|(_, label)| {
+            let mut compact = label.replace(' ', "");
+            compact.truncate(4);
+            Rc::new(RefCell::new(Value::String(compact)))
+        })
+        .collect();
+    Value::List(items)
+}
+
 /// Build a Lisp Value::List of effect slot maps for a track.
 /// Each slot is a map: {:name "Filter" :params ({:name "cutoff" :value 1000 :min 20 :max 20000} ...)}
 fn build_effects_value(
@@ -1339,6 +1958,7 @@ fn build_effects_value(
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
     use std::collections::HashMap;
+    use sequencer::effects::{ParamKind, SyncDivision};
     let Some(track_descs) = descriptors.get(track) else {
         return Value::List(vec![]);
     };
@@ -1368,15 +1988,21 @@ fn build_effects_value(
                 .iter()
                 .enumerate()
                 .map(|(param_idx, pdesc)| {
+                    let delay_synced = if desc.name == "Delay" {
+                        chain
+                            .get(slot_idx)
+                            .map(|s| s.defaults.get(1) > 0.5)
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
                     let default_val = chain
                         .get(slot_idx)
                         .map(|s| s.defaults.get(param_idx))
                         .unwrap_or(pdesc.default);
                     // Show p-lock value if steps are selected, fall back to default
                     let current_val = plock_step
-                        .and_then(|step| {
-                            chain.get(slot_idx)?.plocks.get(step, param_idx)
-                        })
+                        .and_then(|step| chain.get(slot_idx)?.plocks.get(step, param_idx))
                         .unwrap_or(default_val);
 
                     let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -1400,6 +2026,67 @@ fn build_effects_value(
                         "max".to_string(),
                         Rc::new(RefCell::new(Value::Number(pdesc.max as f64))),
                     );
+                    match &pdesc.kind {
+                        ParamKind::Boolean => {
+                            pmap.insert(
+                                "boolean".to_string(),
+                                Rc::new(RefCell::new(Value::Bool(true))),
+                            );
+                        }
+                        ParamKind::Enum { labels } => {
+                            let selected = labels
+                                .get(current_val.round() as usize)
+                                .cloned()
+                                .unwrap_or_default();
+                            let option_values = labels
+                                .iter()
+                                .cloned()
+                                .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                                .collect();
+                            pmap.insert(
+                                "text-value".to_string(),
+                                Rc::new(RefCell::new(Value::String(selected))),
+                            );
+                            pmap.insert(
+                                "options".to_string(),
+                                Rc::new(RefCell::new(Value::List(option_values))),
+                            );
+                        }
+                        ParamKind::Continuous { .. } => {
+                            if desc.name == "Delay" && param_idx == 2 && delay_synced {
+                                let labels: Vec<String> = SyncDivision::ALL
+                                    .iter()
+                                    .map(|d| d.label().to_string())
+                                    .collect();
+                                let selected = labels
+                                    .get(current_val.round() as usize)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let option_values = labels
+                                    .into_iter()
+                                    .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                                    .collect();
+                                pmap.insert(
+                                    "text-value".to_string(),
+                                    Rc::new(RefCell::new(Value::String(selected))),
+                                );
+                                pmap.insert(
+                                    "options".to_string(),
+                                    Rc::new(RefCell::new(Value::List(option_values))),
+                                );
+                                pmap.insert(
+                                    "min".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(0.0))),
+                                );
+                                pmap.insert(
+                                    "max".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(
+                                        (SyncDivision::ALL.len() - 1) as f64,
+                                    ))),
+                                );
+                            }
+                        }
+                    }
                     Rc::new(RefCell::new(Value::Map(pmap)))
                 })
                 .collect();
@@ -1414,6 +2101,434 @@ fn build_effects_value(
         .collect();
 
     Value::List(slots)
+}
+
+fn build_instrument_panel_value(
+    app: &ui::App,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    use std::collections::HashMap;
+
+    const MOD_PARAM_BASE: u32 = 1_000_000;
+    const PARAM_LFO1_RATE_HZ: usize = 13;
+    const PARAM_LFO1_SYNC: usize = 14;
+    const PARAM_LFO1_DIV: usize = 15;
+    const PARAM_LFO1_SHAPE: usize = 16;
+    const PARAM_LFO1_PW: usize = 17;
+    const PARAM_LFO1_RETRIGGER: usize = 18;
+    const PARAM_LFO2_RATE_HZ: usize = 19;
+    const PARAM_LFO2_SYNC: usize = 20;
+    const PARAM_LFO2_DIV: usize = 21;
+    const PARAM_LFO2_SHAPE: usize = 22;
+    const PARAM_LFO2_PW: usize = 23;
+    const PARAM_LFO2_RETRIGGER: usize = 24;
+    const PARAM_LFO3_RATE_HZ: usize = 25;
+    const PARAM_LFO3_SYNC: usize = 26;
+    const PARAM_LFO3_DIV: usize = 27;
+    const PARAM_LFO3_SHAPE: usize = 28;
+    const PARAM_LFO3_PW: usize = 29;
+    const PARAM_LFO3_RETRIGGER: usize = 30;
+    const PARAM_ENV_ATTACK_MS: usize = 31;
+    const PARAM_ENV_DECAY_MS: usize = 32;
+    const PARAM_ENV_SUSTAIN: usize = 33;
+    const PARAM_ENV_RELEASE_MS: usize = 34;
+    const PARAM_RAND_RATE_HZ: usize = 35;
+    const PARAM_RAND_SYNC: usize = 36;
+    const PARAM_RAND_DIV: usize = 37;
+    const PARAM_RAND_SLEW: usize = 38;
+    const PARAM_DRIFT_RATE: usize = 39;
+    const PARAM_DRIFT_SYNC: usize = 40;
+    const PARAM_DRIFT_DIV: usize = 41;
+
+    if app.is_sampler_track(track) {
+        return Value::List(vec![]);
+    }
+    let Some(desc) = app.graph.instrument_descriptors.get(track) else {
+        return Value::List(vec![]);
+    };
+    if desc.params.is_empty() {
+        return Value::List(vec![]);
+    }
+
+    let sel = selected.lock().unwrap();
+    let plock_step = sel.iter().copied().min();
+    let slot = &app.state.pattern.instrument_slots[track];
+    let base_note_default = f32::from_bits(
+        app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+    );
+    let base_note_current = base_note_default;
+
+    fn push_param(
+        out: &mut Vec<Rc<RefCell<Value>>>,
+        name: String,
+        control: &str,
+        idx: Option<usize>,
+        value: f32,
+        min: f32,
+        max: f32,
+        options: Option<&Vec<String>>,
+    ) {
+        let is_boolean_name = name == "enabled" || name == "sync";
+        let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        pmap.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name))),
+        );
+        pmap.insert(
+            "control".to_string(),
+            Rc::new(RefCell::new(Value::String(control.to_string()))),
+        );
+        if let Some(idx) = idx {
+            pmap.insert(
+                "idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(idx as f64))),
+            );
+        }
+        pmap.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(value as f64))),
+        );
+        pmap.insert(
+            "min".to_string(),
+            Rc::new(RefCell::new(Value::Number(min as f64))),
+        );
+        pmap.insert(
+            "max".to_string(),
+            Rc::new(RefCell::new(Value::Number(max as f64))),
+        );
+        if let Some(labels) = options {
+            let selected = labels
+                .get(value.round() as usize)
+                .cloned()
+                .unwrap_or_default();
+            let option_values = labels
+                .iter()
+                .cloned()
+                .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                .collect();
+            pmap.insert(
+                "text-value".to_string(),
+                Rc::new(RefCell::new(Value::String(selected))),
+            );
+            pmap.insert(
+                "options".to_string(),
+                Rc::new(RefCell::new(Value::List(option_values))),
+            );
+        }
+        if options.is_none() && is_boolean_name {
+            pmap.insert(
+                "boolean".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+        }
+        out.push(Rc::new(RefCell::new(Value::Map(pmap))));
+    }
+
+    fn is_mod_param(name: &str) -> bool {
+        name.starts_with("mod ")
+    }
+
+    fn is_source_param(node_param_idx: u32) -> bool {
+        node_param_idx >= MOD_PARAM_BASE
+    }
+
+    fn source_section_name(node_param_idx: u32) -> &'static str {
+        if (MOD_PARAM_BASE + PARAM_LFO1_RATE_HZ as u32..=MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
+            .contains(&node_param_idx)
+        {
+            "LFO 1"
+        } else if (MOD_PARAM_BASE + PARAM_ENV_ATTACK_MS as u32..=MOD_PARAM_BASE + PARAM_ENV_RELEASE_MS as u32)
+            .contains(&node_param_idx)
+        {
+            "ENV 1"
+        } else if (MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32..=MOD_PARAM_BASE + PARAM_RAND_SLEW as u32)
+            .contains(&node_param_idx)
+        {
+            "RAND"
+        } else if (MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32..=MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
+            .contains(&node_param_idx)
+        {
+            "DRIFT"
+        } else if (MOD_PARAM_BASE + PARAM_LFO2_RATE_HZ as u32..=MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32)
+            .contains(&node_param_idx)
+        {
+            "LFO 2"
+        } else {
+            "LFO 3"
+        }
+    }
+
+    fn rename_source_param(name: &str) -> String {
+        if name.ends_with("_div") || name.ends_with("_rate") {
+            "rate".to_string()
+        } else if name.ends_with("_sync") {
+            "sync".to_string()
+        } else if name.ends_with("_shape") {
+            "shape".to_string()
+        } else if name.ends_with("_pw") {
+            "pulse width".to_string()
+        } else if name.ends_with("_retrigger") {
+            "retrigger".to_string()
+        } else if name == "mod_rand_slew" {
+            "slew".to_string()
+        } else if name == "mod_env_attack" {
+            "attack".to_string()
+        } else if name == "mod_env_decay" {
+            "decay".to_string()
+        } else if name == "mod_env_sustain" {
+            "sustain".to_string()
+        } else if name == "mod_env_release" {
+            "release".to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
+    let source_indices: Vec<usize> = desc
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| is_source_param(p.node_param_idx).then_some(i))
+        .collect();
+
+    let find_idx_by_node = |node_param_idx: u32| {
+        source_indices
+            .iter()
+            .copied()
+            .find(|&idx| desc.params.get(idx).map(|p| p.node_param_idx) == Some(node_param_idx))
+    };
+
+    let lfo_sync = |sync_idx: u32| -> bool {
+        find_idx_by_node(sync_idx)
+            .map(|idx| slot.defaults.get(idx) > 0.5)
+            .unwrap_or(false)
+    };
+    let lfo_shape_is_pulse = |shape_idx: u32| -> bool {
+        find_idx_by_node(shape_idx)
+            .map(|idx| slot.defaults.get(idx).round() as i32 == 2)
+            .unwrap_or(false)
+    };
+
+    let mut source_actual: Vec<usize> = Vec::new();
+    let push_lfo =
+        |out: &mut Vec<usize>,
+         rate_idx: usize,
+         sync_idx: usize,
+         div_idx: usize,
+         shape_idx: usize,
+         pw_idx: usize,
+         retrig_idx: usize| {
+            let rate_node = MOD_PARAM_BASE + rate_idx as u32;
+            let sync_node = MOD_PARAM_BASE + sync_idx as u32;
+            let div_node = MOD_PARAM_BASE + div_idx as u32;
+            let shape_node = MOD_PARAM_BASE + shape_idx as u32;
+            let pw_node = MOD_PARAM_BASE + pw_idx as u32;
+            let retrig_node = MOD_PARAM_BASE + retrig_idx as u32;
+
+            if let Some(idx) = if lfo_sync(sync_node) {
+                find_idx_by_node(div_node)
+            } else {
+                find_idx_by_node(rate_node)
+            } {
+                out.push(idx);
+            }
+            if let Some(idx) = find_idx_by_node(sync_node) {
+                out.push(idx);
+            }
+            if let Some(idx) = find_idx_by_node(shape_node) {
+                out.push(idx);
+            }
+            if let Some(idx) = find_idx_by_node(retrig_node) {
+                out.push(idx);
+            }
+            if lfo_shape_is_pulse(shape_node) {
+                if let Some(idx) = find_idx_by_node(pw_node) {
+                    out.push(idx);
+                }
+            }
+        };
+
+    push_lfo(
+        &mut source_actual,
+        PARAM_LFO1_RATE_HZ,
+        PARAM_LFO1_SYNC,
+        PARAM_LFO1_DIV,
+        PARAM_LFO1_SHAPE,
+        PARAM_LFO1_PW,
+        PARAM_LFO1_RETRIGGER,
+    );
+    for idx_const in [
+        PARAM_ENV_ATTACK_MS,
+        PARAM_ENV_DECAY_MS,
+        PARAM_ENV_SUSTAIN,
+        PARAM_ENV_RELEASE_MS,
+    ] {
+        if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + idx_const as u32) {
+            source_actual.push(idx);
+        }
+    }
+    if let Some(idx) = if lfo_sync(
+        MOD_PARAM_BASE + PARAM_RAND_SYNC as u32,
+    ) {
+        find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_DIV as u32)
+    } else {
+        find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32)
+    } {
+        source_actual.push(idx);
+    }
+    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_SYNC as u32) {
+        source_actual.push(idx);
+    }
+    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_SLEW as u32) {
+        source_actual.push(idx);
+    }
+    if let Some(idx) = if lfo_sync(
+        MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32,
+    ) {
+        find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
+    } else {
+        find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32)
+    } {
+        source_actual.push(idx);
+    }
+    if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32) {
+        source_actual.push(idx);
+    }
+    push_lfo(
+        &mut source_actual,
+        PARAM_LFO2_RATE_HZ,
+        PARAM_LFO2_SYNC,
+        PARAM_LFO2_DIV,
+        PARAM_LFO2_SHAPE,
+        PARAM_LFO2_PW,
+        PARAM_LFO2_RETRIGGER,
+    );
+    push_lfo(
+        &mut source_actual,
+        PARAM_LFO3_RATE_HZ,
+        PARAM_LFO3_SYNC,
+        PARAM_LFO3_DIV,
+        PARAM_LFO3_SHAPE,
+        PARAM_LFO3_PW,
+        PARAM_LFO3_RETRIGGER,
+    );
+
+    let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    push_param(
+        &mut synth_params,
+        "base_note".to_string(),
+        "base-note",
+        None,
+        base_note_current,
+        -48.0,
+        48.0,
+        None,
+    );
+
+    for (param_idx, pdesc) in desc.params.iter().enumerate() {
+        let default_val = slot.defaults.get(param_idx);
+        let current_val = plock_step
+            .and_then(|step| slot.plocks.get(step, param_idx))
+            .unwrap_or(default_val);
+        let options = match &pdesc.kind {
+            sequencer::effects::ParamKind::Enum { labels } => Some(labels),
+            _ => None,
+        };
+        if is_source_param(pdesc.node_param_idx) {
+            continue;
+        }
+        if is_mod_param(&pdesc.name) {
+            push_param(
+                &mut mod_params,
+                pdesc.name.clone(),
+                "param",
+                Some(param_idx),
+                pdesc.stored_to_user(current_val),
+                pdesc.stored_to_user(pdesc.min),
+                pdesc.stored_to_user(pdesc.max),
+                options,
+            );
+        } else {
+            push_param(
+                &mut synth_params,
+                pdesc.name.clone(),
+                "param",
+                Some(param_idx),
+                pdesc.stored_to_user(current_val),
+                pdesc.stored_to_user(pdesc.min),
+                pdesc.stored_to_user(pdesc.max),
+                options,
+            );
+        }
+    }
+
+    let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
+    for section_name in ["LFO 1", "ENV 1", "RAND", "DRIFT", "LFO 2", "LFO 3"] {
+        let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
+        for &param_idx in &source_actual {
+            let Some(pdesc) = desc.params.get(param_idx) else {
+                continue;
+            };
+            if source_section_name(pdesc.node_param_idx) != section_name {
+                continue;
+            }
+            let default_val = slot.defaults.get(param_idx);
+            let current_val = plock_step
+                .and_then(|step| slot.plocks.get(step, param_idx))
+                .unwrap_or(default_val);
+            let options = match &pdesc.kind {
+                sequencer::effects::ParamKind::Enum { labels } => Some(labels),
+                _ => None,
+            };
+            push_param(
+                &mut params,
+                rename_source_param(&pdesc.name),
+                "param",
+                Some(param_idx),
+                pdesc.stored_to_user(current_val),
+                pdesc.stored_to_user(pdesc.min),
+                pdesc.stored_to_user(pdesc.max),
+                options,
+            );
+        }
+        if params.is_empty() {
+            continue;
+        }
+        let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        section_map.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(section_name.to_string()))),
+        );
+        section_map.insert(
+            "params".to_string(),
+            Rc::new(RefCell::new(Value::List(params))),
+        );
+        source_sections.push(Rc::new(RefCell::new(Value::Map(section_map))));
+    }
+
+    let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    panel_map.insert(
+        "name".to_string(),
+        Rc::new(RefCell::new(Value::String(
+            current_custom_instrument_name(app, track).unwrap_or_else(|| "Instrument".to_string()),
+        ))),
+    );
+    panel_map.insert(
+        "synth".to_string(),
+        Rc::new(RefCell::new(Value::List(synth_params))),
+    );
+    panel_map.insert(
+        "mod".to_string(),
+        Rc::new(RefCell::new(Value::List(mod_params))),
+    );
+    panel_map.insert(
+        "sources".to_string(),
+        Rc::new(RefCell::new(Value::List(source_sections))),
+    );
+
+    Value::List(vec![Rc::new(RefCell::new(Value::Map(panel_map)))])
 }
 
 /// Build a Lisp Value::List of bools indicating which steps are selected.
@@ -1443,7 +2558,7 @@ fn build_string_list(items: &[String]) -> Value {
     Value::List(items)
 }
 
-fn build_flat_tree_items(items: &[String], selected_item: Option<&str>) -> Value {
+fn build_flat_tree_items(items: &[String]) -> Value {
     use std::collections::HashMap;
     let items: Vec<Rc<RefCell<Value>>> = items
         .iter()
@@ -1453,12 +2568,6 @@ fn build_flat_tree_items(items: &[String], selected_item: Option<&str>) -> Value
                 "label".to_string(),
                 Rc::new(RefCell::new(Value::String(item.clone()))),
             );
-            if selected_item.is_some_and(|selected| selected == item) {
-                map.insert(
-                    "selected".to_string(),
-                    Rc::new(RefCell::new(Value::Bool(true))),
-                );
-            }
             Rc::new(RefCell::new(Value::Map(map)))
         })
         .collect();
@@ -1500,9 +2609,17 @@ fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default();
         rt.set_reactive("SEQ", "sidebar-kind", Value::String("sampler".to_string()));
-        rt.set_reactive("SEQ", "sidebar-instrument-name", Value::String(String::new()));
+        rt.set_reactive(
+            "SEQ",
+            "sidebar-instrument-name",
+            Value::String(String::new()),
+        );
         rt.set_reactive("SEQ", "sidebar-loaded-preset", Value::String(String::new()));
-        rt.set_reactive("SEQ", "sidebar-selected-sample", Value::String(selected_sample));
+        rt.set_reactive(
+            "SEQ",
+            "sidebar-selected-sample",
+            Value::String(selected_sample),
+        );
         rt.set_reactive("SEQ", "sidebar-presets", Value::List(vec![]));
         rt.set_reactive("SEQ", "sidebar-preset-tree", Value::List(vec![]));
         return;
@@ -1520,15 +2637,31 @@ fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
         .unwrap_or_default();
     let preset_items = visible_preset_items_for_track(app, track);
 
-    rt.set_reactive("SEQ", "sidebar-kind", Value::String("instrument".to_string()));
-    rt.set_reactive("SEQ", "sidebar-instrument-name", Value::String(instrument_name));
-    rt.set_reactive("SEQ", "sidebar-loaded-preset", Value::String(loaded_preset.clone()));
-    rt.set_reactive("SEQ", "sidebar-selected-sample", Value::String(String::new()));
+    rt.set_reactive(
+        "SEQ",
+        "sidebar-kind",
+        Value::String("instrument".to_string()),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "sidebar-instrument-name",
+        Value::String(instrument_name),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "sidebar-loaded-preset",
+        Value::String(loaded_preset.clone()),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "sidebar-selected-sample",
+        Value::String(String::new()),
+    );
     rt.set_reactive("SEQ", "sidebar-presets", build_string_list(&preset_items));
     rt.set_reactive(
         "SEQ",
         "sidebar-preset-tree",
-        build_flat_tree_items(&preset_items, if loaded_preset.is_empty() { None } else { Some(loaded_preset.as_str()) }),
+        build_flat_tree_items(&preset_items),
     );
 }
 
@@ -1598,45 +2731,106 @@ fn extract_path_from_payload(payload: &Value) -> Option<String> {
 }
 
 /// Push individual tp-* reactive fields for the current track.
-fn sync_track_params(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize, selected: &Arc<Mutex<HashSet<usize>>>) {
+fn sync_track_params(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) {
     let tp = &state.pattern.track_params[track];
     rt.set_reactive("SEQ", "tp-attack", Value::Number(tp.get_attack_ms() as f64));
-    rt.set_reactive("SEQ", "tp-release", Value::Number(tp.get_release_ms() as f64));
+    rt.set_reactive(
+        "SEQ",
+        "tp-release",
+        Value::Number(tp.get_release_ms() as f64),
+    );
     rt.set_reactive("SEQ", "tp-swing", Value::Number(tp.get_swing() as f64));
     rt.set_reactive("SEQ", "tp-send", Value::Number(tp.get_send() as f64));
-    rt.set_reactive("SEQ", "tp-num-steps", Value::Number(tp.get_num_steps() as f64));
+    rt.set_reactive(
+        "SEQ",
+        "tp-num-steps",
+        Value::Number(tp.get_num_steps() as f64),
+    );
     rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
     rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp.is_polyphonic()));
     // Resolve timebase: show p-locked value from first selected step, otherwise track default
     let timebase_label = {
         let sel = selected.lock().unwrap();
-        sel.iter().copied().min()
+        sel.iter()
+            .copied()
+            .min()
             .and_then(|step| state.pattern.timebase_plocks[track].get(step))
             .unwrap_or_else(|| tp.get_timebase())
             .label()
             .to_string()
     };
     rt.set_reactive("SEQ", "tp-timebase", Value::String(timebase_label));
-    rt.set_reactive("SEQ", "tp-swing-resolution", Value::String(tp.get_swing_resolution().label().to_string()));
+    rt.set_reactive(
+        "SEQ",
+        "tp-swing-resolution",
+        Value::String(tp.get_swing_resolution().label().to_string()),
+    );
 }
 
 /// Build a Lisp Value::Map of track parameters for the current track.
 fn build_track_params(state: &Arc<SequencerState>, track: usize) -> Value {
     use std::collections::HashMap;
     let tp = &state.pattern.track_params[track];
-    eprintln!("build_track_params: track={track} attack={} gate={} vol={}", tp.get_attack_ms(), tp.is_gate_on(), tp.get_volume());
+    eprintln!(
+        "build_track_params: track={track} attack={} gate={} vol={}",
+        tp.get_attack_ms(),
+        tp.is_gate_on(),
+        tp.get_volume()
+    );
     let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-    map.insert("gate".into(), Rc::new(RefCell::new(Value::Bool(tp.is_gate_on()))));
-    map.insert("attack".into(), Rc::new(RefCell::new(Value::Number(tp.get_attack_ms() as f64))));
-    map.insert("release".into(), Rc::new(RefCell::new(Value::Number(tp.get_release_ms() as f64))));
-    map.insert("swing".into(), Rc::new(RefCell::new(Value::Number(tp.get_swing() as f64))));
-    map.insert("swing-resolution".into(), Rc::new(RefCell::new(Value::String(tp.get_swing_resolution().label().to_string()))));
-    map.insert("num-steps".into(), Rc::new(RefCell::new(Value::Number(tp.get_num_steps() as f64))));
-    map.insert("volume".into(), Rc::new(RefCell::new(Value::Number(tp.get_volume() as f64))));
-    map.insert("pan".into(), Rc::new(RefCell::new(Value::Number(tp.get_pan() as f64))));
-    map.insert("timebase".into(), Rc::new(RefCell::new(Value::String(tp.get_timebase().label().to_string()))));
-    map.insert("send".into(), Rc::new(RefCell::new(Value::Number(tp.get_send() as f64))));
-    map.insert("poly".into(), Rc::new(RefCell::new(Value::Bool(tp.is_polyphonic()))));
+    map.insert(
+        "gate".into(),
+        Rc::new(RefCell::new(Value::Bool(tp.is_gate_on()))),
+    );
+    map.insert(
+        "attack".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_attack_ms() as f64))),
+    );
+    map.insert(
+        "release".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_release_ms() as f64))),
+    );
+    map.insert(
+        "swing".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_swing() as f64))),
+    );
+    map.insert(
+        "swing-resolution".into(),
+        Rc::new(RefCell::new(Value::String(
+            tp.get_swing_resolution().label().to_string(),
+        ))),
+    );
+    map.insert(
+        "num-steps".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_num_steps() as f64))),
+    );
+    map.insert(
+        "volume".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_volume() as f64))),
+    );
+    map.insert(
+        "pan".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_pan() as f64))),
+    );
+    map.insert(
+        "timebase".into(),
+        Rc::new(RefCell::new(Value::String(
+            tp.get_timebase().label().to_string(),
+        ))),
+    );
+    map.insert(
+        "send".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_send() as f64))),
+    );
+    map.insert(
+        "poly".into(),
+        Rc::new(RefCell::new(Value::Bool(tp.is_polyphonic()))),
+    );
     Value::Map(map)
 }
 
@@ -1737,16 +2931,23 @@ mod tests {
     #[test]
     fn metal_seq_grid_lisp_parses() {
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read metal-seq-grid.lisp");
-        let tokens = Parser::new(src).parse().expect("tokenize metal-seq-grid.lisp");
+        let tokens = Parser::new(src)
+            .parse()
+            .expect("tokenize metal-seq-grid.lisp");
         let mut pos = 0;
         while pos < tokens.len() {
             if let Err(err) = parse_expression_at(&tokens, &mut pos) {
                 let start = pos.saturating_sub(8);
                 let end = (pos + 8).min(tokens.len());
-                panic!("parse metal-seq-grid.lisp at token {pos}: {err:?}\ncontext: {:?}", &tokens[start..end]);
+                panic!(
+                    "parse metal-seq-grid.lisp at token {pos}: {err:?}\ncontext: {:?}",
+                    &tokens[start..end]
+                );
             }
         }
-        ASTParser::new(tokens).parse().expect("parse metal-seq-grid.lisp");
+        ASTParser::new(tokens)
+            .parse()
+            .expect("parse metal-seq-grid.lisp");
     }
 }
 
@@ -1782,7 +2983,7 @@ fn handle_recording_key(
     keyboard_tx: &std::sync::mpsc::Sender<KeyboardTrigger>,
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
     current_track: &Arc<AtomicUsize>,
-    held_notes: &Arc<Mutex<Vec<(char, f32, usize, Instant)>>>,
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
 ) -> bool {
     use crossterm::event::{KeyCode, KeyEventKind};
 
@@ -1805,22 +3006,23 @@ fn handle_recording_key(
         None => return false,
     };
 
-    let octave = keyboard_octave.load(Ordering::Relaxed);
-    let transpose = (note + octave) as f32;
-
     match key.kind {
         KeyEventKind::Press => {
             // Suppress key repeat — only trigger on first press
             let mut held = held_notes.lock().unwrap();
-            if held.iter().any(|(k, _, _, _)| *k == c) {
+            if held.iter().any(|note| note.key == c) {
                 return true;
             }
 
             let armed = record_armed.lock().unwrap();
+            let octave = keyboard_octave.load(Ordering::Relaxed);
+            let transpose = (note + octave) as f32;
+            let mut pressed_tracks = Vec::new();
 
             // Send note-on to audio thread for all armed tracks
             for (track, a) in armed.iter().enumerate() {
                 if *a {
+                    pressed_tracks.push(track);
                     let _ = keyboard_tx.send(KeyboardTrigger {
                         track,
                         transpose,
@@ -1833,51 +3035,63 @@ fn handle_recording_key(
             // Record the step at press time
             let ct = current_track.load(Ordering::Relaxed);
             let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed) as usize;
-            held.push((c, transpose, playhead, Instant::now()));
+            held.push(HeldKeyboardNote {
+                key: c,
+                transpose,
+                step_at_press: playhead,
+                press_time: Instant::now(),
+                tracks: pressed_tracks,
+            });
             true
         }
         KeyEventKind::Release => {
             // Find and remove the held note
             let held_entry = {
                 let mut held = held_notes.lock().unwrap();
-                let pos = held.iter().position(|(k, _, _, _)| *k == c);
+                let pos = held.iter().position(|note| note.key == c);
                 pos.map(|idx| held.remove(idx))
             };
 
-            let armed = record_armed.lock().unwrap();
-
-            // Send note-off to audio thread for all armed tracks
-            for (track, a) in armed.iter().enumerate() {
-                if *a {
+            // Record into pattern if recording + playing
+            if let Some(note) = held_entry {
+                for track in &note.tracks {
                     let _ = keyboard_tx.send(KeyboardTrigger {
-                        track,
-                        transpose,
+                        track: *track,
+                        transpose: note.transpose,
                         velocity: 0.0,
                         note_off: true,
                     });
                 }
-            }
 
-            // Record into pattern if recording + playing
-            if let Some((_key, note_transpose, step_at_press, press_time)) = held_entry {
                 if recording.load(Ordering::Relaxed) && state.is_playing() {
+                    let armed = record_armed.lock().unwrap();
                     let bpm = state.transport.bpm.load(Ordering::Relaxed) as f64;
                     let secs_per_step = 60.0 / bpm / 4.0;
-                    let hold_secs = press_time.elapsed().as_secs_f64();
+                    let hold_secs = note.press_time.elapsed().as_secs_f64();
                     let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
 
                     for (track, a) in armed.iter().enumerate() {
-                        if !*a { continue; }
+                        if !*a {
+                            continue;
+                        }
                         let num_steps = state.pattern.track_params[track].get_num_steps();
-                        let local_step = step_at_press % num_steps;
+                        let local_step = note.step_at_press % num_steps;
                         if !state.pattern.patterns[track].is_active(local_step) {
                             state.pattern.patterns[track].toggle_step(local_step);
                         }
-                        state.pattern.chord_data[track].add_note(local_step, note_transpose);
+                        state.pattern.chord_data[track].add_note(local_step, note.transpose);
                         let first_note = state.pattern.chord_data[track].get(local_step, 0);
-                        state.pattern.step_data[track].set(local_step, StepParam::Transpose, first_note);
+                        state.pattern.step_data[track].set(
+                            local_step,
+                            StepParam::Transpose,
+                            first_note,
+                        );
                         state.pattern.step_data[track].set(local_step, StepParam::Velocity, 1.0);
-                        state.pattern.step_data[track].set(local_step, StepParam::Duration, duration_steps);
+                        state.pattern.step_data[track].set(
+                            local_step,
+                            StepParam::Duration,
+                            duration_steps,
+                        );
                     }
                     state.publish_scheduler_snapshot();
                 }

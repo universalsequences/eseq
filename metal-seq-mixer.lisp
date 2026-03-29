@@ -25,7 +25,7 @@
         (box :width 12 :height 1
              :bg (if (= SEQ.current-track i) :blue :dark-gray)
              :on-click |x y r| (seq-set-track i)
-          (label name :font-size 11
+          (label (substring name 0 16) :font-size 11 :width 12
                  :color (if (= SEQ.current-track i) :white :gray)
                  :bg :transparent))
         (hslider :min 0 :max 1 :width 5
