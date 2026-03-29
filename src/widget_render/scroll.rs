@@ -31,6 +31,7 @@ impl Default for ScrollState {
 
 thread_local! {
     static SCROLL_STATES: RefCell<HashMap<u64, ScrollState>> = RefCell::new(HashMap::new());
+    static CURRENT_EVENT_SCROLL_OFFSET: RefCell<Option<f32>> = const { RefCell::new(None) };
 }
 
 pub fn get_scroll_state(widget_id: u64) -> ScrollState {
@@ -42,16 +43,14 @@ pub fn set_scroll_state(widget_id: u64, state: ScrollState) {
     super::bump_widget_state_generation();
 }
 
-/// Find the scroll offset of any active scroll container that is currently scrolled.
-pub fn any_active_scroll_offset() -> f32 {
-    SCROLL_STATES.with(|s| {
-        for state in s.borrow().values() {
-            if state.viewport_height > 0.0 && state.content_height > state.viewport_height {
-                return state.offset_y;
-            }
-        }
-        0.0
-    })
+/// Per-event scroll context for child widgets that need to map pointer input
+/// into content coordinates inside a scroll container.
+pub fn current_event_scroll_offset() -> f32 {
+    CURRENT_EVENT_SCROLL_OFFSET.with(|offset| offset.borrow().unwrap_or(0.0))
+}
+
+pub fn set_current_event_scroll_offset(offset_y: Option<f32>) {
+    CURRENT_EVENT_SCROLL_OFFSET.with(|offset| *offset.borrow_mut() = offset_y);
 }
 
 /// Clamp an existing scroll offset when content/viewport dimensions change.

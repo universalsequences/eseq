@@ -107,7 +107,6 @@ fn flatten_items(
         path.push(i);
 
         let is_expanded = has_children && (expand_all || expanded.contains(&path));
-
         rows.push(TreeRow {
             depth,
             label,
@@ -331,7 +330,6 @@ impl WidgetDefinition for TreeWidget {
 
         let rh = ROW_HEIGHT;
 
-        // Adjust for parent scroll container offset
         let scroll_offset = find_parent_scroll_offset(node);
         let row_relative = local_row - node.rect.row + scroll_offset;
         let row_idx = (row_relative / rh).floor() as usize;
@@ -718,9 +716,8 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
 /// Find the scroll offset from the nearest parent scroll container.
 fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {
-    super::scroll::any_active_scroll_offset()
+    super::scroll::current_event_scroll_offset()
 }
 
 /// Fixed row height in cells. Matches what measure() uses.
 const ROW_HEIGHT: f32 = 1.25;
-

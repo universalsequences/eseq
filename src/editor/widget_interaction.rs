@@ -33,9 +33,7 @@ impl Editor {
         if widget_render::overlay_widget_id().is_some()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
         {
-            let scroll_top = self.total_scroll_top();
-            let overlay_local_row = local_row + scroll_top;
-            if widget_render::overlay_contains(local_col, overlay_local_row) {
+            if widget_render::overlay_contains(local_col, local_row) {
                 // Click inside overlay → dispatch to overlay widget
                 if let Some(overlay_id) = widget_render::overlay_widget_id() {
                     let Some(layout) = self.runtime.current_layout.clone() else {
@@ -44,17 +42,19 @@ impl Editor {
                     if let Some(node) =
                         super::widget_focus::find_node_by_id(&layout, overlay_id)
                     {
-                        let output = self.dispatch_widget_mouse_event(
+                        let widget_event = map_mouse_event(
                             &node,
                             mouse.kind,
-                            content_col,
-                            content_row,
-                            precise_col,
-                            precise_row,
+                            local_col,
+                            local_row,
                             None,
                             None,
                             mouse.modifiers,
                         );
+                        let output = match widget_event {
+                            MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
+                            MouseEventOutcome::Dispatch(widget_event) => handle_event(&node, widget_event),
+                        };
                         let _ = self.apply_widget_output(output);
                         return true;
                     }
@@ -487,6 +487,12 @@ impl Editor {
         let total_scroll_left = self.active_leaf().widget_scroll_left;
         let local_col = precise_col - content_col as f32 + total_scroll_left;
         let local_row = precise_row - content_row as f32 + total_scroll_top;
+        let event_scroll_offset = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| find_scroll_ancestor(layout, node.widget_id))
+            .map(|scroll_node| crate::widget_render::scroll::get_scroll_state(scroll_node.widget_id).offset_y);
         let drag_start = drag_start.map(|(start_col, start_row)| {
             (
                 start_col - content_col as f32 + total_scroll_left,
@@ -500,7 +506,11 @@ impl Editor {
             .and_then(|gesture| (gesture.widget_id == node.widget_id).then_some(gesture))
             .and_then(|gesture| gesture.gesture_data.as_ref())
             .or(explicit_gesture);
-        match map_mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers) {
+        crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
+        let outcome =
+            map_mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers);
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
+        match outcome {
             MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
             MouseEventOutcome::Dispatch(widget_event) => handle_event(node, widget_event),
         }
