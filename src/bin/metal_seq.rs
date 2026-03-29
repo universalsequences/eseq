@@ -25,6 +25,122 @@ const DEFAULT_SAMPLES: &[&str] = &[
 ];
 const PAGE_SIZE: usize = 16;
 
+#[derive(Clone)]
+struct SampleTreeNode {
+    label: String,
+    label_lower: String,
+    path: Option<String>,
+    children: Vec<SampleTreeNode>,
+}
+
+fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNode> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            dirs.push((name, path));
+        } else if let Some(ext) = path.extension() {
+            if ext.eq_ignore_ascii_case("wav") {
+                files.push((name, path.to_string_lossy().to_string()));
+            }
+        }
+    }
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+    let mut items = Vec::new();
+
+    for (label, path) in dirs {
+        let children = build_sample_tree_node(&path);
+        if children.is_empty() {
+            continue;
+        }
+        items.push(SampleTreeNode {
+            label_lower: label.to_lowercase(),
+            label,
+            path: None,
+            children,
+        });
+    }
+
+    for (label, full_path) in files {
+        items.push(SampleTreeNode {
+            label_lower: label.to_lowercase(),
+            label,
+            path: Some(full_path),
+            children: Vec::new(),
+        });
+    }
+
+    items
+}
+
+fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
+    Value::List(
+        items.iter()
+            .map(|item| {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "label".to_string(),
+                    Rc::new(RefCell::new(Value::String(item.label.clone()))),
+                );
+                if !item.children.is_empty() {
+                    map.insert(
+                        "children".to_string(),
+                        Rc::new(RefCell::new(sample_tree_nodes_to_value(&item.children))),
+                    );
+                }
+                if let Some(path) = &item.path {
+                    map.insert(
+                        "path".to_string(),
+                        Rc::new(RefCell::new(Value::String(path.clone()))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
+
+fn filter_sample_tree_nodes(items: &[SampleTreeNode], query_lower: &str) -> Vec<SampleTreeNode> {
+    if query_lower.is_empty() {
+        return items.to_vec();
+    }
+
+    let mut filtered = Vec::new();
+    for item in items {
+        if item.children.is_empty() {
+            if item.label_lower.contains(query_lower) {
+                filtered.push(item.clone());
+            }
+            continue;
+        }
+
+        let children = filter_sample_tree_nodes(&item.children, query_lower);
+        if !children.is_empty() {
+            filtered.push(SampleTreeNode {
+                label: item.label.clone(),
+                label_lower: item.label_lower.clone(),
+                path: None,
+                children,
+            });
+        }
+    }
+    filtered
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Init audio engine
     let eng = engine::init_engine()?;
@@ -637,76 +753,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Value::List(results))
     });
 
-    // seq-sample-tree — build hierarchical tree of samples/ for the tree widget
-    fn build_sample_tree_value(dir: &std::path::Path) -> Value {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Value::List(vec![]);
-        };
-        let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
-        let mut files: Vec<(String, String)> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            if path.is_dir() {
-                dirs.push((name, path));
-            } else if let Some(ext) = path.extension() {
-                if ext.eq_ignore_ascii_case("wav") {
-                    files.push((name, path.to_string_lossy().to_string()));
-                }
-            }
-        }
-        dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-        files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-
-        let mut items: Vec<Rc<RefCell<Value>>> = Vec::new();
-
-        // Directories become folder nodes with children
-        for (name, path) in &dirs {
-            let children = build_sample_tree_value(path);
-            // Skip empty directories
-            if matches!(&children, Value::List(l) if l.is_empty()) {
-                continue;
-            }
-            let mut map = std::collections::HashMap::new();
-            map.insert(
-                "label".to_string(),
-                Rc::new(RefCell::new(Value::String(name.clone()))),
-            );
-            map.insert(
-                "children".to_string(),
-                Rc::new(RefCell::new(children)),
-            );
-            items.push(Rc::new(RefCell::new(Value::Map(map))));
-        }
-
-        // Files become leaf nodes with :path
-        for (name, full_path) in &files {
-            let mut map = std::collections::HashMap::new();
-            map.insert(
-                "label".to_string(),
-                Rc::new(RefCell::new(Value::String(name.clone()))),
-            );
-            map.insert(
-                "path".to_string(),
-                Rc::new(RefCell::new(Value::String(full_path.clone()))),
-            );
-            items.push(Rc::new(RefCell::new(Value::Map(map))));
-        }
-
-        Value::List(items)
-    }
-
-    let sample_tree = build_sample_tree_value(std::path::Path::new("samples"));
+    let sample_tree_nodes = build_sample_tree_node(std::path::Path::new("samples"));
+    let sample_tree = sample_tree_nodes_to_value(&sample_tree_nodes);
     eprintln!("metal_seq: sample tree built");
     runtime.register_native("seq-sample-tree", move |_args, _ctx| {
         Ok(sample_tree.clone())
+    });
+    runtime.register_native("seq-filter-sample-tree", move |args, _ctx| {
+        let query_lower = match args.first() {
+            Some(Value::String(s)) => s.trim().to_lowercase(),
+            _ => String::new(),
+        };
+        let filtered = filter_sample_tree_nodes(&sample_tree_nodes, &query_lower);
+        Ok(sample_tree_nodes_to_value(&filtered))
     });
 
     // 4. Create editor with Metal backend

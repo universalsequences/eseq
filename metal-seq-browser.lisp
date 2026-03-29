@@ -53,26 +53,6 @@
         (status (str "Add track: " (get item :label))))
       (status "Select a sample file, not a folder"))))
 
-;; ── Filter logic: keep tree structure but only branches with matching leaves ──
-
-(def sbrowser-filter-tree (tree query)
-  (if (= query "")
-    tree
-    (reduce
-      |acc item|
-      (let ((label (get item :label))
-            (children (get item :children)))
-        (if children
-          (let ((filtered (sbrowser-filter-tree children query)))
-            (if (> (len filtered) 0)
-              (append acc (list (dict :label label :children filtered)))
-              acc))
-          (if (string-contains? (string-downcase label) (string-downcase query))
-            (append acc (list item))
-            acc)))
-      '()
-      tree)))
-
 ;; ── Search bar widget ──
 
 (def sbrowser-header ()
@@ -100,7 +80,7 @@
             :folder-color '(0.88 0.88 0.89)
             :file-color   '(0.62 0.62 0.65)
             :chevron-color '(0.50 0.50 0.53)
-            :items (sbrowser-filter-tree (seq-sample-tree) sbrowser-filter)
+            :items (seq-filter-sample-tree sbrowser-filter)
             :expand-all (not (= sbrowser-filter ""))
             :on-select (lambda (item) (sbrowser-audition item))
             :on-activate (lambda (item) (sbrowser-add-track item))))))))
