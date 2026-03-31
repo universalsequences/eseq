@@ -1391,8 +1391,14 @@ impl Runtime {
                 EffectTarget::BufferName(name) => *name == current_buffer_name,
             };
             if targets_active_buffer {
-                self.current_widget_tree = Some(pending.tree.clone());
-                self.relayout_current_tree();
+                let unchanged = self
+                    .current_widget_tree
+                    .as_ref()
+                    .is_some_and(|current| *current == pending.tree);
+                if !unchanged {
+                    self.current_widget_tree = Some(pending.tree.clone());
+                    self.relayout_current_tree();
+                }
             }
         }
         self.shared

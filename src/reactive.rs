@@ -53,6 +53,14 @@ impl ReactiveRegistry {
             return;
         };
 
+        let unchanged = namespace_entry
+            .fields
+            .get(field)
+            .is_some_and(|current| *current == value);
+        if unchanged {
+            return;
+        }
+
         namespace_entry
             .fields
             .insert(field.to_string(), value.clone());
