@@ -462,6 +462,8 @@ fn size_affecting_props_equal(
 
     let keys: &[&str] = if let Some(definition) = widget_render::widget_definition(widget_type) {
         definition.size_affecting_props()
+    } else if widget_render::sdf_widget::sdf_widget_def(widget_type).is_some() {
+        &[]
     } else {
         match widget_type {
             "knob" => &[],
