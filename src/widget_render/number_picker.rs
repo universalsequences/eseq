@@ -87,7 +87,7 @@ impl WidgetDefinition for NumberPickerWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["value", "width", "height", "font-size", "decimals", "noui"]
+        &["width", "height", "font-size", "decimals", "noui"]
     }
 
     fn measure(

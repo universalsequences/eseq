@@ -243,7 +243,7 @@ impl WidgetDefinition for DropdownWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["value", "options", "width", "height", "font-size"]
+        &["options", "width", "height", "font-size"]
     }
 
     fn renders_own_focus(&self) -> bool {
