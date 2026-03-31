@@ -342,33 +342,41 @@ fn reuse_layout_node_impl(
     existing: &LayoutNode,
     tree: &Value,
     dirty_widget_ids: &mut Vec<u64>,
+    path: &mut Vec<String>,
 ) -> Result<LayoutNode, String> {
+    let format_reason = |reason: String, path: &[String]| {
+        if path.is_empty() {
+            reason
+        } else {
+            format!("{reason}@{}", path.join(">"))
+        }
+    };
     let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
     if widget_type != existing.widget_type {
-        return Err(format!(
+        return Err(format_reason(format!(
             "widget-type:{}->{}",
             existing.widget_type, widget_type
-        ));
+        ), path));
     }
     // Tree widgets manage internal expand/collapse state that changes their
     // height without changing props. Always force full relayout.
     if widget_type == "tree" {
-        return Err("tree-widget".to_string());
+        return Err(format_reason("tree-widget".to_string(), path));
     }
 
     let children_values = get_children(tree);
     if children_values.len() != existing.children.len() {
-        return Err(format!(
+        return Err(format_reason(format!(
             "children-len:{}:{}->{}",
             widget_type,
             existing.children.len(),
             children_values.len()
-        ));
+        ), path));
     }
 
     let new_props = collect_props(tree);
     if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
-        return Err(format!("size-props:{widget_type}"));
+        return Err(format_reason(format!("size-props:{widget_type}"), path));
     }
 
     if existing.props != new_props {
@@ -379,8 +387,12 @@ fn reuse_layout_node_impl(
         .children
         .iter()
         .zip(children_values.iter())
-        .map(|(child_layout, child_tree)| {
-            reuse_layout_node_impl(child_layout, child_tree, dirty_widget_ids)
+        .enumerate()
+        .map(|(idx, (child_layout, child_tree))| {
+            path.push(format!("{widget_type}[{idx}]"));
+            let result = reuse_layout_node_impl(child_layout, child_tree, dirty_widget_ids, path);
+            path.pop();
+            result
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -400,12 +412,14 @@ pub fn reuse_layout_node(
     tree: &Value,
     dirty_widget_ids: &mut Vec<u64>,
 ) -> Option<LayoutNode> {
-    reuse_layout_node_impl(existing, tree, dirty_widget_ids).ok()
+    let mut path = Vec::new();
+    reuse_layout_node_impl(existing, tree, dirty_widget_ids, &mut path).ok()
 }
 
 pub fn reuse_layout_failure_reason(existing: &LayoutNode, tree: &Value) -> Option<String> {
     let mut dirty_widget_ids = Vec::new();
-    reuse_layout_node_impl(existing, tree, &mut dirty_widget_ids).err()
+    let mut path = Vec::new();
+    reuse_layout_node_impl(existing, tree, &mut dirty_widget_ids, &mut path).err()
 }
 
 pub fn same_layout_geometry(left: &LayoutNode, right: &LayoutNode) -> bool {
