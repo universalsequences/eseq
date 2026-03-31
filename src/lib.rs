@@ -299,6 +299,8 @@ mod tests {
     use crate::layout::{LayoutEngine, format_layout_tree_lines};
     use crate::parser::Parser;
     use crate::vm::{EffectTarget, VMError, format_lisp_source, format_lisp_value};
+    #[cfg(target_os = "macos")]
+    use crate::widget_render::{MetalPrimitive, widget_primitives_for_node};
 
     const SDF_LIGHTING_V2_DEMO: &str = include_str!("../sdf-lighting-v2-demo.lisp");
 
@@ -1370,6 +1372,46 @@ mod tests {
             runtime.eval_str(r#"(fmt "hello {}" "world")"#),
             Ok(Some(Value::String("hello world".to_string())))
         );
+    }
+
+    #[test]
+    fn test_substring_uses_character_indices() {
+        let mut runtime = Runtime::new();
+        assert_eq!(
+            runtime.eval_str(r#"(substring "Tim Maia – Est Dificil" 0 12)"#),
+            Ok(Some(Value::String("Tim Maia – E".to_string())))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_label_metal_primitives_are_clipped_to_label_rect() {
+        let mut runtime = Runtime::new();
+        let tree = runtime
+            .eval_str(r#"(label "a very long label" :width 4 :bg :transparent)"#)
+            .unwrap()
+            .unwrap();
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&tree)
+            .expect("layout");
+        let primitives = widget_primitives_for_node(
+            &layout,
+            crate::widget_render::WidgetViewport {
+                scroll_top: 0.0,
+                vp_w: 80.0,
+                vp_h: 24.0,
+                cell_w: 1.0,
+                cell_h: 1.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                tile_content_rows: 24.0,
+            },
+        );
+
+        assert!(matches!(primitives.first(), Some(MetalPrimitive::PushClipRect(_))));
+        assert!(matches!(primitives.get(1), Some(MetalPrimitive::ProportionalText(_))));
+        assert!(matches!(primitives.get(2), Some(MetalPrimitive::PopClipRect)));
     }
 
     #[test]

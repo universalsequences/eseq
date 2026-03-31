@@ -46,10 +46,10 @@ pub struct TileLeaf {
     pub cached_layout: Option<Arc<LayoutNode>>,
     pub layout_revision: u64,
     /// Cached RenderFrame for inactive tile optimization.
-    /// Key is (buffer_id, buffer_revision, layout_revision, scroll_top,
+    /// Key is (buffer_id, buffer_revision, widget_tree_revision, layout_revision, scroll_top,
     /// viewport_width, viewport_height, view_mode).
     pub cached_inactive_frame: Option<(
-        (BufferId, u64, u64, usize, usize, usize, crate::editor::ViewMode),
+        (BufferId, u64, u64, u64, usize, usize, usize, crate::editor::ViewMode),
         crate::backend::RenderFrame,
     )>,
 }

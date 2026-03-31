@@ -37,6 +37,7 @@ pub struct Buffer {
     /// Per-buffer widget tree (for modes that render widgets).
     pub widget_tree: Option<Value>,
     pub widget_tree_source: Option<BufferId>,
+    pub widget_tree_revision: u64,
     pub view_mode: ViewMode,
     pub text_styles: Vec<BufferTextStyle>,
 }
@@ -56,6 +57,7 @@ impl Buffer {
             revision: 0,
             widget_tree: None,
             widget_tree_source: None,
+            widget_tree_revision: 0,
             view_mode: ViewMode::Both,
             text_styles: Vec::new(),
         }
@@ -113,6 +115,12 @@ impl Buffer {
 
     pub fn set_mode(&mut self, mode: BufferMode) {
         self.mode = mode;
+    }
+
+    pub fn set_widget_tree(&mut self, tree: Option<Value>, source: Option<BufferId>) {
+        self.widget_tree = tree;
+        self.widget_tree_source = source;
+        self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
     }
 
     pub fn save(&mut self) -> std::io::Result<PathBuf> {

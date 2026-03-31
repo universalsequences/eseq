@@ -149,6 +149,9 @@ pub struct RenderFrame {
     /// widget rect tree changes, not when render-only props like slider values
     /// update.
     pub widget_layout_cache_key: u64,
+    /// Revision token for semantic widget-tree content. This changes when the
+    /// widget tree output changes even if layout geometry stays the same.
+    pub widget_content_cache_key: u64,
     /// Widget IDs whose props changed without a geometry change. Backends can
     /// use this to patch persistent instance buffers in place.
     pub dirty_widget_ids: Vec<u64>,

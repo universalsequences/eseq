@@ -757,6 +757,31 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::String(s)
     });
 
+    // (substring s start [end]) → character-indexed substring
+    vm.register_native("substring", |args| {
+        let Some(Value::String(s)) = args.first() else {
+            return Value::Nil;
+        };
+        let Some(Value::Number(start)) = args.get(1) else {
+            return Value::Nil;
+        };
+
+        let chars: Vec<char> = s.chars().collect();
+        let len = chars.len();
+        let start = (*start).max(0.0) as usize;
+        let start = start.min(len);
+        let end = match args.get(2) {
+            Some(Value::Number(end)) => ((*end).max(0.0) as usize).min(len),
+            _ => len,
+        };
+
+        if end < start {
+            return Value::String(String::new());
+        }
+
+        Value::String(chars[start..end].iter().collect())
+    });
+
     // (source val ...) → concatenated evaluable Lisp source
     vm.register_native("source", |args| {
         let mut s = String::new();

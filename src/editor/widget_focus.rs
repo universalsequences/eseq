@@ -24,10 +24,8 @@ impl Editor {
         // skip focus — the overlay intercept handles it. If outside, dismiss
         // the overlay and proceed with normal focus logic.
         if crate::widget_render::overlay_widget_id().is_some() {
-            let scroll_top = self.total_scroll_top();
-            let scroll_left = self.active_leaf().widget_scroll_left;
-            let local_row = precise_row - content_row as f32 + scroll_top;
-            let local_col = precise_col - content_col as f32 + scroll_left;
+            let local_row = precise_row - content_row as f32;
+            let local_col = precise_col - content_col as f32;
             if crate::widget_render::overlay_contains(local_col, local_row) {
                 return false;
             }
@@ -317,12 +315,14 @@ impl Editor {
 
     pub(super) fn save_current_widget_tree(&mut self) {
         if let Some(tree) = self.runtime.current_widget_tree() {
-            self.active_buffer_mut().widget_tree = Some(tree);
+            let source = self.active_buffer().widget_tree_source;
+            self.active_buffer_mut().set_widget_tree(Some(tree), source);
         }
     }
 
     /// Clear widget layout and focus state for a buffer with no widget tree.
     pub(super) fn clear_widget_focus(&mut self) {
+        crate::widget_render::clear_overlay();
         self.runtime.clear_current_widget_tree();
         let leaf = self.active_leaf_mut();
         leaf.focused_widget_id = None;
@@ -333,6 +333,7 @@ impl Editor {
     }
 
     pub(super) fn restore_buffer_widget_tree(&mut self) {
+        crate::widget_render::clear_overlay();
         let tree = self.active_buffer().widget_tree.clone();
         match tree {
             Some(tree) => {

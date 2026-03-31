@@ -566,6 +566,7 @@ pub struct Runtime {
     pub current_layout: Option<Arc<LayoutNode>>,
     layout_revision: u64,
     dirty_widget_ids: Vec<u64>,
+    force_layout_revision_bump: bool,
     current_widget_tree: Option<Value>,
     layout_cols: u16,
     layout_rows: u16,
@@ -601,6 +602,7 @@ impl Runtime {
             current_layout: None,
             layout_revision: 0,
             dirty_widget_ids: Vec::new(),
+            force_layout_revision_bump: false,
             current_widget_tree: None,
             layout_cols: 80,
             layout_rows: 24,
@@ -992,6 +994,7 @@ impl Runtime {
     pub fn invalidate_layout(&mut self) {
         self.current_layout = None;
         self.dirty_widget_ids.clear();
+        self.force_layout_revision_bump = true;
         self.relayout_current_tree();
     }
 
@@ -1296,6 +1299,7 @@ impl Runtime {
         let saved_layout = self.current_layout.clone();
         let saved_revision = self.layout_revision;
         let saved_dirty = self.dirty_widget_ids.clone();
+        let saved_force_layout_revision_bump = self.force_layout_revision_bump;
         #[cfg(test)]
         let saved_rendered_layouts = self.rendered_layouts.clone();
         let saved_cols = self.layout_cols;
@@ -1314,6 +1318,7 @@ impl Runtime {
         self.current_layout = saved_layout;
         self.layout_revision = saved_revision;
         self.dirty_widget_ids = saved_dirty;
+        self.force_layout_revision_bump = saved_force_layout_revision_bump;
         #[cfg(test)]
         {
             self.rendered_layouts = saved_rendered_layouts;
@@ -1415,6 +1420,10 @@ impl Runtime {
                 .push(crate::layout::format_layout_tree_lines(&updated, 0));
             self.current_layout = Some(Arc::new(updated));
             self.dirty_widget_ids = dirty_widget_ids;
+            if self.force_layout_revision_bump {
+                self.layout_revision = self.layout_revision.wrapping_add(1);
+            }
+            self.force_layout_revision_bump = false;
             return;
         }
         let engine = if let Some(measurer) = self.text_measurer.as_deref() {
@@ -1441,9 +1450,13 @@ impl Runtime {
             if geometry_changed {
                 self.dirty_widget_ids.clear();
                 self.layout_revision = self.layout_revision.wrapping_add(1);
+            } else if self.force_layout_revision_bump {
+                self.layout_revision = self.layout_revision.wrapping_add(1);
+                self.dirty_widget_ids.clear();
             } else if let Some(layout) = self.current_layout.as_ref() {
                 self.dirty_widget_ids = collect_shader_widget_ids(layout);
             }
+            self.force_layout_revision_bump = false;
         }
     }
 

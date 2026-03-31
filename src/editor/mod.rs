@@ -2459,8 +2459,7 @@ impl Editor {
         let is_active = self.active_buffer_idx() == buffer_idx;
         {
             let buffer = &mut self.buffers[buffer_idx];
-            buffer.widget_tree = tree.clone();
-            buffer.widget_tree_source = source_buffer_id;
+            buffer.set_widget_tree(tree.clone(), source_buffer_id);
             if tree.is_some() {
                 buffer.view_mode = ViewMode::UiOnly;
             }
@@ -2797,8 +2796,7 @@ impl Editor {
             for idx in target_indices {
                 if self.active_buffer_idx() == idx {
                     let buffer = &mut self.buffers[idx];
-                    buffer.widget_tree = None;
-                    buffer.widget_tree_source = None;
+                    buffer.set_widget_tree(None, None);
                 } else {
                     self.apply_widget_tree_to_buffer(idx, None, None);
                 }
@@ -2861,8 +2859,7 @@ impl Editor {
             match tree {
                 Value::Nil | Value::Bool(false) => {
                     let buffer = self.active_buffer_mut();
-                    buffer.widget_tree = None;
-                    buffer.widget_tree_source = None;
+                    buffer.set_widget_tree(None, None);
                     buffer.view_mode = ViewMode::TextOnly;
                     self.runtime.clear_layout_effects();
                     self.active_leaf_mut().focused_widget_id = None;
@@ -2870,8 +2867,7 @@ impl Editor {
                 tree => {
                     let source_id = self.active_buffer().id;
                     let buffer = self.active_buffer_mut();
-                    buffer.widget_tree = Some(tree.clone());
-                    buffer.widget_tree_source = Some(source_id);
+                    buffer.set_widget_tree(Some(tree.clone()), Some(source_id));
                     buffer.view_mode = ViewMode::UiOnly;
                     self.runtime.set_widget_tree(tree);
                     self.auto_focus_first_widget();
@@ -2893,8 +2889,7 @@ impl Editor {
             if self.active_buffer_idx() == buffer_idx {
                 crate::widget_render::clear_overlay();
                 let buffer = &mut self.buffers[buffer_idx];
-                buffer.widget_tree = Some(pending.tree);
-                buffer.widget_tree_source = pending.source_buffer_id;
+                buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
                 buffer.view_mode = ViewMode::UiOnly;
             } else {
                 self.apply_widget_tree_to_buffer(

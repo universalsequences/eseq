@@ -1109,7 +1109,7 @@ fragment float4 waveform_frag(
                         scroll_left: tile.frame.widget_scroll_left,
                     };
                     let primitives = self.widget_scene_for_layout(
-                        tile.frame.text_cache_key,
+                        tile.frame.widget_content_cache_key,
                         tile.frame.widget_layout_cache_key,
                         layout,
                         viewport,
@@ -2029,7 +2029,7 @@ fragment float4 waveform_frag(
                 .as_ref()
                 .map(|layout| {
                     self.widget_scene_for_layout(
-                        frame.text_cache_key,
+                        frame.widget_content_cache_key,
                         frame.widget_layout_cache_key,
                         layout,
                         WidgetViewport {

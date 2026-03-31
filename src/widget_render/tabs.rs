@@ -67,6 +67,13 @@ fn header_height_for_value(node: &Value, aspect: f32) -> f32 {
     header_height(&props, aspect)
 }
 
+fn selected_index(node: &Value, children_len: usize) -> usize {
+    (crate::layout::get_prop_num(node, "value")
+        .map(crate::layout::f64_to_f32)
+        .unwrap_or(0.0) as usize)
+        .min(children_len.saturating_sub(1))
+}
+
 fn get_items(props: &HashMap<String, Value>) -> Vec<String> {
     match props.get("items") {
         Some(Value::List(list)) => list
@@ -181,25 +188,22 @@ impl WidgetDefinition for TabsWidget {
             max_height: (constraints.max_height - header_h).max(0.0),
             aspect: constraints.aspect,
         };
-        let max_child_height = children
-            .iter()
-            .filter_map(|child| measure_child(child, inner))
-            .map(|s| s.height)
-            .fold(0.0_f32, f32::max);
+        let selected_size = children
+            .get(selected_index(node, children.len()))
+            .and_then(|child| measure_child(child, inner))
+            .unwrap_or(Size {
+                width: 0.0,
+                height: 0.0,
+            });
         Some(Size {
             width: if compact {
-                let max_child_width = children
-                    .iter()
-                    .filter_map(|child| measure_child(child, inner))
-                    .map(|s| s.width)
-                    .fold(0.0_f32, f32::max);
                 let header_width = compact_total_width(&props, &items)
                     + get_f32_prop(&props, "padding", 0.0) * 2.0;
-                max_child_width.max(header_width)
+                selected_size.width.max(header_width)
             } else {
                 constraints.max_width
             },
-            height: header_h + max_child_height,
+            height: header_h + selected_size.height,
         })
     }
 
@@ -216,9 +220,7 @@ impl WidgetDefinition for TabsWidget {
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
     ) -> Vec<LayoutNode> {
-        let selected = crate::layout::get_prop_num(node, "value")
-            .map(crate::layout::f64_to_f32)
-            .unwrap_or(0.0) as usize;
+        let selected = selected_index(node, children.len());
 
         let child_constraints = Constraints {
             min_width: 0.0,
@@ -227,13 +229,13 @@ impl WidgetDefinition for TabsWidget {
             max_height: area.height,
             aspect: 1.0,
         };
-        let tallest_child_height = children
-            .iter()
-            .filter_map(|child| measure_child(child, child_constraints))
+        let selected_child_height = children
+            .get(selected)
+            .and_then(|child| measure_child(child, child_constraints))
             .map(|size| size.height)
-            .fold(0.0_f32, f32::max);
+            .unwrap_or(0.0);
         let min_header_h = header_height_for_value(node, 1.0);
-        let header_h = (area.height - tallest_child_height).clamp(min_header_h, area.height);
+        let header_h = (area.height - selected_child_height).clamp(min_header_h, area.height);
         let child_h = (area.height - header_h).max(0.0);
 
         let child_area = Rect {
