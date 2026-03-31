@@ -9,7 +9,8 @@ use crate::audio::register_audio_natives;
 use crate::buffer::BufferTextStyle;
 use crate::host::{BufferId, HostCommand};
 use crate::layout::{
-    LayoutEngine, LayoutNode, TextMeasurer, reuse_layout_node, same_layout_geometry,
+    LayoutEngine, LayoutNode, TextMeasurer, reuse_layout_failure_reason, reuse_layout_node,
+    same_layout_geometry,
 };
 use crate::reactive::ReactiveRegistry;
 use crate::vm::{EffectTarget, PendingWidgetTree, VM, Value, register_core_natives};
@@ -41,6 +42,7 @@ struct RuntimePerfStats {
     relayout_reused: u64,
     relayout_full: u64,
     relayout_total: Duration,
+    relayout_failures: HashMap<String, u64>,
 }
 
 impl RuntimePerfStats {
@@ -56,6 +58,7 @@ impl RuntimePerfStats {
             relayout_reused: 0,
             relayout_full: 0,
             relayout_total: Duration::ZERO,
+            relayout_failures: HashMap::new(),
         }
     }
 
@@ -77,7 +80,7 @@ impl RuntimePerfStats {
         self.maybe_emit();
     }
 
-    fn note_relayout(&mut self, reused: bool, elapsed: Duration) {
+    fn note_relayout(&mut self, reused: bool, elapsed: Duration, failure_reason: Option<String>) {
         if !self.enabled {
             return;
         }
@@ -85,6 +88,9 @@ impl RuntimePerfStats {
             self.relayout_reused += 1;
         } else {
             self.relayout_full += 1;
+            if let Some(reason) = failure_reason {
+                *self.relayout_failures.entry(reason).or_insert(0) += 1;
+            }
         }
         self.relayout_total += elapsed;
         self.maybe_emit();
@@ -117,7 +123,7 @@ impl RuntimePerfStats {
             0.0
         };
         eprintln!(
-            "[ui-profile][runtime] reactive/s={:.1} dirty/cycle={:.1} apply_avg={apply_avg_ms:.2}ms flush_avg={flush_avg_ms:.2}ms reactive_avg={reactive_avg_ms:.2}ms relayout/s={:.1} relayout_avg={relayout_avg_ms:.2}ms reused={} full={}",
+            "[ui-profile][runtime] reactive/s={:.1} dirty/cycle={:.1} apply_avg={apply_avg_ms:.2}ms flush_avg={flush_avg_ms:.2}ms reactive_avg={reactive_avg_ms:.2}ms relayout/s={:.1} relayout_avg={relayout_avg_ms:.2}ms reused={} full={} fail={}",
             self.reactive_cycles as f64 / secs,
             if self.reactive_cycles > 0 {
                 self.dirty_updates as f64 / self.reactive_cycles as f64
@@ -127,6 +133,7 @@ impl RuntimePerfStats {
             relayout_calls as f64 / secs,
             self.relayout_reused,
             self.relayout_full,
+            self.top_failure_reason(),
         );
         self.window_start = Instant::now();
         self.reactive_cycles = 0;
@@ -137,6 +144,15 @@ impl RuntimePerfStats {
         self.relayout_reused = 0;
         self.relayout_full = 0;
         self.relayout_total = Duration::ZERO;
+        self.relayout_failures.clear();
+    }
+
+    fn top_failure_reason(&self) -> String {
+        self.relayout_failures
+            .iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(reason, count)| format!("{reason}({count})"))
+            .unwrap_or_else(|| "-".to_string())
     }
 }
 
@@ -1539,10 +1555,15 @@ impl Runtime {
             if had_layout {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
-            self.perf_stats.note_relayout(true, relayout_started.elapsed());
+            self.perf_stats
+                .note_relayout(true, relayout_started.elapsed(), None);
             return;
         };
         let mut dirty_widget_ids = Vec::new();
+        let failure_reason = self
+            .current_layout
+            .as_ref()
+            .and_then(|existing| reuse_layout_failure_reason(existing.as_ref(), tree));
         if let Some(existing) = self.current_layout.as_ref()
             && let Some(updated) = reuse_layout_node(existing.as_ref(), tree, &mut dirty_widget_ids)
         {
@@ -1555,7 +1576,8 @@ impl Runtime {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
             self.force_layout_revision_bump = false;
-            self.perf_stats.note_relayout(true, relayout_started.elapsed());
+            self.perf_stats
+                .note_relayout(true, relayout_started.elapsed(), None);
             return;
         }
         let engine = if let Some(measurer) = self.text_measurer.as_deref() {
@@ -1589,7 +1611,8 @@ impl Runtime {
                 self.dirty_widget_ids = collect_shader_widget_ids(layout);
             }
             self.force_layout_revision_bump = false;
-            self.perf_stats.note_relayout(false, relayout_started.elapsed());
+            self.perf_stats
+                .note_relayout(false, relayout_started.elapsed(), failure_reason);
         }
     }
 

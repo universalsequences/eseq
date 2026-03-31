@@ -338,29 +338,37 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
     None
 }
 
-pub fn reuse_layout_node(
+fn reuse_layout_node_impl(
     existing: &LayoutNode,
     tree: &Value,
     dirty_widget_ids: &mut Vec<u64>,
-) -> Option<LayoutNode> {
-    let widget_type = get_widget_type(tree)?;
+) -> Result<LayoutNode, String> {
+    let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
     if widget_type != existing.widget_type {
-        return None;
+        return Err(format!(
+            "widget-type:{}->{}",
+            existing.widget_type, widget_type
+        ));
     }
     // Tree widgets manage internal expand/collapse state that changes their
     // height without changing props. Always force full relayout.
     if widget_type == "tree" {
-        return None;
+        return Err("tree-widget".to_string());
     }
 
     let children_values = get_children(tree);
     if children_values.len() != existing.children.len() {
-        return None;
+        return Err(format!(
+            "children-len:{}:{}->{}",
+            widget_type,
+            existing.children.len(),
+            children_values.len()
+        ));
     }
 
     let new_props = collect_props(tree);
     if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
-        return None;
+        return Err(format!("size-props:{widget_type}"));
     }
 
     if existing.props != new_props {
@@ -372,12 +380,12 @@ pub fn reuse_layout_node(
         .iter()
         .zip(children_values.iter())
         .map(|(child_layout, child_tree)| {
-            reuse_layout_node(child_layout, child_tree, dirty_widget_ids)
+            reuse_layout_node_impl(child_layout, child_tree, dirty_widget_ids)
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
 
     let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
-    Some(LayoutNode {
+    Ok(LayoutNode {
         widget_id: existing.widget_id,
         widget_type,
         rect: existing.rect,
@@ -385,6 +393,19 @@ pub fn reuse_layout_node(
         children,
         focusable,
     })
+}
+
+pub fn reuse_layout_node(
+    existing: &LayoutNode,
+    tree: &Value,
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Option<LayoutNode> {
+    reuse_layout_node_impl(existing, tree, dirty_widget_ids).ok()
+}
+
+pub fn reuse_layout_failure_reason(existing: &LayoutNode, tree: &Value) -> Option<String> {
+    let mut dirty_widget_ids = Vec::new();
+    reuse_layout_node_impl(existing, tree, &mut dirty_widget_ids).err()
 }
 
 pub fn same_layout_geometry(left: &LayoutNode, right: &LayoutNode) -> bool {
