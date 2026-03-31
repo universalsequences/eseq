@@ -48,10 +48,22 @@ pub struct AgentSessionContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentAppAction {
-    CreateInstrumentTrack { name: String, source: String },
-    ApplyEffectToCurrentTrack { name: String, source: String },
-    UpdateCurrentEffect { name: String, source: String },
-    UpdateCurrentInstrument { name: String, source: String },
+    CreateInstrumentTrack {
+        name: String,
+        source: String,
+    },
+    ApplyEffectToCurrentTrack {
+        name: String,
+        source: String,
+    },
+    UpdateCurrentEffect {
+        name: String,
+        source: String,
+    },
+    UpdateCurrentInstrument {
+        name: String,
+        source: String,
+    },
     SaveCurrentInstrumentPresets {
         instrument_name: String,
         presets: Vec<AgentInstrumentPresetDraft>,

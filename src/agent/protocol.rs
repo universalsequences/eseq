@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::actions::{
-    normalize_patch_name, AgentAppAction, AgentInstrumentPresetDraft,
-    AgentInstrumentPresetSchema, AgentSessionContext,
+    normalize_patch_name, AgentAppAction, AgentInstrumentPresetDraft, AgentInstrumentPresetSchema,
+    AgentSessionContext,
 };
 use super::tools::{AgentToolRegistry, ExampleKind, ToolResult};
 
@@ -389,10 +389,7 @@ impl AgentToolRuntime {
             content: format!(
                 "instrument: {}\nsource_file: {}\nbase_note_offset: {}\nexisting_presets: {}\n\n{}",
                 schema.instrument_name,
-                schema
-                    .source_file
-                    .as_deref()
-                    .unwrap_or("<unknown>"),
+                schema.source_file.as_deref().unwrap_or("<unknown>"),
                 schema.base_note_offset,
                 existing,
                 grouped.join("\n\n")
@@ -708,7 +705,10 @@ fn lookup_queries(value: &Value) -> Result<Vec<String>, String> {
         }
     }
 
-    Err("Missing required string field 'query' or non-empty string array field 'queries'.".to_string())
+    Err(
+        "Missing required string field 'query' or non-empty string array field 'queries'."
+            .to_string(),
+    )
 }
 
 #[cfg(test)]

@@ -20,7 +20,11 @@ const STATE_ENV_PHASE: usize = 11; // 0=idle, 1=attack, 2=sustain, 3=release
 const STATE_ENV_LEVEL: usize = 12; // current envelope amplitude 0.0–1.0
 const STATE_RELEASE_LEVEL: usize = 13; // level when release began (for linear ramp)
 const STATE_GATE_COUNTER: usize = 14; // real-time sample counter for gate duration (increments by 1/sample, not by playback rate)
-const SAMPLER_STATE_SIZE: usize = 15;
+const STATE_LAST_OUT_L: usize = 15; // last emitted left sample, used for click-free retrigger smoothing
+const STATE_LAST_OUT_R: usize = 16; // last emitted right sample, used for click-free retrigger smoothing
+const STATE_RETRIGGER_OUT_L: usize = 17; // captured left sample at retrigger start
+const STATE_RETRIGGER_OUT_R: usize = 18; // captured right sample at retrigger start
+const SAMPLER_STATE_SIZE: usize = 19;
 
 // Envelope phase constants
 const ENV_IDLE: f32 = 0.0;
@@ -82,6 +86,10 @@ unsafe extern "C" fn sampler_init(
     *s.add(STATE_ENV_LEVEL) = 0.0;
     *s.add(STATE_RELEASE_LEVEL) = 0.0;
     *s.add(STATE_GATE_COUNTER) = 0.0;
+    *s.add(STATE_LAST_OUT_L) = 0.0;
+    *s.add(STATE_LAST_OUT_R) = 0.0;
+    *s.add(STATE_RETRIGGER_OUT_L) = 0.0;
+    *s.add(STATE_RETRIGGER_OUT_R) = 0.0;
 }
 
 /// extern "C" process — reads sample data from buffer, writes to output.
@@ -114,6 +122,10 @@ unsafe extern "C" fn sampler_process(
     let mut env_level = *s.add(STATE_ENV_LEVEL);
     let mut release_level = *s.add(STATE_RELEASE_LEVEL);
     let mut gate_counter = *s.add(STATE_GATE_COUNTER);
+    let mut last_out_l = *s.add(STATE_LAST_OUT_L);
+    let mut last_out_r = *s.add(STATE_LAST_OUT_R);
+    let mut retrigger_out_l = *s.add(STATE_RETRIGGER_OUT_L);
+    let mut retrigger_out_r = *s.add(STATE_RETRIGGER_OUT_R);
 
     let buf_desc = buffers as *const BufferDesc;
     let desc = &*buf_desc.add(buffer_id);
@@ -130,6 +142,8 @@ unsafe extern "C" fn sampler_process(
             *out0.add(i) = 0.0;
             *out1.add(i) = 0.0;
         }
+        *s.add(STATE_LAST_OUT_L) = 0.0;
+        *s.add(STATE_LAST_OUT_R) = 0.0;
         return;
     }
 
@@ -144,14 +158,20 @@ unsafe extern "C" fn sampler_process(
     // playhead==0 means params just reset it. Distinguish fresh vs retrigger:
     if playhead == 0.0 && env_phase != ENV_RETRIGGER {
         gate_counter = 0.0; // reset real-time duration counter
-        if env_level > 0.001 {
-            // Voice was still audible → smooth retrigger fade to 0 first
+        if env_level > 0.001 || last_out_l.abs() > 0.000_1 || last_out_r.abs() > 0.000_1 {
+            // Voice was still audible → fade the actual previous output to zero
+            // before starting the new waveform attack.
             env_phase = ENV_RETRIGGER;
-            release_level = env_level; // fade from this level
+            env_level = 1.0;
+            release_level = 1.0;
+            retrigger_out_l = last_out_l;
+            retrigger_out_r = last_out_r;
         } else {
             // Voice was silent → clean attack from 0
             env_phase = ENV_ATTACK;
             env_level = 0.0;
+            retrigger_out_l = 0.0;
+            retrigger_out_r = 0.0;
         }
     }
 
@@ -186,17 +206,25 @@ unsafe extern "C" fn sampler_process(
         // single sample flow through immediately (e.g. retrigger→attack).
 
         if env_phase == ENV_RETRIGGER {
-            // Fade from release_level to 0 over RETRIGGER_FADE_SAMPLES.
-            // Playhead advances during this time (we "spend" ~1ms of new
-            // sample content at fading volume — inaudible).
-            if release_level > 0.0 {
-                env_level -= release_level / RETRIGGER_FADE_SAMPLES;
-            }
+            // Fade the previously emitted sample to zero, then begin the new attack.
+            // The new playhead advances underneath this silent crossfade so we do not
+            // jump directly from the old waveform to the new one.
+            *out0.add(i) = retrigger_out_l * env_level;
+            *out1.add(i) = retrigger_out_r * env_level;
+            last_out_l = *out0.add(i);
+            last_out_r = *out1.add(i);
+
+            env_level -= 1.0 / RETRIGGER_FADE_SAMPLES;
+            playhead += effective_rate;
+            gate_counter += 1.0;
             if env_level <= 0.0 {
                 env_level = 0.0;
                 env_phase = ENV_ATTACK;
                 post_retrigger = true;
+                last_out_l = 0.0;
+                last_out_r = 0.0;
             }
+            continue;
         }
 
         if env_phase == ENV_ATTACK {
@@ -245,6 +273,8 @@ unsafe extern "C" fn sampler_process(
                 *s.add(STATE_PLAYING) = 0.0;
                 *out0.add(i) = 0.0;
                 *out1.add(i) = 0.0;
+                last_out_l = 0.0;
+                last_out_r = 0.0;
                 for j in (i + 1)..nf {
                     *out0.add(j) = 0.0;
                     *out1.add(j) = 0.0;
@@ -285,6 +315,8 @@ unsafe extern "C" fn sampler_process(
 
         *out0.add(i) = sample_l * env_amp;
         *out1.add(i) = sample_r * env_amp;
+        last_out_l = *out0.add(i);
+        last_out_r = *out1.add(i);
 
         playhead += effective_rate;
         gate_counter += 1.0; // real-time counter (1 per sample, independent of transpose/speed)
@@ -296,6 +328,10 @@ unsafe extern "C" fn sampler_process(
     *s.add(STATE_ENV_LEVEL) = env_level;
     *s.add(STATE_RELEASE_LEVEL) = release_level;
     *s.add(STATE_GATE_COUNTER) = gate_counter;
+    *s.add(STATE_LAST_OUT_L) = last_out_l;
+    *s.add(STATE_LAST_OUT_R) = last_out_r;
+    *s.add(STATE_RETRIGGER_OUT_L) = retrigger_out_l;
+    *s.add(STATE_RETRIGGER_OUT_R) = retrigger_out_r;
 }
 
 pub fn sampler_vtable() -> NodeVTable {
@@ -341,13 +377,9 @@ pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<(i32, Stri
         samples_f32
             .chunks(channels)
             .flat_map(|ch| {
-                let left = ch.iter().step_by(2).copied().sum::<f32>() / ch.iter().step_by(2).count() as f32;
-                let right = ch
-                    .iter()
-                    .skip(1)
-                    .step_by(2)
-                    .copied()
-                    .sum::<f32>()
+                let left = ch.iter().step_by(2).copied().sum::<f32>()
+                    / ch.iter().step_by(2).count() as f32;
+                let right = ch.iter().skip(1).step_by(2).copied().sum::<f32>()
                     / ch.iter().skip(1).step_by(2).count().max(1) as f32;
                 [left, right]
             })

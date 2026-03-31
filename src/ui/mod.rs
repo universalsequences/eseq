@@ -120,6 +120,15 @@ pub enum PatternBtn {
     Delete,
 }
 
+#[derive(Clone, Debug)]
+pub struct HeldKeyboardNote {
+    pub key: char,
+    pub transpose: f32,
+    pub step_at_press: usize,
+    pub press_time: Instant,
+    pub tracks: Vec<usize>,
+}
+
 // Track param cursor indices
 const TP_GATE: usize = 0;
 const TP_ATTACK: usize = 1;
@@ -500,7 +509,7 @@ pub struct UiState {
     pub reverb_replace: f32,
     pub recording: bool,
     pub keyboard_octave: i32,
-    pub held_notes: Vec<(char, f32, usize, Instant)>,
+    pub held_notes: Vec<HeldKeyboardNote>,
     pub piano_notes: Vec<(i32, Instant)>,
     pub piano_last_step: usize,
     pub piano_last_track: usize,
@@ -1043,7 +1052,8 @@ impl App {
             let mut tool_ok = outcome.ok;
             let mut details = vec![outcome.summary.clone()];
 
-            if !outcome.content.trim().is_empty() && outcome.content.trim() != outcome.summary.trim()
+            if !outcome.content.trim().is_empty()
+                && outcome.content.trim() != outcome.summary.trim()
             {
                 details.push(outcome.content.clone());
             }
@@ -1263,8 +1273,13 @@ impl App {
         let desc = self
             .current_instrument_descriptor()
             .ok_or_else(|| "No current instrument descriptor is available.".to_string())?;
-        let existing = crate::lisp_effect::load_instrument_presets(instrument_name)
-            .map_err(|error| format!("Failed to load preset bank for '{}': {error}", instrument_name))?;
+        let existing =
+            crate::lisp_effect::load_instrument_presets(instrument_name).map_err(|error| {
+                format!(
+                    "Failed to load preset bank for '{}': {error}",
+                    instrument_name
+                )
+            })?;
         let mut presets_by_name = existing
             .into_iter()
             .map(|preset| (preset.name.clone(), preset))
@@ -1273,7 +1288,10 @@ impl App {
         for draft in drafts {
             let mut params = std::collections::BTreeMap::new();
             for (idx, param) in desc.params.iter().enumerate() {
-                params.insert(param.name.clone(), self.state.pattern.instrument_slots[track].defaults.get(idx));
+                params.insert(
+                    param.name.clone(),
+                    self.state.pattern.instrument_slots[track].defaults.get(idx),
+                );
             }
             for (param_name, value) in &draft.params {
                 let (idx, param_desc) = desc
@@ -1304,12 +1322,14 @@ impl App {
 
         let mut presets = presets_by_name.into_values().collect::<Vec<_>>();
         presets.sort_by(|a, b| a.name.cmp(&b.name));
-        crate::lisp_effect::save_instrument_presets(instrument_name, &presets).map_err(|error| {
-            format!(
-                "Failed to save preset bank for '{}': {error}",
-                instrument_name
-            )
-        })?;
+        crate::lisp_effect::save_instrument_presets(instrument_name, &presets).map_err(
+            |error| {
+                format!(
+                    "Failed to save preset bank for '{}': {error}",
+                    instrument_name
+                )
+            },
+        )?;
         Ok(format!(
             "Saved {} preset(s) for '{}': {}.",
             drafts.len(),

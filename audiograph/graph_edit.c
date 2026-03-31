@@ -1039,6 +1039,10 @@ bool apply_delete_node_internal(LiveGraph *lg, int node_id) {
     free(node->state);
     node->state = NULL;
   }
+  if (node->debug_name) {
+    free(node->debug_name);
+    node->debug_name = NULL;
+  }
 
   // Free port arrays
   if (node->inEdgeId) {
@@ -1317,6 +1321,7 @@ int apply_add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
   memset(node, 0, sizeof(RTNode));
 
   node->logical_id = logical_id;
+  node->debug_name = name ? strdup(name) : NULL;
   node->vtable = vtable;
   node->state = state;
   node->state_size = state_size;

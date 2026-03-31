@@ -15,7 +15,8 @@ use eseqlisp::{Editor, EditorConfig, HostCommand, HostEvent, Runtime};
 
 use sequencer::engine;
 use sequencer::sequencer::{
-    KeyboardTrigger, SequencerState, StepParam, Timebase, MAX_STEPS, SYNC_RESOLUTIONS,
+    KeyboardTrigger, SequencerState, StepParam, SwingResolution, Timebase, MAX_STEPS,
+    SYNC_RESOLUTIONS,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
@@ -225,6 +226,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("num-steps", Value::Number(PAGE_SIZE as f64)),
             ("num-tracks", Value::Number(track_count as f64)),
             ("current-track", Value::Number(0.0)),
+            (
+                "current-pattern",
+                Value::Number(state.pattern.current_pattern.load(Ordering::Relaxed) as f64),
+            ),
+            (
+                "num-patterns",
+                Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
+            ),
             ("playhead", Value::Number(0.0)),
             ("track-names", build_track_names(&track_names)),
             ("steps", build_steps_value(&state, 0)),
@@ -510,6 +519,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Value::Bool(!sel.lock().unwrap().is_empty()))
     });
 
+    // seq-select-all-steps — select every step in the current track pattern
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-select-all-steps", move |_args, _ctx| {
+        let track = ct.load(Ordering::Relaxed);
+        let num_steps = st.pattern.track_params[track].get_num_steps();
+        let mut set = sel.lock().unwrap();
+        set.clear();
+        set.extend(0..num_steps);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(num_steps as f64))
+    });
+
+    // seq-delete-selected-steps — clear all selected steps and clear selection
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-delete-selected-steps", move |_args, _ctx| {
+        let track = ct.load(Ordering::Relaxed);
+        let steps: Vec<usize> = {
+            let mut set = sel.lock().unwrap();
+            let mut steps: Vec<usize> = set.iter().copied().collect();
+            steps.sort_unstable();
+            set.clear();
+            steps
+        };
+        for step in &steps {
+            st.clear_step_payload(track, *step);
+        }
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(steps.len() as f64))
+    });
+
+    // seq-shift-selected-steps — rotate selected step payloads left/right in place
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-shift-selected-steps", move |args, _ctx| {
+        let Some(Value::Number(direction)) = args.first() else {
+            return Err("seq-shift-selected-steps: expected direction".into());
+        };
+        let direction = (*direction).round() as isize;
+        if direction == 0 {
+            return Ok(Value::Nil);
+        }
+        let track = ct.load(Ordering::Relaxed);
+        let steps: Vec<usize> = {
+            let set = sel.lock().unwrap();
+            let mut steps: Vec<usize> = set.iter().copied().collect();
+            steps.sort_unstable();
+            steps
+        };
+        if steps.is_empty() {
+            return Ok(Value::Bool(false));
+        }
+        st.rotate_steps(track, &steps, direction.signum());
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(true))
+    });
+
     // seq-set-effect-plock — apply p-lock to ALL selected steps
     let st = state.clone();
     let ct = current_track.clone();
@@ -724,6 +799,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         st.publish_scheduler_snapshot();
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(tb.label().to_string()))
+    });
+
+    // seq-set-swing-resolution — set the default swing resolution for the current track (by label string)
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-swing-resolution", move |args, _ctx| {
+        let label = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => return Err("seq-set-swing-resolution: expected string label".into()),
+        };
+        let normalized = label.to_ascii_lowercase();
+        let resolution = SwingResolution::LABELS
+            .iter()
+            .position(|l| l.to_ascii_lowercase() == normalized)
+            .map(|i| SwingResolution::ALL[i])
+            .ok_or_else(|| format!("seq-set-swing-resolution: unknown resolution '{label}'"))?;
+        let track = ct.load(Ordering::Relaxed);
+        st.pattern.track_params[track].set_swing_resolution(resolution);
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::String(resolution.label().to_string()))
     });
 
     // seq-toggle-record — toggle recording mode (requires at least one armed track)
@@ -1330,18 +1427,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-instrument-param" => {
                         if let Value::Map(ref map) = payload {
-                            let param_idx = map
-                                .get("param-idx")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            let value = map
-                                .get("value")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::Number(n) => Some(*n as f32),
-                                    _ => None,
-                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
                             if let (Some(param_idx), Some(user_val)) = (param_idx, value) {
                                 let track = current_track.load(Ordering::Relaxed);
                                 if let Some(desc) = app
@@ -1367,18 +1461,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-instrument-param-option" => {
                         if let Value::Map(ref map) = payload {
-                            let param_idx = map
-                                .get("param-idx")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            let label = map
-                                .get("label")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::String(s) => Some(s.clone()),
-                                    _ => None,
-                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
                             if let (Some(param_idx), Some(label)) = (param_idx, label) {
                                 let track = current_track.load(Ordering::Relaxed);
                                 if let Some(sequencer::effects::ParamKind::Enum { labels }) = app
@@ -1407,18 +1498,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-instrument-plock" => {
                         if let Value::Map(ref map) = payload {
-                            let param_idx = map
-                                .get("param-idx")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            let value = map
-                                .get("value")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::Number(n) => Some(*n as f32),
-                                    _ => None,
-                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
                             if let (Some(param_idx), Some(user_val)) = (param_idx, value) {
                                 let track = current_track.load(Ordering::Relaxed);
                                 if let Some(desc) = app
@@ -1447,18 +1535,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-instrument-plock-option" => {
                         if let Value::Map(ref map) = payload {
-                            let param_idx = map
-                                .get("param-idx")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            let label = map
-                                .get("label")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::String(s) => Some(s.clone()),
-                                    _ => None,
-                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
                             if let (Some(param_idx), Some(label)) = (param_idx, label) {
                                 let track = current_track.load(Ordering::Relaxed);
                                 if let Some(sequencer::effects::ParamKind::Enum { labels }) = app
@@ -1471,8 +1556,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(selected_idx) =
                                         labels.iter().position(|item| item == &label)
                                     {
-                                        let steps: Vec<usize> =
-                                            selected_steps.lock().unwrap().iter().copied().collect();
+                                        let steps: Vec<usize> = selected_steps
+                                            .lock()
+                                            .unwrap()
+                                            .iter()
+                                            .copied()
+                                            .collect();
                                         ui::apply_command(
                                             &mut app,
                                             ui::AppCommand::SetInstrumentPlockMulti {
@@ -1490,24 +1579,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-effect-param-option" => {
                         if let Value::Map(ref map) = payload {
-                            let slot_idx = map
-                                .get("slot-idx")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            let param_idx = map
-                                .get("param-idx")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            let label = map
-                                .get("label")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::String(s) => Some(s.clone()),
-                                    _ => None,
-                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
                             if let (Some(slot_idx), Some(param_idx), Some(label)) =
                                 (slot_idx, param_idx, label)
                             {
@@ -1532,15 +1617,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         })?
                                     });
                                 if let Some(selected_idx) = selected_idx {
-                                    ui::apply_command(
-                                        &mut app,
-                                        ui::AppCommand::SetEffectParam {
+                                    let is_host_sidechain = matches!(
+                                        app.graph
+                                            .effect_descriptors
+                                            .get(track)
+                                            .and_then(|d| d.get(slot_idx))
+                                            .and_then(|d| d.params.get(param_idx))
+                                            .and_then(|p| p.host_control.as_ref()),
+                                        Some(sequencer::effects::HostControl::FxSidechain { .. })
+                                    );
+                                    if is_host_sidechain {
+                                        app.apply_effect_sidechain_selection(
                                             track,
                                             slot_idx,
                                             param_idx,
-                                            value: selected_idx as f32,
-                                        },
-                                    );
+                                            selected_idx,
+                                        );
+                                        if let Some(slot) = app
+                                            .state
+                                            .pattern
+                                            .effect_chains
+                                            .get(track)
+                                            .and_then(|chain| chain.get(slot_idx))
+                                        {
+                                            slot.defaults.set(param_idx, selected_idx as f32);
+                                        }
+                                        app.state.publish_scheduler_snapshot();
+                                    } else {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetEffectParam {
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
+                                    }
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -1548,24 +1661,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-effect-plock-option" => {
                         if let Value::Map(ref map) = payload {
-                            let slot_idx = map
-                                .get("slot-idx")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            let param_idx = map
-                                .get("param-idx")
-                                .and_then(|cell| match &*cell.borrow() {
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
                                     Value::Number(n) => Some(*n as usize),
                                     _ => None,
                                 });
-                            let label = map
-                                .get("label")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::String(s) => Some(s.clone()),
-                                    _ => None,
-                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
                             if let (Some(slot_idx), Some(param_idx), Some(label)) =
                                 (slot_idx, param_idx, label)
                             {
@@ -1590,18 +1699,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         })?
                                     });
                                 if let Some(selected_idx) = selected_idx {
-                                    let steps: Vec<usize> =
-                                        selected_steps.lock().unwrap().iter().copied().collect();
-                                    ui::apply_command(
-                                        &mut app,
-                                        ui::AppCommand::SetEffectPlockMulti {
+                                    let is_host_sidechain = matches!(
+                                        app.graph
+                                            .effect_descriptors
+                                            .get(track)
+                                            .and_then(|d| d.get(slot_idx))
+                                            .and_then(|d| d.params.get(param_idx))
+                                            .and_then(|p| p.host_control.as_ref()),
+                                        Some(sequencer::effects::HostControl::FxSidechain { .. })
+                                    );
+                                    if is_host_sidechain {
+                                        app.apply_effect_sidechain_selection(
                                             track,
                                             slot_idx,
-                                            steps,
                                             param_idx,
-                                            value: selected_idx as f32,
-                                        },
-                                    );
+                                            selected_idx,
+                                        );
+                                        if let Some(slot) = app
+                                            .state
+                                            .pattern
+                                            .effect_chains
+                                            .get(track)
+                                            .and_then(|chain| chain.get(slot_idx))
+                                        {
+                                            slot.defaults.set(param_idx, selected_idx as f32);
+                                        }
+                                        app.state.publish_scheduler_snapshot();
+                                    } else {
+                                        let steps: Vec<usize> =
+                                            selected_steps.lock().unwrap().iter().copied().collect();
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetEffectPlockMulti {
+                                                track,
+                                                slot_idx,
+                                                steps,
+                                                param_idx,
+                                                value: selected_idx as f32,
+                                            },
+                                        );
+                                    }
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -1609,12 +1746,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "set-instrument-base-note" => {
                         if let Value::Map(ref map) = payload {
-                            let value = map
-                                .get("value")
-                                .and_then(|cell| match &*cell.borrow() {
-                                    Value::Number(n) => Some(*n as f32),
-                                    _ => None,
-                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
                             if let Some(value) = value {
                                 let track = current_track.load(Ordering::Relaxed);
                                 let clamped = value.clamp(-48.0, 48.0);
@@ -1649,6 +1784,175 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
+                        }
+                    }
+                    "switch-pattern" => {
+                        if let Value::Map(ref map) = payload {
+                            let idx = map.get("idx").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            if let Some(idx) = idx {
+                                let num_tracks = app.tracks.len();
+                                if let Some(sample_ids) = app.state.switch_pattern(
+                                    idx,
+                                    num_tracks,
+                                    &app.graph.track_buffer_ids,
+                                    &app.tracks,
+                                    &app.graph.track_instrument_types,
+                                ) {
+                                    app.graph_controller().apply_sample_ids(&sample_ids);
+                                    app.push_all_restored_defaults();
+                                    let ct = current_track.load(Ordering::Relaxed);
+                                    let rt = editor.runtime_mut();
+                                    sync_pattern_state(rt, &state);
+                                    rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "velocities",
+                                        build_param_list(&state, ct, StepParam::Velocity),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "durations",
+                                        build_param_list(&state, ct, StepParam::Duration),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "transposes",
+                                        build_param_list(&state, ct, StepParam::Transpose),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "pans",
+                                        build_param_list(&state, ct, StepParam::Pan),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "syncs",
+                                        build_param_list(&state, ct, StepParam::Sync),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "track-volumes",
+                                        build_track_volumes(&state),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "effects",
+                                        build_effects_value(
+                                            &state,
+                                            ct,
+                                            &app.graph.effect_descriptors,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "instrument-panel",
+                                        build_instrument_panel_value(&app, ct, &selected_steps),
+                                    );
+                                    sync_track_params(rt, &state, ct, &selected_steps);
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            ct,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
+                                    sync_sidebar_browser(rt, &app, ct);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "clone-pattern" => {
+                        let num_tracks = app.tracks.len();
+                        let new_idx = app.state.clone_pattern(
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        );
+                        let rt = editor.runtime_mut();
+                        sync_pattern_state(rt, &state);
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "Cloned pattern {}",
+                            new_idx + 1
+                        )));
+                    }
+                    "delete-pattern" => {
+                        let num_tracks = app.tracks.len();
+                        if let Some(sample_ids) = app.state.delete_pattern(
+                            num_tracks,
+                            &app.graph.track_buffer_ids,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        ) {
+                            app.graph_controller().apply_sample_ids(&sample_ids);
+                            app.push_all_restored_defaults();
+                            let ct = current_track.load(Ordering::Relaxed);
+                            let rt = editor.runtime_mut();
+                            sync_pattern_state(rt, &state);
+                            rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                            rt.set_reactive(
+                                "SEQ",
+                                "velocities",
+                                build_param_list(&state, ct, StepParam::Velocity),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "durations",
+                                build_param_list(&state, ct, StepParam::Duration),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "transposes",
+                                build_param_list(&state, ct, StepParam::Transpose),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "pans",
+                                build_param_list(&state, ct, StepParam::Pan),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "syncs",
+                                build_param_list(&state, ct, StepParam::Sync),
+                            );
+                            rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                            rt.set_reactive(
+                                "SEQ",
+                                "effects",
+                                build_effects_value(
+                                    &state,
+                                    ct,
+                                    &app.graph.effect_descriptors,
+                                    &selected_steps,
+                                ),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "instrument-panel",
+                                build_instrument_panel_value(&app, ct, &selected_steps),
+                            );
+                            sync_track_params(rt, &state, ct, &selected_steps);
+                            rt.set_reactive(
+                                "SEQ",
+                                "step-has-plocks",
+                                build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                            );
+                            sync_sidebar_browser(rt, &app, ct);
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     other => {
@@ -1695,7 +1999,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ct != prev_current_track {
                 editor.reset_widget_scroll_left();
                 let rt = editor.runtime_mut();
+                sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
+                rt.set_reactive("SEQ", "playhead", Value::Number(playhead as f64));
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 rt.set_reactive(
                     "SEQ",
@@ -1713,7 +2019,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     build_param_list(&state, ct, StepParam::Transpose),
                 );
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
-                rt.set_reactive("SEQ", "syncs", build_param_list(&state, ct, StepParam::Sync));
+                rt.set_reactive(
+                    "SEQ",
+                    "syncs",
+                    build_param_list(&state, ct, StepParam::Sync),
+                );
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                 rt.set_reactive(
                     "SEQ",
@@ -1733,6 +2043,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 sync_sidebar_browser(rt, &app, ct);
                 prev_current_track = ct;
+                prev_playhead = playhead;
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
                 needs_reactive_cycle = true;
@@ -1754,6 +2065,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version {
                 let rt = editor.runtime_mut();
+                sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 rt.set_reactive(
                     "SEQ",
@@ -1771,7 +2083,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     build_param_list(&state, ct, StepParam::Transpose),
                 );
                 rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
-                rt.set_reactive("SEQ", "syncs", build_param_list(&state, ct, StepParam::Sync));
+                rt.set_reactive(
+                    "SEQ",
+                    "syncs",
+                    build_param_list(&state, ct, StepParam::Sync),
+                );
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                 rt.set_reactive(
                     "SEQ",
@@ -1797,6 +2113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
                 let rt = editor.runtime_mut();
+                sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                 rt.set_reactive(
                     "SEQ",
@@ -1937,6 +2254,19 @@ fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
+fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
+    rt.set_reactive(
+        "SEQ",
+        "current-pattern",
+        Value::Number(state.pattern.current_pattern.load(Ordering::Relaxed) as f64),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "num-patterns",
+        Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
+    );
+}
+
 fn build_sync_labels() -> Value {
     let items: Vec<Rc<RefCell<Value>>> = SYNC_RESOLUTIONS
         .iter()
@@ -1957,8 +2287,8 @@ fn build_effects_value(
     descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) -> Value {
-    use std::collections::HashMap;
     use sequencer::effects::{ParamKind, SyncDivision};
+    use std::collections::HashMap;
     let Some(track_descs) = descriptors.get(track) else {
         return Value::List(vec![]);
     };
@@ -2234,23 +2564,28 @@ fn build_instrument_panel_value(
     }
 
     fn source_section_name(node_param_idx: u32) -> &'static str {
-        if (MOD_PARAM_BASE + PARAM_LFO1_RATE_HZ as u32..=MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
+        if (MOD_PARAM_BASE + PARAM_LFO1_RATE_HZ as u32
+            ..=MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
             .contains(&node_param_idx)
         {
             "LFO 1"
-        } else if (MOD_PARAM_BASE + PARAM_ENV_ATTACK_MS as u32..=MOD_PARAM_BASE + PARAM_ENV_RELEASE_MS as u32)
+        } else if (MOD_PARAM_BASE + PARAM_ENV_ATTACK_MS as u32
+            ..=MOD_PARAM_BASE + PARAM_ENV_RELEASE_MS as u32)
             .contains(&node_param_idx)
         {
             "ENV 1"
-        } else if (MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32..=MOD_PARAM_BASE + PARAM_RAND_SLEW as u32)
+        } else if (MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32
+            ..=MOD_PARAM_BASE + PARAM_RAND_SLEW as u32)
             .contains(&node_param_idx)
         {
             "RAND"
-        } else if (MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32..=MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
+        } else if (MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32
+            ..=MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
             .contains(&node_param_idx)
         {
             "DRIFT"
-        } else if (MOD_PARAM_BASE + PARAM_LFO2_RATE_HZ as u32..=MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32)
+        } else if (MOD_PARAM_BASE + PARAM_LFO2_RATE_HZ as u32
+            ..=MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32)
             .contains(&node_param_idx)
         {
             "LFO 2"
@@ -2311,43 +2646,42 @@ fn build_instrument_panel_value(
     };
 
     let mut source_actual: Vec<usize> = Vec::new();
-    let push_lfo =
-        |out: &mut Vec<usize>,
-         rate_idx: usize,
-         sync_idx: usize,
-         div_idx: usize,
-         shape_idx: usize,
-         pw_idx: usize,
-         retrig_idx: usize| {
-            let rate_node = MOD_PARAM_BASE + rate_idx as u32;
-            let sync_node = MOD_PARAM_BASE + sync_idx as u32;
-            let div_node = MOD_PARAM_BASE + div_idx as u32;
-            let shape_node = MOD_PARAM_BASE + shape_idx as u32;
-            let pw_node = MOD_PARAM_BASE + pw_idx as u32;
-            let retrig_node = MOD_PARAM_BASE + retrig_idx as u32;
+    let push_lfo = |out: &mut Vec<usize>,
+                    rate_idx: usize,
+                    sync_idx: usize,
+                    div_idx: usize,
+                    shape_idx: usize,
+                    pw_idx: usize,
+                    retrig_idx: usize| {
+        let rate_node = MOD_PARAM_BASE + rate_idx as u32;
+        let sync_node = MOD_PARAM_BASE + sync_idx as u32;
+        let div_node = MOD_PARAM_BASE + div_idx as u32;
+        let shape_node = MOD_PARAM_BASE + shape_idx as u32;
+        let pw_node = MOD_PARAM_BASE + pw_idx as u32;
+        let retrig_node = MOD_PARAM_BASE + retrig_idx as u32;
 
-            if let Some(idx) = if lfo_sync(sync_node) {
-                find_idx_by_node(div_node)
-            } else {
-                find_idx_by_node(rate_node)
-            } {
+        if let Some(idx) = if lfo_sync(sync_node) {
+            find_idx_by_node(div_node)
+        } else {
+            find_idx_by_node(rate_node)
+        } {
+            out.push(idx);
+        }
+        if let Some(idx) = find_idx_by_node(sync_node) {
+            out.push(idx);
+        }
+        if let Some(idx) = find_idx_by_node(shape_node) {
+            out.push(idx);
+        }
+        if let Some(idx) = find_idx_by_node(retrig_node) {
+            out.push(idx);
+        }
+        if lfo_shape_is_pulse(shape_node) {
+            if let Some(idx) = find_idx_by_node(pw_node) {
                 out.push(idx);
             }
-            if let Some(idx) = find_idx_by_node(sync_node) {
-                out.push(idx);
-            }
-            if let Some(idx) = find_idx_by_node(shape_node) {
-                out.push(idx);
-            }
-            if let Some(idx) = find_idx_by_node(retrig_node) {
-                out.push(idx);
-            }
-            if lfo_shape_is_pulse(shape_node) {
-                if let Some(idx) = find_idx_by_node(pw_node) {
-                    out.push(idx);
-                }
-            }
-        };
+        }
+    };
 
     push_lfo(
         &mut source_actual,
@@ -2368,9 +2702,7 @@ fn build_instrument_panel_value(
             source_actual.push(idx);
         }
     }
-    if let Some(idx) = if lfo_sync(
-        MOD_PARAM_BASE + PARAM_RAND_SYNC as u32,
-    ) {
+    if let Some(idx) = if lfo_sync(MOD_PARAM_BASE + PARAM_RAND_SYNC as u32) {
         find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_DIV as u32)
     } else {
         find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32)
@@ -2383,9 +2715,7 @@ fn build_instrument_panel_value(
     if let Some(idx) = find_idx_by_node(MOD_PARAM_BASE + PARAM_RAND_SLEW as u32) {
         source_actual.push(idx);
     }
-    if let Some(idx) = if lfo_sync(
-        MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32,
-    ) {
+    if let Some(idx) = if lfo_sync(MOD_PARAM_BASE + PARAM_DRIFT_SYNC as u32) {
         find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
     } else {
         find_idx_by_node(MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32)

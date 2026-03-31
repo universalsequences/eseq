@@ -52,13 +52,23 @@
   (< (step-index i) SEQ.tp-num-steps))
 
 (def cursor-left ()
-  (set! cursor-step (mod (- (current-step) 1) (max 1 SEQ.tp-num-steps))))
+  (if (seq-has-selection?)
+    (seq-shift-selected-steps -1)
+    (set! cursor-step (mod (- (current-step) 1) (max 1 SEQ.tp-num-steps)))))
 
 (def cursor-right ()
-  (set! cursor-step (mod (+ (current-step) 1) (max 1 SEQ.tp-num-steps))))
+  (if (seq-has-selection?)
+    (seq-shift-selected-steps 1)
+    (set! cursor-step (mod (+ (current-step) 1) (max 1 SEQ.tp-num-steps)))))
 
 (def cursor-toggle ()
   (seq-toggle-step (current-step)))
+
+(def select-all-steps ()
+  (seq-select-all-steps))
+
+(def delete-selected-steps ()
+  (seq-delete-selected-steps))
 
 (def goto-page (page)
   (set! cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1))))
@@ -67,6 +77,9 @@
 (define-mode "seq-grid-mode" :read-only true)
 (mode-bind-key "seq-grid-mode" "LEFT" "cursor-left")
 (mode-bind-key "seq-grid-mode" "RIGHT" "cursor-right")
+(mode-bind-key "seq-grid-mode" "C-a" "select-all-steps")
+(mode-bind-key "seq-grid-mode" "BACKSPACE" "delete-selected-steps")
+(mode-bind-key "seq-grid-mode" "DEL" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "RET" "cursor-toggle")
 
 (def param-values ()
@@ -435,11 +448,11 @@
           :width 6 :height 1.5 :font-size 11))
       ; Swing resolution
       (v-stack :align :center :gap 0.25
-        (h-stack :gap 0.25 :align :baseline
-          (label "sw-res" :font-size 9 :color :gray :bg :transparent)
-          (number-picker :value SEQ.tp-swing-resolution :min 1 :max 64 :decimals 0
-            :noui true :font-size 9 :text-color :gray
-            :width 3 :height 1))))))
+        (label "sw-res" :font-size 9 :color :gray :bg :transparent)
+        (dropdown :value SEQ.tp-swing-resolution
+          :options '("1/16" "1/8" "1/4" "1/2")
+          :on-change (lambda (v) (seq-set-swing-resolution v))
+          :width 5 :height 1.5 :font-size 11)))))
 
 ; Layout: samples | metal | mixer on top, fx on bottom
 (set-layout '(:rows

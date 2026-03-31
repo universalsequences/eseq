@@ -5,6 +5,7 @@
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 // On Apple platforms, enable QoS hints for worker threads to reduce jitter.
@@ -49,6 +50,25 @@ static bool using_inline_out_cache(const RTNode *node) {
 
 // Thread-local storage for current node being processed
 static __thread RTNode *g_current_processing_node = NULL;
+static __thread int g_current_execution_slot = 0;
+
+#define MAX_TRACKED_EXECUTION_SLOTS 65
+static _Atomic int g_inflight_node_ids[MAX_TRACKED_EXECUTION_SLOTS];
+
+static void dump_inflight_nodes(LiveGraph *lg) {
+  fprintf(stderr, "[audiograph] in-flight node dump begin\n");
+  for (int slot = 0; slot < MAX_TRACKED_EXECUTION_SLOTS; slot++) {
+    int nid = atomic_load_explicit(&g_inflight_node_ids[slot], memory_order_acquire);
+    if (nid < 0 || !lg || nid >= lg->node_count) {
+      continue;
+    }
+    RTNode *node = &lg->nodes[nid];
+    fprintf(stderr, "[audiograph] in-flight slot=%d node=%d logical=%llu name=%s\n",
+            slot, nid, (unsigned long long)node->logical_id,
+            node->debug_name ? node->debug_name : "<unnamed>");
+  }
+  fprintf(stderr, "[audiograph] in-flight node dump end\n");
+}
 
 int ap_current_node_ninputs(void) {
   if (g_current_processing_node) {
@@ -65,6 +85,9 @@ void initialize_engine(int block_Size, int sample_rate) {
   atomic_store_explicit(&g_engine.oswg_join_remaining, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.oswg_version, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.rt_time_constraint, 0, memory_order_relaxed);
+  for (int i = 0; i < MAX_TRACKED_EXECUTION_SLOTS; i++) {
+    atomic_store_explicit(&g_inflight_node_ids[i], -1, memory_order_relaxed);
+  }
 }
 
 // ===================== Graph Management =====================
@@ -137,7 +160,8 @@ static void wait_for_block_start_or_shutdown(void) {
 }
 
 static void *worker_main(void *arg) {
-  (void)arg;
+  intptr_t worker_slot = (intptr_t)arg;
+  g_current_execution_slot = (int)worker_slot;
   // Elevate worker thread QoS on Apple platforms for better scheduling.
 #ifdef __APPLE__
 #ifdef QOS_CLASS_USER_INTERACTIVE
@@ -327,7 +351,8 @@ void engine_start_workers(int workers) {
     (void)pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
 #endif
-    pthread_create(&g_engine.threads[i], &attr, worker_main, NULL);
+    pthread_create(&g_engine.threads[i], &attr, worker_main,
+                   (void *)(intptr_t)(i + 1));
     pthread_attr_destroy(&attr);
   }
 }
@@ -585,6 +610,8 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
             nid, lg->node_count);
     return;
   }
+  atomic_store_explicit(&g_inflight_node_ids[g_current_execution_slot], nid,
+                        memory_order_release);
   bind_and_run_live(lg, nid, nframes); // uses silence/scratch for missing ports
 
   RTNode *node = &lg->nodes[nid];
@@ -613,6 +640,8 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
   // The audio thread waits on jobsInFlight with acquire loads, so the final
   // transition to zero must carry release semantics.
   atomic_fetch_sub_explicit(&lg->sched.jobsInFlight, 1, memory_order_release);
+  atomic_store_explicit(&g_inflight_node_ids[g_current_execution_slot], -1,
+                        memory_order_release);
 }
 
 // Check if a node has any connected outputs (for scheduling)
@@ -626,6 +655,35 @@ static inline bool node_has_any_output_connected(LiveGraph *lg, int node_id) {
       return true;
   }
   return false;
+}
+
+static void dump_stalled_nodes(LiveGraph *lg) {
+  if (!lg) {
+    return;
+  }
+
+  fprintf(stderr, "[audiograph] stalled-node dump begin\n");
+  for (int i = 0; i < lg->node_count; i++) {
+    RTNode *node = &lg->nodes[i];
+    bool deleted = (node->vtable.process == NULL && node->nInputs == 0 &&
+                    node->nOutputs == 0);
+    int pending = atomic_load_explicit(&lg->sched.pending[i], memory_order_acquire);
+    int indegree = lg->sched.indegree[i];
+    bool orphaned = lg->sched.is_orphaned[i];
+    bool has_out = node_has_any_output_connected(lg, i);
+
+    if (pending <= 0 && !orphaned && !deleted) {
+      continue;
+    }
+
+    fprintf(stderr,
+            "[audiograph] stalled-node id=%d logical=%llu pending=%d indegree=%d orphaned=%d deleted=%d succCount=%d nIn=%d nOut=%d hasOut=%d name=%s\n",
+            i, (unsigned long long)node->logical_id, pending, indegree,
+            orphaned ? 1 : 0, deleted ? 1 : 0, node->succCount, node->nInputs,
+            node->nOutputs, has_out ? 1 : 0,
+            node->debug_name ? node->debug_name : "<unnamed>");
+  }
+  fprintf(stderr, "[audiograph] stalled-node dump end\n");
 }
 
 // ===================== OPTIMIZATION: Scheduling Cache =====================
@@ -790,6 +848,9 @@ void process_live_block(LiveGraph *lg, int nframes) {
     // Audio thread helps do some work
     int32_t nid;
     int empty_spins = 0;
+    bool stall_logged = false;
+    struct timespec wait_started;
+    clock_gettime(CLOCK_MONOTONIC, &wait_started);
     while (atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire) > 0) {
       if (rq_try_pop(lg->sched.readyQueue, &nid)) {
         execute_and_fanout(lg, nid, nframes);
@@ -804,6 +865,23 @@ void process_live_block(LiveGraph *lg, int nframes) {
         if (++empty_spins > 64) {
           sched_yield();
           empty_spins = 0;
+        }
+        if (!stall_logged) {
+          struct timespec now;
+          clock_gettime(CLOCK_MONOTONIC, &now);
+          long waited_ms =
+              (now.tv_sec - wait_started.tv_sec) * 1000L +
+              (now.tv_nsec - wait_started.tv_nsec) / 1000000L;
+          if (waited_ms >= 10) {
+            int jobs = atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire);
+            int qlen = atomic_load_explicit(&lg->sched.readyQueue->qlen, memory_order_acquire);
+            fprintf(stderr,
+                    "[audiograph] process_live_block stall: waited=%ldms jobsInFlight=%d readyQ=%d node_count=%d source_count=%d\n",
+                    waited_ms, jobs, qlen, lg->node_count, lg->sched.source_count);
+            dump_stalled_nodes(lg);
+            dump_inflight_nodes(lg);
+            stall_logged = true;
+          }
         }
       }
     }

@@ -162,6 +162,9 @@ void destroy_live_graph(LiveGraph *lg) {
       if (node->state) {
         free(node->state);
       }
+      if (node->debug_name) {
+        free(node->debug_name);
+      }
       if (node->inEdgeId) {
         free(node->inEdgeId);
       }

@@ -15,7 +15,8 @@ use crate::scheduled_event::{
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
 use crate::sequencer::{
-    sync_beats, SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_STEPS, MAX_TRACKS,
+    sync_beats, SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_STEPS,
+    MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
@@ -353,7 +354,10 @@ fn instrument_sound_fingerprint(
     let track = &snapshot.tracks[track_idx];
     let mut hasher = DefaultHasher::new();
     track.engine_id.hash(&mut hasher);
-    track.instrument_base_note_offset.to_bits().hash(&mut hasher);
+    track
+        .instrument_base_note_offset
+        .to_bits()
+        .hash(&mut hasher);
     for param in instrument_params {
         param.target.hash(&mut hasher);
         param.idx.hash(&mut hasher);
@@ -377,8 +381,7 @@ pub fn spawn_scheduler_thread(
             let mut last_pattern = usize::MAX;
             let mut last_playing = false;
             let lookahead_target_samples = (scheduler_block_size.max(1) * 4) as u64;
-            let mut accumulator_states =
-                [AccumulatorRuntimeState::default(); MAX_TRACKS];
+            let mut accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
             let mut pending_accum_reset = [false; MAX_TRACKS];
             let mut scratch_source_version = u64::MAX;
             let mut scratch_runtime = None;
@@ -423,9 +426,13 @@ pub fn spawn_scheduler_thread(
                 if reset_all {
                     for track_idx in 0..MAX_TRACKS {
                         pending_accum_reset[track_idx] = false;
-                        if let Some(def) = ACCUMULATOR_REGISTRY
-                            .get(snapshot.tracks.get(track_idx).map(|t| t.params.accumulator_idx).unwrap_or(0))
-                        {
+                        if let Some(def) = ACCUMULATOR_REGISTRY.get(
+                            snapshot
+                                .tracks
+                                .get(track_idx)
+                                .map(|t| t.params.accumulator_idx)
+                                .unwrap_or(0),
+                        ) {
                             accumulator_states[track_idx] = AccumulatorRuntimeState {
                                 value: def.reset_value,
                                 reversed: false,
@@ -440,9 +447,13 @@ pub fn spawn_scheduler_thread(
                         continue;
                     }
                     pending_accum_reset[track_idx] = false;
-                    if let Some(def) = ACCUMULATOR_REGISTRY
-                        .get(snapshot.tracks.get(track_idx).map(|t| t.params.accumulator_idx).unwrap_or(0))
-                    {
+                    if let Some(def) = ACCUMULATOR_REGISTRY.get(
+                        snapshot
+                            .tracks
+                            .get(track_idx)
+                            .map(|t| t.params.accumulator_idx)
+                            .unwrap_or(0),
+                    ) {
                         accumulator_states[track_idx] = AccumulatorRuntimeState {
                             value: def.reset_value,
                             reversed: false,
@@ -462,11 +473,7 @@ pub fn spawn_scheduler_thread(
                     // disturbing the current musical phase.
                     let previous_scheduled_until = scheduled_until_sample;
                     queue.clear();
-                    clock.seek_to_rendered_position(
-                        &snapshot,
-                        rendered,
-                        previous_scheduled_until,
-                    );
+                    clock.seek_to_rendered_position(&snapshot, rendered, previous_scheduled_until);
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                 }
@@ -596,7 +603,8 @@ pub fn spawn_scheduler_thread(
                                         if target_track >= snapshot.tracks.len() {
                                             continue;
                                         }
-                                        let target_step = &snapshot.tracks[target_track].steps[trigger.step];
+                                        let target_step =
+                                            &snapshot.tracks[target_track].steps[trigger.step];
                                         let instrument_fingerprint = instrument_sound_fingerprint(
                                             &snapshot,
                                             target_track,
@@ -669,7 +677,8 @@ pub fn spawn_scheduler_thread(
                                 notes: [0.0; MAX_VOICES],
                                 step_transpose: target_step.params[StepParam::Transpose.index()],
                             };
-                            for (idx, note) in target_step.chord.iter().take(MAX_VOICES).enumerate() {
+                            for (idx, note) in target_step.chord.iter().take(MAX_VOICES).enumerate()
+                            {
                                 chord.notes[idx] = *note;
                             }
 

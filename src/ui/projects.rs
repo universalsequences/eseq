@@ -507,7 +507,8 @@ impl App {
         self.editor.scratch_buffer = scratch.buffer;
         self.editor.scratch_cursor = (scratch.cursor_row, scratch.cursor_col);
         self.editor.scratch_runtime = None;
-        self.state.set_scratch_source(self.editor.scratch_buffer.clone());
+        self.state
+            .set_scratch_source(self.editor.scratch_buffer.clone());
         self.clear_control_hooks();
         if let Err(error) = self.rebuild_scratch_runtime_from_buffer() {
             self.editor.status_message =
@@ -639,14 +640,14 @@ impl App {
                         if self.is_sampler_track(track_idx) {
                             crate::effects::EffectSlotSnapshot::new_empty()
                         } else {
-                            let slot = instrument_slots
-                                .get(track_idx)
-                                .cloned()
-                                .unwrap_or_else(|| crate::project::ProjectEffectSlot {
-                                    num_params: 0,
-                                    defaults: Vec::new(),
-                                    plocks: vec![Vec::new(); MAX_STEPS],
-                                    param_node_indices: Vec::new(),
+                            let slot =
+                                instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
+                                    crate::project::ProjectEffectSlot {
+                                        num_params: 0,
+                                        defaults: Vec::new(),
+                                        plocks: vec![Vec::new(); MAX_STEPS],
+                                        param_node_indices: Vec::new(),
+                                    }
                                 });
                             if slot.num_params == 0 {
                                 crate::effects::EffectSlotSnapshot::capture(
@@ -719,7 +720,7 @@ impl App {
         walk(Path::new("samples"))
     }
 
-    pub(super) fn push_all_restored_defaults(&self) {
+    pub fn push_all_restored_defaults(&self) {
         self.push_master_volume();
         for track_idx in 0..self.tracks.len() {
             self.push_track_volume(track_idx);

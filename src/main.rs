@@ -12,7 +12,7 @@ static CRASH_LOG_PATH: OnceLock<String> = OnceLock::new();
 
 #[cfg(unix)]
 mod crash_handler {
-    use super::{CRASH_LOG, CRASH_LOG_PATH, OnceLock};
+    use super::{OnceLock, CRASH_LOG, CRASH_LOG_PATH};
     use std::ffi::c_void;
     use std::io::Write;
     use std::mem::MaybeUninit;

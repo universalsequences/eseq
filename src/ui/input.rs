@@ -384,12 +384,15 @@ impl App {
                         let track = self.ui.cursor_track;
                         let dest_start = self.ui.cursor_step;
                         let num_steps = self.num_steps();
-                        apply_command(self, AppCommand::PasteSteps {
-                            track,
-                            clipboard: clipboard.clone(),
-                            dest_start,
-                            num_steps,
-                        });
+                        apply_command(
+                            self,
+                            AppCommand::PasteSteps {
+                                track,
+                                clipboard: clipboard.clone(),
+                                dest_start,
+                                num_steps,
+                            },
+                        );
                         // Put clipboard back so it can be pasted again
                         self.ui.step_clipboard = Some(clipboard);
                     }
@@ -447,6 +450,8 @@ impl App {
                 for armed in self.graph.record_armed.iter_mut() {
                     *armed = false;
                 }
+                let all_tracks: Vec<usize> = (0..self.graph.record_armed.len()).collect();
+                self.release_held_notes_for_tracks(&all_tracks);
                 self.ui.recording = false;
                 self.focus_sidebar_sounds();
                 return;
@@ -468,7 +473,10 @@ impl App {
                     }
                     '[' => {
                         // Shift record quantize threshold earlier (compensate for more output latency)
-                        apply_command(self, AppCommand::AdjustRecordQuantizeThresh { delta: -0.05 });
+                        apply_command(
+                            self,
+                            AppCommand::AdjustRecordQuantizeThresh { delta: -0.05 },
+                        );
                         return;
                     }
                     ']' => {
@@ -479,13 +487,15 @@ impl App {
                     _ => {
                         if let Some(semitone) = Self::note_from_key(c) {
                             // Ignore key repeat — only trigger on first press
-                            if self.ui.held_notes.iter().any(|(k, _, _, _)| *k == c) {
+                            if self.ui.held_notes.iter().any(|note| note.key == c) {
                                 return;
                             }
                             let transpose = semitone as f32 + self.ui.keyboard_octave as f32;
+                            let mut pressed_tracks = Vec::new();
                             // Send note-on to audio thread for all armed tracks
                             for (track, armed) in self.graph.record_armed.iter().enumerate() {
                                 if *armed {
+                                    pressed_tracks.push(track);
                                     let _ = self.graph.keyboard_tx.send(KeyboardTrigger {
                                         track,
                                         transpose,
@@ -512,9 +522,13 @@ impl App {
                             } else {
                                 step as usize
                             };
-                            self.ui
-                                .held_notes
-                                .push((c, transpose, step_now, Instant::now()));
+                            self.ui.held_notes.push(crate::ui::HeldKeyboardNote {
+                                key: c,
+                                transpose,
+                                step_at_press: step_now,
+                                press_time: Instant::now(),
+                                tracks: pressed_tracks,
+                            });
                             return;
                         }
                     }
@@ -856,7 +870,11 @@ impl App {
                 let arm_hit_left = layout.arm_x.saturating_sub(1);
                 let arm_hit_right = layout.arm_x + 2;
                 if col >= arm_hit_left && col < arm_hit_right {
+                    let was_armed = self.graph.record_armed[idx];
                     self.graph.record_armed[idx] = !self.graph.record_armed[idx];
+                    if was_armed && !self.graph.record_armed[idx] {
+                        self.release_held_notes_for_tracks(&[idx]);
+                    }
                     self.ui.focused_region = Region::Cirklon;
                 } else if col >= layout.volume_x && col < layout.volume_x + layout.volume_width {
                     let inner_width = layout.volume_inner_width.max(1);
@@ -1152,10 +1170,23 @@ impl App {
 
         if !is_active {
             // Activate the step and set this semitone as the Transpose value
-            apply_command(self, AppCommand::SetStepActive { track, step, active: true });
-            apply_command(self, AppCommand::SetStepParam {
-                track, step, param: StepParam::Transpose, value: semitone as f32,
-            });
+            apply_command(
+                self,
+                AppCommand::SetStepActive {
+                    track,
+                    step,
+                    active: true,
+                },
+            );
+            apply_command(
+                self,
+                AppCommand::SetStepParam {
+                    track,
+                    step,
+                    param: StepParam::Transpose,
+                    value: semitone as f32,
+                },
+            );
             return;
         }
 
@@ -1166,7 +1197,14 @@ impl App {
                 .round() as i32;
             if semitone == current {
                 // Clicking the same note deactivates the step
-                apply_command(self, AppCommand::SetStepActive { track, step, active: false });
+                apply_command(
+                    self,
+                    AppCommand::SetStepActive {
+                        track,
+                        step,
+                        active: false,
+                    },
+                );
             } else {
                 // Add a second note: migrate Transpose into chord_data, then add new note
                 // These chord mutations go directly through state (ChordData has no AppCommand yet)
@@ -1181,14 +1219,27 @@ impl App {
             if !added {
                 if new_count == 0 {
                     // Removed last note: deactivate step
-                    apply_command(self, AppCommand::SetStepActive { track, step, active: false });
+                    apply_command(
+                        self,
+                        AppCommand::SetStepActive {
+                            track,
+                            step,
+                            active: false,
+                        },
+                    );
                     return;
                 } else if new_count == 1 {
                     // One note left: migrate back to Transpose, clear chord
                     let remaining = self.state.pattern.chord_data[track].get(step, 0);
-                    apply_command(self, AppCommand::SetStepParam {
-                        track, step, param: StepParam::Transpose, value: remaining,
-                    });
+                    apply_command(
+                        self,
+                        AppCommand::SetStepParam {
+                            track,
+                            step,
+                            param: StepParam::Transpose,
+                            value: remaining,
+                        },
+                    );
                     self.state.pattern.chord_data[track].clear_step(step);
                     self.state.publish_scheduler_snapshot();
                     return;
@@ -1408,7 +1459,15 @@ impl App {
                 let track = self.ui.cursor_track;
                 let param = self.ui.active_param;
                 for step in self.selected_steps() {
-                    apply_command(self, AppCommand::SetStepParam { track, step, param, value: val });
+                    apply_command(
+                        self,
+                        AppCommand::SetStepParam {
+                            track,
+                            step,
+                            param,
+                            value: val,
+                        },
+                    );
                 }
             }
             Region::Params | Region::Sidebar => {
@@ -1417,7 +1476,13 @@ impl App {
                         super::params::ToolRow::Accum(super::AC_LIMIT) => {
                             let tracks = self.selected_tracks();
                             for track in tracks {
-                                apply_command(self, AppCommand::SetTrackAccumLimit { track, value: val.max(0.0) });
+                                apply_command(
+                                    self,
+                                    AppCommand::SetTrackAccumLimit {
+                                        track,
+                                        value: val.max(0.0),
+                                    },
+                                );
                             }
                         }
                         super::params::ToolRow::Track(super::TP_ATTACK) => {
@@ -1435,36 +1500,68 @@ impl App {
                         super::params::ToolRow::Track(super::TP_SWING) => {
                             let tracks = self.selected_tracks();
                             for track in tracks {
-                                apply_command(self, AppCommand::SetTrackSwing { track, value: val });
+                                apply_command(
+                                    self,
+                                    AppCommand::SetTrackSwing { track, value: val },
+                                );
                             }
                         }
                         super::params::ToolRow::Track(super::TP_STEPS) => {
                             let tracks = self.selected_tracks();
                             for track in tracks {
-                                apply_command(self, AppCommand::SetTrackNumSteps { track, n: val as usize });
+                                apply_command(
+                                    self,
+                                    AppCommand::SetTrackNumSteps {
+                                        track,
+                                        n: val as usize,
+                                    },
+                                );
                             }
                             self.clamp_cursor_to_steps();
                         }
                         super::params::ToolRow::Track(super::TP_VOLUME) => {
                             let tracks = self.selected_tracks();
                             for track in tracks {
-                                apply_command(self, AppCommand::SetTrackVolume { track, value: val.clamp(0.0, 1.0) });
+                                apply_command(
+                                    self,
+                                    AppCommand::SetTrackVolume {
+                                        track,
+                                        value: val.clamp(0.0, 1.0),
+                                    },
+                                );
                             }
                         }
                         super::params::ToolRow::Track(super::TP_PAN) => {
                             let tracks = self.selected_tracks();
                             for track in tracks {
-                                apply_command(self, AppCommand::SetTrackPan { track, value: val.clamp(-1.0, 1.0) });
+                                apply_command(
+                                    self,
+                                    AppCommand::SetTrackPan {
+                                        track,
+                                        value: val.clamp(-1.0, 1.0),
+                                    },
+                                );
                             }
                         }
                         super::params::ToolRow::Track(super::TP_SEND) => {
                             let tracks = self.selected_tracks();
                             for track in tracks {
-                                apply_command(self, AppCommand::SetTrackSend { track, value: val.clamp(0.0, 1.0) });
+                                apply_command(
+                                    self,
+                                    AppCommand::SetTrackSend {
+                                        track,
+                                        value: val.clamp(0.0, 1.0),
+                                    },
+                                );
                             }
                         }
                         super::params::ToolRow::Track(super::TP_MASTER) => {
-                            apply_command(self, AppCommand::SetMasterVolume { value: val.clamp(0.0, 2.0) });
+                            apply_command(
+                                self,
+                                AppCommand::SetMasterVolume {
+                                    value: val.clamp(0.0, 2.0),
+                                },
+                            );
                         }
                         _ => {}
                     }
@@ -1588,7 +1685,15 @@ impl App {
         let track = self.ui.cursor_track;
         let param = self.ui.active_param;
         for step in self.selected_steps() {
-            apply_command(self, AppCommand::AdjustStepParam { track, step, param, delta });
+            apply_command(
+                self,
+                AppCommand::AdjustStepParam {
+                    track,
+                    step,
+                    param,
+                    delta,
+                },
+            );
         }
     }
 
@@ -1606,7 +1711,15 @@ impl App {
             return;
         }
         let track = self.ui.cursor_track;
-        apply_command(self, AppCommand::ShiftStepRange { track, lo, hi, new_lo });
+        apply_command(
+            self,
+            AppCommand::ShiftStepRange {
+                track,
+                lo,
+                hi,
+                new_lo,
+            },
+        );
 
         self.ui.cursor_step =
             (self.ui.cursor_step as isize + shift).clamp(0, (ns - 1) as isize) as usize;
@@ -1887,19 +2000,38 @@ impl App {
 
                     if is_active && is_accent {
                         // Already active + accent: lift velocity to 1.0 instead of toggling off
-                        apply_command(self, AppCommand::SetStepParam {
-                            track, step, param: StepParam::Velocity, value: 1.0,
-                        });
+                        apply_command(
+                            self,
+                            AppCommand::SetStepParam {
+                                track,
+                                step,
+                                param: StepParam::Velocity,
+                                value: 1.0,
+                            },
+                        );
                     } else if is_active {
                         // Already active + no accent: toggle off
                         apply_command(self, AppCommand::ToggleStep { track, step });
                     } else {
                         // Inactive: toggle on with appropriate velocity
                         let vel = if is_accent { 1.0 } else { 0.5 };
-                        apply_command(self, AppCommand::SetStepActive { track, step, active: true });
-                        apply_command(self, AppCommand::SetStepParam {
-                            track, step, param: StepParam::Velocity, value: vel,
-                        });
+                        apply_command(
+                            self,
+                            AppCommand::SetStepActive {
+                                track,
+                                step,
+                                active: true,
+                            },
+                        );
+                        apply_command(
+                            self,
+                            AppCommand::SetStepParam {
+                                track,
+                                step,
+                                param: StepParam::Velocity,
+                                value: vel,
+                            },
+                        );
                     }
                     self.ui.cursor_step = step;
                 }
@@ -2007,7 +2139,11 @@ impl App {
                 };
                 if let Some(t) = track {
                     if t < self.tracks.len() && t < self.graph.record_armed.len() {
+                        let was_armed = self.graph.record_armed[t];
                         self.graph.record_armed[t] = !self.graph.record_armed[t];
+                        if was_armed && !self.graph.record_armed[t] {
+                            self.release_held_notes_for_tracks(&[t]);
+                        }
                         if !self.any_track_armed() {
                             self.ui.recording = false;
                         }
@@ -2050,23 +2186,23 @@ impl App {
     /// Handle key release: send note-off to audio and optionally record into pattern.
     fn handle_note_release(&mut self, c: char) {
         // Find and remove the held note for this key
-        let held = self.ui.held_notes.iter().position(|(k, _, _, _)| *k == c);
+        let held = self.ui.held_notes.iter().position(|note| note.key == c);
         let held = match held {
             Some(idx) => self.ui.held_notes.remove(idx),
             None => return,
         };
-        let (_key, transpose, step_at_press, press_time) = held;
+        let transpose = held.transpose;
+        let step_at_press = held.step_at_press;
+        let press_time = held.press_time;
 
-        // Send note-off to audio thread for all armed tracks
-        for (track, armed) in self.graph.record_armed.iter().enumerate() {
-            if *armed {
-                let _ = self.graph.keyboard_tx.send(KeyboardTrigger {
-                    track,
-                    transpose,
-                    velocity: 0.0,
-                    note_off: true,
-                });
-            }
+        // Send note-off to the exact tracks that received the original note-on.
+        for track in held.tracks {
+            let _ = self.graph.keyboard_tx.send(KeyboardTrigger {
+                track,
+                transpose,
+                velocity: 0.0,
+                note_off: true,
+            });
         }
 
         // Record into pattern if recording + playing
@@ -2105,5 +2241,29 @@ impl App {
         }
 
         self.state.publish_scheduler_snapshot();
+    }
+
+    pub(super) fn release_held_notes_for_tracks(&mut self, tracks: &[usize]) {
+        if tracks.is_empty() {
+            return;
+        }
+        let mut retained = Vec::with_capacity(self.ui.held_notes.len());
+        for mut held in self.ui.held_notes.drain(..) {
+            for &track in tracks {
+                if held.tracks.contains(&track) {
+                    let _ = self.graph.keyboard_tx.send(KeyboardTrigger {
+                        track,
+                        transpose: held.transpose,
+                        velocity: 0.0,
+                        note_off: true,
+                    });
+                }
+            }
+            held.tracks.retain(|track| !tracks.contains(track));
+            if !held.tracks.is_empty() {
+                retained.push(held);
+            }
+        }
+        self.ui.held_notes = retained;
     }
 }

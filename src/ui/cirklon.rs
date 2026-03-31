@@ -94,7 +94,14 @@ impl App {
                     let mut steps: Vec<usize> = self.ui.visual_steps.iter().copied().collect();
                     steps.sort();
                     let track = self.ui.cursor_track;
-                    apply_command(self, AppCommand::RotateSteps { track, steps, direction: -1 });
+                    apply_command(
+                        self,
+                        AppCommand::RotateSteps {
+                            track,
+                            steps,
+                            direction: -1,
+                        },
+                    );
                 } else if self.ui.selection_anchor.is_some() {
                     self.shift_selection(-1);
                 } else if self.ui.cursor_step > 0 {
@@ -108,7 +115,14 @@ impl App {
                     let mut steps: Vec<usize> = self.ui.visual_steps.iter().copied().collect();
                     steps.sort();
                     let track = self.ui.cursor_track;
-                    apply_command(self, AppCommand::RotateSteps { track, steps, direction: 1 });
+                    apply_command(
+                        self,
+                        AppCommand::RotateSteps {
+                            track,
+                            steps,
+                            direction: 1,
+                        },
+                    );
                 } else if self.ui.selection_anchor.is_some() {
                     self.shift_selection(1);
                 } else {
@@ -174,11 +188,14 @@ impl App {
                         self.ui.visual_steps.clear();
                     } else {
                         // No selection: just deactivate cursor step, no plock clear
-                        apply_command(self, AppCommand::SetStepActive {
-                            track,
-                            step: self.ui.cursor_step,
-                            active: false,
-                        });
+                        apply_command(
+                            self,
+                            AppCommand::SetStepActive {
+                                track,
+                                step: self.ui.cursor_step,
+                                active: false,
+                            },
+                        );
                     }
                 }
             }
@@ -1206,7 +1223,7 @@ fn draw_piano_roll(frame: &mut Frame, app: &mut App, area: Rect) {
         .ui
         .held_notes
         .iter()
-        .map(|&(_, t, _, _)| t.round() as i32)
+        .map(|note| note.transpose.round() as i32)
         .collect();
 
     // Always overlay both: amber = cursor step, cyan = playing, green = both

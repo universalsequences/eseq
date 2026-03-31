@@ -58,46 +58,49 @@
     (seq-set-effect-param (get fx :slot-idx) (get p :idx) v)))
 
 (def fx-param-row (p fx)
-  (h-stack :gap 0.5 :align :center
-    (label (substring (get p :name) 0 12) :font-size 9 :width 9
-           :color :gray :bg :transparent)
-    (if (get p :boolean)
-      (box :width 8 :height 1.3
-           :bg :transparent
-           :on-click |x y r|
-             (if fx
-               (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))
-               (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1)))
-        (label (if (> (get p :value) 0.5) "ON" "OFF")
-               :font-size 11 :width 8
-               :color :white :bg :transparent))
-      (if (get p :options)
-      (dropdown :value (get p :text-value)
-        :options (get p :options)
-        :on-change (lambda (v)
-          (if fx
-            (host-command
-              (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")
-              (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :label v))
-            (fx-set-instrument-option p v)))
-        :width 8 :height 1.3 :font-size 11)
-      (number-picker :value (get p :value)
-        :min (get p :min) :max (get p :max) :decimals 2
-        :noui true :font-size 9 :text-color :gray
-        :on-change (lambda (v)
-          (if fx
-            (fx-set-effect-value fx p v)
-            (fx-set-instrument-value p v)))
-        :width 8 :height 1.3)))
-    (if (or (get p :options) (get p :boolean))
-      (label "" :width 10 :bg :transparent)
-      (hslider :width 10 :min (get p :min) :max (get p :max)
-               :value (get p :value)
-               :material (aqua-slider-material)
-               :on-change (lambda (v)
-                 (if fx
-                   (fx-set-effect-value fx p v)
-                   (fx-set-instrument-value p v)))))))
+  (box :height 1.25 :no-clamp-width true
+    (h-stack :gap 0.45 :align :center :no-clamp-width true
+      (box :width 13.2 :height 1.25 :no-clamp-width true
+        (h-stack :gap 0.25 :align :baseline :no-clamp-width true
+          (label (substring (get p :name) 0 11) :font-size 9 :width 7
+                 :color :gray :bg :transparent)
+          (if (get p :boolean)
+            (box :width 5.5 :height 1.25 :align :center
+                 :bg :transparent
+                 :on-click |x y r|
+                   (if fx
+                     (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))
+                     (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1)))
+              (label (if (> (get p :value) 0.5) "ON" "OFF")
+                     :font-size 10 :width 5.5
+                     :color :white :bg :transparent))
+            (if (get p :options)
+            (dropdown :value (get p :text-value)
+              :options (get p :options)
+              :on-change (lambda (v)
+                (if fx
+                  (host-command
+                    (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")
+                    (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :label v))
+                  (fx-set-instrument-option p v)))
+              :width 5.8 :height 1.2 :font-size 10)
+            (number-picker :value (get p :value)
+              :min (get p :min) :max (get p :max) :decimals 2
+              :noui true :font-size 9 :text-color :gray
+              :on-change (lambda (v)
+                (if fx
+                  (fx-set-effect-value fx p v)
+                  (fx-set-instrument-value p v)))
+              :width 5.2 :height 1.1)))))
+      (if (or (get p :options) (get p :boolean))
+        (label "" :width 7.8 :bg :transparent)
+        (hslider :width 7.8 :min (get p :min) :max (get p :max)
+                 :value (get p :value)
+                 :material (aqua-slider-material)
+                 :on-change (lambda (v)
+                   (if fx
+                     (fx-set-effect-value fx p v)
+                     (fx-set-instrument-value p v))))))))
 
 (def fx-param-grid (params fx)
   (h-stack :gap 1.5 :no-clamp-width true

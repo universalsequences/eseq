@@ -118,7 +118,13 @@ impl GraphController<'_> {
 
         let shell = self.create_track_shell(name);
         self.ensure_custom_engine_runtime(engine_id, name, manifest, lib)?;
-        self.connect_engine_to_track(engine_id, idx, name, shell.voice_sum_id, shell.voice_sum_r_id)?;
+        self.connect_engine_to_track(
+            engine_id,
+            idx,
+            name,
+            shell.voice_sum_id,
+            shell.voice_sum_r_id,
+        )?;
         self.finish_track_registration(TrackRegistration {
             idx,
             track_name: name.to_string(),
@@ -163,7 +169,7 @@ impl GraphController<'_> {
         Ok(())
     }
 
-    pub(super) fn apply_sample_ids(&mut self, sample_ids: &[(i32, String)]) {
+    pub fn apply_sample_ids(&mut self, sample_ids: &[(i32, String)]) {
         for (track, (buffer_id, name)) in sample_ids.iter().enumerate() {
             if *buffer_id < 0 {
                 continue;
@@ -774,7 +780,11 @@ impl GraphController<'_> {
                 let route_r_name =
                     CString::new(format!("{}_eng{}_route_{}_r", track_name, engine_id, v)).unwrap();
                 let route_r_id = unsafe {
-                    crate::audiograph::live_add_gain(self.app.graph.lg.0, 0.0, route_r_name.as_ptr())
+                    crate::audiograph::live_add_gain(
+                        self.app.graph.lg.0,
+                        0.0,
+                        route_r_name.as_ptr(),
+                    )
                 };
                 if route_r_id < 0 {
                     return Err(format!(
@@ -809,7 +819,11 @@ impl GraphController<'_> {
                 let route_r_name =
                     CString::new(format!("{}_eng{}_route_{}_r", track_name, engine_id, v)).unwrap();
                 let route_r_id = unsafe {
-                    crate::audiograph::live_add_gain(self.app.graph.lg.0, 0.0, route_r_name.as_ptr())
+                    crate::audiograph::live_add_gain(
+                        self.app.graph.lg.0,
+                        0.0,
+                        route_r_name.as_ptr(),
+                    )
                 };
                 if route_r_id < 0 {
                     return Err(format!(
@@ -885,7 +899,11 @@ impl GraphController<'_> {
                         4 + mod_out as i32,
                     );
                 }
-                for route_pair in engine.route_gain_ids.iter().flat_map(|routes| routes.iter()) {
+                for route_pair in engine
+                    .route_gain_ids
+                    .iter()
+                    .flat_map(|routes| routes.iter())
+                {
                     for (route_idx, &route_id) in route_pair.iter().enumerate() {
                         if route_id <= 0 {
                             continue;
@@ -961,28 +979,32 @@ impl GraphController<'_> {
                     )?;
                 }
             }
-                for route_pair in engine.route_gain_ids.iter().flat_map(|routes| routes.iter()) {
-                    for (route_idx, &route_id) in route_pair.iter().enumerate() {
-                        if route_id <= 0 {
-                            continue;
-                        }
-                        let src_port = if manifest.n_outputs > 1 {
-                            route_idx as i32
-                        } else {
-                            0
-                        };
-                        self.graph_connect_checked(
-                            synth_id,
-                            src_port,
-                            route_id,
-                            0,
-                            &format!(
-                                "rebuild_custom_engine_runtime engine {} voice {} route {}:{}",
-                                engine_id, v, route_id, src_port
-                            ),
-                        )?;
+            for route_pair in engine
+                .route_gain_ids
+                .iter()
+                .flat_map(|routes| routes.iter())
+            {
+                for (route_idx, &route_id) in route_pair.iter().enumerate() {
+                    if route_id <= 0 {
+                        continue;
                     }
+                    let src_port = if manifest.n_outputs > 1 {
+                        route_idx as i32
+                    } else {
+                        0
+                    };
+                    self.graph_connect_checked(
+                        synth_id,
+                        src_port,
+                        route_id,
+                        0,
+                        &format!(
+                            "rebuild_custom_engine_runtime engine {} voice {} route {}:{}",
+                            engine_id, v, route_id, src_port
+                        ),
+                    )?;
                 }
+            }
 
             new_synth_ids.push(synth_id);
             self.app.state.runtime.engine_synth_node_ids[engine_id][v]

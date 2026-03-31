@@ -109,9 +109,8 @@ impl AgentNetworkClient {
                     tool_outcomes: tool_outcomes.clone(),
                 });
             }
-            let response: OpenAiChatCompletionResponse = response
-                .json()
-                .map_err(|error| AgentTurnError {
+            let response: OpenAiChatCompletionResponse =
+                response.json().map_err(|error| AgentTurnError {
                     message: format!("Failed to decode OpenAI response: {error}"),
                     tool_outcomes: tool_outcomes.clone(),
                 })?;
@@ -157,14 +156,12 @@ impl AgentNetworkClient {
                             json!({})
                         } else {
                             serde_json::from_str(&tool_call.function.arguments).map_err(
-                                |error| {
-                                    AgentTurnError {
-                                        message: format!(
-                                            "OpenAI tool arguments for '{}' were invalid JSON: {error}",
-                                            tool_call.function.name
-                                        ),
-                                        tool_outcomes: tool_outcomes.clone(),
-                                    }
+                                |error| AgentTurnError {
+                                    message: format!(
+                                        "OpenAI tool arguments for '{}' were invalid JSON: {error}",
+                                        tool_call.function.name
+                                    ),
+                                    tool_outcomes: tool_outcomes.clone(),
                                 },
                             )?
                         },
@@ -274,27 +271,25 @@ impl AgentNetworkClient {
                     tool_outcomes: tool_outcomes.clone(),
                 });
             }
-            let response: GeminiGenerateContentResponse = response
-                .json()
-                .map_err(|error| AgentTurnError {
+            let response: GeminiGenerateContentResponse =
+                response.json().map_err(|error| AgentTurnError {
                     message: format!("Failed to decode Gemini response: {error}"),
                     tool_outcomes: tool_outcomes.clone(),
                 })?;
 
-            let candidate = response
-                .candidates
-                .into_iter()
-                .next()
-                .ok_or_else(|| AgentTurnError {
-                    message: "Gemini returned no candidates.".to_string(),
-                    tool_outcomes: tool_outcomes.clone(),
-                })?;
-            let content = candidate
-                .content
-                .ok_or_else(|| AgentTurnError {
-                    message: "Gemini returned no content.".to_string(),
-                    tool_outcomes: tool_outcomes.clone(),
-                })?;
+            let candidate =
+                response
+                    .candidates
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| AgentTurnError {
+                        message: "Gemini returned no candidates.".to_string(),
+                        tool_outcomes: tool_outcomes.clone(),
+                    })?;
+            let content = candidate.content.ok_or_else(|| AgentTurnError {
+                message: "Gemini returned no content.".to_string(),
+                tool_outcomes: tool_outcomes.clone(),
+            })?;
             let function_calls = extract_gemini_function_calls(&content.parts);
             let assistant_text = extract_gemini_text(&content.parts);
 
@@ -319,10 +314,10 @@ impl AgentNetworkClient {
                 last_tool_signature = Some(tool_signature.clone());
             }
             if repeated_tool_call_rounds >= MAX_REPEAT_TOOL_CALL_ROUNDS {
-                return Err(format!(
-                    "Agent repeated the same tool-call plan: {tool_signature}"
-                )
-                .into_error(tool_outcomes));
+                return Err(
+                    format!("Agent repeated the same tool-call plan: {tool_signature}")
+                        .into_error(tool_outcomes),
+                );
             }
 
             let mut response_parts = Vec::new();
@@ -369,10 +364,10 @@ impl AgentNetworkClient {
                     last_failure_signature = Some(signature.clone());
                 }
                 if repeated_failure_rounds >= MAX_REPEAT_TOOL_FAILURES {
-                    return Err(format!(
-                        "Agent repeated the same failing tool call: {signature}"
-                    )
-                    .into_error(tool_outcomes));
+                    return Err(
+                        format!("Agent repeated the same failing tool call: {signature}")
+                            .into_error(tool_outcomes),
+                    );
                 }
             } else {
                 repeated_failure_rounds = 0;
@@ -600,7 +595,11 @@ fn gemini_tool_call_signature(tool_calls: &[GeminiFunctionCall]) -> String {
         .join(" | ")
 }
 
-fn format_tool_loop_error(provider: &str, max_rounds: usize, last_tool_signature: Option<&str>) -> String {
+fn format_tool_loop_error(
+    provider: &str,
+    max_rounds: usize,
+    last_tool_signature: Option<&str>,
+) -> String {
     match last_tool_signature {
         Some(signature) => format!(
             "{provider} tool loop exceeded maximum rounds ({max_rounds}). Last tool-call plan: {signature}"
@@ -766,7 +765,9 @@ mod tests {
     fn openai_tools_omit_strict_flag() {
         let runtime = AgentToolRuntime::load_default().expect("load runtime");
         let tools = openai_tools(&runtime.specs());
-        assert!(tools.iter().all(|tool| tool["function"]["strict"].is_null()));
+        assert!(tools
+            .iter()
+            .all(|tool| tool["function"]["strict"].is_null()));
     }
 
     #[test]

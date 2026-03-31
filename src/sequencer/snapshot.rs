@@ -2,7 +2,9 @@ use std::sync::atomic::Ordering;
 
 use crate::effects::EffectSlotSnapshot;
 
-use super::data::{InstrumentType, StepParam, Timebase, TrackParamsSnapshot, MAX_STEPS, NUM_PARAMS};
+use super::data::{
+    InstrumentType, StepParam, Timebase, TrackParamsSnapshot, MAX_STEPS, NUM_PARAMS,
+};
 use super::state::SequencerState;
 
 #[derive(Clone, Debug)]
@@ -84,18 +86,17 @@ impl SequencerSnapshot {
                 accum_mode: tp.get_accum_mode(),
                 fts_scale: tp.get_fts_scale(),
             };
-            let instrument_type = if state.runtime.instrument_type_flags[track_idx]
-                .load(Ordering::Relaxed)
-                == 1
-            {
-                InstrumentType::Custom
-            } else {
-                InstrumentType::Sampler
-            };
+            let instrument_type =
+                if state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed) == 1 {
+                    InstrumentType::Custom
+                } else {
+                    InstrumentType::Sampler
+                };
             let instrument_base_note_offset = f32::from_bits(
                 state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
             );
-            let engine_id = match state.runtime.track_engine_ids[track_idx].load(Ordering::Relaxed) {
+            let engine_id = match state.runtime.track_engine_ids[track_idx].load(Ordering::Relaxed)
+            {
                 u32::MAX => None,
                 id => Some(id as usize),
             };
@@ -103,9 +104,8 @@ impl SequencerSnapshot {
                 .iter()
                 .map(EffectSlotSnapshot::capture)
                 .collect();
-            let instrument_slot = EffectSlotSnapshot::capture(
-                &state.pattern.instrument_slots[track_idx],
-            );
+            let instrument_slot =
+                EffectSlotSnapshot::capture(&state.pattern.instrument_slots[track_idx]);
 
             let mut steps = Vec::with_capacity(MAX_STEPS);
             for step_idx in 0..MAX_STEPS {

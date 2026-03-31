@@ -96,21 +96,20 @@ impl AgentToolRegistry {
                 .collect();
             operators.sort_by_key(|op| score_operator(op, query));
 
-            let mut attributes: Vec<&DocAttribute> = self
-                .catalog
-                .attributes()
-                .iter()
-                .filter(|attr| {
-                    query.is_empty()
-                        || attr.name.eq_ignore_ascii_case(query)
-                        || attr.name.to_ascii_lowercase().contains(query)
-                        || attr.summary.to_ascii_lowercase().contains(query)
-                        || attr
-                            .used_by
-                            .iter()
-                            .any(|name| name.eq_ignore_ascii_case(query) || name.contains(query))
-                })
-                .collect();
+            let mut attributes: Vec<&DocAttribute> =
+                self.catalog
+                    .attributes()
+                    .iter()
+                    .filter(|attr| {
+                        query.is_empty()
+                            || attr.name.eq_ignore_ascii_case(query)
+                            || attr.name.to_ascii_lowercase().contains(query)
+                            || attr.summary.to_ascii_lowercase().contains(query)
+                            || attr.used_by.iter().any(|name| {
+                                name.eq_ignore_ascii_case(query) || name.contains(query)
+                            })
+                    })
+                    .collect();
             attributes.sort_by_key(|attr| score_attribute(attr, query));
 
             let mut examples: Vec<&DocExample> = live_examples
@@ -186,7 +185,11 @@ impl AgentToolRegistry {
             summary: format!(
                 "Matched docs for {} quer{}{}.",
                 effective_queries.len(),
-                if effective_queries.len() == 1 { "y" } else { "ies" },
+                if effective_queries.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                },
                 if joined_queries.is_empty() {
                     String::new()
                 } else {

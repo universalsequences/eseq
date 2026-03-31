@@ -17,6 +17,7 @@ typedef struct {
 
 typedef struct RTNode {
   uint64_t logical_id; // stable ID for migration/params
+  char *debug_name;
   NodeVTable vtable;
   void *state;       // aligned, preallocated
   size_t state_size; // size of allocated state for watch list copying

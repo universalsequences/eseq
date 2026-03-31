@@ -196,12 +196,21 @@ impl App {
                 ToolRow::Track(TP_FTS) => {
                     let track = self.ui.cursor_track;
                     let new_scale = (tp.get_fts_scale() + 1).min(crate::scale::SCALES.len() - 1);
-                    apply_command(self, AppCommand::SetTrackFtsScale { track, scale_idx: new_scale });
+                    apply_command(
+                        self,
+                        AppCommand::SetTrackFtsScale {
+                            track,
+                            scale_idx: new_scale,
+                        },
+                    );
                 }
                 ToolRow::Accum(AC_LIMIT) => {
                     let tracks = self.selected_tracks();
                     for track in tracks {
-                        apply_command(self, AppCommand::AdjustTrackAccumLimit { track, delta: 1.0 });
+                        apply_command(
+                            self,
+                            AppCommand::AdjustTrackAccumLimit { track, delta: 1.0 },
+                        );
                     }
                 }
                 _ => {}
@@ -213,7 +222,13 @@ impl App {
                 }
                 ToolRow::Track(TP_RELEASE) => {
                     let track = self.ui.cursor_track;
-                    apply_command(self, AppCommand::AdjustTrackRelease { track, delta: -10.0 });
+                    apply_command(
+                        self,
+                        AppCommand::AdjustTrackRelease {
+                            track,
+                            delta: -10.0,
+                        },
+                    );
                 }
                 ToolRow::Track(TP_SWING) => {
                     let track = self.ui.cursor_track;
@@ -231,13 +246,25 @@ impl App {
                 ToolRow::Track(TP_VOLUME) => {
                     let tracks = self.selected_tracks();
                     for track in tracks {
-                        apply_command(self, AppCommand::AdjustTrackVolume { track, delta: -0.05 });
+                        apply_command(
+                            self,
+                            AppCommand::AdjustTrackVolume {
+                                track,
+                                delta: -0.05,
+                            },
+                        );
                     }
                 }
                 ToolRow::Track(TP_PAN) => {
                     let tracks = self.selected_tracks();
                     for track in tracks {
-                        apply_command(self, AppCommand::AdjustTrackPan { track, delta: -0.05 });
+                        apply_command(
+                            self,
+                            AppCommand::AdjustTrackPan {
+                                track,
+                                delta: -0.05,
+                            },
+                        );
                     }
                 }
                 ToolRow::Track(TP_TIMEBASE) => {
@@ -247,7 +274,13 @@ impl App {
                 ToolRow::Track(TP_SEND) => {
                     let tracks = self.selected_tracks();
                     for track in tracks {
-                        apply_command(self, AppCommand::AdjustTrackSend { track, delta: -0.05 });
+                        apply_command(
+                            self,
+                            AppCommand::AdjustTrackSend {
+                                track,
+                                delta: -0.05,
+                            },
+                        );
                     }
                 }
                 ToolRow::Track(TP_MASTER) => {
@@ -256,12 +289,21 @@ impl App {
                 ToolRow::Track(TP_FTS) => {
                     let track = self.ui.cursor_track;
                     let new_scale = tp.get_fts_scale().saturating_sub(1);
-                    apply_command(self, AppCommand::SetTrackFtsScale { track, scale_idx: new_scale });
+                    apply_command(
+                        self,
+                        AppCommand::SetTrackFtsScale {
+                            track,
+                            scale_idx: new_scale,
+                        },
+                    );
                 }
                 ToolRow::Accum(AC_LIMIT) => {
                     let tracks = self.selected_tracks();
                     for track in tracks {
-                        apply_command(self, AppCommand::AdjustTrackAccumLimit { track, delta: -1.0 });
+                        apply_command(
+                            self,
+                            AppCommand::AdjustTrackAccumLimit { track, delta: -1.0 },
+                        );
                     }
                 }
                 _ => {}
@@ -623,14 +665,21 @@ impl App {
                         let track = self.ui.cursor_track;
                         apply_command(
                             self,
-                            AppCommand::SetTimebasePlockMulti { track, steps, timebase: tb },
+                            AppCommand::SetTimebasePlockMulti {
+                                track,
+                                steps,
+                                timebase: tb,
+                            },
                         );
                     } else {
                         let tracks = self.selected_tracks();
                         for track in tracks {
                             apply_command(
                                 self,
-                                AppCommand::SetTrackTimebase { track, timebase: tb },
+                                AppCommand::SetTrackTimebase {
+                                    track,
+                                    timebase: tb,
+                                },
                             );
                         }
                     }

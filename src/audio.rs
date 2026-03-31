@@ -650,8 +650,10 @@ unsafe fn route_custom_voice_to_track(
 ) {
     let num_tracks = state.active_track_count();
     for t in 0..num_tracks {
-        let lid_l = state.runtime.engine_route_lids[engine_id][voice_idx][t].load(Ordering::Relaxed);
-        let lid_r = state.runtime.engine_route_lids_r[engine_id][voice_idx][t].load(Ordering::Relaxed);
+        let lid_l =
+            state.runtime.engine_route_lids[engine_id][voice_idx][t].load(Ordering::Relaxed);
+        let lid_r =
+            state.runtime.engine_route_lids_r[engine_id][voice_idx][t].load(Ordering::Relaxed);
         if lid_l == 0 && lid_r == 0 {
             continue;
         }
@@ -794,6 +796,13 @@ fn render_chunk(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     unsafe {
         process_next_block(data.lg.0, output.as_mut_ptr(), nframes as i32);
+    }
+}
+
+fn zero_output_frames(output: &mut [f32], start_frame: usize, num_channels: usize) {
+    let start = start_frame.saturating_mul(num_channels);
+    if start < output.len() {
+        output[start..].fill(0.0);
     }
 }
 
@@ -1437,6 +1446,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
 
     let mut rendered_frames = 0usize;
+    let mut zero_chunk_spins = 0usize;
     while rendered_frames < nframes {
         let current_sample = block_start_sample + rendered_frames as u64;
         let current_pattern_epoch = data.state.transport.pattern_epoch.load(Ordering::Relaxed);
@@ -1476,12 +1486,33 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             .unwrap_or(block_end_sample);
         let chunk_frames = (next_sample.saturating_sub(current_sample)) as usize;
         if chunk_frames == 0 {
+            zero_chunk_spins += 1;
+            if zero_chunk_spins >= 32 {
+                let next_event_sample = data.events_heap.peek().map(|rev| rev.0.sample_time);
+                eprintln!(
+                    "audio: zero-chunk livelock guard tripped; rendered_frames={rendered_frames} nframes={nframes} current_sample={current_sample} next_event_sample={next_event_sample:?} heap_len={} late_events={}",
+                    data.events_heap.len(),
+                    data.late_scheduled_events,
+                );
+                zero_output_frames(output, rendered_frames, data.num_channels);
+                break;
+            }
             continue;
         }
+        zero_chunk_spins = 0;
 
         let start = rendered_frames * data.num_channels;
         let end = (rendered_frames + chunk_frames) * data.num_channels;
+        let render_start = Instant::now();
         render_chunk(data, &mut output[start..end]);
+        let render_elapsed = render_start.elapsed();
+        if render_elapsed.as_millis() >= 10 {
+            eprintln!(
+                "audio: slow render_chunk; chunk_frames={chunk_frames} rendered_frames={rendered_frames} elapsed_ms={} heap_len={} current_sample={current_sample}",
+                render_elapsed.as_millis(),
+                data.events_heap.len(),
+            );
+        }
         rendered_frames += chunk_frames;
     }
     data.rendered_samples

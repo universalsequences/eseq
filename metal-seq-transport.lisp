@@ -18,8 +18,62 @@
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.7)
-      (material :color (rgba 0.06 0.06 0.07 1.0)
+      (material
+        :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+          :light (vec3 -0.31 -0.4851 1.0) :shininess 51.0)
+        :color
+        (let ((base (rgba 0.003 0.003 0.004 1.0))
+              (lit (+ 0.02 (* 0.02 diffuse)))
+              (shine (* 0.10 specular)))
+          (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
         :shadow (shadow :color (rgba 0 0 0 0.5) :blur 0.06 :offset (vec2 0 0.02))))))
+
+(defwidget pattern-pill-bg
+  :width 1 :height 1
+  :state (active)
+  :paint-margin 0.3
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height 0.54)
+      (material 
+        :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+          :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+        :color 
+        (if active
+        (let ((base 
+              (rgba 0.00 0.01 0.42 1.0) )
+            
+            (lit (+ 0.06 (* 0.03 diffuse)))
+            (shine (* 0.25 specular))
+            )
+          (+ base (rgba lit lit lit 1) (rgba shine shine shine 0))
+          )
+        
+      (rgba 0 0 0 0))))))
+
+
+(defwidget pattern-pill-btn-bg
+ :width 1 :height 1
+  :state (active)
+  :paint-margin 0.3
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height height)
+      (material 
+        :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+          :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+        :color 
+        (if active
+        (let ((base 
+              (rgba 0.00 0.01 0.02 1.0) )
+            
+            (lit (+ 0.06 (* 0.03 diffuse)))
+            (shine (* 0.25 specular))
+            )
+          (+ base (rgba lit lit lit 1) (rgba shine shine shine 0))
+          )
+        
+      (rgba 0 0 0 0))))))
 
 (defwidget add-track-icon
   :width 2.5 :height 1.8
@@ -81,7 +135,14 @@
     (sdf/layer
       (if (= active 1)
         (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
-          (material :color (rgba 0.28 0.62 0.22 1.0)))
+          (material
+            :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+              :light (vec3 -0.31 -0.851 1.3) :shininess 51.0)
+            :color
+            (let ((base (rgba 0.05 0.28 0.03 1.0))
+                  (lit (+ 0.025 (* 0.05 diffuse)))
+                  (shine (* 0.18 specular)))
+              (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))))
         (rgba 0 0 0 0))
       (sdf/fill
         (let ((p1x -0.35) (p1y -0.5) (p2x -0.35) (p2y 0.5) (p3x 0.55) (p3y 0.0))
@@ -100,21 +161,37 @@
     (sdf/layer
       (if (= active 1)
         (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
-          (material :color (rgba 0.62 0.14 0.14 1.0)))
+          (material
+            :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
+              :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
+            :color
+            (let ((base (rgba 0.12 0.001 0.001 1.0))
+                  (lit (+ 0.06 (* 0.40 diffuse)))
+                  (shine (* 0.25 specular)))
+              (+ base (rgba lit 0 0 1) (rgba shine shine shine 0)))))
         (rgba 0 0 0 0))
       (sdf/fill (sdf/circle 0.4)
         (material :color fg-col)))))
+
+(def seq-switch-pattern (idx)
+  (host-command "switch-pattern" (dict :idx idx)))
+
+(def seq-clone-pattern ()
+  (host-command "clone-pattern" (dict)))
+
+(def seq-delete-pattern ()
+  (host-command "delete-pattern" (dict)))
 
 ;; ── Transport layout ──
 
 (effect-buffer "*transport*"
   (h-stack :gap 0.5 :padding 0.5 :align :center
-
+    
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
       (box :width 2.5
         :on-click |x y r| (sbrowser-toggle-create-track-mode)
         (add-track-icon :active (if (sbrowser-audition-mode?) 0 1))))
-
+    
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
       (h-stack :gap 0.2 :align :center
@@ -130,7 +207,7 @@
         (box :width 2.5 
           :on-click |x y r| (seq-toggle-record)
           (rec-icon :active (if SEQ.recording 1 0)))))
-
+    
     ;; Single continuous LED panel
     (box :background "transport-led-bg" :height 1.4 :width 34
       (h-stack :gap 0 :align :center :padding 0.5
@@ -152,4 +229,35 @@
           :font-size 15
           :text-color (rgba 0.85 0.85 0.85 1)
           :on-change (lambda (v) (seq-set-bpm v))
-          :width 8 :height 1.2)))))
+          :width 8 :height 1.2)))
+    
+    (box :background "transport-btn-bg" :padding 0.2 :height 1.4
+      (h-stack :gap 0.1 :align :center
+        (each (range 0 SEQ.num-patterns) |i|
+          (box :width 2.5 :height 1.1 
+            :background "pattern-pill-bg"
+            :active (if (= i SEQ.current-pattern) 1 0)
+            :on-click |x y r| (seq-switch-pattern i)
+            (v-stack :align :center
+              (label (fmt " {} " (+ i 1))
+                :font-size 11
+                :color (if (= i SEQ.current-pattern) :white :gray)
+                :bg :transparent))))
+        (label "" :width 0.2 :bg :transparent)
+        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+          :on-click |x y r| (seq-clone-pattern)
+          (v-stack :align :center
+            (label "+"
+              :font-size 12
+
+              :color :white
+              :bg :transparent)))
+        
+        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+          :on-click |x y r| (if (> SEQ.num-patterns 1) (seq-delete-pattern) nil)
+          (v-stack :align :center
+          (label "-"
+            :font-size 12
+          
+            :color (if (> SEQ.num-patterns 1) :white :dark-gray)
+            :bg :transparent)))))))

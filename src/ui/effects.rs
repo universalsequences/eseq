@@ -32,7 +32,10 @@ impl App {
     }
 
     pub(crate) fn rebuild_scratch_runtime_from_buffer(&mut self) -> Result<(), String> {
-        let track = self.ui.cursor_track.min(self.state.active_track_count().saturating_sub(1));
+        let track = self
+            .ui
+            .cursor_track
+            .min(self.state.active_track_count().saturating_sub(1));
         let cursor_step = self.ui.cursor_step;
         self.sync_scratch_runtime_descriptors();
         let mut runtime = lisp_effect::ScratchControlRuntime::new(
@@ -392,7 +395,7 @@ impl App {
         }
     }
 
-    pub(super) fn apply_effect_sidechain_selection(
+    pub fn apply_effect_sidechain_selection(
         &self,
         track: usize,
         slot_idx: usize,
@@ -584,16 +587,26 @@ impl App {
         match pending.receiver.try_recv() {
             Ok(Ok(compile_result)) => {
                 let target = match &pending.target {
-                    CompileTarget::Effect { name, slot_idx, track } => {
-                        CompileTarget::Effect { name: name.clone(), slot_idx: *slot_idx, track: *track }
-                    }
+                    CompileTarget::Effect {
+                        name,
+                        slot_idx,
+                        track,
+                    } => CompileTarget::Effect {
+                        name: name.clone(),
+                        slot_idx: *slot_idx,
+                        track: *track,
+                    },
                     CompileTarget::Instrument { name } => {
                         CompileTarget::Instrument { name: name.clone() }
                     }
                 };
                 self.editor.pending_compile = None;
                 match target {
-                    CompileTarget::Effect { name, slot_idx, track } => {
+                    CompileTarget::Effect {
+                        name,
+                        slot_idx,
+                        track,
+                    } => {
                         self.apply_compiled_effect(compile_result, &name, slot_idx, track);
                         Some(format!("Loaded effect: {name}"))
                     }
@@ -911,7 +924,8 @@ impl App {
                         self.editor.scratch_buffer = editor.active_buffer().text();
                         self.editor.scratch_cursor = editor.active_buffer().cursor;
                         self.sync_scratch_runtime_descriptors();
-                        self.state.set_scratch_source(self.editor.scratch_buffer.clone());
+                        self.state
+                            .set_scratch_source(self.editor.scratch_buffer.clone());
                         None
                     }
                     _ => None,
@@ -924,7 +938,8 @@ impl App {
         ) {
             self.editor.scratch_buffer = text;
             self.editor.scratch_cursor = cursor;
-            self.state.set_scratch_source(self.editor.scratch_buffer.clone());
+            self.state
+                .set_scratch_source(self.editor.scratch_buffer.clone());
             self.editor.scratch_runtime = Some(runtime);
         }
     }

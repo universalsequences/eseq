@@ -418,7 +418,11 @@ static inline int dgen_guard_delay_index_f32(float idx, int limit, const char *e
     let injected = if source.contains("dgen_guard_delay_index_f32(") {
         source.to_string()
     } else if source.contains("const int VOICE_COUNT =") {
-        source.replacen("const int VOICE_COUNT =", &format!("{helper}const int VOICE_COUNT ="), 1)
+        source.replacen(
+            "const int VOICE_COUNT =",
+            &format!("{helper}const int VOICE_COUNT ="),
+            1,
+        )
     } else {
         return Err("Generated C did not contain VOICE_COUNT anchor for guard injection".into());
     };
@@ -452,7 +456,9 @@ static inline int dgen_guard_delay_index_f32(float idx, int limit, const char *e
                 }
             }
             let Some(close_idx) = close else {
-                return Err(format!("Failed to find closing ] in generated C line: {line}"));
+                return Err(format!(
+                    "Failed to find closing ] in generated C line: {line}"
+                ));
             };
             changed.push_str(&line[cursor..open]);
             let inner = &line[open..close_idx];
@@ -478,7 +484,10 @@ fn compile_guarded_dylib(c_path: &Path, dylib_path: &Path) -> Result<(), String>
         .args(["-fPIC", "-shared"])
         .args(["-framework", "Accelerate"])
         .args(["-std=c11", "-x", "c"])
-        .args(["-o", dylib_path.to_str().ok_or("Invalid dylib output path")?])
+        .args([
+            "-o",
+            dylib_path.to_str().ok_or("Invalid dylib output path")?,
+        ])
         .arg(c_path)
         .output()
         .map_err(|e| format!("Failed to run clang for guarded dylib: {e}"))?;
@@ -1621,11 +1630,7 @@ impl ScratchControlRuntime {
                 self.runtime
                     .set_global_value("__accumulator_callback", callback);
                 self.runtime
-                    .eval_str(&format!(
-                        "(__accumulator_callback {} {})",
-                        step,
-                        value
-                    ))
+                    .eval_str(&format!("(__accumulator_callback {} {})", step, value))
                     .map_err(|e| format!("{e:?}"))?;
             }
         }
@@ -2267,11 +2272,7 @@ fn register_sequencer_natives_with_accumulators(
             let track_idx = current_track(&context_for_clear_step);
             let step_idx = parse_step_arg(&args, 0)?;
             state_for_clear_step.clear_step_payload(track_idx, step_idx);
-            ctx.set_status(format!(
-                "track {} step {} cleared",
-                track_idx,
-                step_idx
-            ));
+            ctx.set_status(format!("track {} step {} cleared", track_idx, step_idx));
             Ok(EValue::Bool(true))
         },
     );
@@ -2313,9 +2314,7 @@ fn register_sequencer_natives_with_accumulators(
             );
             ctx.set_status(format!(
                 "track {} step {} velocity {}",
-                track_idx,
-                step_idx,
-                value
+                track_idx, step_idx, value
             ));
             Ok(EValue::Bool(true))
         },
@@ -2341,9 +2340,7 @@ fn register_sequencer_natives_with_accumulators(
             );
             ctx.set_status(format!(
                 "track {} step {} transpose {}",
-                track_idx,
-                step_idx,
-                value
+                track_idx, step_idx, value
             ));
             Ok(EValue::Bool(true))
         },
@@ -2369,9 +2366,7 @@ fn register_sequencer_natives_with_accumulators(
             );
             ctx.set_status(format!(
                 "track {} step {} transpose adjusted by {}",
-                track_idx,
-                step_idx,
-                value
+                track_idx, step_idx, value
             ));
             Ok(EValue::Bool(true))
         },
@@ -2429,8 +2424,7 @@ fn register_sequencer_natives_with_accumulators(
             state_for_rotate.rotate_steps(track_idx, &steps, *direction as isize);
             ctx.set_status(format!(
                 "track {} rotated by {}",
-                track_idx,
-                *direction as isize
+                track_idx, *direction as isize
             ));
             Ok(EValue::Bool(true))
         },
@@ -2755,7 +2749,11 @@ fn install_runtime_globals(
         .ok()
         .map(|metadata| {
             (
-                metadata.effect_descriptors.get(track).cloned().unwrap_or_default(),
+                metadata
+                    .effect_descriptors
+                    .get(track)
+                    .cloned()
+                    .unwrap_or_default(),
                 metadata.instrument_descriptors.get(track).cloned(),
             )
         })
@@ -2885,7 +2883,10 @@ fn parse_instrument_param_ref_arg(value: &EValue) -> Result<usize, String> {
     }
 }
 
-fn parse_instrument_param_target_arg(args: &[EValue], idx: usize) -> Result<(usize, usize), String> {
+fn parse_instrument_param_target_arg(
+    args: &[EValue],
+    idx: usize,
+) -> Result<(usize, usize), String> {
     if let Some(value) = args.get(idx) {
         if matches!(value, EValue::List(_)) {
             return Ok((parse_instrument_param_ref_arg(value)?, idx + 1));
@@ -3041,11 +3042,15 @@ impl EffectDescriptorParamSnapshot {
                 if range <= 0.0 {
                     self.min
                 } else {
-                    (self.min + normalized * range).round().clamp(self.min, self.max)
+                    (self.min + normalized * range)
+                        .round()
+                        .clamp(self.min, self.max)
                 }
             }
             crate::effects::ParamKind::Continuous { .. } => match self.scaling {
-                crate::effects::ParamScaling::Linear => self.min + normalized * (self.max - self.min),
+                crate::effects::ParamScaling::Linear => {
+                    self.min + normalized * (self.max - self.min)
+                }
                 crate::effects::ParamScaling::Exponential => {
                     if self.min <= 0.0 || self.max <= 0.0 {
                         self.min + normalized * (self.max - self.min)
@@ -3152,7 +3157,13 @@ fn set_effect_param_normalized(
     normalized: f32,
     desc: &EffectDescriptorParamSnapshot,
 ) -> Result<(), String> {
-    set_effect_param_raw(eval, slot_idx, param_idx, desc.denormalize(normalized), desc)
+    set_effect_param_raw(
+        eval,
+        slot_idx,
+        param_idx,
+        desc.denormalize(normalized),
+        desc,
+    )
 }
 
 fn add_effect_param_raw(
@@ -3230,7 +3241,8 @@ fn set_instrument_param_raw(
     {
         existing.value = value;
     } else {
-        eval.instrument_params.push(ScheduledInstrumentParam { target, idx, value });
+        eval.instrument_params
+            .push(ScheduledInstrumentParam { target, idx, value });
     }
     Ok(())
 }
@@ -3868,8 +3880,7 @@ pub fn run_embedded_scratch_flow(
     mut on_loop_event: impl FnMut(&mut Editor, Option<(&str, &EValue)>) -> Option<String>,
 ) -> Option<(String, (usize, usize), ScratchControlRuntime)> {
     control_runtime.set_position(track, cursor_step);
-    let (runtime, context, metadata, accumulators, accumulator_eval) =
-        control_runtime.into_parts();
+    let (runtime, context, metadata, accumulators, accumulator_eval) = control_runtime.into_parts();
     let init_src = std::fs::read_to_string("../eseqlisp/init.lisp")
         .or_else(|_| std::fs::read_to_string("init.lisp"))
         .unwrap_or_default();
@@ -4389,7 +4400,9 @@ mod tests {
             shared_native_metadata(effect_descriptors, fallback_instrument_descriptors(1)),
         );
 
-        let result = runtime.eval_str("(seq-plock-effect 0 FILTER.cutoff 0.5)").unwrap();
+        let result = runtime
+            .eval_str("(seq-plock-effect 0 FILTER.cutoff 0.5)")
+            .unwrap();
 
         assert_eq!(result, Some(Value::Bool(true)));
         assert_eq!(
@@ -4808,7 +4821,10 @@ mod tests {
                     pan: 0.0,
                     chop: 1.0,
                 },
-                vec![EffectSlotSnapshot::new_default(&EffectDescriptor::builtin_filter(), 42)],
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
                 EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
                 vec![ScheduledEffectParam {
                     logical_id: 42,
@@ -4826,24 +4842,15 @@ mod tests {
         assert_eq!(output.resolved.transpose, 5.0);
         assert_eq!(output.resolved.velocity, 0.5);
         assert_eq!(output.resolved.pan, 0.25);
-        assert!(
-            output
-                .effect_params
-                .iter()
-                .any(|param| {
-                    param.logical_id == 42
-                        && param.idx == 2
-                        && (param.value - effect_expected).abs() < 0.001
-                })
-        );
-        assert!(
-            output
-                .instrument_params
-                .iter()
-                .any(|param| param.target == ScheduledInstrumentParamTarget::Synth
-                    && param.idx == 0
-                    && (param.value - instrument_expected).abs() < 0.001)
-        );
+        assert!(output.effect_params.iter().any(|param| {
+            param.logical_id == 42
+                && param.idx == 2
+                && (param.value - effect_expected).abs() < 0.001
+        }));
+        assert!(output.instrument_params.iter().any(|param| param.target
+            == ScheduledInstrumentParamTarget::Synth
+            && param.idx == 0
+            && (param.value - instrument_expected).abs() < 0.001));
     }
 
     #[test]
@@ -4906,7 +4913,9 @@ mod tests {
             .unwrap();
 
         assert!(output.effect_params.iter().any(|param| {
-            param.logical_id == 42 && param.idx == 2 && (param.value - effect_expected).abs() < 0.001
+            param.logical_id == 42
+                && param.idx == 2
+                && (param.value - effect_expected).abs() < 0.001
         }));
         assert!(output.instrument_params.iter().any(|param| {
             param.target == ScheduledInstrumentParamTarget::Synth
@@ -4965,7 +4974,10 @@ mod tests {
                     pan: 0.0,
                     chop: 1.0,
                 },
-                vec![EffectSlotSnapshot::new_default(&EffectDescriptor::builtin_filter(), 42)],
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
                 EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
                 vec![ScheduledEffectParam {
                     logical_id: 42,

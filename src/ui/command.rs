@@ -31,12 +31,18 @@ use super::App;
 #[allow(dead_code)]
 pub enum AppCommand {
     // ── Pattern / step mutations ──────────────────────────────────────────────
-
     /// Toggle a step on/off and clear its plocks if it was active.
-    ToggleStep { track: usize, step: usize },
+    ToggleStep {
+        track: usize,
+        step: usize,
+    },
 
     /// Explicitly set a step's active flag.
-    SetStepActive { track: usize, step: usize, active: bool },
+    SetStepActive {
+        track: usize,
+        step: usize,
+        active: bool,
+    },
 
     /// Set one parameter value on a step.
     SetStepParam {
@@ -55,10 +61,16 @@ pub enum AppCommand {
     },
 
     /// Clear all payload (params, active flag, plocks) for a step.
-    ClearStepPayload { track: usize, step: usize },
+    ClearStepPayload {
+        track: usize,
+        step: usize,
+    },
 
     /// Clear payload for multiple steps.
-    ClearSteps { track: usize, steps: Vec<usize> },
+    ClearSteps {
+        track: usize,
+        steps: Vec<usize>,
+    },
 
     /// Rotate steps cyclically left (-1) or right (+1).
     RotateSteps {
@@ -86,10 +98,14 @@ pub enum AppCommand {
     },
 
     /// Double track pattern length by duplicating existing steps.
-    DuplicateTrackPattern { track: usize },
+    DuplicateTrackPattern {
+        track: usize,
+    },
 
     /// Halve track pattern length.
-    HalveTrackPattern { track: usize },
+    HalveTrackPattern {
+        track: usize,
+    },
 
     /// Set or clear the per-step timebase p-lock.
     SetTimebasePlock {
@@ -106,68 +122,145 @@ pub enum AppCommand {
     },
 
     /// Clear the timebase p-lock on multiple steps.
-    ClearTimebasePlockMulti { track: usize, steps: Vec<usize> },
+    ClearTimebasePlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+    },
 
     // ── Track params ──────────────────────────────────────────────────────────
-
     /// Toggle the gate (mute) flag for a track.
-    ToggleTrackGate { track: usize },
+    ToggleTrackGate {
+        track: usize,
+    },
 
     /// Toggle the polyphonic flag for a track.
-    ToggleTrackPolyphonic { track: usize },
+    ToggleTrackPolyphonic {
+        track: usize,
+    },
 
-    SetTrackAttack { track: usize, ms: f32 },
-    AdjustTrackAttack { track: usize, delta: f32 },
+    SetTrackAttack {
+        track: usize,
+        ms: f32,
+    },
+    AdjustTrackAttack {
+        track: usize,
+        delta: f32,
+    },
 
-    SetTrackRelease { track: usize, ms: f32 },
-    AdjustTrackRelease { track: usize, delta: f32 },
+    SetTrackRelease {
+        track: usize,
+        ms: f32,
+    },
+    AdjustTrackRelease {
+        track: usize,
+        delta: f32,
+    },
 
-    SetTrackSwing { track: usize, value: f32 },
-    AdjustTrackSwing { track: usize, delta: f32 },
+    SetTrackSwing {
+        track: usize,
+        value: f32,
+    },
+    AdjustTrackSwing {
+        track: usize,
+        delta: f32,
+    },
 
-    SetTrackSwingResolution { track: usize, resolution: SwingResolution },
-    NextTrackSwingResolution { track: usize },
-    PrevTrackSwingResolution { track: usize },
+    SetTrackSwingResolution {
+        track: usize,
+        resolution: SwingResolution,
+    },
+    NextTrackSwingResolution {
+        track: usize,
+    },
+    PrevTrackSwingResolution {
+        track: usize,
+    },
 
-    SetTrackNumSteps { track: usize, n: usize },
-    AdjustTrackNumSteps { track: usize, delta: isize },
+    SetTrackNumSteps {
+        track: usize,
+        n: usize,
+    },
+    AdjustTrackNumSteps {
+        track: usize,
+        delta: isize,
+    },
 
     /// Set track volume; also pushes to the live audio graph.
-    SetTrackVolume { track: usize, value: f32 },
+    SetTrackVolume {
+        track: usize,
+        value: f32,
+    },
     /// Adjust track volume by a delta; also pushes to the live audio graph.
-    AdjustTrackVolume { track: usize, delta: f32 },
+    AdjustTrackVolume {
+        track: usize,
+        delta: f32,
+    },
 
     /// Set track pan; also pushes to the live audio graph.
-    SetTrackPan { track: usize, value: f32 },
+    SetTrackPan {
+        track: usize,
+        value: f32,
+    },
     /// Adjust track pan; also pushes.
-    AdjustTrackPan { track: usize, delta: f32 },
+    AdjustTrackPan {
+        track: usize,
+        delta: f32,
+    },
 
     /// Set track send level; also pushes to the live audio graph.
-    SetTrackSend { track: usize, value: f32 },
+    SetTrackSend {
+        track: usize,
+        value: f32,
+    },
     /// Adjust track send; also pushes.
-    AdjustTrackSend { track: usize, delta: f32 },
+    AdjustTrackSend {
+        track: usize,
+        delta: f32,
+    },
 
     /// Set master volume; also pushes to the live audio graph.
-    SetMasterVolume { value: f32 },
-    AdjustMasterVolume { delta: f32 },
+    SetMasterVolume {
+        value: f32,
+    },
+    AdjustMasterVolume {
+        delta: f32,
+    },
 
-    SetTrackTimebase { track: usize, timebase: Timebase },
-    NextTrackTimebase { track: usize },
-    PrevTrackTimebase { track: usize },
+    SetTrackTimebase {
+        track: usize,
+        timebase: Timebase,
+    },
+    NextTrackTimebase {
+        track: usize,
+    },
+    PrevTrackTimebase {
+        track: usize,
+    },
 
-    SetTrackFtsScale { track: usize, scale_idx: usize },
+    SetTrackFtsScale {
+        track: usize,
+        scale_idx: usize,
+    },
 
     SetTrackAccumIdx {
         track: usize,
         idx: usize,
         default_limit: Option<f32>,
     },
-    SetTrackAccumLimit { track: usize, value: f32 },
-    AdjustTrackAccumLimit { track: usize, delta: f32 },
-    SetTrackAccumMode { track: usize, mode: u32 },
+    SetTrackAccumLimit {
+        track: usize,
+        value: f32,
+    },
+    AdjustTrackAccumLimit {
+        track: usize,
+        delta: f32,
+    },
+    SetTrackAccumMode {
+        track: usize,
+        mode: u32,
+    },
 
     // ── Effect params ─────────────────────────────────────────────────────────
-
     /// Set an effect slot default param value; also pushes to audio graph.
     SetEffectParam {
         track: usize,
@@ -195,7 +288,6 @@ pub enum AppCommand {
     },
 
     // ── Instrument params ─────────────────────────────────────────────────────
-
     /// Set an instrument slot default param; also pushes to audio graph.
     SetInstrumentParam {
         track: usize,
@@ -220,16 +312,22 @@ pub enum AppCommand {
     },
 
     /// Set the instrument base-note offset.
-    SetInstrumentBaseNoteOffset { track: usize, value: f32 },
+    SetInstrumentBaseNoteOffset {
+        track: usize,
+        value: f32,
+    },
 
     // ── Transport ─────────────────────────────────────────────────────────────
-
     TogglePlay,
 
-    SetBpm { bpm: u32 },
+    SetBpm {
+        bpm: u32,
+    },
 
     /// Adjust the record-quantize threshold (clamped to [0.1, 0.9]).
-    AdjustRecordQuantizeThresh { delta: f32 },
+    AdjustRecordQuantizeThresh {
+        delta: f32,
+    },
 }
 
 /// Execute `cmd` against `app`, calling
@@ -262,20 +360,33 @@ fn command_mutates_sequencer_state(_cmd: &AppCommand) -> bool {
 fn execute_command(app: &mut App, cmd: AppCommand) {
     match cmd {
         // ── Pattern / step mutations ──────────────────────────────────────
-
         AppCommand::ToggleStep { track, step } => {
             app.state.toggle_step_and_clear_plocks(track, step);
         }
 
-        AppCommand::SetStepActive { track, step, active } => {
+        AppCommand::SetStepActive {
+            track,
+            step,
+            active,
+        } => {
             app.state.pattern.patterns[track].set_step_active(step, active);
         }
 
-        AppCommand::SetStepParam { track, step, param, value } => {
+        AppCommand::SetStepParam {
+            track,
+            step,
+            param,
+            value,
+        } => {
             app.state.set_step_param(track, step, param, value);
         }
 
-        AppCommand::AdjustStepParam { track, step, param, delta } => {
+        AppCommand::AdjustStepParam {
+            track,
+            step,
+            param,
+            delta,
+        } => {
             app.state.adjust_step_param(track, step, param, delta);
         }
 
@@ -289,11 +400,20 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             }
         }
 
-        AppCommand::RotateSteps { track, steps, direction } => {
+        AppCommand::RotateSteps {
+            track,
+            steps,
+            direction,
+        } => {
             app.state.rotate_steps(track, &steps, direction);
         }
 
-        AppCommand::PasteSteps { track, clipboard, dest_start, num_steps } => {
+        AppCommand::PasteSteps {
+            track,
+            clipboard,
+            dest_start,
+            num_steps,
+        } => {
             for (offset, snap) in &clipboard {
                 let dest = dest_start + offset;
                 if dest >= num_steps {
@@ -307,7 +427,12 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             }
         }
 
-        AppCommand::ShiftStepRange { track, lo, hi, new_lo } => {
+        AppCommand::ShiftStepRange {
+            track,
+            lo,
+            hi,
+            new_lo,
+        } => {
             app.state.move_step_range(track, lo, hi, new_lo);
         }
 
@@ -319,12 +444,20 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.halve_track_pattern(track);
         }
 
-        AppCommand::SetTimebasePlock { track, step, timebase } => match timebase {
+        AppCommand::SetTimebasePlock {
+            track,
+            step,
+            timebase,
+        } => match timebase {
             Some(tb) => app.state.pattern.timebase_plocks[track].set(step, tb),
             None => app.state.pattern.timebase_plocks[track].clear(step),
         },
 
-        AppCommand::SetTimebasePlockMulti { track, steps, timebase } => {
+        AppCommand::SetTimebasePlockMulti {
+            track,
+            steps,
+            timebase,
+        } => {
             for step in steps {
                 app.state.pattern.timebase_plocks[track].set(step, timebase);
             }
@@ -337,7 +470,6 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         }
 
         // ── Track params ──────────────────────────────────────────────────
-
         AppCommand::ToggleTrackGate { track } => {
             app.state.pattern.track_params[track].toggle_gate();
         }
@@ -437,8 +569,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         }
 
         AppCommand::AdjustMasterVolume { delta } => {
-            let current =
-                f32::from_bits(app.state.transport.master_volume.load(Ordering::Relaxed));
+            let current = f32::from_bits(app.state.transport.master_volume.load(Ordering::Relaxed));
             app.state.transport.master_volume.store(
                 (current + delta).clamp(0.0, 2.0).to_bits(),
                 Ordering::Relaxed,
@@ -462,7 +593,11 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.pattern.track_params[track].set_fts_scale(scale_idx);
         }
 
-        AppCommand::SetTrackAccumIdx { track, idx, default_limit } => {
+        AppCommand::SetTrackAccumIdx {
+            track,
+            idx,
+            default_limit,
+        } => {
             app.state.pattern.track_params[track].set_accumulator_idx(idx);
             if let Some(limit) = default_limit {
                 app.state.pattern.track_params[track].set_accum_limit(limit);
@@ -483,8 +618,12 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         }
 
         // ── Effect params ─────────────────────────────────────────────────
-
-        AppCommand::SetEffectParam { track, slot_idx, param_idx, value } => {
+        AppCommand::SetEffectParam {
+            track,
+            slot_idx,
+            param_idx,
+            value,
+        } => {
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
                 slot.defaults.set(param_idx, value);
@@ -492,14 +631,26 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             }
         }
 
-        AppCommand::SetEffectPlock { track, step, slot_idx, param_idx, value } => {
+        AppCommand::SetEffectPlock {
+            track,
+            step,
+            slot_idx,
+            param_idx,
+            value,
+        } => {
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
                 slot.plocks.set(step, param_idx, value);
             }
         }
 
-        AppCommand::SetEffectPlockMulti { track, steps, slot_idx, param_idx, value } => {
+        AppCommand::SetEffectPlockMulti {
+            track,
+            steps,
+            slot_idx,
+            param_idx,
+            value,
+        } => {
             let chain = &app.state.pattern.effect_chains[track];
             if let Some(slot) = chain.get(slot_idx) {
                 for step in steps {
@@ -509,21 +660,34 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         }
 
         // ── Instrument params ─────────────────────────────────────────────
-
-        AppCommand::SetInstrumentParam { track, param_idx, value } => {
+        AppCommand::SetInstrumentParam {
+            track,
+            param_idx,
+            value,
+        } => {
             let slot = &app.state.pattern.instrument_slots[track];
             slot.defaults.set(param_idx, value);
             app.send_instrument_param(track, param_idx, value);
             app.mark_track_sound_dirty(track);
         }
 
-        AppCommand::SetInstrumentPlock { track, step, param_idx, value } => {
+        AppCommand::SetInstrumentPlock {
+            track,
+            step,
+            param_idx,
+            value,
+        } => {
             app.state.pattern.instrument_slots[track]
                 .plocks
                 .set(step, param_idx, value);
         }
 
-        AppCommand::SetInstrumentPlockMulti { track, steps, param_idx, value } => {
+        AppCommand::SetInstrumentPlockMulti {
+            track,
+            steps,
+            param_idx,
+            value,
+        } => {
             let slot = &app.state.pattern.instrument_slots[track];
             for step in steps {
                 slot.plocks.set(step, param_idx, value);
@@ -536,7 +700,6 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
         }
 
         // ── Transport ─────────────────────────────────────────────────────
-
         AppCommand::TogglePlay => {
             app.state.toggle_play();
         }
@@ -555,10 +718,10 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
                     .record_quantize_thresh
                     .load(Ordering::Relaxed),
             );
-            app.state
-                .transport
-                .record_quantize_thresh
-                .store((current + delta).clamp(0.1, 0.9).to_bits(), Ordering::Relaxed);
+            app.state.transport.record_quantize_thresh.store(
+                (current + delta).clamp(0.1, 0.9).to_bits(),
+                Ordering::Relaxed,
+            );
         }
     }
 }

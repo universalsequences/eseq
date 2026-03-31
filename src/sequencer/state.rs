@@ -519,7 +519,8 @@ impl SequencerState {
             let mut published = self.scheduler_snapshot.lock().unwrap();
             *published = Arc::clone(&snapshot);
         }
-        self.scheduler_snapshot_version.fetch_add(1, Ordering::AcqRel);
+        self.scheduler_snapshot_version
+            .fetch_add(1, Ordering::AcqRel);
         snapshot
     }
     pub fn scratch_source(&self) -> String {
@@ -532,7 +533,9 @@ impl SequencerState {
         *self.scratch_source.lock().unwrap() = source.into();
         self.scratch_source_version.fetch_add(1, Ordering::AcqRel);
     }
-    pub fn scratch_runtime_descriptors(&self) -> (Vec<Vec<EffectDescriptor>>, Vec<EffectDescriptor>) {
+    pub fn scratch_runtime_descriptors(
+        &self,
+    ) -> (Vec<Vec<EffectDescriptor>>, Vec<EffectDescriptor>) {
         (
             self.scratch_effect_descriptors.lock().unwrap().clone(),
             self.scratch_instrument_descriptors.lock().unwrap().clone(),
@@ -552,10 +555,13 @@ impl SequencerState {
         }
     }
     pub fn request_all_accumulator_resets(&self) {
-        self.pending_accumulator_reset_all.store(true, Ordering::Release);
+        self.pending_accumulator_reset_all
+            .store(true, Ordering::Release);
     }
     pub fn take_accumulator_reset_requests(&self) -> (bool, [bool; MAX_TRACKS]) {
-        let all = self.pending_accumulator_reset_all.swap(false, Ordering::AcqRel);
+        let all = self
+            .pending_accumulator_reset_all
+            .swap(false, Ordering::AcqRel);
         let mut tracks = [false; MAX_TRACKS];
         for (idx, flag) in tracks.iter_mut().enumerate() {
             *flag = self.pending_accumulator_reset_tracks[idx].swap(false, Ordering::AcqRel);
@@ -1415,7 +1421,10 @@ mod tests {
 
     #[test]
     fn accumulator_reset_requests_are_consumed_once() {
-        let state = SequencerState::new(2, vec![default_empty_effect_chain(), default_empty_effect_chain()]);
+        let state = SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        );
 
         state.request_accumulator_reset(1);
         state.request_all_accumulator_resets();

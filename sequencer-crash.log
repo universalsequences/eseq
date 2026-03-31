@@ -47,3 +47,19 @@ stack trace:
 5   libsystem_pthread.dylib             0x0000000192f5cba8 thread_start + 8
 
 
+
+sequencer caught fatal signal 11 (SIGSEGV)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 11 (SIGSEGV)
+crash log: sequencer-crash.log
+stack trace:
+0   sequencer                           0x0000000102b3603c _ZN9sequencer13crash_handler14signal_handler17h1be2a6d396a6a60aE + 484
+1   libsystem_platform.dylib            0x00000001899df744 _sigtramp + 56
+2   sequencer                           0x0000000102ebf480 bind_and_run_live + 132
+3   sequencer                           0x0000000102ebf144 worker_main + 920
+4   libsystem_pthread.dylib             0x00000001899d5c08 _pthread_start + 136
+5   libsystem_pthread.dylib             0x00000001899d0ba8 thread_start + 8
+
+

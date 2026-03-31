@@ -19,8 +19,8 @@ pub mod recorder;
 pub mod reverb;
 pub mod sampler;
 mod scale;
-mod scheduler;
 mod scheduled_event;
+mod scheduler;
 #[allow(dead_code)]
 pub mod sequencer;
 #[allow(dead_code)]
