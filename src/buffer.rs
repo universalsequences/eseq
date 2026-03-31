@@ -118,6 +118,11 @@ impl Buffer {
     }
 
     pub fn set_widget_tree(&mut self, tree: Option<Value>, source: Option<BufferId>) {
+        let tree_unchanged = self.widget_tree.as_ref() == tree.as_ref();
+        let source_unchanged = self.widget_tree_source == source;
+        if tree_unchanged && source_unchanged {
+            return;
+        }
         self.widget_tree = tree;
         self.widget_tree_source = source;
         self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
