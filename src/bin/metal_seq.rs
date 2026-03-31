@@ -2113,7 +2113,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
                 let rt = editor.runtime_mut();
-                sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                 rt.set_reactive(
                     "SEQ",
@@ -2136,7 +2135,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "step-has-plocks",
                     build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
                 );
-                sync_sidebar_browser(rt, &app, ct);
                 // Sync recording state
                 let rec_on = recording.load(Ordering::Relaxed);
                 rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
