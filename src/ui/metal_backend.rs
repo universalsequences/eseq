@@ -977,6 +977,8 @@ fragment float4 waveform_frag(
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.sync_window_theme();
+            let mut widget_scene_build_time = Duration::ZERO;
+            let mut metal_prep_time = Duration::ZERO;
 
             let Some(pipeline) = self.pipeline.clone() else {
                 return Ok(());
@@ -1108,6 +1110,7 @@ fragment float4 waveform_frag(
                         scroll_top: tile.frame.widget_scroll_top,
                         scroll_left: tile.frame.widget_scroll_left,
                     };
+                    let scene_started = Instant::now();
                     let primitives = self.widget_scene_for_layout(
                         tile.frame.widget_content_cache_key,
                         tile.frame.widget_layout_cache_key,
@@ -1116,6 +1119,7 @@ fragment float4 waveform_frag(
                         tile.frame.widget_scroll_top,
                         inner_rows,
                     );
+                    widget_scene_build_time += scene_started.elapsed();
                     let overlay_prims = if widget_render::overlay_widget_id().is_some() {
                         let (_, overlay) = widget_render::collect_metal_primitives(
                             layout,
@@ -1156,6 +1160,7 @@ fragment float4 waveform_frag(
                     for (seg_scissor, seg_prims) in &segments {
                         enc.setScissorRect(*seg_scissor);
 
+                        let prep_started = Instant::now();
                         let (bg_runs, fg_runs) = partition_widget_instance_runs(seg_prims);
                         for (widget_type, instances) in &bg_runs {
                             let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
@@ -1180,11 +1185,13 @@ fragment float4 waveform_frag(
                             let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
                             build_widget_primitive_quads(seg_prims, atlas, vp_w, vp_h)
                         };
+                        metal_prep_time += prep_started.elapsed();
                         draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
 
                         if let (Some(prop_atlas), Some(prop_pipe)) =
                             (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
                         {
+                            let prop_started = Instant::now();
                             let prop_verts = build_proportional_text_quads(
                                 seg_prims,
                                 prop_atlas,
@@ -1193,6 +1200,7 @@ fragment float4 waveform_frag(
                                 vp_w,
                                 vp_h,
                             );
+                            metal_prep_time += prop_started.elapsed();
                             let prop_tex = prop_atlas.texture.clone();
                             draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
                         }
@@ -1604,6 +1612,7 @@ fragment float4 waveform_frag(
             enc.endEncoding();
             cmdbuf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
             cmdbuf.commit();
+            self.stats.note_frame(0, 0, 0, widget_scene_build_time, metal_prep_time);
             Ok(())
         }
     }
@@ -1999,6 +2008,8 @@ fragment float4 waveform_frag(
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             self.sync_window_theme();
             let time_seconds = self.elapsed_time_seconds();
+            let mut widget_scene_build_time = Duration::ZERO;
+            let mut metal_prep_time = Duration::ZERO;
 
             self.compile_pending_sdf_pipelines();
 
@@ -2028,7 +2039,8 @@ fragment float4 waveform_frag(
                 .widget_layout
                 .as_ref()
                 .map(|layout| {
-                    self.widget_scene_for_layout(
+                    let started = Instant::now();
+                    let scene = self.widget_scene_for_layout(
                         frame.widget_content_cache_key,
                         frame.widget_layout_cache_key,
                         layout,
@@ -2046,7 +2058,9 @@ fragment float4 waveform_frag(
                         },
                         frame.widget_scroll_top,
                         max_rows,
-                    )
+                    );
+                    widget_scene_build_time += started.elapsed();
+                    scene
                 })
                 .unwrap_or_default();
 
@@ -2071,9 +2085,11 @@ fragment float4 waveform_frag(
                     }
                 };
             }
+            let prep_started = Instant::now();
             let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
             let (primitive_bg_runs, primitive_instance_runs) =
                 partition_widget_instance_runs(&primitive_scene);
+            metal_prep_time += prep_started.elapsed();
 
             // ── Vertex buffer ────────────────────────────────────────────────
             let text_vbuf = self.cached_text_buffer.as_ref();
@@ -2158,6 +2174,7 @@ fragment float4 waveform_frag(
             if let (Some(prop_atlas), Some(prop_pipe)) =
                 (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
             {
+                let prop_started = Instant::now();
                 let prop_verts = build_proportional_text_quads(
                     &primitive_scene,
                     prop_atlas,
@@ -2166,6 +2183,7 @@ fragment float4 waveform_frag(
                     vp_w,
                     vp_h,
                 );
+                metal_prep_time += prop_started.elapsed();
                 if !prop_verts.is_empty() {
                     let byte_len = std::mem::size_of_val(prop_verts.as_slice());
                     if let Some(pvbuf) = unsafe {
@@ -2240,35 +2258,56 @@ fragment float4 waveform_frag(
             enc.endEncoding();
             buf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
             buf.commit();
-            self.stats.note_frame(text_bytes, label_bytes, widget_bytes);
+            self.stats.note_frame(
+                text_bytes,
+                label_bytes,
+                widget_bytes,
+                widget_scene_build_time,
+                metal_prep_time,
+            );
             Ok(())
         }
     }
 
     struct RenderStats {
+        enabled: bool,
         window_start: Instant,
         frames: u64,
         text_bytes: usize,
         label_bytes: usize,
         widget_bytes: usize,
+        widget_scene_build: Duration,
+        metal_prep: Duration,
     }
 
     impl RenderStats {
         fn new() -> Self {
             Self {
+                enabled: std::env::var_os("ESEQLISP_PROFILE_UI").is_some(),
                 window_start: Instant::now(),
                 frames: 0,
                 text_bytes: 0,
                 label_bytes: 0,
                 widget_bytes: 0,
+                widget_scene_build: Duration::ZERO,
+                metal_prep: Duration::ZERO,
             }
         }
 
-        fn note_frame(&mut self, text_bytes: usize, label_bytes: usize, widget_bytes: usize) {
+        fn note_frame(
+            &mut self,
+            text_bytes: usize,
+            label_bytes: usize,
+            widget_bytes: usize,
+            widget_scene_build: Duration,
+            metal_prep: Duration,
+        ) {
             self.frames += 1;
             self.text_bytes += text_bytes;
             self.label_bytes += label_bytes;
             self.widget_bytes += widget_bytes;
+            self.widget_scene_build += widget_scene_build;
+            self.metal_prep += metal_prep;
 
             let elapsed = self.window_start.elapsed();
             if elapsed.as_secs_f64() < 1.0 {
@@ -2280,18 +2319,24 @@ fragment float4 waveform_frag(
             let total_mb =
                 (self.text_bytes + self.label_bytes + self.widget_bytes) as f64 / (1024.0 * 1024.0);
             let mbps = total_mb / secs;
-            eprintln!(
-                "[metal-stats] fps={fps:.1} upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s",
-                self.text_bytes as f64 / (1024.0 * 1024.0) / secs,
-                self.label_bytes as f64 / (1024.0 * 1024.0) / secs,
-                self.widget_bytes as f64 / (1024.0 * 1024.0) / secs,
-            );
+            if self.enabled {
+                eprintln!(
+                    "[ui-profile][metal] fps={fps:.1} scene_avg={:.2}ms prep_avg={:.2}ms upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s",
+                    self.widget_scene_build.as_secs_f64() * 1000.0 / self.frames as f64,
+                    self.metal_prep.as_secs_f64() * 1000.0 / self.frames as f64,
+                    self.text_bytes as f64 / (1024.0 * 1024.0) / secs,
+                    self.label_bytes as f64 / (1024.0 * 1024.0) / secs,
+                    self.widget_bytes as f64 / (1024.0 * 1024.0) / secs,
+                );
+            }
 
             self.window_start = Instant::now();
             self.frames = 0;
             self.text_bytes = 0;
             self.label_bytes = 0;
             self.widget_bytes = 0;
+            self.widget_scene_build = Duration::ZERO;
+            self.metal_prep = Duration::ZERO;
         }
     }
 

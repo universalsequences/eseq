@@ -19,7 +19,9 @@ pub mod vstack;
 pub mod waveform;
 
 use std::cell::RefCell;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
@@ -56,6 +58,8 @@ thread_local! {
     static OVERLAY_INFO: RefCell<Option<OverlayInfo>> = RefCell::new(None);
     #[cfg(target_os = "macos")]
     static OVERLAY_PRIMITIVES: RefCell<Vec<MetalPrimitive>> = RefCell::new(Vec::new());
+    #[cfg(target_os = "macos")]
+    static WIDGET_PRIMITIVE_CACHE: RefCell<HashMap<u64, Vec<MetalPrimitive>>> = RefCell::new(HashMap::new());
 }
 
 pub fn set_overlay(widget_id: u64, rect: Rect) {
@@ -556,6 +560,84 @@ pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
 }
 
 #[cfg(target_os = "macos")]
+fn cacheable_widget_primitives(widget_type: &str) -> bool {
+    matches!(
+        widget_type,
+        "label" | "slider" | "hslider" | "vslider" | "toggle" | "knob" | "tabs" | "box"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
+    std::mem::discriminant(value).hash(hasher);
+    match value {
+        Value::Number(n) => n.to_bits().hash(hasher),
+        Value::Bool(b) => b.hash(hasher),
+        Value::Nil => {}
+        Value::String(s) | Value::Symbol(s) | Value::Keyword(s) => s.hash(hasher),
+        Value::List(items) => {
+            items.len().hash(hasher);
+            for item in items {
+                hash_value(&item.borrow(), hasher);
+            }
+        }
+        Value::Map(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort();
+            keys.len().hash(hasher);
+            for key in keys {
+                key.hash(hasher);
+                if let Some(value) = map.get(key) {
+                    hash_value(&value.borrow(), hasher);
+                }
+            }
+        }
+        Value::Closure(idx, _) | Value::Function(idx) => idx.hash(hasher),
+        Value::NodeRef(id) => id.hash(hasher),
+        Value::NativeFunction(_) => {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Option<u64> {
+    if overlay_widget_id().is_some() || !cacheable_widget_primitives(&node.widget_type) {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    node.widget_id.hash(&mut hasher);
+    node.widget_type.hash(&mut hasher);
+    node.rect.row.to_bits().hash(&mut hasher);
+    node.rect.col.to_bits().hash(&mut hasher);
+    node.rect.width.to_bits().hash(&mut hasher);
+    node.rect.height.to_bits().hash(&mut hasher);
+    viewport.cell_w.to_bits().hash(&mut hasher);
+    viewport.cell_h.to_bits().hash(&mut hasher);
+    viewport.vp_w.to_bits().hash(&mut hasher);
+    viewport.vp_h.to_bits().hash(&mut hasher);
+    viewport.focused_widget_id.hash(&mut hasher);
+    viewport.focused_branch.hash(&mut hasher);
+    viewport.tile_content_rows.to_bits().hash(&mut hasher);
+    viewport.scroll_top.to_bits().hash(&mut hasher);
+    viewport.scroll_left.to_bits().hash(&mut hasher);
+    hash_props(&node.props, &mut hasher);
+    Some(hasher.finish())
+}
+
+#[cfg(target_os = "macos")]
+fn hash_props(props: &HashMap<String, Value>, hasher: &mut DefaultHasher) {
+    let mut keys = props.keys().collect::<Vec<_>>();
+    keys.sort();
+    keys.len().hash(hasher);
+    for key in keys {
+        key.hash(hasher);
+        if let Some(value) = props.get(key) {
+            hash_value(value, hasher);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 pub fn widget_shader_sources() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
     let mut shaders = Vec::new();
     for definition in WIDGET_DEFINITIONS {
@@ -573,8 +655,25 @@ pub fn widget_primitives_for_node(
     node: &LayoutNode,
     viewport: WidgetViewport,
 ) -> Vec<MetalPrimitive> {
+    let cache_key = widget_primitive_cache_key(node, viewport);
+    if let Some(cache_key) = cache_key
+        && let Some(cached) = WIDGET_PRIMITIVE_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
+    {
+        return cached;
+    }
+
     if let Some(definition) = widget_definition(&node.widget_type) {
-        definition.build_metal_primitives(&node.widget_type, node, viewport)
+        let primitives = definition.build_metal_primitives(&node.widget_type, node, viewport);
+        if let Some(cache_key) = cache_key {
+            WIDGET_PRIMITIVE_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.len() >= 4096 {
+                    cache.clear();
+                }
+                cache.insert(cache_key, primitives.clone());
+            });
+        }
+        primitives
     } else if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
         sdf_widget::sdf_widget_metal_primitives(&node.widget_type, node, viewport)
     } else {

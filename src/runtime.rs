@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::audio::register_audio_natives;
 use crate::buffer::BufferTextStyle;
@@ -28,6 +28,116 @@ pub struct RuntimeEvalProfile {
     pub sync_theme: Duration,
     pub invalidate_symbol_cache: Duration,
     pub flush_widget_trees: Duration,
+}
+
+struct RuntimePerfStats {
+    enabled: bool,
+    window_start: Instant,
+    reactive_cycles: u64,
+    dirty_updates: u64,
+    reactive_apply: Duration,
+    reactive_flush: Duration,
+    reactive_total: Duration,
+    relayout_reused: u64,
+    relayout_full: u64,
+    relayout_total: Duration,
+}
+
+impl RuntimePerfStats {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("ESEQLISP_PROFILE_UI").is_some(),
+            window_start: Instant::now(),
+            reactive_cycles: 0,
+            dirty_updates: 0,
+            reactive_apply: Duration::ZERO,
+            reactive_flush: Duration::ZERO,
+            reactive_total: Duration::ZERO,
+            relayout_reused: 0,
+            relayout_full: 0,
+            relayout_total: Duration::ZERO,
+        }
+    }
+
+    fn note_reactive_cycle(
+        &mut self,
+        dirty_updates: usize,
+        apply: Duration,
+        flush: Duration,
+        total: Duration,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        self.reactive_cycles += 1;
+        self.dirty_updates += dirty_updates as u64;
+        self.reactive_apply += apply;
+        self.reactive_flush += flush;
+        self.reactive_total += total;
+        self.maybe_emit();
+    }
+
+    fn note_relayout(&mut self, reused: bool, elapsed: Duration) {
+        if !self.enabled {
+            return;
+        }
+        if reused {
+            self.relayout_reused += 1;
+        } else {
+            self.relayout_full += 1;
+        }
+        self.relayout_total += elapsed;
+        self.maybe_emit();
+    }
+
+    fn maybe_emit(&mut self) {
+        if !self.enabled || self.window_start.elapsed().as_secs_f64() < 1.0 {
+            return;
+        }
+        let secs = self.window_start.elapsed().as_secs_f64();
+        let reactive_avg_ms = if self.reactive_cycles > 0 {
+            self.reactive_total.as_secs_f64() * 1000.0 / self.reactive_cycles as f64
+        } else {
+            0.0
+        };
+        let apply_avg_ms = if self.reactive_cycles > 0 {
+            self.reactive_apply.as_secs_f64() * 1000.0 / self.reactive_cycles as f64
+        } else {
+            0.0
+        };
+        let flush_avg_ms = if self.reactive_cycles > 0 {
+            self.reactive_flush.as_secs_f64() * 1000.0 / self.reactive_cycles as f64
+        } else {
+            0.0
+        };
+        let relayout_calls = self.relayout_reused + self.relayout_full;
+        let relayout_avg_ms = if relayout_calls > 0 {
+            self.relayout_total.as_secs_f64() * 1000.0 / relayout_calls as f64
+        } else {
+            0.0
+        };
+        eprintln!(
+            "[ui-profile][runtime] reactive/s={:.1} dirty/cycle={:.1} apply_avg={apply_avg_ms:.2}ms flush_avg={flush_avg_ms:.2}ms reactive_avg={reactive_avg_ms:.2}ms relayout/s={:.1} relayout_avg={relayout_avg_ms:.2}ms reused={} full={}",
+            self.reactive_cycles as f64 / secs,
+            if self.reactive_cycles > 0 {
+                self.dirty_updates as f64 / self.reactive_cycles as f64
+            } else {
+                0.0
+            },
+            relayout_calls as f64 / secs,
+            self.relayout_reused,
+            self.relayout_full,
+        );
+        self.window_start = Instant::now();
+        self.reactive_cycles = 0;
+        self.dirty_updates = 0;
+        self.reactive_apply = Duration::ZERO;
+        self.reactive_flush = Duration::ZERO;
+        self.reactive_total = Duration::ZERO;
+        self.relayout_reused = 0;
+        self.relayout_full = 0;
+        self.relayout_total = Duration::ZERO;
+    }
 }
 
 fn expand_sdf_expression(
@@ -574,6 +684,7 @@ pub struct Runtime {
     layout_cell_w: f32,
     layout_cell_h: f32,
     text_measurer: Option<Box<dyn TextMeasurer>>,
+    perf_stats: RuntimePerfStats,
 }
 
 impl Default for Runtime {
@@ -610,6 +721,7 @@ impl Runtime {
             layout_cell_w: 1.0,
             layout_cell_h: 1.0,
             text_measurer: None,
+            perf_stats: RuntimePerfStats::new(),
         };
         runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
         crate::theme::set_current(crate::theme::default_theme());
@@ -1044,6 +1156,7 @@ impl Runtime {
     }
 
     pub fn run_reactive_cycle(&mut self) {
+        let total_started = Instant::now();
         let current_buffer_id = self.shared.borrow().current_buffer_id;
         self.vm.set_current_effect_context(current_buffer_id);
         let dirty = self.reactive_registry.drain_dirty();
@@ -1051,9 +1164,19 @@ impl Runtime {
             return;
         }
 
+        let dirty_len = dirty.len();
+        let apply_started = Instant::now();
         if self.vm.apply_reactive_changes(dirty).is_ok() {
+            let apply_elapsed = apply_started.elapsed();
             self.sync_theme_from_vm();
+            let flush_started = Instant::now();
             self.flush_widget_trees();
+            self.perf_stats.note_reactive_cycle(
+                dirty_len,
+                apply_elapsed,
+                flush_started.elapsed(),
+                total_started.elapsed(),
+            );
         }
     }
 
@@ -1408,6 +1531,7 @@ impl Runtime {
     }
 
     fn relayout_current_tree(&mut self) {
+        let relayout_started = Instant::now();
         let Some(tree) = self.current_widget_tree.as_ref() else {
             let had_layout = self.current_layout.is_some();
             self.current_layout = None;
@@ -1415,6 +1539,7 @@ impl Runtime {
             if had_layout {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
+            self.perf_stats.note_relayout(true, relayout_started.elapsed());
             return;
         };
         let mut dirty_widget_ids = Vec::new();
@@ -1430,6 +1555,7 @@ impl Runtime {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
             self.force_layout_revision_bump = false;
+            self.perf_stats.note_relayout(true, relayout_started.elapsed());
             return;
         }
         let engine = if let Some(measurer) = self.text_measurer.as_deref() {
@@ -1463,6 +1589,7 @@ impl Runtime {
                 self.dirty_widget_ids = collect_shader_widget_ids(layout);
             }
             self.force_layout_revision_bump = false;
+            self.perf_stats.note_relayout(false, relayout_started.elapsed());
         }
     }
 
