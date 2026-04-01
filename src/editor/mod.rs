@@ -1402,6 +1402,11 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    pub fn reset_widget_scroll_top(&mut self) {
+        self.active_leaf_mut().widget_scroll_top = 0.0;
+        self.mark_needs_redraw();
+    }
+
     /// Combined vertical scroll: widget scroll + text scroll.
     pub fn total_scroll_top(&self) -> f32 {
         self.widget_scroll_top() + self.active_buffer().scroll_top as f32
@@ -1524,6 +1529,20 @@ impl Editor {
         self.clear_mark();
         self.clear_widget_focus();
         id
+    }
+
+    pub fn upsert_scratch_buffer(&mut self, name: &str, text: &str) -> BufferId {
+        if let Some(idx) = self.buffers.iter().position(|buffer| buffer.name == name) {
+            let id = self.buffers[idx].id;
+            self.buffers[idx].set_text(text);
+            id
+        } else {
+            let id = self.alloc_buffer_id();
+            let mut buffer = Buffer::new(id, name);
+            buffer.set_text(text);
+            self.buffers.push(buffer);
+            id
+        }
     }
 
     fn ensure_scratch_buffer_named(&mut self, name: &str) -> usize {

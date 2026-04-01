@@ -718,6 +718,7 @@ impl NativeContext {
 pub struct Runtime {
     vm: VM,
     pub(crate) shared: SharedBridgeState,
+    sync_theme_to_global: bool,
     symbol_metadata: HashMap<String, SymbolMetadata>,
     symbol_revision: u64,
     cached_completion_symbols: Option<Vec<String>>,
@@ -755,6 +756,7 @@ impl Runtime {
         let mut runtime = Self {
             vm,
             shared,
+            sync_theme_to_global: true,
             symbol_metadata: HashMap::new(),
             symbol_revision: 0,
             cached_completion_symbols: None,
@@ -996,6 +998,10 @@ impl Runtime {
         runtime
     }
 
+    pub fn set_theme_sync_enabled(&mut self, enabled: bool) {
+        self.sync_theme_to_global = enabled;
+    }
+
     pub fn with_init_source(init: impl AsRef<str>) -> Self {
         let mut runtime = Self::new();
         let src = init.as_ref();
@@ -1064,7 +1070,9 @@ impl Runtime {
 
         let result = self.vm.eval_str(src);
         if result.is_ok() {
-            self.sync_theme_from_vm();
+            if self.sync_theme_to_global {
+                self.sync_theme_from_vm();
+            }
             self.invalidate_symbol_cache();
             self.flush_widget_trees();
         }
@@ -1092,7 +1100,9 @@ impl Runtime {
         profile.vm_execute = vm_profile.execute;
 
         let sync_started = std::time::Instant::now();
-        self.sync_theme_from_vm();
+        if self.sync_theme_to_global {
+            self.sync_theme_from_vm();
+        }
         profile.sync_theme = sync_started.elapsed();
 
         let cache_started = std::time::Instant::now();
@@ -1108,7 +1118,7 @@ impl Runtime {
 
     pub fn set_global_value(&mut self, name: &str, value: Value) {
         self.vm.set_global_value(name, value);
-        if name == "THEME" {
+        if self.sync_theme_to_global && name == "THEME" {
             self.sync_theme_from_vm();
         }
         self.invalidate_symbol_cache();
@@ -1125,7 +1135,7 @@ impl Runtime {
         } else {
             self.vm.writable_reactive_namespaces.remove(name);
         }
-        if name == "THEME" {
+        if self.sync_theme_to_global && name == "THEME" {
             self.sync_theme_from_vm();
         }
         self.invalidate_symbol_cache();
@@ -1133,7 +1143,7 @@ impl Runtime {
 
     pub fn set_reactive(&mut self, namespace: &str, field: &str, value: Value) {
         self.reactive_registry.set(namespace, field, value);
-        if namespace == "THEME" {
+        if self.sync_theme_to_global && namespace == "THEME" {
             self.sync_theme_from_registry();
         }
     }
@@ -1201,7 +1211,9 @@ impl Runtime {
         self.vm.set_current_effect_context(current_buffer_id);
         let result = self.vm.invoke(callable, args);
         if result.is_ok() {
-            self.sync_theme_from_vm();
+            if self.sync_theme_to_global {
+                self.sync_theme_from_vm();
+            }
             self.flush_widget_trees();
         }
         result
@@ -1221,7 +1233,9 @@ impl Runtime {
         if self.vm.apply_reactive_changes(dirty).is_ok() {
             let apply_elapsed = apply_started.elapsed();
             let exec_timings = self.vm.take_reactive_exec_timings();
-            self.sync_theme_from_vm();
+            if self.sync_theme_to_global {
+                self.sync_theme_from_vm();
+            }
             let flush_started = Instant::now();
             self.flush_widget_trees();
             self.perf_stats.note_reactive_cycle(
