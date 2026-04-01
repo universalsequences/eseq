@@ -43,6 +43,7 @@ struct RuntimePerfStats {
     relayout_full: u64,
     relayout_total: Duration,
     relayout_failures: HashMap<String, u64>,
+    reactive_exec: HashMap<String, (u64, Duration)>,
 }
 
 impl RuntimePerfStats {
@@ -59,6 +60,7 @@ impl RuntimePerfStats {
             relayout_full: 0,
             relayout_total: Duration::ZERO,
             relayout_failures: HashMap::new(),
+            reactive_exec: HashMap::new(),
         }
     }
 
@@ -68,6 +70,7 @@ impl RuntimePerfStats {
         apply: Duration,
         flush: Duration,
         total: Duration,
+        exec_timings: Vec<crate::vm::ReactiveExecTiming>,
     ) {
         if !self.enabled {
             return;
@@ -77,6 +80,14 @@ impl RuntimePerfStats {
         self.reactive_apply += apply;
         self.reactive_flush += flush;
         self.reactive_total += total;
+        for timing in exec_timings {
+            let entry = self
+                .reactive_exec
+                .entry(timing.label)
+                .or_insert((0, Duration::ZERO));
+            entry.0 += 1;
+            entry.1 += timing.elapsed;
+        }
         self.maybe_emit();
     }
 
@@ -123,7 +134,7 @@ impl RuntimePerfStats {
             0.0
         };
         eprintln!(
-            "[ui-profile][runtime] reactive/s={:.1} dirty/cycle={:.1} apply_avg={apply_avg_ms:.2}ms flush_avg={flush_avg_ms:.2}ms reactive_avg={reactive_avg_ms:.2}ms relayout/s={:.1} relayout_avg={relayout_avg_ms:.2}ms reused={} full={} fail={}",
+            "[ui-profile][runtime] reactive/s={:.1} dirty/cycle={:.1} apply_avg={apply_avg_ms:.2}ms flush_avg={flush_avg_ms:.2}ms reactive_avg={reactive_avg_ms:.2}ms relayout/s={:.1} relayout_avg={relayout_avg_ms:.2}ms reused={} full={} fail={} hot={}",
             self.reactive_cycles as f64 / secs,
             if self.reactive_cycles > 0 {
                 self.dirty_updates as f64 / self.reactive_cycles as f64
@@ -134,6 +145,7 @@ impl RuntimePerfStats {
             self.relayout_reused,
             self.relayout_full,
             self.top_failure_reason(),
+            self.top_reactive_exec(),
         );
         self.window_start = Instant::now();
         self.reactive_cycles = 0;
@@ -145,6 +157,7 @@ impl RuntimePerfStats {
         self.relayout_full = 0;
         self.relayout_total = Duration::ZERO;
         self.relayout_failures.clear();
+        self.reactive_exec.clear();
     }
 
     fn top_failure_reason(&self) -> String {
@@ -153,6 +166,26 @@ impl RuntimePerfStats {
             .max_by_key(|(_, count)| *count)
             .map(|(reason, count)| format!("{reason}({count})"))
             .unwrap_or_else(|| "-".to_string())
+    }
+
+    fn top_reactive_exec(&self) -> String {
+        let mut entries = self
+            .reactive_exec
+            .iter()
+            .map(|(label, (count, total))| (label, *count, *total))
+            .collect::<Vec<_>>();
+        entries.sort_by(|a, b| b.2.cmp(&a.2));
+        let summary = entries
+            .into_iter()
+            .take(3)
+            .map(|(label, count, total)| format!("{label}:{:.1}ms/{count}", total.as_secs_f64() * 1000.0))
+            .collect::<Vec<_>>()
+            .join(",");
+        if summary.is_empty() {
+            "-".to_string()
+        } else {
+            summary
+        }
     }
 }
 
@@ -572,7 +605,10 @@ impl NativeContext {
     }
 
     pub fn render_widget(&mut self, tree: Value) {
-        self.shared.borrow_mut().pending_widget_tree.replace(tree);
+        self.shared
+            .borrow_mut()
+            .pending_widget_tree
+            .replace(tree.deep_clone());
     }
 
     pub fn render_widget_to_buffer(&mut self, buffer_name: String, tree: Value) {
@@ -583,7 +619,7 @@ impl NativeContext {
             .push(PendingWidgetTree {
                 source_buffer_id,
                 target: EffectTarget::BufferName(buffer_name),
-                tree,
+                tree: tree.deep_clone(),
             });
     }
 
@@ -1184,6 +1220,7 @@ impl Runtime {
         let apply_started = Instant::now();
         if self.vm.apply_reactive_changes(dirty).is_ok() {
             let apply_elapsed = apply_started.elapsed();
+            let exec_timings = self.vm.take_reactive_exec_timings();
             self.sync_theme_from_vm();
             let flush_started = Instant::now();
             self.flush_widget_trees();
@@ -1192,6 +1229,7 @@ impl Runtime {
                 apply_elapsed,
                 flush_started.elapsed(),
                 total_started.elapsed(),
+                exec_timings,
             );
         }
     }
@@ -1449,7 +1487,11 @@ impl Runtime {
             self.layout_rows = rows;
         }
 
-        self.current_widget_tree = Some(tree.clone());
+        // Snapshotting an arbitrary buffer/tree should not try to reuse against
+        // the currently active layout; that mixes unrelated trees and inflates
+        // both relayout work and profiling noise.
+        self.current_layout = None;
+        self.current_widget_tree = Some(tree.deep_clone());
         self.relayout_current_tree();
         let snapshot = self.current_layout.clone();
 
@@ -1490,14 +1532,14 @@ impl Runtime {
         self.current_layout = None;
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
-        self.current_widget_tree = Some(tree);
+        self.current_widget_tree = Some(tree.deep_clone());
         self.relayout_current_tree();
     }
 
     /// Restore a previously saved widget tree for display only,
     /// without clearing reactive effects.
     pub fn restore_widget_tree(&mut self, tree: Value) {
-        self.current_widget_tree = Some(tree);
+        self.current_widget_tree = Some(tree.deep_clone());
         self.relayout_current_tree();
         // Force layout revision bump so GPU caches rebuild
         self.layout_revision = self.layout_revision.wrapping_add(1);
@@ -1535,7 +1577,7 @@ impl Runtime {
                     .as_ref()
                     .is_some_and(|current| *current == pending.tree);
                 if !unchanged {
-                    self.current_widget_tree = Some(pending.tree.clone());
+                    self.current_widget_tree = Some(pending.tree.deep_clone());
                     self.relayout_current_tree();
                 }
             }

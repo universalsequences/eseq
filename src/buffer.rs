@@ -123,7 +123,7 @@ impl Buffer {
         if tree_unchanged && source_unchanged {
             return;
         }
-        self.widget_tree = tree;
+        self.widget_tree = tree.map(|tree| tree.deep_clone());
         self.widget_tree_source = source;
         self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
     }

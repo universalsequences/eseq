@@ -677,6 +677,8 @@ impl Editor {
             let persist_selection = matches!(
                 mouse.kind,
                 MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
                     | MouseEventKind::ScrollUp
                     | MouseEventKind::ScrollDown
                     | MouseEventKind::ScrollLeft
@@ -2459,7 +2461,7 @@ impl Editor {
         let is_active = self.active_buffer_idx() == buffer_idx;
         {
             let buffer = &mut self.buffers[buffer_idx];
-            buffer.set_widget_tree(tree.clone(), source_buffer_id);
+            buffer.set_widget_tree(tree.as_ref().map(Value::deep_clone), source_buffer_id);
             if tree.is_some() {
                 buffer.view_mode = ViewMode::UiOnly;
             }
@@ -2867,7 +2869,7 @@ impl Editor {
                 tree => {
                     let source_id = self.active_buffer().id;
                     let buffer = self.active_buffer_mut();
-                    buffer.set_widget_tree(Some(tree.clone()), Some(source_id));
+                    buffer.set_widget_tree(Some(tree.deep_clone()), Some(source_id));
                     buffer.view_mode = ViewMode::UiOnly;
                     self.runtime.set_widget_tree(tree);
                     self.auto_focus_first_widget();

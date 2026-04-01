@@ -365,12 +365,33 @@ fn reuse_layout_node_impl(
     }
 
     let children_values = get_children(tree);
-    if children_values.len() != existing.children.len() {
+    let effective_children_values: Vec<&Value> = if widget_type == "tabs" {
+        let selected = (get_prop_num(tree, "value").map(f64_to_f32).unwrap_or(0.0) as usize)
+            .min(children_values.len().saturating_sub(1));
+        children_values.get(selected).into_iter().collect()
+    } else {
+        children_values.iter().collect()
+    };
+
+    if effective_children_values.len() != existing.children.len() {
+        let old_children = existing
+            .children
+            .iter()
+            .map(|child| child.widget_type.clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        let new_children = effective_children_values
+            .iter()
+            .map(|child| get_widget_type(child).unwrap_or_else(|| "non-widget".to_string()))
+            .collect::<Vec<_>>()
+            .join(",");
         return Err(format_reason(format!(
-            "children-len:{}:{}->{}",
+            "children-len:{}:{}->{}:[{}]->[{}]",
             widget_type,
             existing.children.len(),
-            children_values.len()
+            effective_children_values.len(),
+            old_children,
+            new_children
         ), path));
     }
 
@@ -386,7 +407,7 @@ fn reuse_layout_node_impl(
     let children = existing
         .children
         .iter()
-        .zip(children_values.iter())
+        .zip(effective_children_values.iter())
         .enumerate()
         .map(|(idx, (child_layout, child_tree))| {
             path.push(format!("{widget_type}[{idx}]"));

@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static RAND_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 
@@ -89,6 +89,12 @@ pub struct PendingWidgetTree {
     pub source_buffer_id: Option<BufferId>,
     pub target: EffectTarget,
     pub tree: Value,
+}
+
+#[derive(Clone)]
+pub struct ReactiveExecTiming {
+    pub label: String,
+    pub elapsed: Duration,
 }
 
 pub struct ReactiveDag {
@@ -322,6 +328,13 @@ impl PartialEq for Value {
                         .zip(b.iter())
                         .all(|(x, y)| *x.borrow() == *y.borrow())
             }
+            (Self::Map(a), Self::Map(b)) => {
+                a.len() == b.len()
+                    && a.iter().all(|(key, left)| {
+                        b.get(key)
+                            .is_some_and(|right| *left.borrow() == *right.borrow())
+                    })
+            }
             (Self::Closure(a, _), Self::Closure(b, _)) => a == b,
             (Self::Function(a), Self::Function(b)) => a == b,
             (Self::NodeRef(a), Self::NodeRef(b)) => a == b,
@@ -342,6 +355,39 @@ impl Clone for Value {
             Self::List(l) => Self::List(l.clone()),
             Self::Map(m) => Self::Map(m.clone()),
             Self::Closure(i, u) => Self::Closure(*i, u.clone()),
+            Self::Function(i) => Self::Function(*i),
+            Self::NodeRef(id) => Self::NodeRef(*id),
+            Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
+        }
+    }
+}
+
+impl Value {
+    pub fn deep_clone(&self) -> Self {
+        match self {
+            Self::Number(n) => Self::Number(*n),
+            Self::Bool(b) => Self::Bool(*b),
+            Self::Nil => Self::Nil,
+            Self::String(s) => Self::String(s.clone()),
+            Self::Symbol(s) => Self::Symbol(s.clone()),
+            Self::Keyword(s) => Self::Keyword(s.clone()),
+            Self::List(items) => Self::List(
+                items
+                    .iter()
+                    .map(|item| Rc::new(RefCell::new(item.borrow().deep_clone())))
+                    .collect(),
+            ),
+            Self::Map(map) => Self::Map(
+                map.iter()
+                    .map(|(key, value)| {
+                        (
+                            key.clone(),
+                            Rc::new(RefCell::new(value.borrow().deep_clone())),
+                        )
+                    })
+                    .collect(),
+            ),
+            Self::Closure(i, upvalues) => Self::Closure(*i, upvalues.clone()),
             Self::Function(i) => Self::Function(*i),
             Self::NodeRef(id) => Self::NodeRef(*id),
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
@@ -370,6 +416,7 @@ pub struct VM {
     pub state_bindings: HashMap<String, NodeId>,
     execution_depth: usize,
     processing_reactive: bool,
+    reactive_exec_timings: Vec<ReactiveExecTiming>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
     pub macros: HashMap<String, MacroDef>,
@@ -1159,6 +1206,7 @@ impl VM {
             state_bindings: HashMap::new(),
             execution_depth: 0,
             processing_reactive: false,
+            reactive_exec_timings: Vec::new(),
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
             macros: HashMap::new(),
@@ -1336,6 +1384,22 @@ impl VM {
     pub fn set_current_effect_context(&mut self, source_buffer_id: Option<BufferId>) {
         self.current_effect_source_buffer_id = source_buffer_id;
         self.current_effect_target = EffectTarget::BufferId(source_buffer_id);
+    }
+
+    pub fn take_reactive_exec_timings(&mut self) -> Vec<ReactiveExecTiming> {
+        std::mem::take(&mut self.reactive_exec_timings)
+    }
+
+    fn reactive_node_label(&self, node_id: NodeId) -> Option<String> {
+        match self.dag.nodes.get(&node_id) {
+            Some(ReactiveNode::Effect { target, .. }) => Some(match target {
+                EffectTarget::BufferId(Some(id)) => format!("buf#{id}"),
+                EffectTarget::BufferId(None) => "active-buffer".to_string(),
+                EffectTarget::BufferName(name) => name.clone(),
+            }),
+            Some(ReactiveNode::Derived { id, .. }) => Some(format!("derived:{id}")),
+            _ => None,
+        }
     }
 
     fn execute_from(&mut self, entry_chunk: usize) -> Result<Option<Value>, VMError> {
@@ -1529,6 +1593,7 @@ impl VM {
         }
 
         self.processing_reactive = true;
+        self.reactive_exec_timings.clear();
         let result = (|| -> Result<(), VMError> {
             loop {
                 let sorted = self.dag.topo_sort_dirty();
@@ -1558,7 +1623,15 @@ impl VM {
                         self.current_effect_source_buffer_id = *source_buffer_id;
                         self.current_effect_target = target.clone();
                     }
+                    let label = self.reactive_node_label(node_id);
+                    let started = Instant::now();
                     self.execute_from(chunk_idx)?;
+                    if let Some(label) = label {
+                        self.reactive_exec_timings.push(ReactiveExecTiming {
+                            label,
+                            elapsed: started.elapsed(),
+                        });
+                    }
                     self.current_effect_source_buffer_id = previous_owner.0;
                     self.current_effect_target = previous_owner.1;
                 }
@@ -2224,7 +2297,7 @@ impl VM {
                         self.pending_widget_trees.push(PendingWidgetTree {
                             source_buffer_id: self.current_effect_source_buffer_id,
                             target: self.current_effect_target.clone(),
-                            tree: tree.borrow().clone(),
+                            tree: tree.borrow().deep_clone(),
                         });
                         frames.last_mut().unwrap().pc += 1;
                     }
