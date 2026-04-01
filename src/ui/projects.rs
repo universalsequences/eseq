@@ -14,6 +14,65 @@ use crate::sequencer::{InstrumentType, PatternSnapshot, MAX_STEPS};
 use super::{App, InputMode, Region, SidebarMode, SidebarTab};
 
 impl App {
+    pub fn save_project_with_name(
+        &mut self,
+        requested_name: Option<&str>,
+    ) -> Result<String, String> {
+        let requested_name = requested_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.current_project_name.clone())
+            .ok_or_else(|| "Project name must contain letters or numbers".to_string())?;
+
+        let save_name = project::sanitize_project_name(&requested_name);
+        if save_name.is_empty() {
+            return Err("Project name must contain letters or numbers".to_string());
+        }
+
+        self.save_project_named(&save_name)?;
+        self.current_project_name = Some(save_name.clone());
+        Ok(save_name)
+    }
+
+    pub fn queue_project_load_named(&mut self, name: &str) -> Result<(), String> {
+        eprintln!("project-load: queue requested name={name}");
+        let project = project::load_project(name).map_err(|error| error.to_string())?;
+        eprintln!(
+            "project-load: file loaded name={} version={} tracks={} patterns={} custom_effect_tracks={}",
+            name,
+            project.version,
+            project.tracks.len(),
+            project.patterns.len(),
+            project.custom_effects.len()
+        );
+        if project.version != project::project_file_version() {
+            return Err(format!("Unsupported project version {}", project.version));
+        }
+
+        self.editor.pending_project_load = Some(super::PendingProjectLoad {
+            name: name.to_string(),
+            tick: 0,
+            project,
+            built_patterns: Vec::new(),
+            fallback_samples: 0,
+            phase: super::PendingProjectLoadPhase::ClearExisting,
+        });
+        Ok(())
+    }
+
+    pub fn has_pending_project_load(&self) -> bool {
+        self.editor.pending_project_load.is_some()
+    }
+
+    pub fn advance_pending_project_load(&mut self) -> Result<(), String> {
+        let result = self.advance_project_load();
+        if result.is_err() {
+            self.editor.pending_project_load = None;
+        }
+        result
+    }
+
     pub(super) fn open_project_name_prompt(&mut self) {
         self.ui.value_buffer = self.current_project_name.clone().unwrap_or_default();
         self.ui.input_mode = InputMode::ProjectNameEntry;
@@ -46,17 +105,8 @@ impl App {
                 if requested_name.is_empty() {
                     return;
                 }
-                let save_name = project::sanitize_project_name(&requested_name);
-                if save_name.is_empty() {
-                    self.editor.status_message = Some((
-                        "Project name must contain letters or numbers".to_string(),
-                        Instant::now(),
-                    ));
-                    return;
-                }
-                match self.save_project_named(&save_name) {
-                    Ok(()) => {
-                        self.current_project_name = Some(save_name.clone());
+                match self.save_project_with_name(Some(&requested_name)) {
+                    Ok(save_name) => {
                         self.editor.status_message =
                             Some((format!("Saved project '{}'", save_name), Instant::now()));
                     }
@@ -103,24 +153,8 @@ impl App {
                     return;
                 };
                 self.ui.input_mode = InputMode::Normal;
-                match project::load_project(&name) {
-                    Ok(project) => {
-                        if project.version != project_file_version() {
-                            self.editor.status_message = Some((
-                                format!("Unsupported project version {}", project.version),
-                                Instant::now(),
-                            ));
-                            return;
-                        }
-                        self.editor.pending_project_load = Some(super::PendingProjectLoad {
-                            name,
-                            tick: 0,
-                            project,
-                            built_patterns: Vec::new(),
-                            fallback_samples: 0,
-                            phase: super::PendingProjectLoadPhase::ClearExisting,
-                        });
-                    }
+                match self.queue_project_load_named(&name) {
+                    Ok(()) => {}
                     Err(error) => {
                         self.editor.status_message =
                             Some((format!("Error: {error}"), Instant::now()));
@@ -273,11 +307,15 @@ impl App {
                         if slot.node_id.load(Ordering::Relaxed) == 0 {
                             None
                         } else {
-                            Some(
-                                self.graph.effect_descriptors[track_idx][slot_idx]
-                                    .name
-                                    .clone(),
-                            )
+                            let name = self.graph.effect_descriptors[track_idx][slot_idx]
+                                .name
+                                .trim()
+                                .to_string();
+                            if name.is_empty() {
+                                None
+                            } else {
+                                Some(name)
+                            }
                         }
                     })
                     .collect()
@@ -344,10 +382,21 @@ impl App {
 
         match pending.phase {
             super::PendingProjectLoadPhase::ClearExisting => {
+                eprintln!(
+                    "project-load: tick={} phase=ClearExisting existing_tracks={}",
+                    pending.tick,
+                    self.tracks.len()
+                );
                 self.graph_controller().clear_all_tracks();
                 pending.phase = super::PendingProjectLoadPhase::AddTrack(0);
             }
             super::PendingProjectLoadPhase::AddTrack(track_idx) => {
+                eprintln!(
+                    "project-load: tick={} phase=AddTrack index={} total={}",
+                    pending.tick,
+                    track_idx,
+                    pending.project.tracks.len()
+                );
                 if track_idx >= pending.project.tracks.len() {
                     pending.phase = super::PendingProjectLoadPhase::AddEffect {
                         track_idx: 0,
@@ -356,6 +405,11 @@ impl App {
                 } else {
                     match &pending.project.tracks[track_idx] {
                         ProjectTrack::Sampler { sample_path } => {
+                            eprintln!(
+                                "project-load: add sampler track index={} path={}",
+                                track_idx,
+                                sample_path
+                            );
                             self.graph_controller()
                                 .add_track(Path::new(sample_path))
                                 .map_err(|error| {
@@ -363,6 +417,11 @@ impl App {
                                 })?;
                         }
                         ProjectTrack::Custom { instrument_name } => {
+                            eprintln!(
+                                "project-load: add custom track index={} instrument={}",
+                                track_idx,
+                                instrument_name
+                            );
                             self.add_saved_instrument_track_sync(instrument_name)?;
                         }
                     }
@@ -370,6 +429,12 @@ impl App {
                 }
             }
             super::PendingProjectLoadPhase::AddEffect { track_idx, offset } => {
+                eprintln!(
+                    "project-load: tick={} phase=AddEffect track={} offset={}",
+                    pending.tick,
+                    track_idx,
+                    offset
+                );
                 if track_idx >= pending.project.custom_effects.len() {
                     pending.phase = super::PendingProjectLoadPhase::BuildPattern(0);
                 } else if offset >= pending.project.custom_effects[track_idx].len() {
@@ -378,9 +443,17 @@ impl App {
                         offset: 0,
                     };
                 } else {
-                    if let Some(effect_name) =
-                        pending.project.custom_effects[track_idx][offset].as_ref()
+                    if let Some(effect_name) = pending.project.custom_effects[track_idx][offset]
+                        .as_ref()
+                        .map(|name| name.trim())
+                        .filter(|name| !name.is_empty())
                     {
+                        eprintln!(
+                            "project-load: load effect track={} slot={} name={}",
+                            track_idx,
+                            BUILTIN_SLOT_COUNT + offset,
+                            effect_name
+                        );
                         self.load_saved_effect_to_slot_sync(
                             track_idx,
                             BUILTIN_SLOT_COUNT + offset,
@@ -394,6 +467,12 @@ impl App {
                 }
             }
             super::PendingProjectLoadPhase::BuildPattern(pattern_idx) => {
+                eprintln!(
+                    "project-load: tick={} phase=BuildPattern index={} total={}",
+                    pending.tick,
+                    pattern_idx,
+                    pending.project.patterns.len()
+                );
                 if pattern_idx >= pending.project.patterns.len() {
                     pending.phase = super::PendingProjectLoadPhase::Finalize;
                 } else {
@@ -406,6 +485,12 @@ impl App {
                 }
             }
             super::PendingProjectLoadPhase::Finalize => {
+                eprintln!(
+                    "project-load: tick={} phase=Finalize built_patterns={} fallback_samples={}",
+                    pending.tick,
+                    pending.built_patterns.len(),
+                    pending.fallback_samples
+                );
                 self.finish_project_load(pending)?;
                 return Ok(());
             }
@@ -416,6 +501,13 @@ impl App {
     }
 
     fn finish_project_load(&mut self, pending: super::PendingProjectLoad) -> Result<(), String> {
+        eprintln!(
+            "project-load: finish start name={} tracks={} built_patterns={} fallback_samples={}",
+            pending.name,
+            self.tracks.len(),
+            pending.built_patterns.len(),
+            pending.fallback_samples
+        );
         let ProjectFile {
             version: _,
             name: _,
@@ -460,7 +552,6 @@ impl App {
             .transport
             .master_volume
             .store(master_volume.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
-        self.state.publish_scheduler_snapshot();
 
         self.ui.cursor_track = 0;
         self.ui.cursor_step = 0;
@@ -486,6 +577,13 @@ impl App {
             bank[current_pattern].restore(&self.state);
             bank[current_pattern].sample_ids.clone()
         };
+        eprintln!(
+            "project-load: restored current_pattern={} sample_ids={} graph_tracks={}",
+            current_pattern,
+            current_sample_ids.len(),
+            self.graph.track_node_ids.len()
+        );
+        self.state.publish_scheduler_snapshot();
         self.graph_controller()
             .apply_sample_ids(&current_sample_ids);
         self.set_reverb_param(0, reverb.size);
@@ -528,6 +626,7 @@ impl App {
         } else {
             format!("Opened project '{}'", pending.name)
         };
+        eprintln!("project-load: finish complete status={status}");
         self.editor.status_message = Some((status, Instant::now()));
         self.editor.pending_project_load = None;
         Ok(())

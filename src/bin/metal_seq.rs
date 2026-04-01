@@ -27,6 +27,29 @@ const DEFAULT_SAMPLES: &[&str] = &[
     "samples/producers/donda/PABLO HAT.wav",
 ];
 const PAGE_SIZE: usize = 16;
+const BUILTIN_ACCUMULATOR_NAMES: &[&str] = &[
+    "Off",
+    "TransposeRamp",
+    "VelocityDecay",
+    "OctaveEcho",
+    "SendToTrack",
+];
+const ACCUM_MODE_LABELS: &[&str] = &["rtz", "clip", "rvtz", "rvbp"];
+const FTS_SCALE_NAMES: &[&str] = &[
+    "Off",
+    "Major",
+    "Minor",
+    "Dorian",
+    "Mixolydian",
+    "Lydian",
+    "Phrygian",
+    "Locrian",
+    "Pent. Major",
+    "Pent. Minor",
+    "Blues",
+    "Whole Tone",
+    "Diminished",
+];
 
 #[derive(Clone)]
 struct SampleTreeNode {
@@ -219,6 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut runtime = Runtime::new();
 
     let track_count = track_names.len();
+    let accumulator_names = Arc::new(Mutex::new(build_accumulator_names(&app)));
 
     // Register SEQ reactive namespace
     runtime.register_reactive(
@@ -252,6 +276,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "transposes",
                 build_param_list(&state, 0, StepParam::Transpose),
             ),
+            ("auxas", build_param_list(&state, 0, StepParam::AuxA)),
             ("pans", build_param_list(&state, 0, StepParam::Pan)),
             ("syncs", build_param_list(&state, 0, StepParam::Sync)),
             ("sync-labels", build_sync_labels()),
@@ -311,6 +336,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .to_string(),
                 ),
             ),
+            (
+                "tp-fts",
+                Value::String(
+                    FTS_SCALE_NAMES
+                        .get(state.pattern.track_params[0].get_fts_scale())
+                        .copied()
+                        .unwrap_or("Off")
+                        .to_string(),
+                ),
+            ),
+            ("tp-accumulator", Value::String(selected_accumulator_name(&app, 0))),
+            (
+                "tp-accum-limit",
+                Value::Number(state.pattern.track_params[0].get_accum_limit() as f64),
+            ),
+            (
+                "tp-accum-mode",
+                Value::String(
+                    accum_mode_label(state.pattern.track_params[0].get_accum_mode()).to_string(),
+                ),
+            ),
+            ("accumulator-options", build_accumulator_options(&app)),
+            ("fts-options", build_fts_options()),
+            ("accum-mode-options", build_accum_mode_options()),
             ("available-effects", build_available_effects()),
             ("selected-steps", build_selection_value(&selected_steps)),
             (
@@ -329,6 +378,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("sidebar-selected-sample", Value::String(String::new())),
             ("sidebar-presets", Value::List(vec![])),
             ("sidebar-preset-tree", Value::List(vec![])),
+            ("current-project-name", Value::String(String::new())),
         ],
         false,
     );
@@ -367,6 +417,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let param = match param_name.as_str() {
             "velocity" | "vel" => StepParam::Velocity,
             "duration" | "dur" => StepParam::Duration,
+            "aux-a" | "aux_a" | "auxa" | "axa" => StepParam::AuxA,
             "transpose" => StepParam::Transpose,
             "pan" => StepParam::Pan,
             "sync" | "syn" => StepParam::Sync,
@@ -644,6 +695,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let param = match param_name.as_str() {
             "velocity" | "vel" => StepParam::Velocity,
             "duration" | "dur" => StepParam::Duration,
+            "aux-a" | "aux_a" | "auxa" | "axa" => StepParam::AuxA,
             "transpose" => StepParam::Transpose,
             "pan" => StepParam::Pan,
             "sync" | "syn" => StepParam::Sync,
@@ -748,6 +800,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
     });
 
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    let accumulator_names_for_native = accumulator_names.clone();
+    runtime.register_native("seq-set-accumulator", move |args, _ctx| {
+        let label = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => return Err("seq-set-accumulator: expected string label".into()),
+        };
+        let names = accumulator_names_for_native.lock().unwrap();
+        let idx = names
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(label))
+            .ok_or_else(|| format!("seq-set-accumulator: unknown accumulator '{label}'"))?;
+        let track = ct.load(Ordering::Relaxed);
+        let tp = &st.pattern.track_params[track];
+        tp.set_accumulator_idx(idx);
+        if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
+            tp.set_script_accumulator_name(None);
+            tp.set_accum_limit(builtin_accumulator_default_limit(idx));
+        } else {
+            tp.set_script_accumulator_name(Some(names[idx].clone()));
+        }
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::String(names[idx].clone()))
+    });
+
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-accum-mode", move |args, _ctx| {
+        let label = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => return Err("seq-set-accum-mode: expected string label".into()),
+        };
+        let mode = ACCUM_MODE_LABELS
+            .iter()
+            .position(|entry: &&str| entry.eq_ignore_ascii_case(label))
+            .map(|idx| idx as u32)
+            .ok_or_else(|| format!("seq-set-accum-mode: unknown mode '{label}'"))?;
+        let track = ct.load(Ordering::Relaxed);
+        st.pattern.track_params[track].set_accum_mode(mode);
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::String(accum_mode_label(mode).to_string()))
+    });
+
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-accum-limit", move |args, _ctx| {
+        let Some(Value::Number(limit)) = args.first() else {
+            return Err("seq-set-accum-limit: expected number".into());
+        };
+        let limit = (*limit as f32).clamp(0.0, 127.0);
+        let track = ct.load(Ordering::Relaxed);
+        st.pattern.track_params[track].set_accum_limit(limit);
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(limit as f64))
+    });
+
     // seq-double-track-pattern — duplicate current track pattern to double its length
     let st = state.clone();
     let ct = current_track.clone();
@@ -790,6 +905,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         st.publish_scheduler_snapshot();
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(tb.label().to_string()))
+    });
+
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-fts", move |args, _ctx| {
+        let label = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => return Err("seq-set-fts: expected string label".into()),
+        };
+        let normalized = label.to_ascii_lowercase();
+        let scale_idx = FTS_SCALE_NAMES
+            .iter()
+            .position(|scale| scale.to_ascii_lowercase() == normalized)
+            .ok_or_else(|| format!("seq-set-fts: unknown scale '{label}'"))?;
+        let track = ct.load(Ordering::Relaxed);
+        st.pattern.track_params[track].set_fts_scale(scale_idx);
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::String(FTS_SCALE_NAMES[scale_idx].to_string()))
     });
 
     // seq-plock-timebase — set a timebase p-lock on selected steps
@@ -962,6 +1097,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let filtered = filter_sample_tree_nodes(&sample_tree_nodes, &query_lower);
         Ok(sample_tree_nodes_to_value(&filtered))
     });
+    runtime.register_native("seq-project-tree", move |args, _ctx| {
+        let query = match args.first() {
+            Some(Value::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        Ok(build_project_tree(&query))
+    });
     runtime.register_native("seq-saved-instruments", move |_args, _ctx| {
         Ok(Value::List(
             sequencer::lisp_effect::list_saved_instruments()
@@ -983,6 +1125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
+    push_project_scratch_to_named_buffer(&mut editor, &app);
 
     let mut backend = MetalBackend::new().map_err(|_| "Metal backend creation failed")?;
     backend
@@ -1015,6 +1158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("metal_seq: entering event loop");
 
     loop {
+        pull_named_scratch_buffer_into_project(&editor, &mut app);
         editor.update_timers();
         let (cols, rows) = backend.viewport_size();
         let (cell_w, cell_h) = backend.cell_dimensions();
@@ -1227,31 +1371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         build_track_names(&track_names),
                                     );
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "velocities",
-                                        build_param_list(&state, idx, StepParam::Velocity),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "durations",
-                                        build_param_list(&state, idx, StepParam::Duration),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "transposes",
-                                        build_param_list(&state, idx, StepParam::Transpose),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "pans",
-                                        build_param_list(&state, idx, StepParam::Pan),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "syncs",
-                                        build_param_list(&state, idx, StepParam::Sync),
-                                    );
+                                    sync_step_param_lists(rt, &state, idx);
                                     rt.set_reactive(
                                         "SEQ",
                                         "track-volumes",
@@ -1272,7 +1392,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "instrument-panel",
                                         build_instrument_panel_value(&app, idx, &selected_steps),
                                     );
-                                    sync_track_params(rt, &state, idx, &selected_steps);
+                                    *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                                    sync_track_params(rt, &app, &state, idx, &selected_steps);
                                     rt.set_reactive(
                                         "SEQ",
                                         "step-has-plocks",
@@ -1333,31 +1454,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 "steps",
                                                 build_steps_value(&state, idx),
                                             );
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "velocities",
-                                                build_param_list(&state, idx, StepParam::Velocity),
-                                            );
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "durations",
-                                                build_param_list(&state, idx, StepParam::Duration),
-                                            );
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "transposes",
-                                                build_param_list(&state, idx, StepParam::Transpose),
-                                            );
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "pans",
-                                                build_param_list(&state, idx, StepParam::Pan),
-                                            );
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "syncs",
-                                                build_param_list(&state, idx, StepParam::Sync),
-                                            );
+                                            sync_step_param_lists(rt, &state, idx);
                                             rt.set_reactive(
                                                 "SEQ",
                                                 "track-volumes",
@@ -1382,7 +1479,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     &selected_steps,
                                                 ),
                                             );
-                                            sync_track_params(rt, &state, idx, &selected_steps);
+                                            *accumulator_names.lock().unwrap() =
+                                                build_accumulator_names(&app);
+                                            sync_track_params(
+                                                rt,
+                                                &app,
+                                                &state,
+                                                idx,
+                                                &selected_steps,
+                                            );
                                             rt.set_reactive(
                                                 "SEQ",
                                                 "step-has-plocks",
@@ -1440,6 +1545,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )));
                                     }
                                 }
+                            }
+                        }
+                    }
+                    "save-project" => {
+                        let requested_name = if let Value::Map(ref map) = payload {
+                            map.get("name").and_then(|cell| match &*cell.borrow() {
+                                Value::String(name) => Some(name.clone()),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        };
+                        match app.save_project_with_name(requested_name.as_deref()) {
+                            Ok(save_name) => {
+                                let rt = editor.runtime_mut();
+                                sync_project_state(rt, &app);
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Saved project '{save_name}'"
+                                )));
+                            }
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error saving project: {error}"
+                                )));
+                            }
+                        }
+                    }
+                    "load-project" => {
+                        let requested_name = if let Value::Map(ref map) = payload {
+                            map.get("name").and_then(|cell| match &*cell.borrow() {
+                                Value::String(name) => Some(name.clone()),
+                                _ => None,
+                            })
+                        } else {
+                            None
+                        };
+                        let Some(project_name) = requested_name.filter(|name| !name.trim().is_empty())
+                        else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Error loading project: missing project name".to_string(),
+                            ));
+                            continue;
+                        };
+                        eprintln!("metal_seq: host load-project name={project_name}");
+                        match app.queue_project_load_named(&project_name) {
+                            Ok(()) => {
+                                eprintln!("metal_seq: queued project load name={project_name}");
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Opening project '{project_name}'..."
+                                )));
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "metal_seq: queue project load failed name={} error={}",
+                                    project_name,
+                                    error
+                                );
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error loading project: {error}"
+                                )));
                             }
                         }
                     }
@@ -1832,31 +1999,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let rt = editor.runtime_mut();
                                     sync_pattern_state(rt, &state);
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "velocities",
-                                        build_param_list(&state, ct, StepParam::Velocity),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "durations",
-                                        build_param_list(&state, ct, StepParam::Duration),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "transposes",
-                                        build_param_list(&state, ct, StepParam::Transpose),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "pans",
-                                        build_param_list(&state, ct, StepParam::Pan),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "syncs",
-                                        build_param_list(&state, ct, StepParam::Sync),
-                                    );
+                                    sync_step_param_lists(rt, &state, ct);
                                     rt.set_reactive(
                                         "SEQ",
                                         "track-volumes",
@@ -1877,7 +2020,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "instrument-panel",
                                         build_instrument_panel_value(&app, ct, &selected_steps),
                                     );
-                                    sync_track_params(rt, &state, ct, &selected_steps);
+                                    *accumulator_names.lock().unwrap() =
+                                        build_accumulator_names(&app);
+                                    sync_track_params(rt, &app, &state, ct, &selected_steps);
                                     rt.set_reactive(
                                         "SEQ",
                                         "step-has-plocks",
@@ -1927,31 +2072,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let rt = editor.runtime_mut();
                             sync_pattern_state(rt, &state);
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                            rt.set_reactive(
-                                "SEQ",
-                                "velocities",
-                                build_param_list(&state, ct, StepParam::Velocity),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "durations",
-                                build_param_list(&state, ct, StepParam::Duration),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "transposes",
-                                build_param_list(&state, ct, StepParam::Transpose),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "pans",
-                                build_param_list(&state, ct, StepParam::Pan),
-                            );
-                            rt.set_reactive(
-                                "SEQ",
-                                "syncs",
-                                build_param_list(&state, ct, StepParam::Sync),
-                            );
+                            sync_step_param_lists(rt, &state, ct);
                             rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                             rt.set_reactive(
                                 "SEQ",
@@ -1968,7 +2089,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "instrument-panel",
                                 build_instrument_panel_value(&app, ct, &selected_steps),
                             );
-                            sync_track_params(rt, &state, ct, &selected_steps);
+                            *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                            sync_track_params(rt, &app, &state, ct, &selected_steps);
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -1985,6 +2107,125 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "Unknown host command: {other}"
                         )));
                     }
+                }
+            }
+        }
+
+        if app.has_pending_project_load() {
+            let was_pending = true;
+            match app.advance_pending_project_load() {
+                Ok(()) => {
+                    if was_pending && !app.has_pending_project_load() {
+                        push_project_scratch_to_named_buffer(&mut editor, &app);
+                        eprintln!(
+                            "metal_seq: project load completed tracks={} current_project={:?}",
+                            app.tracks.len(),
+                            app.current_project_name
+                        );
+                        track_names = app.tracks.clone();
+                        current_track.store(0, Ordering::Relaxed);
+                        *track_pan_ids.lock().unwrap() = app
+                            .graph
+                            .track_node_ids
+                            .iter()
+                            .map(|ids| ids.pan_id)
+                            .collect();
+                        *record_armed.lock().unwrap() = vec![false; track_names.len()];
+
+                        let ct = current_track.load(Ordering::Relaxed);
+                        let playhead = if app.tracks.is_empty() {
+                            0
+                        } else {
+                            state.transport.track_playheads[ct].load(Ordering::Relaxed)
+                        };
+                        let bpm = state.transport.bpm.load(Ordering::Relaxed);
+                        let playing = state.transport.playing.load(Ordering::Relaxed);
+                        let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
+                        let snap_ver = state.scheduler_snapshot_version();
+                        let rt = editor.runtime_mut();
+
+                        sync_pattern_state(rt, &state);
+                        sync_project_state(rt, &app);
+                        rt.set_reactive("SEQ", "playing", Value::Bool(playing));
+                        rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
+                        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
+                        rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
+                        rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
+                        rt.set_reactive(
+                            "SEQ",
+                            "record-armed",
+                            build_record_armed_value(&record_armed.lock().unwrap()),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "selected-steps",
+                            build_selection_value(&selected_steps),
+                        );
+
+                        if app.tracks.is_empty() {
+                            rt.set_reactive("SEQ", "playhead", Value::Number(0.0));
+                            rt.set_reactive("SEQ", "steps", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "durations", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "pans", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "effects", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
+                        } else {
+                            rt.set_reactive("SEQ", "playhead", Value::Number(playhead as f64));
+                            rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                            sync_step_param_lists(rt, &state, ct);
+                            rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                            rt.set_reactive(
+                                "SEQ",
+                                "effects",
+                                build_effects_value(
+                                    &state,
+                                    ct,
+                                    &app.graph.effect_descriptors,
+                                    &selected_steps,
+                                ),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "instrument-panel",
+                                build_instrument_panel_value(&app, ct, &selected_steps),
+                            );
+                            *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                            sync_track_params(rt, &app, &state, ct, &selected_steps);
+                            rt.set_reactive(
+                                "SEQ",
+                                "step-has-plocks",
+                                build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                            );
+                            sync_sidebar_browser(rt, &app, ct);
+                        }
+
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+
+                        prev_current_track = ct;
+                        prev_playhead = playhead;
+                        prev_bpm = bpm;
+                        prev_playing = playing;
+                        prev_pattern_epoch = epoch;
+                        prev_snapshot_version = snap_ver;
+                        prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
+
+                        if let Some((status, _)) = app.editor.status_message.take() {
+                            eprintln!("metal_seq: project load status={status}");
+                            editor.handle_host_event(HostEvent::Status(status));
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!("metal_seq: project load advance failed error={error}");
+                    editor.handle_host_event(HostEvent::Status(format!(
+                        "Error loading project: {error}"
+                    )));
                 }
             }
         }
@@ -2023,33 +2264,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Track switch — rebuild everything
             if ct != prev_current_track {
+                editor.reset_widget_scroll_top();
                 editor.reset_widget_scroll_left();
                 let rt = editor.runtime_mut();
                 sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
                 rt.set_reactive("SEQ", "playhead", Value::Number(playhead as f64));
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                rt.set_reactive(
-                    "SEQ",
-                    "velocities",
-                    build_param_list(&state, ct, StepParam::Velocity),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "durations",
-                    build_param_list(&state, ct, StepParam::Duration),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "transposes",
-                    build_param_list(&state, ct, StepParam::Transpose),
-                );
-                rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
-                rt.set_reactive(
-                    "SEQ",
-                    "syncs",
-                    build_param_list(&state, ct, StepParam::Sync),
-                );
+                sync_step_param_lists(rt, &state, ct);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
                 rt.set_reactive(
                     "SEQ",
@@ -2061,7 +2283,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "instrument-panel",
                     build_instrument_panel_value(&app, ct, &selected_steps),
                 );
-                sync_track_params(rt, &state, ct, &selected_steps);
+                *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
@@ -2093,29 +2316,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let rt = editor.runtime_mut();
                 sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                rt.set_reactive(
-                    "SEQ",
-                    "velocities",
-                    build_param_list(&state, ct, StepParam::Velocity),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "durations",
-                    build_param_list(&state, ct, StepParam::Duration),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "transposes",
-                    build_param_list(&state, ct, StepParam::Transpose),
-                );
-                rt.set_reactive("SEQ", "pans", build_param_list(&state, ct, StepParam::Pan));
-                rt.set_reactive(
-                    "SEQ",
-                    "syncs",
-                    build_param_list(&state, ct, StepParam::Sync),
-                );
+                sync_step_param_lists(rt, &state, ct);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                sync_track_params(rt, &state, ct, &selected_steps);
+                *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
@@ -2130,7 +2334,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ui_ep != prev_ui_epoch {
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                sync_track_params(rt, &state, ct, &selected_steps);
+                *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
                     "SEQ",
                     "selected-steps",
@@ -2242,6 +2447,92 @@ fn build_param_list(state: &Arc<SequencerState>, track: usize, param: StepParam)
         })
         .collect();
     Value::List(items)
+}
+
+fn sync_step_param_lists(rt: &mut Runtime, state: &Arc<SequencerState>, track: usize) {
+    rt.set_reactive(
+        "SEQ",
+        "velocities",
+        build_param_list(state, track, StepParam::Velocity),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "durations",
+        build_param_list(state, track, StepParam::Duration),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "transposes",
+        build_param_list(state, track, StepParam::Transpose),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "auxas",
+        build_param_list(state, track, StepParam::AuxA),
+    );
+    rt.set_reactive("SEQ", "pans", build_param_list(state, track, StepParam::Pan));
+    rt.set_reactive("SEQ", "syncs", build_param_list(state, track, StepParam::Sync));
+}
+
+fn build_accumulator_names(app: &ui::App) -> Vec<String> {
+    let mut names = BUILTIN_ACCUMULATOR_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<Vec<_>>();
+    if let Some(runtime) = app.editor.scratch_runtime.as_ref() {
+        names.extend(runtime.accumulator_names());
+    }
+    names
+}
+
+fn build_accumulator_options(app: &ui::App) -> Value {
+    let items = build_accumulator_names(app)
+        .into_iter()
+        .map(|name| Rc::new(RefCell::new(Value::String(name))))
+        .collect();
+    Value::List(items)
+}
+
+fn build_accum_mode_options() -> Value {
+    let items = ACCUM_MODE_LABELS
+        .iter()
+        .map(|label| Rc::new(RefCell::new(Value::String((*label).to_string()))))
+        .collect();
+    Value::List(items)
+}
+
+fn build_fts_options() -> Value {
+    let items = FTS_SCALE_NAMES
+        .iter()
+        .map(|scale| Rc::new(RefCell::new(Value::String((*scale).to_string()))))
+        .collect();
+    Value::List(items)
+}
+
+fn builtin_accumulator_default_limit(idx: usize) -> f32 {
+    match idx {
+        1 => 48.0,
+        2 => 1.0,
+        _ => 0.0,
+    }
+}
+
+fn accum_mode_label(mode: u32) -> &'static str {
+    ACCUM_MODE_LABELS
+        .get(mode as usize)
+        .copied()
+        .unwrap_or(ACCUM_MODE_LABELS[0])
+}
+
+fn selected_accumulator_name(app: &ui::App, track: usize) -> String {
+    let tp = &app.state.pattern.track_params[track];
+    if let Some(name) = tp.script_accumulator_name() {
+        return name;
+    }
+    build_accumulator_names(app)
+        .get(tp.get_accumulator_idx())
+        .cloned()
+        .unwrap_or_else(|| "Off".to_string())
 }
 
 /// Build a Lisp Value::List of bools for record-armed state per track.
@@ -2924,6 +3215,59 @@ fn build_flat_tree_items(items: &[String]) -> Value {
     Value::List(items)
 }
 
+fn visible_project_items() -> Vec<String> {
+    sequencer::project::list_project_names().unwrap_or_default()
+}
+
+fn build_project_tree(query: &str) -> Value {
+    let query = query.trim().to_lowercase();
+    let mut items = visible_project_items();
+    if !query.is_empty() {
+        items.retain(|item| item.to_lowercase().contains(&query));
+    }
+    build_flat_tree_items(&items)
+}
+
+fn sync_project_state(rt: &mut Runtime, app: &ui::App) {
+    rt.set_reactive(
+        "SEQ",
+        "current-project-name",
+        Value::String(app.current_project_name.clone().unwrap_or_default()),
+    );
+}
+
+const PROJECT_SCRATCH_BUFFER_NAME: &str = "*scratch*";
+
+fn push_project_scratch_to_named_buffer(editor: &mut Editor, app: &ui::App) {
+    let scratch_text = app.editor.scratch_buffer.clone();
+    let scratch_cursor = app.editor.scratch_cursor;
+
+    editor.upsert_scratch_buffer(PROJECT_SCRATCH_BUFFER_NAME, &scratch_text);
+
+    if editor.active_buffer().name == PROJECT_SCRATCH_BUFFER_NAME {
+        let buffer = editor.active_buffer_mut();
+        let row = scratch_cursor.0.min(buffer.lines.len().saturating_sub(1));
+        let col = scratch_cursor.1.min(buffer.lines[row].len());
+        buffer.cursor = (row, col);
+    }
+}
+
+fn pull_named_scratch_buffer_into_project(editor: &Editor, app: &mut ui::App) {
+    let buffer = editor.active_buffer();
+    if buffer.name != PROJECT_SCRATCH_BUFFER_NAME {
+        return;
+    }
+
+    let text = buffer.text();
+    let cursor = buffer.cursor;
+    if app.editor.scratch_buffer != text || app.editor.scratch_cursor != cursor {
+        app.editor.scratch_buffer = text.clone();
+        app.editor.scratch_cursor = cursor;
+        app.state.set_scratch_source(text);
+        app.editor.scratch_runtime = None;
+    }
+}
+
 fn current_custom_instrument_name(app: &ui::App, track: usize) -> Option<String> {
     if app.tracks.is_empty() || app.is_sampler_track(track) {
         None
@@ -3083,6 +3427,7 @@ fn extract_path_from_payload(payload: &Value) -> Option<String> {
 /// Push individual tp-* reactive fields for the current track.
 fn sync_track_params(
     rt: &mut Runtime,
+    app: &ui::App,
     state: &Arc<SequencerState>,
     track: usize,
     selected: &Arc<Mutex<HashSet<usize>>>,
@@ -3120,6 +3465,35 @@ fn sync_track_params(
         "tp-swing-resolution",
         Value::String(tp.get_swing_resolution().label().to_string()),
     );
+    rt.set_reactive(
+        "SEQ",
+        "tp-fts",
+        Value::String(
+            FTS_SCALE_NAMES
+                .get(tp.get_fts_scale())
+                .copied()
+                .unwrap_or("Off")
+                .to_string(),
+        ),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "tp-accumulator",
+        Value::String(selected_accumulator_name(app, track)),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "tp-accum-limit",
+        Value::Number(tp.get_accum_limit() as f64),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "tp-accum-mode",
+        Value::String(accum_mode_label(tp.get_accum_mode()).to_string()),
+    );
+    rt.set_reactive("SEQ", "accumulator-options", build_accumulator_options(app));
+    rt.set_reactive("SEQ", "fts-options", build_fts_options());
+    rt.set_reactive("SEQ", "accum-mode-options", build_accum_mode_options());
 }
 
 /// Build a Lisp Value::Map of track parameters for the current track.

@@ -44,6 +44,20 @@ impl VoicePool {
         }
     }
 
+    pub fn reset(&mut self) {
+        self.num_voices = 0;
+        self.age_counter = 0;
+        for voice in &mut self.voices {
+            *voice = VoiceSlot {
+                logical_id: 0,
+                node_id: 0,
+                age: 0,
+                active: false,
+                note: 0.0,
+            };
+        }
+    }
+
     /// Allocate a voice for the given note.
     /// Mono mode: always returns voice 0.
     /// Poly mode: prefers the oldest inactive voice, or steals the oldest active one.

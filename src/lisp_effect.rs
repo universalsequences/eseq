@@ -1565,6 +1565,10 @@ impl ScratchControlRuntime {
         self.runtime.take_status_message()
     }
 
+    pub fn set_theme_sync_enabled(&mut self, enabled: bool) {
+        self.runtime.set_theme_sync_enabled(enabled);
+    }
+
     pub fn set_global_value(&mut self, name: &str, value: EValue) {
         self.runtime.set_global_value(name, value);
     }
@@ -3993,13 +3997,15 @@ pub fn scratch_runtime_with_fallbacks(
     } else {
         instrument_descriptors
     };
-    ScratchControlRuntime::new(
+    let mut runtime = ScratchControlRuntime::new(
         state,
         effect_descriptors,
         instrument_descriptors,
         track,
         cursor_step,
-    )
+    );
+    runtime.set_theme_sync_enabled(false);
+    runtime
 }
 
 pub fn eval_sequencer_control(

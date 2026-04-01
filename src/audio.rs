@@ -193,6 +193,21 @@ impl CustomEnginePool {
         }
     }
 
+    fn reset(&mut self) {
+        self.num_voices = 0;
+        self.age_counter = 0;
+        for voice in &mut self.voices {
+            *voice = CustomVoiceSlot {
+                logical_id: 0,
+                age: 0,
+                active: false,
+                note: 0.0,
+                assigned_track: None,
+                fingerprint: 0,
+            };
+        }
+    }
+
     fn allocate_voice(
         &mut self,
         track: usize,
@@ -271,6 +286,58 @@ impl CustomEnginePool {
     fn invalidate_sound_cache(&mut self) {
         for i in 0..self.num_voices {
             self.voices[i].fingerprint = 0;
+        }
+    }
+}
+
+fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool: &mut VoicePool) {
+    let desired_count = state.runtime.voice_counts[track].load(Ordering::Acquire) as usize;
+    let desired_count = desired_count.min(MAX_VOICES);
+
+    let mut needs_reset = pool.num_voices != desired_count;
+    if !needs_reset {
+        for v in 0..desired_count {
+            let desired_lid = state.runtime.voice_lids[track][v].load(Ordering::Acquire);
+            if pool.voices[v].logical_id != desired_lid {
+                needs_reset = true;
+                break;
+            }
+        }
+    }
+
+    if needs_reset {
+        pool.reset();
+        for v in 0..desired_count {
+            let lid = state.runtime.voice_lids[track][v].load(Ordering::Acquire);
+            if lid != 0 {
+                pool.add_voice(lid, lid as i32);
+            }
+        }
+    }
+}
+
+fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut CustomEnginePool) {
+    let desired_count = state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
+    let desired_count = desired_count.min(MAX_VOICES);
+
+    let mut needs_reset = pool.num_voices != desired_count;
+    if !needs_reset {
+        for v in 0..desired_count {
+            let desired_lid = state.runtime.engine_voice_lids[engine_id][v].load(Ordering::Acquire);
+            if pool.voices[v].logical_id != desired_lid {
+                needs_reset = true;
+                break;
+            }
+        }
+    }
+
+    if needs_reset {
+        pool.reset();
+        for v in 0..desired_count {
+            let lid = state.runtime.engine_voice_lids[engine_id][v].load(Ordering::Acquire);
+            if lid != 0 {
+                pool.add_voice(lid);
+            }
         }
     }
 }
@@ -1120,33 +1187,13 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
 
-    // Sync voice pools for any newly added tracks
+    // Sync voice pools against current runtime bindings. Project loads can
+    // replace tracks in-place, so growth-only sync leaves dead logical IDs.
     for t in 0..num_tracks {
-        let pool = &mut data.voice_pools[t];
-        let vc = data.state.runtime.voice_counts[t].load(Ordering::Acquire) as usize;
-        if pool.num_voices < vc {
-            for v in pool.num_voices..vc {
-                let lid = data.state.runtime.voice_lids[t][v].load(Ordering::Acquire);
-                if lid != 0 {
-                    // We need the node_id too, but we can derive it from lid (they match for new nodes)
-                    pool.add_voice(lid, lid as i32);
-                }
-            }
-        }
+        sync_sampler_voice_pool(&data.state, t, &mut data.voice_pools[t]);
 
         if let Some(engine_id) = track_engine_id(&data.state, t) {
-            let pool = &mut data.custom_engine_pools[engine_id];
-            let vc =
-                data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
-            if pool.num_voices < vc {
-                for v in pool.num_voices..vc.min(MAX_VOICES) {
-                    let lid =
-                        data.state.runtime.engine_voice_lids[engine_id][v].load(Ordering::Acquire);
-                    if lid != 0 {
-                        pool.add_voice(lid);
-                    }
-                }
-            }
+            sync_custom_engine_pool(&data.state, engine_id, &mut data.custom_engine_pools[engine_id]);
         }
     }
 
@@ -1595,22 +1642,10 @@ pub fn build_output_stream(
     // Pre-populate voice pools for any existing tracks
     let num_tracks = state.active_track_count();
     for t in 0..num_tracks {
-        let vc = state.runtime.voice_counts[t].load(Ordering::Acquire) as usize;
-        for v in 0..vc.min(MAX_VOICES) {
-            let lid = state.runtime.voice_lids[t][v].load(Ordering::Acquire);
-            if lid != 0 {
-                voice_pools[t].add_voice(lid, lid as i32);
-            }
-        }
+        sync_sampler_voice_pool(&state, t, &mut voice_pools[t]);
 
         if let Some(engine_id) = track_engine_id(&state, t) {
-            let vc = state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
-            for v in custom_engine_pools[engine_id].num_voices..vc.min(MAX_VOICES) {
-                let lid = state.runtime.engine_voice_lids[engine_id][v].load(Ordering::Acquire);
-                if lid != 0 {
-                    custom_engine_pools[engine_id].add_voice(lid);
-                }
-            }
+            sync_custom_engine_pool(&state, engine_id, &mut custom_engine_pools[engine_id]);
         }
     }
 

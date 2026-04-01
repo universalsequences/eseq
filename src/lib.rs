@@ -13,7 +13,7 @@ mod filter;
 mod gatepitch;
 #[allow(dead_code)]
 pub mod lisp_effect;
-mod project;
+pub mod project;
 pub mod recorder;
 #[allow(dead_code)]
 pub mod reverb;

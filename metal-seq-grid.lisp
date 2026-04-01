@@ -11,7 +11,7 @@
 (bind-key "C-p" "seq-toggle-play")
 (bind-key "ESC" "seq-clear-selection")
 
-; 0=vel 1=dur 2=transpose 3=pan 4=sync
+; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync
 (defstate param-mode 0)
 
 (def page-size 16)
@@ -85,49 +85,55 @@
 (def param-values ()
   (if (= param-mode 0) SEQ.velocities
     (if (= param-mode 1) SEQ.durations
-      (if (= param-mode 2) SEQ.transposes
-        (if (= param-mode 3) SEQ.pans
-          SEQ.syncs)))))
+      (if (= param-mode 2) SEQ.auxas
+        (if (= param-mode 3) SEQ.transposes
+          (if (= param-mode 4) SEQ.pans
+            SEQ.syncs))))))
 
 (def param-min ()
   (if (= param-mode 0) 0
     (if (= param-mode 1) 0.1
-      (if (= param-mode 2) -12
-        (if (= param-mode 3) -1
-          0)))))
+      (if (= param-mode 2) 0
+        (if (= param-mode 3) -12
+          (if (= param-mode 4) -1
+            0))))))
 
 (def param-max ()
   (if (= param-mode 0) 1
     (if (= param-mode 1) 2
-      (if (= param-mode 2) 12
-        (if (= param-mode 3) 1
-          (- (len SEQ.sync-labels) 1))))))
+      (if (= param-mode 2) 16
+        (if (= param-mode 3) 12
+          (if (= param-mode 4) 1
+            (- (len SEQ.sync-labels) 1)))))))
 
 (def param-keyword ()
   (if (= param-mode 0) :velocity
     (if (= param-mode 1) :duration
-      (if (= param-mode 2) :transpose
-        (if (= param-mode 3) :pan
-          :sync)))))
+      (if (= param-mode 2) :aux-a
+        (if (= param-mode 3) :transpose
+          (if (= param-mode 4) :pan
+            :sync))))))
 
 (def param-color ()
   (if (= param-mode 0) :blue
     (if (= param-mode 1) :green
-      (if (= param-mode 2) :yellow
-        (if (= param-mode 3) :red
-          :green)))))
+      (if (= param-mode 2) :magenta
+        (if (= param-mode 3) :yellow
+          (if (= param-mode 4) :red
+            :green))))))
 
 (def param-name ()
   (if (= param-mode 0) "Velocity"
     (if (= param-mode 1) "Duration"
-      (if (= param-mode 2) "Transpose"
-        (if (= param-mode 3) "Pan"
-          "Sync")))))
+      (if (= param-mode 2) "Aux A"
+        (if (= param-mode 3) "Transpose"
+          (if (= param-mode 4) "Pan"
+            "Sync"))))))
 
 (def param-origin ()
-  (if (= param-mode 2) 0
-    (if (= param-mode 3) 0
-      (if (= param-mode 4) 0
+  (if (= param-mode 3) 0
+    (if (= param-mode 4) 0
+      (if (= param-mode 5) 0
         (param-min)))))
 
 (def sync-current-label ()
@@ -254,22 +260,28 @@
           :color (if (= param-mode 1) :white :gray)
           :bg :transparent))
       (box :width 8 :height 2
-        :bg (if (= param-mode 2) :yellow :dark-gray)
+        :bg (if (= param-mode 2) :magenta :dark-gray)
         :on-click |x y r| (set! param-mode 2)
-        (label "xpose" :font-size 12
+        (label "aux_a" :font-size 12
           :color (if (= param-mode 2) :white :gray)
           :bg :transparent))
       (box :width 8 :height 2
-        :bg (if (= param-mode 3) :red :dark-gray)
+        :bg (if (= param-mode 3) :yellow :dark-gray)
         :on-click |x y r| (set! param-mode 3)
-        (label "pan" :font-size 12
+        (label "xpose" :font-size 12
           :color (if (= param-mode 3) :white :gray)
           :bg :transparent))
       (box :width 8 :height 2
-        :bg (if (= param-mode 4) :green :dark-gray)
+        :bg (if (= param-mode 4) :red :dark-gray)
         :on-click |x y r| (set! param-mode 4)
-        (label "syn" :font-size 12
+        (label "pan" :font-size 12
           :color (if (= param-mode 4) :white :gray)
+          :bg :transparent))
+      (box :width 8 :height 2
+        :bg (if (= param-mode 5) :green :dark-gray)
+        :on-click |x y r| (set! param-mode 5)
+        (label "syn" :font-size 12
+          :color (if (= param-mode 5) :white :gray)
           :bg :transparent)))
     
     ; Step columns: vslider + aqua step toggle + step number
@@ -288,11 +300,11 @@
                 nil))
             (v-stack :align :center :gap 0.5
               (vslider :height 4
-                :width (if (= param-mode 4) 3 2)
+                :width (if (= param-mode 5) 3 2)
                 :min (param-min) :max (param-max)
                 :origin (param-origin)
                 :value (nth (param-values) step)
-                :items (if (= param-mode 4) SEQ.sync-labels '())
+                :items (if (= param-mode 5) SEQ.sync-labels '())
                 :font-size 11
                 :color (if visible
                          (if (nth SEQ.steps step) :white :gray)
@@ -325,7 +337,7 @@
       (box :width 11.5 :height 1.3
         (label (fmt "Step {}  {}" (+ (current-step) 1) (param-name))
           :font-size 11 :color :gray :bg :transparent))
-      (if (= param-mode 4)
+      (if (= param-mode 5)
         (box :width 8 :height 1.3
           (label (sync-current-label)
             :font-size 11 :color :white :bg :transparent))
@@ -393,7 +405,14 @@
           (hslider :min 0 :max 2000
             :value SEQ.tp-release
             :material (aqua-slider-material)
-            :on-change (lambda (v) (seq-set-track-param :release v))))))
+            :on-change (lambda (v) (seq-set-track-param :release v)))))
+      ; Fit-to-scale
+      (v-stack :align :center :gap 0.25
+        (label "fts" :font-size 9 :color :gray :bg :transparent)
+        (dropdown :value SEQ.tp-fts
+          :options SEQ.fts-options
+          :on-change (lambda (v) (seq-set-fts v))
+          :width 10 :height 1.5 :font-size 10)))
 
     ; Track parameters — row 2
     (h-stack :gap 1.5
@@ -452,7 +471,37 @@
         (dropdown :value SEQ.tp-swing-resolution
           :options '("1/16" "1/8" "1/4" "1/2")
           :on-change (lambda (v) (seq-set-swing-resolution v))
-          :width 5 :height 1.5 :font-size 11)))))
+          :width 5 :height 1.5 :font-size 11)))
+
+    ; Accumulator controls
+    (h-stack :gap 1.5
+      ; Accumulator function
+      (v-stack :align :center :gap 0.25
+        (label "acc fn" :font-size 9 :color :gray :bg :transparent)
+        (dropdown :value SEQ.tp-accumulator
+          :options SEQ.accumulator-options
+          :on-change (lambda (v) (seq-set-accumulator v))
+          :width 10 :height 1.5 :font-size 10))
+      ; Accumulator mode
+      (v-stack :align :center :gap 0.25
+        (label "acc mode" :font-size 9 :color :gray :bg :transparent)
+        (dropdown :value SEQ.tp-accum-mode
+          :options SEQ.accum-mode-options
+          :on-change (lambda (v) (seq-set-accum-mode v))
+          :width 8 :height 1.5 :font-size 10))
+      ; Accumulator limit
+      (v-stack :align :center :gap 0.25
+        (h-stack :gap 0.25 :align :baseline
+          (label "acc lim" :font-size 9 :color :gray :bg :transparent)
+          (number-picker :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
+            :noui true :font-size 9 :text-color :gray
+            :on-change (lambda (v) (seq-set-accum-limit v))
+            :width 4 :height 1))
+        (box :width 8 :height 2
+          (hslider :min 0 :max 127
+            :value SEQ.tp-accum-limit
+            :material (aqua-slider-material)
+            :on-change (lambda (v) (seq-set-accum-limit v))))))))
 
 ; Layout: samples | metal | mixer on top, fx on bottom
 (set-layout '(:rows

@@ -91,6 +91,46 @@
       (sdf/fill (sdf/rounded-rect 0.72 0.12 0.05)
         (material :color fg-col)))))
 
+(defwidget save-icon
+  :width 2.8 :height 1.4
+  :paint-margin 0.5
+  :state (active)
+  :shader
+  (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
+      (bg-col (if (= active 1)
+          (rgba 0.00 0.35 0.82 1.0)
+          (rgba 0.18 0.18 0.20 1.0))))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rounded-rect width height 0.4)
+        (material :color bg-col))
+      
+      (sdf/fill
+        (sdf/translate 0.0 -0.60
+          (sdf/rounded-rect 0.42 0.32 0.12))
+        (material :color fg-col))
+            (sdf/fill
+        (sdf/translate 0.22 -0.60
+          (sdf/rounded-rect 0.14 0.26 0.1))
+        (material :color bg-col))
+      (sdf/fill
+        (sdf/translate 0.0 0.38
+          (sdf/rounded-rect 0.48 0.33 0.12))
+        (material :color fg-col)))))
+
+(defwidget transport-tool-chip-bg
+  :width 1 :height 1
+  :state (active)
+  :paint-margin 0.3
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/rounded-rect width height height)
+      (material
+        :color (if (= active 1)
+                 (rgba 0.00 0.35 0.82 1.0)
+                 (rgba 0.18 0.18 0.20 1.0))
+        :shadow (shadow :color (rgba 0 0 0 0.42) :blur 0.06 :offset (vec2 0 0.02))))))
+
 ;; ── Button widgets — icons scaled 2x ──
 
 ;; Rewind: two left-pointing triangles (mirrored play triangle)
@@ -188,9 +228,24 @@
   (h-stack :gap 0.5 :padding 0.5 :align :center
     
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
-      (box :width 2.5
+      (box :width 3
         :on-click |x y r| (sbrowser-toggle-create-track-mode)
-        (add-track-icon :active (if (sbrowser-audition-mode?) 0 1))))
+        (add-track-icon :active (if (sbrowser-create-mode?) 1 0))))
+    
+          (save-icon 
+            :on-click |x y r| (sbrowser-open-project-save)
+            :active (if (sbrowser-project-save-mode?) 1 0))
+    
+    (box :width 5.0 :height 1.25 :padding 0.135
+      :background "transport-tool-chip-bg"
+      :active (if (sbrowser-project-browser-mode?) 1 0)
+      :on-click |x y r| (sbrowser-open-project-browser)
+      (box :width 5.0 
+        (v-stack :align :center
+          (label " files "
+            :font-size 11
+            :color (if (sbrowser-project-browser-mode?) :white :gray)
+            :bg :transparent))))
     
     ;; Transport buttons in a shared rounded-rect container
     (box :background "transport-btn-bg" :padding 0.015 :height 1.4
@@ -249,15 +304,15 @@
           (v-stack :align :center
             (label "+"
               :font-size 12
-
+              
               :color :white
               :bg :transparent)))
         
         (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
           :on-click |x y r| (if (> SEQ.num-patterns 1) (seq-delete-pattern) nil)
           (v-stack :align :center
-          (label "-"
-            :font-size 12
-          
-            :color (if (> SEQ.num-patterns 1) :white :dark-gray)
-            :bg :transparent)))))))
+            (label "-"
+              :font-size 12
+              
+              :color (if (> SEQ.num-patterns 1) :white :dark-gray)
+              :bg :transparent)))))))
