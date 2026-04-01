@@ -201,6 +201,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
     // UI-only counter for changes that shouldn't affect pattern_epoch (e.g. volume, selection)
     let ui_epoch = Arc::new(AtomicUsize::new(0));
+    // FX/instrument panel refresh counter for changes that affect *fx* but
+    // should not force *fx* to rerun on unrelated step-grid edits.
+    let fx_epoch = Arc::new(AtomicUsize::new(0));
 
     // Recording state shared between native functions and event loop
     let recording = Arc::new(AtomicBool::new(false));
@@ -427,6 +430,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct = current_track.clone();
     let descs = effect_descriptors.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-set-effect-param", move |args, _ctx| {
         let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -482,6 +486,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // (otherwise it re-applies the old value on next step trigger)
         st.publish_scheduler_snapshot();
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(clamped as f64))
     });
 
@@ -490,6 +495,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // seq-select-step — toggle step in/out of selection
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-select-step", move |args, _ctx| {
         let Some(Value::Number(step)) = args.first() else {
             return Err("seq-select-step: expected step number".into());
@@ -501,15 +507,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             set.remove(&step);
         }
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(!was_selected))
     });
 
     // seq-clear-selection
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-clear-selection", move |_args, _ctx| {
         sel.lock().unwrap().clear();
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Nil)
     });
 
@@ -524,6 +533,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-select-all-steps", move |_args, _ctx| {
         let track = ct.load(Ordering::Relaxed);
         let num_steps = st.pattern.track_params[track].get_num_steps();
@@ -531,6 +541,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         set.clear();
         set.extend(0..num_steps);
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(num_steps as f64))
     });
 
@@ -539,6 +550,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-delete-selected-steps", move |_args, _ctx| {
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
@@ -553,6 +565,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         st.publish_scheduler_snapshot();
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(steps.len() as f64))
     });
 
@@ -561,6 +574,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-shift-selected-steps", move |args, _ctx| {
         let Some(Value::Number(direction)) = args.first() else {
             return Err("seq-shift-selected-steps: expected direction".into());
@@ -582,6 +596,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         st.rotate_steps(track, &steps, direction.signum());
         st.publish_scheduler_snapshot();
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(true))
     });
 
@@ -590,6 +605,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-set-effect-plock", move |args, _ctx| {
         let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -610,6 +626,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         st.publish_scheduler_snapshot();
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(val as f64))
     });
 
@@ -993,6 +1010,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_snapshot_version: u64 = 0;
     let mut prev_current_track: usize = usize::MAX;
     let mut prev_ui_epoch: usize = 0;
+    let mut prev_fx_epoch: usize = 0;
 
     eprintln!("metal_seq: entering event loop");
 
@@ -1454,6 +1472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             value: stored,
                                         },
                                     );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -1490,6 +1509,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 value: selected_idx as f32,
                                             },
                                         );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
@@ -1528,6 +1548,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             value: stored,
                                         },
                                     );
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -1571,6 +1592,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 value: selected_idx as f32,
                                             },
                                         );
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
                                         ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
@@ -1654,6 +1676,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             },
                                         );
                                     }
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -1739,6 +1762,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             },
                                         );
                                     }
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
@@ -1760,6 +1784,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: clamped,
                                     },
                                 );
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }
                         }
@@ -1981,6 +2006,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
+            fx_epoch.fetch_add(1, Ordering::Relaxed);
             editor.handle_host_event(HostEvent::Status(status));
         }
 
@@ -2089,16 +2115,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     build_param_list(&state, ct, StepParam::Sync),
                 );
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive(
-                    "SEQ",
-                    "effects",
-                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "instrument-panel",
-                    build_instrument_panel_value(&app, ct, &selected_steps),
-                );
                 sync_track_params(rt, &state, ct, &selected_steps);
                 rt.set_reactive(
                     "SEQ",
@@ -2114,16 +2130,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ui_ep != prev_ui_epoch {
                 let rt = editor.runtime_mut();
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive(
-                    "SEQ",
-                    "effects",
-                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "instrument-panel",
-                    build_instrument_panel_value(&app, ct, &selected_steps),
-                );
                 sync_track_params(rt, &state, ct, &selected_steps);
                 rt.set_reactive(
                     "SEQ",
@@ -2148,6 +2154,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 prev_ui_epoch = ui_ep;
+                needs_reactive_cycle = true;
+            }
+            let fx_ep = fx_epoch.load(Ordering::Relaxed);
+            if fx_ep != prev_fx_epoch {
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "SEQ",
+                    "effects",
+                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "instrument-panel",
+                    build_instrument_panel_value(&app, ct, &selected_steps),
+                );
+                prev_fx_epoch = fx_ep;
                 needs_reactive_cycle = true;
             }
             if playhead != prev_playhead {
