@@ -1,6 +1,9 @@
 ;; metal-seq-mixer.lisp — Track list with volume sliders + record arm
 ;; Renders to *mixer* buffer. Loaded by metal-seq-grid.lisp.
 
+(def track-peak (i)
+  (reactive-get "SEQ" (str "track-peak-" i)))
+
 ;; Record arm indicator (small circle)
 (defwidget rec-arm-dot
   :width 1.5 :height 1.5
@@ -105,7 +108,8 @@
               :value (nth SEQ.track-volumes i)
               :material (aqua-slider-material)
               :on-change (lambda (v) (seq-set-track-volume i v)))
-            (mixer-track-meter :level (nth SEQ.track-peaks i))))
+            (subtree :key (str "mixer-track-meter-" i)
+              (mixer-track-meter :level (track-peak i)))))
         (if (and (= SEQ.current-track i) (> SEQ.num-tracks 1))
           (box :width 1.6 :height 1.2 :align :center
             :bg :transparent

@@ -732,3 +732,270 @@ This checklist covers the immediate implementation scope for Phase 0 through Pha
 - [ ] Commit 4: dependency capture and indexes
 - [ ] Commit 5: pending subtree update plumbing
 - [ ] Commit 6: subtree reevaluation behind feature flag
+
+## Explicit Subtree Owner Plan
+
+This is the next concrete track for getting `*metal*`, `*mixer*`, and `*transport*` fast under live playback.
+
+Problem statement:
+
+- Today a large effect tree still owns too much UI.
+- `SEQ.playhead` in `*metal*` dirties a broad step-grid region instead of just the affected step cells.
+- `SEQ.track-peaks` in `*mixer*` still lives inside a track row that is too coarse.
+- Consumer-side subtree upgrade helps only when an emitted tree is already subtree-shaped; it does not create finer reactive ownership by itself.
+
+The fix is to introduce **explicit subtree owners** as real reactive reevaluation units.
+
+Target model:
+
+- Lisp can mark a subtree as a hot-path ownership boundary.
+- The compiler preserves that as a special form, not just a visual wrapper.
+- The VM begins and ends dependency capture around that owner.
+- The runtime can rerun that owner directly and emit `ReplaceSubtree(...)`.
+
+### Phase A: Add an explicit `subtree` special form
+
+Files:
+
+- `../eseqlisp/src/lang/compiler.rs`
+- `../eseqlisp/src/lang/vm.rs`
+- `../eseqlisp/src/widgets.rs`
+
+Scope:
+
+- [ ] Add a new Lisp special form:
+  - [ ] `(subtree :key expr body)`
+- [ ] Require a stable key for now.
+- [ ] Treat `subtree` as a semantic ownership boundary, not merely another widget helper.
+- [ ] Keep the body expression result as the emitted widget tree; do not introduce a visible extra layout wrapper unless strictly necessary.
+
+Compiler work in `compiler.rs`:
+
+- [ ] Add new opcodes for subtree ownership:
+  - [ ] `SubtreeBegin`
+  - [ ] `SubtreeEnd`
+- [ ] Add `compile_subtree_form(...)`.
+- [ ] Parse the form shape:
+  - [ ] `subtree`
+  - [ ] `:key`
+  - [ ] key expression
+  - [ ] body expression
+- [ ] Compile the key expression before the body so the VM can derive a stable subtree owner id.
+- [ ] Emit begin/end ownership opcodes around the body evaluation.
+
+VM work in `vm.rs`:
+
+- [ ] Add owner-stack state:
+  - [ ] current subtree owner stack
+  - [ ] current subtree root id stack
+  - [ ] current subtree dependency capture table
+- [ ] On `SubtreeBegin`:
+  - [ ] evaluate/pop key value
+  - [ ] derive a stable owner/root id using source buffer id + target + key
+  - [ ] push subtree owner context
+  - [ ] start dependency capture for that root
+- [ ] On `SubtreeEnd`:
+  - [ ] finalize dependency capture
+  - [ ] annotate the produced body tree with the owner/root metadata
+  - [ ] pop subtree owner context
+- [ ] Ensure nested subtrees attribute reads to the nearest active subtree owner.
+
+Rules:
+
+- [ ] The subtree root id should be stable across reruns for the same key.
+- [ ] Nested children inside the subtree should inherit the subtree root id unless they open another subtree owner.
+- [ ] If the form is malformed or the key is unstable/unusable, fall back to current full-tree behavior and log it in debug traces.
+
+### Phase B: Make dependency capture owner-accurate
+
+Files:
+
+- `../eseqlisp/src/lang/vm.rs`
+- `../eseqlisp/src/buffer.rs`
+- `../eseqlisp/src/runtime.rs`
+
+Scope:
+
+- [ ] Stop copying one effect-wide dependency set to every subtree in the emitted tree when inside explicit subtree owners.
+- [ ] Record dependency sets per explicit subtree owner/root id.
+- [ ] Persist those sets into committed snapshots.
+
+Implementation details:
+
+- [ ] `record_reactive_read(...)` should register against the nearest active subtree owner, not just the whole effect scope.
+- [ ] `PendingUiUpdate::ReplaceSubtree` should carry the captured dependency set for that owner.
+- [ ] Snapshot commit should preserve:
+  - [ ] `subtree root id -> reactive fields`
+  - [ ] `reactive field -> subtree root ids`
+
+Success criteria:
+
+- [ ] In `*metal*`, `SEQ.playhead` maps to specific step-cell owner ids, not one broad step-grid owner.
+- [ ] In `*mixer*`, `SEQ.track-peaks` maps to the owning track-meter/track-strip subtree ids.
+
+### Phase C: Add direct subtree rerun in the VM/runtime
+
+Files:
+
+- `../eseqlisp/src/lang/vm.rs`
+- `../eseqlisp/src/runtime.rs`
+
+Scope:
+
+- [ ] Add a registry of explicit subtree owners:
+  - [ ] root id
+  - [ ] source buffer id
+  - [ ] target buffer
+  - [ ] rerun chunk/body metadata
+  - [ ] parent owner id if nested
+- [ ] Given dirty reactive fields, resolve affected explicit subtree owners before rerunning broad effects.
+- [ ] Rerun only those owners when metadata is complete.
+- [ ] Emit `PendingUiUpdate::ReplaceSubtree(...)` directly from owner reruns.
+- [ ] Preserve full-buffer effect rerun fallback when:
+  - [ ] owner metadata is missing
+  - [ ] owner target is ambiguous
+  - [ ] identity changed incompatibly
+  - [ ] owner rerun errors or produces an invalid root
+
+Instrumentation additions:
+
+- [ ] Count:
+  - [ ] explicit subtree owner reruns
+  - [ ] explicit subtree owner fallback-to-full reruns
+  - [ ] owner ids affected by each dirty field
+- [ ] Trace:
+  - [ ] why an owner rerun fell back
+  - [ ] which fields mapped to which owner ids
+
+### Phase D: Convert `*metal*` to step-cell owners
+
+Files:
+
+- `metal-seq-grid.lisp`
+
+Hot-path targets:
+
+- [ ] One subtree owner per visible step cell in the main step grid.
+- [ ] Optional nested subtree owner for the playhead-sensitive label/highlight if needed after the first pass.
+- [ ] Keep non-hot controls outside this first pass unchanged.
+
+Initial rewrite shape:
+
+```lisp
+(grid :cols 16 :col-width 4
+  (each (range 0 page-size) |i|
+    (let ((step (step-index i)))
+      (subtree :key (str "step-cell-" step)
+        (step-cell i step)))))
+```
+
+Expected ownership per step cell:
+
+- [ ] `SEQ.steps[step]`
+- [ ] `SEQ.selected-steps[step]`
+- [ ] visible step param value for current `param-mode`
+- [ ] `(= SEQ.playhead step)`
+
+Expected payoff:
+
+- [ ] playhead movement should dirty only the old/new step-cell owners
+- [ ] dragging a slider should dirty only the current step-cell owner, not the whole visible 16-step region
+
+### Phase E: Convert `*mixer*` to track-strip and meter owners
+
+Files:
+
+- `metal-seq-mixer.lisp`
+
+Hot-path targets:
+
+- [ ] One subtree owner per track row.
+- [ ] Optional nested subtree owner around each `mixer-track-meter`.
+
+Initial rewrite shape:
+
+```lisp
+(each SEQ.track-names |name i|
+  (subtree :key (str "mixer-track-" i)
+    (mixer-track-row name i)))
+```
+
+If track rows are still too broad:
+
+```lisp
+(subtree :key (str "mixer-track-meter-" i)
+  (mixer-track-meter :level (nth SEQ.track-peaks i)))
+```
+
+Expected ownership:
+
+- [ ] track meter owner depends on `SEQ.track-peaks[i]`
+- [ ] track volume slider owner depends on `SEQ.track-volumes[i]`
+- [ ] current-track styling depends on `SEQ.current-track`
+
+Expected payoff:
+
+- [ ] a peak change for one track should not dirty unrelated tracks
+
+### Phase F: Convert `*transport*` to transport-playhead and master-meter owners
+
+Files:
+
+- `metal-seq-transport.lisp`
+
+Hot-path targets:
+
+- [ ] subtree owner for the transport playhead LED/readout cluster
+- [ ] subtree owner for master left meter
+- [ ] subtree owner for master right meter
+
+Suggested split:
+
+- [ ] group the bar/beat/sixteenth labels under one owner keyed `"transport-playhead"`
+- [ ] group left meter under one owner keyed `"master-meter-l"`
+- [ ] group right meter under one owner keyed `"master-meter-r"`
+
+Expected payoff:
+
+- [ ] `SEQ.transport-playhead` changes do not dirtify the master meters
+- [ ] `SEQ.master-peak-l` / `SEQ.master-peak-r` do not dirtify the transport counters
+
+### Phase G: Validation and profiling checkpoints
+
+Files:
+
+- `../eseqlisp/src/runtime.rs`
+- `../eseqlisp/src/editor/tests.rs`
+- `metal-seq-grid.lisp`
+- `metal-seq-mixer.lisp`
+- `metal-seq-transport.lisp`
+
+Add tests:
+
+- [ ] nested subtree-owner dependency attribution
+- [ ] subtree owner rerun emits `ReplaceSubtree(...)`
+- [ ] fallback-to-full-buffer on missing owner metadata
+- [ ] `*metal*` playhead change affects only bounded step-cell owners
+- [ ] mixer peak change affects only the owning track row/meter owner
+
+Profiler checkpoints to capture before/after:
+
+- [ ] `SEQ.playhead` -> affected owner count in `*metal*`
+- [ ] `SEQ.track-peaks` -> affected owner count in `*mixer*`
+- [ ] subtree rerun count vs full-buffer rerun count during playback
+- [ ] relayout mode for step-cell owner updates
+
+### Recommended implementation order
+
+- [ ] Commit 7: `subtree` special form + VM owner-stack plumbing
+- [ ] Commit 8: per-owner dependency capture + direct `ReplaceSubtree(...)` emission
+- [ ] Commit 9: convert `metal-seq-grid.lisp` step cells to subtree owners
+- [ ] Commit 10: convert mixer track rows/meters to subtree owners
+- [ ] Commit 11: convert transport playhead/meters to subtree owners
+- [ ] Commit 12: subtree relayout entry point for explicit owner updates
+
+### Success condition for this track
+
+- [ ] While playback is running, editing a slider in a modest buffer stays responsive because playhead/meter churn is confined to separate subtree owners.
+- [ ] In `*metal*`, playhead movement no longer causes broad step-grid reevaluation.
+- [ ] In `*mixer*`, one track's meter movement no longer causes broad mixer reruns.

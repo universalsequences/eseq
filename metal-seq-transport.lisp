@@ -324,48 +324,52 @@
     ;; Single continuous LED panel
     (box :background "transport-led-bg" :height 1.4 :width 41
       (h-stack
-      (h-stack :gap 0 :align :center :padding 0.5
-        (label (fmt "{:>3}" (+ (floor (/ SEQ.transport-playhead 16)) 1))
-          :font-size 15 :width 4
-          :color '(rgba 0.85 0.85 0.85 1)
-          :bg :transparent)
-        (label (fmt "{:>3}" (+ (floor (/ (mod SEQ.transport-playhead 16) 4)) 1))
-          :font-size 15 :width 3
-          :color '(rgba 0.85 0.85 0.85 1)
-          :bg :transparent)
-        (label (fmt "{:>3}" (+ (mod (mod SEQ.transport-playhead 16) 4) 1))
-          :font-size 15 :width 3
-          :color '(rgba 0.85 0.85 0.85 1)
-          :bg :transparent)
-        (label "" :width 1 :bg :transparent)
-        (number-picker :value SEQ.bpm :min 20 :max 300 :decimals 1
-          :noui true
-          :font-size 15
-          :text-color (rgba 0.85 0.85 0.85 1)
-          :on-change (lambda (v) (seq-set-bpm v))
-          :width 7 :height 1.2))
+      (subtree :key "transport-clock"
+        (h-stack :gap 0 :align :center :padding 0.5
+          (label (fmt "{:>3}" (+ (floor (/ SEQ.transport-playhead 16)) 1))
+            :font-size 15 :width 4
+            :color '(rgba 0.85 0.85 0.85 1)
+            :bg :transparent)
+          (label (fmt "{:>3}" (+ (floor (/ (mod SEQ.transport-playhead 16) 4)) 1))
+            :font-size 15 :width 3
+            :color '(rgba 0.85 0.85 0.85 1)
+            :bg :transparent)
+          (label (fmt "{:>3}" (+ (mod (mod SEQ.transport-playhead 16) 4) 1))
+            :font-size 15 :width 3
+            :color '(rgba 0.85 0.85 0.85 1)
+            :bg :transparent)
+          (label "" :width 1 :bg :transparent)
+          (number-picker :value SEQ.bpm :min 20 :max 300 :decimals 1
+            :noui true
+            :font-size 15
+            :text-color (rgba 0.85 0.85 0.85 1)
+            :on-change (lambda (v) (seq-set-bpm v))
+            :width 7 :height 1.2)))
       (v-stack :gap 0.05 :align :center :padding 0.18
         (h-stack :gap 0.25 :align :center
           (label "L"
             :font-size 8 :width 0.9
             :color '(rgba 0.63 0.88 0.41 1)
             :bg :transparent)
-          (transport-master-meter :level SEQ.master-peak-l))
+          (subtree :key "master-meter-l"
+            (transport-master-meter :level SEQ.master-peak-l)))
         (h-stack :gap 0.25 :align :center
           (label "R"
             :font-size 8 :width 0.9
             :color '(rgba 0.63 0.88 0.41 1)
             :bg :transparent)
-          (transport-master-meter :level SEQ.master-peak-r)))
-      (h-stack :gap 0 :align :center :padding 0.3
-        (label "cpu"
-          :font-size 12 :width 2.5
-          :color '(rgba 0.30 0.30 0.32 1)
-          :bg :transparent)
-        (label (fmt "{:>2.0}%" SEQ.cpu-load-pct)
-          :font-size 12 :width 4.5
-          :color :gray
-          :bg :transparent))))
+          (subtree :key "master-meter-r"
+            (transport-master-meter :level SEQ.master-peak-r))))
+      (subtree :key "transport-cpu"
+        (h-stack :gap 0 :align :center :padding 0.3
+          (label "cpu"
+            :font-size 12 :width 2.5
+            :color '(rgba 0.30 0.30 0.32 1)
+            :bg :transparent)
+          (label (fmt "{:>2.0}%" SEQ.cpu-load-pct)
+            :font-size 12 :width 4.5
+            :color :gray
+            :bg :transparent)))))
     
     (box :background "transport-btn-bg" :padding 0.2 :height 1.4
       (h-stack :gap 0.1 :align :center

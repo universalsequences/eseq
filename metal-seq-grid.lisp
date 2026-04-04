@@ -34,7 +34,7 @@
     (current-page)))
 
 (def playhead-page ()
-  (min (floor (/ (mod SEQ.playhead (max 1 SEQ.tp-num-steps)) page-size))
+  (min SEQ.playhead-page
     (- (page-count) 1)))
 
 (def page-offset ()
@@ -283,6 +283,14 @@
         (material :color (rgba 1 1 1 1))))
     (rgba 0 0 0 0)))
 
+(defwidget step-playhead-dot
+  :width 1.0 :height 0.7
+  :state (active)
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/circle 0.45)
+      (material :color (if (= active 1) (rgba 1 1 1 1) (rgba 0 0 0 0))))))
+
 ;; ── Main UI ──
 
 (effect-buffer "*metal*"
@@ -388,8 +396,11 @@
                 :font-size 10 :bg :transparent
                 :color (if visible
                         (if (nth SEQ.selected-steps step) :yellow
-                          (if (= SEQ.playhead step) :white :gray))
-                        :gray))))))) 
+                          :gray)
+                        :gray))
+              (subtree :key (str "step-playhead-probe-" step)
+                (step-playhead-dot
+                  :active (if (reactive-get "SEQ" (str "playhead-active-" step)) 1 0)))))))) 
 
     ; Step cursor info
     (h-stack :gap 1 :align :center

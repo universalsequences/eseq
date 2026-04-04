@@ -30,6 +30,7 @@ const DEFAULT_SAMPLES: &[&str] = &[
 const PAGE_SIZE: usize = 16;
 const AUTO_FOLLOW_COOLDOWN: Duration = Duration::from_secs(5);
 const METER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const CPU_UI_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const METER_LEVEL_STEPS: f64 = 48.0;
 const BUILTIN_ACCUMULATOR_NAMES: &[&str] = &[
     "Off",
@@ -190,6 +191,8 @@ fn filter_sample_tree_nodes(items: &[SampleTreeNode], query_lower: &str) -> Vec<
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    sequencer::crash::install()?;
+
     // 1. Init audio engine
     let eng = engine::init_engine()?;
     let lg_ptr = eng.lg_ptr;
@@ -263,7 +266,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Register SEQ reactive namespace
     runtime.register_reactive(
         "SEQ",
-        vec![
+        {
+            let mut fields = vec![
             ("playing", Value::Bool(false)),
             ("bpm", Value::Number(120.0)),
             ("num-steps", Value::Number(PAGE_SIZE as f64)),
@@ -299,7 +303,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("syncs", build_param_list(&state, 0, StepParam::Sync)),
             ("sync-labels", build_sync_labels()),
             ("track-volumes", build_track_volumes(&state)),
-            ("track-peaks", build_track_peaks_value(&vec![0.0; track_count])),
             (
                 "effects",
                 build_effects_value(&state, 0, &effect_descriptors, &selected_steps),
@@ -394,6 +397,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "record-armed",
                 build_record_armed_value(&record_armed.lock().unwrap()),
             ),
+            ("playhead-page", Value::Number(0.0)),
             ("sidebar-kind", Value::String("sampler".to_string())),
             ("sidebar-instrument-name", Value::String(String::new())),
             ("sidebar-loaded-preset", Value::String(String::new())),
@@ -401,7 +405,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("sidebar-presets", Value::List(vec![])),
             ("sidebar-preset-tree", Value::List(vec![])),
             ("current-project-name", Value::String(String::new())),
-        ],
+            ];
+            for idx in 0..track_count {
+                fields.push((
+                    Box::leak(format!("track-peak-{idx}").into_boxed_str()),
+                    Value::Number(0.0),
+                ));
+            }
+            for idx in 0..MAX_STEPS {
+                fields.push((
+                    Box::leak(format!("playhead-active-{idx}").into_boxed_str()),
+                    Value::Bool(idx == 0),
+                ));
+            }
+            fields
+        },
         false,
     );
 
@@ -1286,6 +1304,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cached_peak_r_level = 0.0f64;
     let mut cached_track_peak_levels = vec![0.0; track_names.len()];
     let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
+    let mut last_cpu_ui_poll_at = Instant::now() - CPU_UI_POLL_INTERVAL;
+    let mut cached_cpu_load_bits: u32 = 0.0f32.to_bits();
 
     eprintln!("metal_seq: entering event loop");
 
@@ -1525,11 +1545,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "track-volumes",
                                         build_track_volumes(&state),
                                     );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "track-peaks",
-                                        build_track_peaks_value(&cached_track_peak_levels),
-                                    );
+                                    sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     rt.set_reactive(
                                         "SEQ",
                                         "effects",
@@ -1613,11 +1629,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 "track-volumes",
                                                 build_track_volumes(&state),
                                             );
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "track-peaks",
-                                                build_track_peaks_value(&cached_track_peak_levels),
-                                            );
+                                            sync_track_peak_fields(rt, &cached_track_peak_levels);
                                             rt.set_reactive(
                                                 "SEQ",
                                                 "effects",
@@ -2225,11 +2237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "track-volumes",
                                         build_track_volumes(&state),
                                     );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "track-peaks",
-                                        build_track_peaks_value(&cached_track_peak_levels),
-                                    );
+                                    sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     rt.set_reactive(
                                         "SEQ",
                                         "effects",
@@ -2335,11 +2343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
                             rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                            rt.set_reactive(
-                                "SEQ",
-                                "track-peaks",
-                                build_track_peaks_value(&cached_track_peak_levels),
-                            );
+                            sync_track_peak_fields(rt, &cached_track_peak_levels);
                             rt.set_reactive(
                                 "SEQ",
                                 "effects",
@@ -2406,8 +2410,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
                         let bpm = state.transport.bpm.load(Ordering::Relaxed);
-                        let cpu_load_bits = state.transport.cpu_load_pct.load(Ordering::Relaxed);
-                        let cpu_load_pct = f32::from_bits(cpu_load_bits);
+                        if last_cpu_ui_poll_at.elapsed() >= CPU_UI_POLL_INTERVAL {
+                            cached_cpu_load_bits =
+                                state.transport.cpu_load_pct.load(Ordering::Relaxed);
+                            last_cpu_ui_poll_at = Instant::now();
+                        }
+                        let cpu_load_pct = f32::from_bits(cached_cpu_load_bits);
                         let playing = state.transport.playing.load(Ordering::Relaxed);
                         let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
                         let snap_ver = state.scheduler_snapshot_version();
@@ -2455,7 +2463,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
 
                         if app.tracks.is_empty() {
-                            rt.set_reactive("SEQ", "playhead", Value::Number(0.0));
+                            sync_playhead_fields(rt, 0, 1);
                             rt.set_reactive("SEQ", "transport-playhead", Value::Number(0.0));
                             rt.set_reactive("SEQ", "steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
@@ -2464,12 +2472,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "pans", Value::List(vec![]));
                             rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-peaks", Value::List(vec![]));
                             rt.set_reactive("SEQ", "effects", Value::List(vec![]));
                             rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
                         } else {
-                            rt.set_reactive("SEQ", "playhead", Value::Number(playhead as f64));
+                            sync_playhead_fields(
+                                rt,
+                                playhead as usize,
+                                state.pattern.track_params[ct].get_num_steps(),
+                            );
                             rt.set_reactive(
                                 "SEQ",
                                 "transport-playhead",
@@ -2478,11 +2489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
                             rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                            rt.set_reactive(
-                                "SEQ",
-                                "track-peaks",
-                                build_track_peaks_value(&cached_track_peak_levels),
-                            );
+                            sync_track_peak_fields(rt, &cached_track_peak_levels);
                             rt.set_reactive(
                                 "SEQ",
                                 "effects",
@@ -2518,7 +2525,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_playing = playing;
                         prev_pattern_epoch = epoch;
                         prev_snapshot_version = snap_ver;
-                        prev_cpu_load_bits = cpu_load_bits;
+                        prev_cpu_load_bits = cached_cpu_load_bits;
                         prev_peak_l_level = cached_peak_l_level;
                         prev_peak_r_level = cached_peak_r_level;
                         prev_track_peak_levels = cached_track_peak_levels.clone();
@@ -2565,7 +2572,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let playing = state.transport.playing.load(Ordering::Relaxed);
             let bpm = state.transport.bpm.load(Ordering::Relaxed);
-            let cpu_load_bits = state.transport.cpu_load_pct.load(Ordering::Relaxed);
+            if last_cpu_ui_poll_at.elapsed() >= CPU_UI_POLL_INTERVAL {
+                cached_cpu_load_bits = state.transport.cpu_load_pct.load(Ordering::Relaxed);
+                last_cpu_ui_poll_at = Instant::now();
+            }
+            let cpu_load_bits = cached_cpu_load_bits;
             let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
             let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed);
             let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
@@ -2589,7 +2600,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
-                rt.set_reactive("SEQ", "playhead", Value::Number(playhead as f64));
+                sync_playhead_fields(
+                    rt,
+                    playhead as usize,
+                    state.pattern.track_params[ct].get_num_steps(),
+                );
                 rt.set_reactive(
                     "SEQ",
                     "transport-playhead",
@@ -2598,11 +2613,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_step_param_lists(rt, &state, ct);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive(
-                    "SEQ",
-                    "track-peaks",
-                    build_track_peaks_value(&cached_track_peak_levels),
-                );
+                sync_track_peak_fields(rt, &cached_track_peak_levels);
                 rt.set_reactive(
                     "SEQ",
                     "effects",
@@ -2671,26 +2682,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 needs_reactive_cycle = true;
             }
             if cached_track_peak_levels != prev_track_peak_levels {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "track-peaks",
-                    build_track_peaks_value(&cached_track_peak_levels),
-                );
+                sync_track_peak_fields(editor.runtime_mut(), &cached_track_peak_levels);
                 prev_track_peak_levels = cached_track_peak_levels.clone();
+                needs_reactive_cycle = true;
+            }
+            if playhead != prev_playhead {
+                sync_playhead_field_delta(
+                    editor.runtime_mut(),
+                    prev_playhead as usize,
+                    playhead as usize,
+                    state.pattern.track_params[ct].get_num_steps(),
+                );
+                prev_playhead = playhead;
                 needs_reactive_cycle = true;
             }
             if epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version {
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
+                sync_playhead_fields(
+                    rt,
+                    playhead as usize,
+                    state.pattern.track_params[ct].get_num_steps(),
+                );
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_step_param_lists(rt, &state, ct);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive(
-                    "SEQ",
-                    "track-peaks",
-                    build_track_peaks_value(&cached_track_peak_levels),
-                );
+                sync_track_peak_fields(rt, &cached_track_peak_levels);
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
@@ -2708,11 +2726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                rt.set_reactive(
-                    "SEQ",
-                    "track-peaks",
-                    build_track_peaks_value(&cached_track_peak_levels),
-                );
+                sync_track_peak_fields(rt, &cached_track_peak_levels);
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
@@ -2754,15 +2768,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     build_instrument_panel_value(&app, ct, &selected_steps),
                 );
                 prev_fx_epoch = fx_ep;
-                needs_reactive_cycle = true;
-            }
-            if playhead != prev_playhead {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "playhead",
-                    Value::Number(playhead as f64),
-                );
-                prev_playhead = playhead;
                 needs_reactive_cycle = true;
             }
             if transport_playhead != prev_transport_playhead {
@@ -3228,6 +3233,61 @@ fn build_track_peaks_value(levels: &[f64]) -> Value {
     Value::List(items)
 }
 
+fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) {
+    for (idx, &level) in levels.iter().enumerate() {
+        rt.set_reactive(
+            "SEQ",
+            &format!("track-peak-{idx}"),
+            Value::Number(level),
+        );
+    }
+}
+
+fn sync_playhead_fields(rt: &mut Runtime, playhead: usize, num_steps: usize) {
+    let clamped_steps = num_steps.max(1).min(MAX_STEPS);
+    let active_step = playhead.min(clamped_steps.saturating_sub(1));
+    rt.set_reactive(
+        "SEQ",
+        "playhead-page",
+        Value::Number((active_step / PAGE_SIZE) as f64),
+    );
+    for idx in 0..MAX_STEPS {
+        rt.set_reactive(
+            "SEQ",
+            &format!("playhead-active-{idx}"),
+            Value::Bool(idx == active_step && idx < clamped_steps),
+        );
+    }
+}
+
+fn sync_playhead_field_delta(
+    rt: &mut Runtime,
+    prev_playhead: usize,
+    playhead: usize,
+    num_steps: usize,
+) {
+    let clamped_steps = num_steps.max(1).min(MAX_STEPS);
+    let prev_active = prev_playhead.min(clamped_steps.saturating_sub(1));
+    let active_step = playhead.min(clamped_steps.saturating_sub(1));
+    rt.set_reactive(
+        "SEQ",
+        "playhead-page",
+        Value::Number((active_step / PAGE_SIZE) as f64),
+    );
+    if prev_active != active_step {
+        rt.set_reactive(
+            "SEQ",
+            &format!("playhead-active-{prev_active}"),
+            Value::Bool(false),
+        );
+        rt.set_reactive(
+            "SEQ",
+            &format!("playhead-active-{active_step}"),
+            Value::Bool(true),
+        );
+    }
+}
+
 fn sync_track_topology_state(
     rt: &mut Runtime,
     app: &ui::App,
@@ -3249,6 +3309,7 @@ fn sync_track_topology_state(
     );
 
     if app.tracks.is_empty() {
+        sync_playhead_fields(rt, 0, 1);
         rt.set_reactive("SEQ", "steps", Value::List(vec![]));
         rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
         rt.set_reactive("SEQ", "durations", Value::List(vec![]));
@@ -3257,13 +3318,17 @@ fn sync_track_topology_state(
         rt.set_reactive("SEQ", "pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-peaks", Value::List(vec![]));
         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
         return;
     }
 
+    sync_playhead_fields(
+        rt,
+        state.transport.track_playheads[current_track_idx].load(Ordering::Relaxed) as usize,
+        state.pattern.track_params[current_track_idx].get_num_steps(),
+    );
     rt.set_reactive(
         "SEQ",
         "steps",
@@ -3271,11 +3336,7 @@ fn sync_track_topology_state(
     );
     sync_step_param_lists(rt, state, current_track_idx);
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
-    rt.set_reactive(
-        "SEQ",
-        "track-peaks",
-        build_track_peaks_value(track_peak_levels),
-    );
+    sync_track_peak_fields(rt, track_peak_levels);
     rt.set_reactive(
         "SEQ",
         "effects",
