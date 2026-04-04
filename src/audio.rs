@@ -344,6 +344,24 @@ fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut 
 }
 
 fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_tracks: usize) {
+    // Topology edits can invalidate the per-track gate-off bookkeeping for
+    // already-ringing custom voices. Explicitly send gate-off to every live
+    // custom engine voice before resetting callback-local state so notes do
+    // not hang after tracks are compacted.
+    for engine_id in 0..MAX_TRACKS {
+        let voice_count =
+            data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
+        for voice_idx in 0..voice_count.min(MAX_VOICES) {
+            let lid = data.state.runtime.engine_voice_lids[engine_id][voice_idx]
+                .load(Ordering::Acquire);
+            if lid != 0 {
+                unsafe {
+                    send_custom_note_off(data.lg.0, lid);
+                }
+            }
+        }
+    }
+
     for pool in &mut data.voice_pools {
         pool.reset();
     }
@@ -366,6 +384,8 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     data.events_heap.clear();
     data.event_seq = 0;
     data.last_num_tracks = num_tracks;
+    data.last_playing = false;
+    data.last_pattern = u32::MAX;
 
     for t in 0..num_tracks {
         sync_sampler_voice_pool(&data.state, t, &mut data.voice_pools[t]);

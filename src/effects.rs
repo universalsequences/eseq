@@ -192,7 +192,9 @@ impl ParamDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use super::{ParamDescriptor, ParamKind, ParamScaling};
+    use std::sync::atomic::Ordering;
+
+    use super::{EffectDescriptor, EffectSlotState, ParamDescriptor, ParamKind, ParamScaling};
 
     #[test]
     fn denormalize_boolean_snaps_to_zero_or_one() {
@@ -228,6 +230,80 @@ mod tests {
 
         let value = desc.denormalize(0.5);
         assert!((value - 632.4555).abs() < 0.1, "value was {value}");
+    }
+
+    #[test]
+    fn sync_descriptor_preserves_existing_defaults_and_plocks() {
+        let original = EffectDescriptor {
+            name: "orig".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "a".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.1,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 3,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "b".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.2,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 4,
+                    host_control: None,
+                },
+            ],
+        };
+        let rebound = EffectDescriptor {
+            name: "rebound".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "a".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.9,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 10,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "b".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.8,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 11,
+                    host_control: None,
+                },
+            ],
+        };
+
+        let slot = EffectSlotState::new(&original, 100);
+        slot.defaults.set(0, 0.42);
+        slot.defaults.set(1, 0.73);
+        slot.plocks.set(3, 0, 0.33);
+        slot.plocks.set(4, 1, 0.66);
+
+        slot.sync_descriptor(&rebound, 200);
+
+        assert_eq!(slot.node_id.load(Ordering::Relaxed), 200);
+        assert_eq!(slot.resolve_node_idx(0), 10);
+        assert_eq!(slot.resolve_node_idx(1), 11);
+        assert_eq!(slot.defaults.get(0), 0.42);
+        assert_eq!(slot.defaults.get(1), 0.73);
+        assert_eq!(slot.plocks.get(3, 0), Some(0.33));
+        assert_eq!(slot.plocks.get(4, 1), Some(0.66));
     }
 }
 
@@ -606,6 +682,41 @@ impl EffectSlotState {
         }
     }
 
+    /// Rebind this live slot to the current graph descriptor/node while
+    /// preserving the stored defaults and p-locks as far as possible.
+    pub fn sync_descriptor(&self, desc: &EffectDescriptor, node_id: u32) {
+        let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
+        let preserve = old_num_params.min(desc.params.len());
+
+        let mut saved_defaults = Vec::with_capacity(preserve);
+        for param_idx in 0..preserve {
+            saved_defaults.push(self.defaults.get(param_idx));
+        }
+
+        let mut saved_plocks = Vec::with_capacity(MAX_STEPS);
+        for step in 0..MAX_STEPS {
+            let mut step_plocks = Vec::with_capacity(preserve);
+            for param_idx in 0..preserve {
+                step_plocks.push(self.plocks.get(step, param_idx));
+            }
+            saved_plocks.push(step_plocks);
+        }
+
+        self.apply_descriptor(desc, node_id);
+
+        for param_idx in 0..preserve {
+            self.defaults.set(param_idx, saved_defaults[param_idx]);
+        }
+        for step in 0..MAX_STEPS {
+            for param_idx in 0..preserve {
+                match saved_plocks[step][param_idx] {
+                    Some(value) => self.plocks.set(step, param_idx, value),
+                    None => self.plocks.clear_param(step, param_idx),
+                }
+            }
+        }
+    }
+
     /// Reset this slot to an empty state.
     pub fn clear(&self) {
         self.node_id.store(0, Ordering::Relaxed);
@@ -697,11 +808,6 @@ impl EffectSlotSnapshot {
             }
         }
 
-        for i in 0..np {
-            if i < self.param_node_indices.len() && i < slot.param_node_indices.len() {
-                slot.param_node_indices[i].store(self.param_node_indices[i], Ordering::Relaxed);
-            }
-        }
     }
 
     pub fn new_default(desc: &EffectDescriptor, node_id: u32) -> Self {

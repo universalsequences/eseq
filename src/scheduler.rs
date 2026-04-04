@@ -379,6 +379,7 @@ pub fn spawn_scheduler_thread(
             let mut clock = SnapshotSequencerClock::new(sample_rate);
             let mut scheduled_until_sample = 0u64;
             let mut last_pattern = usize::MAX;
+            let mut last_pattern_epoch = u64::MAX;
             let mut last_playing = false;
             let lookahead_target_samples = (scheduler_block_size.max(1) * 4) as u64;
             let mut accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
@@ -417,6 +418,7 @@ pub fn spawn_scheduler_thread(
                     scheduled_until_sample = rendered;
                     last_playing = false;
                     last_pattern = pattern;
+                    last_pattern_epoch = pattern_epoch;
                     pending_accum_reset = [false; MAX_TRACKS];
                     accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
                     thread::sleep(Duration::from_millis(2));
@@ -466,6 +468,15 @@ pub fn spawn_scheduler_thread(
                 if !last_playing {
                     queue.clear();
                     clock.reset();
+                    scheduled_until_sample = rendered;
+                    pending_accum_reset = [true; MAX_TRACKS];
+                } else if last_pattern_epoch != pattern_epoch {
+                    // Track topology edits bump pattern_epoch without changing the
+                    // pattern index. Rebuild the scheduler horizon immediately so
+                    // future triggers target the compacted live track layout.
+                    let previous_scheduled_until = scheduled_until_sample;
+                    queue.clear();
+                    clock.seek_to_rendered_position(&snapshot, rendered, previous_scheduled_until);
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                 } else if last_pattern != pattern {
@@ -720,6 +731,7 @@ pub fn spawn_scheduler_thread(
 
                 last_playing = playing;
                 last_pattern = pattern;
+                last_pattern_epoch = pattern_epoch;
                 thread::sleep(Duration::from_millis(1));
             }
         });

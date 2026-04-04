@@ -238,11 +238,6 @@ impl PatternSnapshot {
             }
             if t < self.track_sound_states.len() && t < track_sound_state.len() {
                 track_sound_state[t] = self.track_sound_states[t].clone();
-                let engine_id = self.track_sound_states[t]
-                    .engine_id
-                    .map(|id| id as u32)
-                    .unwrap_or(u32::MAX);
-                state.runtime.track_engine_ids[t].store(engine_id, Ordering::Relaxed);
             }
 
             if t < self.chord_snapshots.len() {
@@ -2045,6 +2040,34 @@ mod tests {
         assert_eq!(state.transport.track_playheads[2].load(Ordering::Relaxed), 0);
         assert_eq!(state.runtime.sampler_lids[2].load(Ordering::Relaxed), 0);
         assert_eq!(state.runtime.track_engine_ids[2].load(Ordering::Relaxed), u32::MAX);
+    }
+
+    #[test]
+    fn pattern_restore_preserves_live_runtime_engine_binding() {
+        let state = make_state_with_tracks(1);
+        state.runtime.track_engine_ids[0].store(77, Ordering::Relaxed);
+        state.pattern.track_sound_state.lock().unwrap()[0] = TrackSoundState {
+            engine_id: Some(12),
+            loaded_preset: Some("pad".to_string()),
+            dirty: false,
+        };
+
+        let snapshot = PatternSnapshot::capture(
+            &state,
+            1,
+            &[0],
+            &[String::from("track")],
+            &[InstrumentType::Custom],
+        );
+
+        state.runtime.track_engine_ids[0].store(91, Ordering::Relaxed);
+        snapshot.restore(&state);
+
+        assert_eq!(state.runtime.track_engine_ids[0].load(Ordering::Relaxed), 91);
+        assert_eq!(
+            state.pattern.track_sound_state.lock().unwrap()[0].engine_id,
+            Some(77)
+        );
     }
 
     #[test]

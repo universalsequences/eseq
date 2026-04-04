@@ -361,6 +361,7 @@ impl GraphController<'_> {
         }
 
         self.compact_app_track_vectors(track_idx);
+        self.rebind_live_track_runtime_after_delete();
         self.app.refresh_effect_sidechain_labels();
         self.app.push_all_restored_defaults();
 
@@ -590,6 +591,50 @@ impl GraphController<'_> {
         self.app.graph.effect_descriptors.remove(track_idx);
         self.app.graph.instrument_descriptors.remove(track_idx);
         self.app.graph.record_armed.remove(track_idx);
+    }
+
+    fn rebind_live_track_runtime_after_delete(&mut self) {
+        let mut track_sound_state = self.app.state.pattern.track_sound_state.lock().unwrap();
+
+        for track_idx in 0..self.app.tracks.len() {
+            if let (Some(nodes), Some(descs), Some(chain)) = (
+                self.app.graph.track_node_ids.get(track_idx),
+                self.app.graph.effect_descriptors.get(track_idx),
+                self.app.state.pattern.effect_chains.get(track_idx),
+            ) {
+                for (slot_idx, slot) in chain.iter().enumerate() {
+                    let Some(desc) = descs.get(slot_idx) else {
+                        continue;
+                    };
+                    let node_id = match slot_idx {
+                        0 => nodes.filter_id as u32,
+                        1 => nodes.delay_id as u32,
+                        _ => slot.node_id.load(Ordering::Relaxed),
+                    };
+                    slot.sync_descriptor(desc, node_id);
+                }
+            }
+
+            let engine_id = self.app.graph.track_engine_ids.get(track_idx).and_then(|id| *id);
+            self.app.state.runtime.track_engine_ids[track_idx].store(
+                engine_id.map(|id| id as u32).unwrap_or(u32::MAX),
+                Ordering::Relaxed,
+            );
+            if let Some(meta) = track_sound_state.get_mut(track_idx) {
+                meta.engine_id = engine_id;
+            }
+
+            if self.app.graph.track_instrument_types.get(track_idx)
+                == Some(&crate::sequencer::InstrumentType::Custom)
+            {
+                if let Some(desc) = self.app.graph.instrument_descriptors.get(track_idx) {
+                    let node_id = self.app.state.pattern.instrument_slots[track_idx]
+                        .node_id
+                        .load(Ordering::Relaxed);
+                    self.app.state.pattern.instrument_slots[track_idx].sync_descriptor(desc, node_id);
+                }
+            }
+        }
     }
 
     fn create_track_shell(&mut self, name: &str) -> TrackShell {
