@@ -1437,11 +1437,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Flush pending drag at frame boundary
-        if last_render_at.elapsed() >= frame_interval {
-            if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
-                editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
-            }
+        // Flush the latest coalesced drag every loop iteration. Waiting for the
+        // render boundary makes slider/knob drags feel stale and can drop the
+        // final motion segment if mouse-up lands before the next frame.
+        if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
+            editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
         }
 
         // 1b. Drain host commands (sample browser etc.)
