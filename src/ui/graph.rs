@@ -315,6 +315,66 @@ impl GraphController<'_> {
             vec![crate::sequencer::PatternSnapshot::new_default(0, &[])];
     }
 
+    pub fn delete_track(&mut self, track_idx: usize) -> Result<usize, String> {
+        let old_count = self.app.tracks.len();
+        if old_count <= 1 {
+            return Err("Cannot delete the last remaining track".to_string());
+        }
+        if track_idx >= old_count {
+            return Err("Invalid track index".to_string());
+        }
+
+        let names = self.app.tracks.clone();
+        let buffer_ids = self.app.graph.track_buffer_ids.clone();
+        let instrument_types = self.app.graph.track_instrument_types.clone();
+        let deleted_engine_id = self.app.graph.track_engine_ids[track_idx];
+
+        {
+            let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+            self.delete_custom_effect_chain(track_idx);
+            self.delete_track_engine_routes(track_idx);
+
+            let track_nodes = self.app.graph.track_node_ids[track_idx].clone();
+            self.delete_track_shell(&track_nodes);
+
+            if let Some(engine_id) = deleted_engine_id {
+                if !self.engine_is_still_referenced_excluding(engine_id, track_idx) {
+                    self.delete_engine_runtime(engine_id);
+                }
+            }
+
+            self.shift_engine_route_tables_left(track_idx, old_count);
+        }
+
+        if !self
+            .app
+            .state
+            .remove_track(
+                track_idx,
+                &buffer_ids,
+                &names,
+                &instrument_types,
+                &self.app.graph.effect_descriptors,
+            )
+        {
+            return Err("Failed to compact sequencer state for deleted track".to_string());
+        }
+
+        self.compact_app_track_vectors(track_idx);
+        self.app.refresh_effect_sidechain_labels();
+        self.app.push_all_restored_defaults();
+
+        let new_selected = track_idx.min(self.app.tracks.len().saturating_sub(1));
+        self.app.ui.cursor_track = new_selected;
+        self.app.ui.cursor_step = self
+            .app
+            .ui
+            .cursor_step
+            .min(self.app.state.pattern.track_params[new_selected].get_num_steps().saturating_sub(1));
+
+        Ok(new_selected)
+    }
+
     pub fn send_buffer_to_all_voices(&self, track: usize, buffer_id: i32) {
         if track < self.app.graph.track_voice_lids.len() {
             for &lid in &self.app.graph.track_voice_lids[track] {
@@ -358,6 +418,196 @@ impl GraphController<'_> {
             }
         }
         self.app.graph.track_node_ids[track].filter_id
+    }
+
+    fn delete_custom_effect_chain(&mut self, track_idx: usize) {
+        for slot_idx in crate::effects::BUILTIN_SLOT_COUNT
+            ..self.app.state.pattern.effect_chains[track_idx].len()
+        {
+            let slot = &self.app.state.pattern.effect_chains[track_idx][slot_idx];
+            let node_id = slot.node_id.load(Ordering::Relaxed);
+            if node_id == 0 {
+                continue;
+            }
+            let offset = slot_idx - crate::effects::BUILTIN_SLOT_COUNT;
+            let predecessor_id = self.find_custom_slot_predecessor(track_idx, offset);
+            let successor_id = self.find_custom_slot_successor(track_idx, offset);
+            unsafe {
+                crate::audiograph::graph_disconnect(
+                    self.app.graph.lg.0,
+                    predecessor_id,
+                    0,
+                    node_id as i32,
+                    0,
+                );
+                crate::audiograph::graph_disconnect(
+                    self.app.graph.lg.0,
+                    node_id as i32,
+                    0,
+                    successor_id,
+                    0,
+                );
+                crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    predecessor_id,
+                    0,
+                    successor_id,
+                    0,
+                );
+                crate::audiograph::delete_node(self.app.graph.lg.0, node_id as i32);
+            }
+        }
+    }
+
+    fn delete_track_engine_routes(&mut self, track_idx: usize) {
+        for (engine_id, engine) in self.app.graph.engine_node_ids.iter_mut().enumerate() {
+            let Some(engine) = engine.as_mut() else {
+                continue;
+            };
+            if track_idx >= engine.route_gain_ids.len() {
+                continue;
+            }
+            for route_pair in &engine.route_gain_ids[track_idx] {
+                for &route_id in route_pair {
+                    if route_id <= 0 {
+                        continue;
+                    }
+                    unsafe {
+                        crate::audiograph::delete_node(self.app.graph.lg.0, route_id);
+                    }
+                }
+            }
+            engine.route_gain_ids[track_idx].clear();
+            for voice in 0..MAX_VOICES {
+                self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+                    .store(0, Ordering::Release);
+                self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+                    .store(0, Ordering::Release);
+            }
+        }
+    }
+
+    fn delete_track_shell(&mut self, track: &TrackNodeIds) {
+        for &sampler_id in &track.sampler_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, sampler_id);
+            }
+        }
+        unsafe {
+            crate::audiograph::delete_node(self.app.graph.lg.0, track.send_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
+            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, track.pan_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, track.pan_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_r_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_id);
+        }
+    }
+
+    fn engine_is_still_referenced_excluding(&self, engine_id: usize, removed_track: usize) -> bool {
+        self.app
+            .graph
+            .track_engine_ids
+            .iter()
+            .enumerate()
+            .any(|(track_idx, binding)| track_idx != removed_track && *binding == Some(engine_id))
+    }
+
+    fn delete_engine_runtime(&mut self, engine_id: usize) {
+        let Some(engine) = self.app.graph.engine_node_ids.get_mut(engine_id).and_then(Option::take)
+        else {
+            return;
+        };
+
+        for route_pairs in &engine.route_gain_ids {
+            for route_pair in route_pairs {
+                for &route_id in route_pair {
+                    if route_id <= 0 {
+                        continue;
+                    }
+                    unsafe {
+                        crate::audiograph::delete_node(self.app.graph.lg.0, route_id);
+                    }
+                }
+            }
+        }
+        for &node_id in &engine.synth_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, node_id);
+            }
+        }
+        for &node_id in &engine.modulator_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, node_id);
+            }
+        }
+        for &node_id in &engine.gatepitch_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, node_id);
+            }
+        }
+
+        self.app.state.runtime.engine_voice_counts[engine_id].store(0, Ordering::Release);
+        for voice in 0..MAX_VOICES {
+            self.app.state.runtime.engine_voice_lids[engine_id][voice].store(0, Ordering::Release);
+            self.app.state.runtime.engine_synth_node_ids[engine_id][voice]
+                .store(0, Ordering::Release);
+            self.app.state.runtime.engine_modulator_node_ids[engine_id][voice]
+                .store(0, Ordering::Release);
+            for track_idx in 0..MAX_TRACKS {
+                self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+                    .store(0, Ordering::Release);
+                self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+                    .store(0, Ordering::Release);
+            }
+        }
+    }
+
+    fn shift_engine_route_tables_left(&mut self, track_idx: usize, old_count: usize) {
+        for (engine_id, engine) in self.app.graph.engine_node_ids.iter_mut().enumerate() {
+            let Some(engine) = engine.as_mut() else {
+                continue;
+            };
+            for idx in track_idx..old_count.saturating_sub(1) {
+                engine.route_gain_ids[idx] = std::mem::take(&mut engine.route_gain_ids[idx + 1]);
+                for voice in 0..MAX_VOICES {
+                    self.app.state.runtime.engine_route_lids[engine_id][voice][idx].store(
+                        self.app.state.runtime.engine_route_lids[engine_id][voice][idx + 1]
+                            .load(Ordering::Relaxed),
+                        Ordering::Release,
+                    );
+                    self.app.state.runtime.engine_route_lids_r[engine_id][voice][idx].store(
+                        self.app.state.runtime.engine_route_lids_r[engine_id][voice][idx + 1]
+                            .load(Ordering::Relaxed),
+                        Ordering::Release,
+                    );
+                }
+            }
+            if old_count > 0 {
+                engine.route_gain_ids[old_count - 1].clear();
+                for voice in 0..MAX_VOICES {
+                    self.app.state.runtime.engine_route_lids[engine_id][voice][old_count - 1]
+                        .store(0, Ordering::Release);
+                    self.app.state.runtime.engine_route_lids_r[engine_id][voice][old_count - 1]
+                        .store(0, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    fn compact_app_track_vectors(&mut self, track_idx: usize) {
+        self.app.tracks.remove(track_idx);
+        self.app.sampler_paths.remove(track_idx);
+        self.app.graph.track_node_ids.remove(track_idx);
+        self.app.graph.track_buffer_ids.remove(track_idx);
+        self.app.graph.track_voice_lids.remove(track_idx);
+        self.app.graph.track_instrument_types.remove(track_idx);
+        self.app.graph.track_engine_ids.remove(track_idx);
+        self.app.graph.track_synth_node_ids.remove(track_idx);
+        self.app.graph.track_gatepitch_node_ids.remove(track_idx);
+        self.app.graph.effect_descriptors.remove(track_idx);
+        self.app.graph.instrument_descriptors.remove(track_idx);
+        self.app.graph.record_armed.remove(track_idx);
     }
 
     fn create_track_shell(&mut self, name: &str) -> TrackShell {

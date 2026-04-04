@@ -64,24 +64,52 @@
           (material :color (rgba 0.92 0.24 0.22 1)))
         (rgba 0 0 0 0)))))
 
+(defwidget delete-track-icon
+  :width 1.5 :height 1.2
+  :paint-margin 0.35
+  :state (active)
+  :shader
+  (let ((fg-col (if (= active 1)
+                  (rgba 0.98 0.98 1.0 1.0)
+                  (rgba 0.62 0.64 0.70 1.0)))
+        (bg-col (if (= active 1)
+                  (rgba 0.72 0.16 0.16 1.0)
+                  (rgba 0.14 0.15 0.17 1.0))))
+    (sdf/layer
+      (sdf/fill (sdf/rounded-rect (* 0.72 height) (* 0.72 height) 0.3)
+        (material :color bg-col))
+      (sdf/fill
+        (let ((clip (max (- (abs x) 0.28) (- (abs y) 0.28)))
+              (diag1 (max (- (* 0.7071 (abs (- x y))) 0.045) clip))
+              (diag2 (max (- (* 0.7071 (abs (+ x y))) 0.045) clip)))
+          (min diag1 diag2))
+        (material :color fg-col)))))
+
 (effect-buffer "*mixer*"
   (v-stack :padding 1 :gap 0.5
     (each SEQ.track-names |name i|
       (h-stack :gap 0.5 :align :center
         (box :width 2 :height 1.5
-             :background "rec-arm-dot"
-             :active (if (nth SEQ.record-armed i) 1 0)
-             :on-click |x y r| (seq-toggle-record-arm i))
+          :background "rec-arm-dot"
+          :active (if (nth SEQ.record-armed i) 1 0)
+          :on-click |x y r| (seq-toggle-record-arm i))
         (box :width 12 :height 1
-             :bg (if (= SEQ.current-track i) :blue :dark-gray)
-             :on-click |x y r| (seq-set-track i)
+          :bg (if (= SEQ.current-track i) :blue :dark-gray)
+          :on-click |x y r| (seq-set-track i)
           (label (substring name 0 16) :font-size 11 :width 12
-                 :color (if (= SEQ.current-track i) :white :gray)
-                 :bg :transparent))
+            :color (if (= SEQ.current-track i) :white :gray)
+            :bg :transparent))
         (box :width 5.2
           (v-stack :gap 0.18
             (hslider :min 0 :max 1 :width 5
-                     :value (nth SEQ.track-volumes i)
-                     :material (aqua-slider-material)
-                     :on-change (lambda (v) (seq-set-track-volume i v)))
-            (mixer-track-meter :level (nth SEQ.track-peaks i))))))))
+              :value (nth SEQ.track-volumes i)
+              :material (aqua-slider-material)
+              :on-change (lambda (v) (seq-set-track-volume i v)))
+            (mixer-track-meter :level (nth SEQ.track-peaks i))))
+        (if (and (= SEQ.current-track i) (> SEQ.num-tracks 1))
+          (box :width 1.6 :height 1.2 :align :center
+            :bg :transparent
+            :on-click |x y r| (host-command "delete-track" (dict :track i))
+            :background "delete-track-icon"
+            :active 0)
+          (label "" :width 1.6 :bg :transparent))))))

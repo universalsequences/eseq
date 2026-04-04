@@ -29,6 +29,8 @@ const DEFAULT_SAMPLES: &[&str] = &[
 ];
 const PAGE_SIZE: usize = 16;
 const AUTO_FOLLOW_COOLDOWN: Duration = Duration::from_secs(5);
+const METER_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const METER_LEVEL_STEPS: f64 = 48.0;
 const BUILTIN_ACCUMULATOR_NAMES: &[&str] = &[
     "Off",
     "TransposeRamp",
@@ -297,10 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("syncs", build_param_list(&state, 0, StepParam::Sync)),
             ("sync-labels", build_sync_labels()),
             ("track-volumes", build_track_volumes(&state)),
-            (
-                "track-peaks",
-                build_track_peaks_value_from_bits(&vec![0.0f32.to_bits(); track_count]),
-            ),
+            ("track-peaks", build_track_peaks_value(&vec![0.0; track_count])),
             (
                 "effects",
                 build_effects_value(&state, 0, &effect_descriptors, &selected_steps),
@@ -1277,12 +1276,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_snapshot_version: u64 = 0;
     let mut prev_current_track: usize = usize::MAX;
     let mut prev_cpu_load_bits: u32 = u32::MAX;
-    let mut prev_peak_l_bits: u32 = u32::MAX;
-    let mut prev_peak_r_bits: u32 = u32::MAX;
-    let mut prev_track_peak_bits: Vec<u32> = Vec::new();
+    let mut prev_peak_l_level = -1.0f64;
+    let mut prev_peak_r_level = -1.0f64;
+    let mut prev_track_peak_levels: Vec<f64> = Vec::new();
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
     let mut prev_auto_follow = true;
+    let mut cached_peak_l_level = 0.0f64;
+    let mut cached_peak_r_level = 0.0f64;
+    let mut cached_track_peak_levels = vec![0.0; track_names.len()];
+    let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
 
     eprintln!("metal_seq: entering event loop");
 
@@ -1522,12 +1525,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "track-volumes",
                                         build_track_volumes(&state),
                                     );
-                                    let track_peak_bits =
-                                        read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
                                     rt.set_reactive(
                                         "SEQ",
                                         "track-peaks",
-                                        build_track_peaks_value_from_bits(&track_peak_bits),
+                                        build_track_peaks_value(&cached_track_peak_levels),
                                     );
                                     rt.set_reactive(
                                         "SEQ",
@@ -1612,12 +1613,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 "track-volumes",
                                                 build_track_volumes(&state),
                                             );
-                                            let track_peak_bits =
-                                                read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
                                             rt.set_reactive(
                                                 "SEQ",
                                                 "track-peaks",
-                                                build_track_peaks_value_from_bits(&track_peak_bits),
+                                                build_track_peaks_value(&cached_track_peak_levels),
                                             );
                                             rt.set_reactive(
                                                 "SEQ",
@@ -1671,6 +1670,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                    "delete-track" => {
+                        let track = match &payload {
+                            Value::Map(map) => map.get("track").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            }),
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        }
+                        .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+
+                        match app.graph_controller().delete_track(track) {
+                            Ok(new_idx) => {
+                                current_track.store(new_idx, Ordering::Relaxed);
+                                *track_pan_ids.lock().unwrap() = app
+                                    .graph
+                                    .track_node_ids
+                                    .iter()
+                                    .map(|ids| ids.pan_id)
+                                    .collect();
+                                cached_track_peak_levels =
+                                    read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
+                                last_meter_poll_at = Instant::now();
+                                *record_armed.lock().unwrap() = app.graph.record_armed.clone();
+
+                                let rt = editor.runtime_mut();
+                                sync_track_topology_state(
+                                    rt,
+                                    &app,
+                                    &state,
+                                    &mut track_names,
+                                    new_idx,
+                                    &selected_steps,
+                                    &accumulator_names,
+                                    &record_armed,
+                                    &cached_track_peak_levels,
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Deleted track {}",
+                                    track + 1
+                                )));
+                            }
+                            Err(e) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error deleting track: {e}"
+                                )));
                             }
                         }
                     }
@@ -2174,12 +2225,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "track-volumes",
                                         build_track_volumes(&state),
                                     );
-                                    let track_peak_bits =
-                                        read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
                                     rt.set_reactive(
                                         "SEQ",
                                         "track-peaks",
-                                        build_track_peaks_value_from_bits(&track_peak_bits),
+                                        build_track_peaks_value(&cached_track_peak_levels),
                                     );
                                     rt.set_reactive(
                                         "SEQ",
@@ -2286,12 +2335,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
                             rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                            let track_peak_bits =
-                                read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
                             rt.set_reactive(
                                 "SEQ",
                                 "track-peaks",
-                                build_track_peaks_value_from_bits(&track_peak_bits),
+                                build_track_peaks_value(&cached_track_peak_levels),
                             );
                             rt.set_reactive(
                                 "SEQ",
@@ -2360,12 +2407,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
                         let bpm = state.transport.bpm.load(Ordering::Relaxed);
                         let cpu_load_bits = state.transport.cpu_load_pct.load(Ordering::Relaxed);
-                        let peak_l_bits = state.transport.peak_l.load(Ordering::Relaxed);
-                        let peak_r_bits = state.transport.peak_r.load(Ordering::Relaxed);
                         let cpu_load_pct = f32::from_bits(cpu_load_bits);
                         let playing = state.transport.playing.load(Ordering::Relaxed);
                         let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
                         let snap_ver = state.scheduler_snapshot_version();
+                        cached_peak_l_level =
+                            meter_display_level(f32::from_bits(state.transport.peak_l.load(Ordering::Relaxed)));
+                        cached_peak_r_level =
+                            meter_display_level(f32::from_bits(state.transport.peak_r.load(Ordering::Relaxed)));
+                        cached_track_peak_levels =
+                            read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
+                        last_meter_poll_at = Instant::now();
                         let rt = editor.runtime_mut();
 
                         sync_pattern_state(rt, &state);
@@ -2381,12 +2433,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.set_reactive(
                             "SEQ",
                             "master-peak-l",
-                            Value::Number(master_meter_level(f32::from_bits(peak_l_bits))),
+                            Value::Number(cached_peak_l_level),
                         );
                         rt.set_reactive(
                             "SEQ",
                             "master-peak-r",
-                            Value::Number(master_meter_level(f32::from_bits(peak_r_bits))),
+                            Value::Number(cached_peak_r_level),
                         );
                         rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
                         rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
@@ -2426,12 +2478,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
                             rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                            let track_peak_bits =
-                                read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
                             rt.set_reactive(
                                 "SEQ",
                                 "track-peaks",
-                                build_track_peaks_value_from_bits(&track_peak_bits),
+                                build_track_peaks_value(&cached_track_peak_levels),
                             );
                             rt.set_reactive(
                                 "SEQ",
@@ -2469,10 +2519,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_pattern_epoch = epoch;
                         prev_snapshot_version = snap_ver;
                         prev_cpu_load_bits = cpu_load_bits;
-                        prev_peak_l_bits = peak_l_bits;
-                        prev_peak_r_bits = peak_r_bits;
-                        prev_track_peak_bits =
-                            read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
+                        prev_peak_l_level = cached_peak_l_level;
+                        prev_peak_r_level = cached_peak_r_level;
+                        prev_track_peak_levels = cached_track_peak_levels.clone();
                         prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
 
                         if let Some((status, _)) = app.editor.status_message.take() {
@@ -2517,13 +2566,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let playing = state.transport.playing.load(Ordering::Relaxed);
             let bpm = state.transport.bpm.load(Ordering::Relaxed);
             let cpu_load_bits = state.transport.cpu_load_pct.load(Ordering::Relaxed);
-            let peak_l_bits = state.transport.peak_l.load(Ordering::Relaxed);
-            let peak_r_bits = state.transport.peak_r.load(Ordering::Relaxed);
-            let track_peak_bits = read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
             let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
             let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed);
             let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
             let snap_ver = state.scheduler_snapshot_version();
+            if last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL {
+                cached_peak_l_level =
+                    meter_display_level(f32::from_bits(state.transport.peak_l.load(Ordering::Relaxed)));
+                cached_peak_r_level =
+                    meter_display_level(f32::from_bits(state.transport.peak_r.load(Ordering::Relaxed)));
+                cached_track_peak_levels =
+                    read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
+                last_meter_poll_at = Instant::now();
+            }
 
             let mut needs_reactive_cycle = false;
 
@@ -2546,7 +2601,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive(
                     "SEQ",
                     "track-peaks",
-                    build_track_peaks_value_from_bits(&track_peak_bits),
+                    build_track_peaks_value(&cached_track_peak_levels),
                 );
                 rt.set_reactive(
                     "SEQ",
@@ -2597,31 +2652,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_cpu_load_bits = cpu_load_bits;
                 needs_reactive_cycle = true;
             }
-            if peak_l_bits != prev_peak_l_bits {
+            if cached_peak_l_level != prev_peak_l_level {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "master-peak-l",
-                    Value::Number(master_meter_level(f32::from_bits(peak_l_bits))),
+                    Value::Number(cached_peak_l_level),
                 );
-                prev_peak_l_bits = peak_l_bits;
+                prev_peak_l_level = cached_peak_l_level;
                 needs_reactive_cycle = true;
             }
-            if peak_r_bits != prev_peak_r_bits {
+            if cached_peak_r_level != prev_peak_r_level {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "master-peak-r",
-                    Value::Number(master_meter_level(f32::from_bits(peak_r_bits))),
+                    Value::Number(cached_peak_r_level),
                 );
-                prev_peak_r_bits = peak_r_bits;
+                prev_peak_r_level = cached_peak_r_level;
                 needs_reactive_cycle = true;
             }
-            if track_peak_bits != prev_track_peak_bits {
+            if cached_track_peak_levels != prev_track_peak_levels {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "track-peaks",
-                    build_track_peaks_value_from_bits(&track_peak_bits),
+                    build_track_peaks_value(&cached_track_peak_levels),
                 );
-                prev_track_peak_bits = track_peak_bits.clone();
+                prev_track_peak_levels = cached_track_peak_levels.clone();
                 needs_reactive_cycle = true;
             }
             if epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version {
@@ -2634,7 +2689,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive(
                     "SEQ",
                     "track-peaks",
-                    build_track_peaks_value_from_bits(&track_peak_bits),
+                    build_track_peaks_value(&cached_track_peak_levels),
                 );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
@@ -2656,7 +2711,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive(
                     "SEQ",
                     "track-peaks",
-                    build_track_peaks_value_from_bits(&track_peak_bits),
+                    build_track_peaks_value(&cached_track_peak_levels),
                 );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
@@ -2735,8 +2790,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // Always redraw when selection is active (for itime animation on selected steps)
-        if !selected_steps.lock().unwrap().is_empty() {
+        // Keep selection animation live only during playback; when paused, edits/events
+        // still request redraws explicitly, but idle should stay cheap.
+        if playing_now && !selected_steps.lock().unwrap().is_empty() {
             editor.mark_needs_redraw();
         }
 
@@ -3131,12 +3187,12 @@ fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
-fn read_track_peak_bits(lg: sequencer::audiograph::LiveGraphPtr, pan_ids: &[i32]) -> Vec<u32> {
+fn read_track_peak_levels(lg: sequencer::audiograph::LiveGraphPtr, pan_ids: &[i32]) -> Vec<f64> {
     pan_ids
         .iter()
         .map(|&pan_id| {
             if pan_id < 0 {
-                return 0.0f32.to_bits();
+                return 0.0;
             }
             let mut state_size = 0usize;
             let snapshot = unsafe {
@@ -3148,7 +3204,7 @@ fn read_track_peak_bits(lg: sequencer::audiograph::LiveGraphPtr, pan_ids: &[i32]
                 if !snapshot.is_null() {
                     unsafe { sequencer::audiograph::free_c_ptr(snapshot) };
                 }
-                return 0.0f32.to_bits();
+                return 0.0;
             }
             let peak = unsafe {
                 let state = std::slice::from_raw_parts(
@@ -3159,17 +3215,85 @@ fn read_track_peak_bits(lg: sequencer::audiograph::LiveGraphPtr, pan_ids: &[i32]
                     .max(state[sequencer::stereo_panner::STATE_PEAK_R])
             };
             unsafe { sequencer::audiograph::free_c_ptr(snapshot) };
-            peak.to_bits()
+            meter_display_level(peak)
         })
         .collect()
 }
 
-fn build_track_peaks_value_from_bits(bits: &[u32]) -> Value {
-    let items: Vec<Rc<RefCell<Value>>> = bits
+fn build_track_peaks_value(levels: &[f64]) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = levels
         .iter()
-        .map(|&bits| Rc::new(RefCell::new(Value::Number(master_meter_level(f32::from_bits(bits))))))
+        .map(|&level| Rc::new(RefCell::new(Value::Number(level))))
         .collect();
     Value::List(items)
+}
+
+fn sync_track_topology_state(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track_names: &mut Vec<String>,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    track_peak_levels: &[f64],
+) {
+    sync_track_name_state(rt, track_names, app);
+    sync_pattern_state(rt, state);
+    rt.set_reactive("SEQ", "current-track", Value::Number(current_track_idx as f64));
+    rt.set_reactive(
+        "SEQ",
+        "record-armed",
+        build_record_armed_value(&record_armed.lock().unwrap()),
+    );
+
+    if app.tracks.is_empty() {
+        rt.set_reactive("SEQ", "steps", Value::List(vec![]));
+        rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
+        rt.set_reactive("SEQ", "durations", Value::List(vec![]));
+        rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
+        rt.set_reactive("SEQ", "auxas", Value::List(vec![]));
+        rt.set_reactive("SEQ", "pans", Value::List(vec![]));
+        rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-peaks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "effects", Value::List(vec![]));
+        rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
+        rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
+        return;
+    }
+
+    rt.set_reactive(
+        "SEQ",
+        "steps",
+        build_steps_value(state, current_track_idx),
+    );
+    sync_step_param_lists(rt, state, current_track_idx);
+    rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
+    rt.set_reactive(
+        "SEQ",
+        "track-peaks",
+        build_track_peaks_value(track_peak_levels),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "effects",
+        build_effects_value(state, current_track_idx, &app.graph.effect_descriptors, selected_steps),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "instrument-panel",
+        build_instrument_panel_value(app, current_track_idx, selected_steps),
+    );
+    *accumulator_names.lock().unwrap() = build_accumulator_names(app);
+    sync_track_params(rt, app, state, current_track_idx, selected_steps);
+    rt.set_reactive(
+        "SEQ",
+        "step-has-plocks",
+        build_step_has_plocks(state, current_track_idx, &app.graph.effect_descriptors),
+    );
+    sync_sidebar_browser(rt, app, current_track_idx);
 }
 
 fn sync_pattern_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
@@ -3812,6 +3936,14 @@ fn master_meter_level(peak: f32) -> f64 {
     } else {
         peak.sqrt().min(1.2) as f64
     }
+}
+
+fn quantize_meter_level(level: f64) -> f64 {
+    ((level.clamp(0.0, 1.2) * METER_LEVEL_STEPS).round()) / METER_LEVEL_STEPS
+}
+
+fn meter_display_level(peak: f32) -> f64 {
+    quantize_meter_level(master_meter_level(peak))
 }
 
 fn build_flat_tree_items(items: &[String]) -> Value {

@@ -605,6 +605,23 @@ impl EffectSlotState {
             }
         }
     }
+
+    /// Reset this slot to an empty state.
+    pub fn clear(&self) {
+        self.node_id.store(0, Ordering::Relaxed);
+        self.num_params.store(0, Ordering::Relaxed);
+        for i in 0..MAX_SLOT_PARAMS {
+            self.defaults.set(i, 0.0);
+            if i < self.param_node_indices.len() {
+                self.param_node_indices[i].store(0, Ordering::Relaxed);
+            }
+        }
+        for step in 0..MAX_STEPS {
+            for param_idx in 0..MAX_SLOT_PARAMS {
+                self.plocks.clear_param(step, param_idx);
+            }
+        }
+    }
 }
 
 // ── EffectSlotSnapshot (for pattern save/restore) ──

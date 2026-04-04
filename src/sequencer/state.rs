@@ -1,7 +1,9 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::effects::{EffectDescriptor, EffectSlotSnapshot, EffectSlotState, MAX_SLOT_PARAMS};
+use crate::effects::{
+    EffectDescriptor, EffectSlotSnapshot, EffectSlotState, HostControl, MAX_SLOT_PARAMS,
+};
 use crate::voice::MAX_VOICES;
 
 use super::data::{
@@ -47,6 +49,32 @@ pub struct PatternSnapshot {
 }
 
 impl PatternSnapshot {
+    /// Delete one track lane from this snapshot and compact higher track indices.
+    ///
+    /// This is the snapshot-side half of track deletion semantics:
+    /// deleting a track removes it from every track-indexed lane immediately,
+    /// and every track after it shifts down by one. The live delete path will
+    /// pair this with graph teardown, live-state compaction, and UI refresh.
+    pub fn remove_track(&mut self, track_idx: usize) {
+        if track_idx >= self.track_bits.len() {
+            return;
+        }
+
+        self.track_bits.remove(track_idx);
+        self.step_data.remove(track_idx);
+        self.track_params.remove(track_idx);
+        self.effect_slots.remove(track_idx);
+        self.instrument_slots.remove(track_idx);
+        self.instrument_base_note_offsets.remove(track_idx);
+        self.track_sound_states.remove(track_idx);
+        self.sample_ids.remove(track_idx);
+        self.chord_snapshots.remove(track_idx);
+        self.timebase_plock_snapshots.remove(track_idx);
+        self.swing_plock_snapshots.remove(track_idx);
+        self.swing_resolution_plock_snapshots.remove(track_idx);
+        self.instrument_types.remove(track_idx);
+    }
+
     pub fn capture(
         state: &SequencerState,
         num_tracks: usize,
@@ -369,6 +397,121 @@ impl PatternSnapshot {
     }
 }
 
+fn sidechain_source_track(
+    owner_track: usize,
+    selection_idx: usize,
+    total_tracks: usize,
+) -> Option<usize> {
+    if selection_idx == 0 {
+        return None;
+    }
+    let mut current_idx = 0usize;
+    for source_track in 0..total_tracks {
+        if source_track == owner_track {
+            continue;
+        }
+        current_idx += 1;
+        if current_idx == selection_idx {
+            return Some(source_track);
+        }
+    }
+    None
+}
+
+fn sidechain_selection_index(owner_track: usize, source_track: usize, total_tracks: usize) -> usize {
+    if source_track >= total_tracks || source_track == owner_track {
+        return 0;
+    }
+    let mut selection_idx = 0usize;
+    for candidate in 0..total_tracks {
+        if candidate == owner_track {
+            continue;
+        }
+        selection_idx += 1;
+        if candidate == source_track {
+            return selection_idx;
+        }
+    }
+    0
+}
+
+fn remap_sidechain_selection_after_track_delete(
+    owner_track_old: usize,
+    selection_idx: usize,
+    deleted_track: usize,
+    old_track_count: usize,
+) -> usize {
+    let Some(source_old) = sidechain_source_track(owner_track_old, selection_idx, old_track_count)
+    else {
+        return 0;
+    };
+    if source_old == deleted_track {
+        return 0;
+    }
+    let owner_new = if owner_track_old > deleted_track {
+        owner_track_old - 1
+    } else {
+        owner_track_old
+    };
+    let source_new = if source_old > deleted_track {
+        source_old - 1
+    } else {
+        source_old
+    };
+    sidechain_selection_index(owner_new, source_new, old_track_count - 1)
+}
+
+fn remap_snapshot_sidechain_references_after_track_delete(
+    snapshot: &mut PatternSnapshot,
+    effect_descriptors: &[Vec<EffectDescriptor>],
+    deleted_track: usize,
+    old_track_count: usize,
+) {
+    for owner_track in 0..old_track_count {
+        if owner_track == deleted_track || owner_track >= snapshot.effect_slots.len() {
+            continue;
+        }
+        let Some(track_descs) = effect_descriptors.get(owner_track) else {
+            continue;
+        };
+        for (slot_idx, slot) in snapshot.effect_slots[owner_track].iter_mut().enumerate() {
+            let Some(desc) = track_descs.get(slot_idx) else {
+                continue;
+            };
+            let num_params = slot.num_params as usize;
+            for param_idx in 0..num_params.min(desc.params.len()) {
+                if !matches!(
+                    desc.params[param_idx].host_control,
+                    Some(HostControl::FxSidechain { .. })
+                ) {
+                    continue;
+                }
+                let remapped = remap_sidechain_selection_after_track_delete(
+                    owner_track,
+                    slot.defaults.get(param_idx).copied().unwrap_or(0.0).round().max(0.0) as usize,
+                    deleted_track,
+                    old_track_count,
+                ) as f32;
+                if param_idx < slot.defaults.len() {
+                    slot.defaults[param_idx] = remapped;
+                }
+                for step in 0..MAX_STEPS {
+                    if let Some(selection) = slot.plocks[step].get(param_idx).and_then(|v| *v) {
+                        slot.plocks[step][param_idx] = Some(
+                            remap_sidechain_selection_after_track_delete(
+                                owner_track,
+                                selection.round().max(0.0) as usize,
+                                deleted_track,
+                                old_track_count,
+                            ) as f32,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn default_empty_effect_chain() -> Vec<EffectSlotState> {
     use crate::lisp_effect::MAX_CUSTOM_FX;
     let filter_desc = EffectDescriptor::builtin_filter();
@@ -575,6 +718,205 @@ impl SequencerState {
             .fetch_add(1, Ordering::AcqRel);
         snapshot
     }
+
+    fn reset_track_params_to_default(&self, track: usize) {
+        let defaults = TrackParamsSnapshot::default();
+        let params = &self.pattern.track_params[track];
+        params.gate.store(defaults.gate, Ordering::Relaxed);
+        params.set_attack_ms(defaults.attack_ms);
+        params.set_release_ms(defaults.release_ms);
+        params.set_swing(defaults.swing);
+        params.set_swing_resolution(defaults.swing_resolution);
+        params.set_num_steps(defaults.num_steps);
+        params.set_volume(defaults.volume);
+        params.set_pan(defaults.pan);
+        params.set_send(defaults.send);
+        params
+            .polyphonic
+            .store(defaults.polyphonic, Ordering::Relaxed);
+        params.set_timebase(defaults.timebase);
+        params.set_accumulator_idx(defaults.accumulator_idx);
+        params.set_script_accumulator_name(defaults.script_accumulator_name);
+        params.set_accum_limit(defaults.accum_limit);
+        params.set_accum_mode(defaults.accum_mode);
+        params.set_fts_scale(defaults.fts_scale);
+    }
+
+    fn clear_live_track_lane(&self, track: usize) {
+        self.pattern.patterns[track].store_bits([0u64; TRACK_PATTERN_WORDS]);
+        for step in 0..MAX_STEPS {
+            for param in StepParam::ALL {
+                self.pattern.step_data[track].set(step, param, param.default_value());
+            }
+            self.pattern.chord_data[track].clear_step(step);
+            self.pattern.timebase_plocks[track].clear(step);
+            self.pattern.swing_plocks[track].clear(step);
+            self.pattern.swing_resolution_plocks[track].clear(step);
+        }
+        self.reset_track_params_to_default(track);
+        for slot in &self.pattern.effect_chains[track] {
+            slot.clear();
+        }
+        self.pattern.instrument_slots[track].clear();
+        self.pattern.instrument_base_note_offsets[track].store(0.0f32.to_bits(), Ordering::Relaxed);
+        if let Some(sound) = self.pattern.track_sound_state.lock().unwrap().get_mut(track) {
+            *sound = TrackSoundState::default();
+        }
+    }
+
+    fn shift_runtime_track_bindings_left(&self, track_idx: usize, old_count: usize) {
+        for idx in track_idx..old_count.saturating_sub(1) {
+            let next = idx + 1;
+            self.transport.track_playheads[idx].store(
+                self.transport.track_playheads[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.transport.trigger_flash[idx].store(
+                self.transport.trigger_flash[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.sampler_lids[idx].store(
+                self.runtime.sampler_lids[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.pan_lids[idx].store(
+                self.runtime.pan_lids[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.delay_lids[idx].store(
+                self.runtime.delay_lids[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.send_lids[idx].store(
+                self.runtime.send_lids[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.voice_counts[idx].store(
+                self.runtime.voice_counts[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.instrument_type_flags[idx].store(
+                self.runtime.instrument_type_flags[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.track_engine_ids[idx].store(
+                self.runtime.track_engine_ids[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            for voice in 0..MAX_VOICES {
+                self.runtime.voice_lids[idx][voice].store(
+                    self.runtime.voice_lids[next][voice].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+                self.runtime.synth_node_ids[idx][voice].store(
+                    self.runtime.synth_node_ids[next][voice].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+            }
+            self.pending_accumulator_reset_tracks[idx].store(
+                self.pending_accumulator_reset_tracks[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            for engine_id in 0..MAX_TRACKS {
+                for voice in 0..MAX_VOICES {
+                    self.runtime.engine_route_lids[engine_id][voice][idx].store(
+                        self.runtime.engine_route_lids[engine_id][voice][next]
+                            .load(Ordering::Relaxed),
+                        Ordering::Relaxed,
+                    );
+                    self.runtime.engine_route_lids_r[engine_id][voice][idx].store(
+                        self.runtime.engine_route_lids_r[engine_id][voice][next]
+                            .load(Ordering::Relaxed),
+                        Ordering::Relaxed,
+                    );
+                }
+            }
+        }
+
+        if old_count == 0 {
+            return;
+        }
+        let last = old_count - 1;
+        self.transport.track_playheads[last].store(0, Ordering::Relaxed);
+        self.transport.trigger_flash[last].store(0, Ordering::Relaxed);
+        self.runtime.sampler_lids[last].store(0, Ordering::Relaxed);
+        self.runtime.pan_lids[last].store(0, Ordering::Relaxed);
+        self.runtime.delay_lids[last].store(0, Ordering::Relaxed);
+        self.runtime.send_lids[last].store(0, Ordering::Relaxed);
+        self.runtime.voice_counts[last].store(0, Ordering::Relaxed);
+        self.runtime.instrument_type_flags[last].store(0, Ordering::Relaxed);
+        self.runtime.track_engine_ids[last].store(u32::MAX, Ordering::Relaxed);
+        for voice in 0..MAX_VOICES {
+            self.runtime.voice_lids[last][voice].store(0, Ordering::Relaxed);
+            self.runtime.synth_node_ids[last][voice].store(0, Ordering::Relaxed);
+        }
+        self.pending_accumulator_reset_tracks[last].store(false, Ordering::Relaxed);
+        for engine_id in 0..MAX_TRACKS {
+            for voice in 0..MAX_VOICES {
+                self.runtime.engine_route_lids[engine_id][voice][last].store(0, Ordering::Relaxed);
+                self.runtime.engine_route_lids_r[engine_id][voice][last]
+                    .store(0, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Delete one track from live sequencer state and compact higher track indices.
+    ///
+    /// This state-side helper is the non-graph half of track deletion semantics:
+    /// the deleted lane disappears from the current pattern and all snapshots in
+    /// memory, higher lanes shift down immediately, and the old trailing lane is
+    /// cleared so stale state cannot leak back after future restores.
+    pub fn remove_track(
+        &self,
+        track_idx: usize,
+        buffer_ids: &[i32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+        effect_descriptors: &[Vec<EffectDescriptor>],
+    ) -> bool {
+        let old_count = self.active_track_count();
+        if old_count <= 1 || track_idx >= old_count {
+            return false;
+        }
+
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let mut current_snapshot =
+            PatternSnapshot::capture(self, old_count, buffer_ids, names, instrument_types);
+        remap_snapshot_sidechain_references_after_track_delete(
+            &mut current_snapshot,
+            effect_descriptors,
+            track_idx,
+            old_count,
+        );
+        current_snapshot.remove_track(track_idx);
+
+        {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+                if pattern_idx == current_pattern {
+                    *snapshot = current_snapshot.clone();
+                } else {
+                    remap_snapshot_sidechain_references_after_track_delete(
+                        snapshot,
+                        effect_descriptors,
+                        track_idx,
+                        old_count,
+                    );
+                    snapshot.remove_track(track_idx);
+                }
+            }
+        }
+
+        current_snapshot.restore(self);
+        self.shift_runtime_track_bindings_left(track_idx, old_count);
+        self.clear_live_track_lane(old_count - 1);
+        self.transport
+            .num_tracks
+            .store((old_count - 1) as u32, Ordering::Release);
+        self.publish_scheduler_snapshot();
+        true
+    }
+
     pub fn scratch_source(&self) -> String {
         self.scratch_source.lock().unwrap().clone()
     }
@@ -1071,6 +1413,282 @@ impl SequencerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::{EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling};
+
+    fn sample_track_params(id: usize) -> TrackParamsSnapshot {
+        TrackParamsSnapshot {
+            gate: id % 2 == 0,
+            attack_ms: 10.0 + id as f32,
+            release_ms: 20.0 + id as f32,
+            swing: 0.1 * id as f32,
+            swing_resolution: SwingResolution::Quarter,
+            num_steps: 8 + id,
+            volume: 0.2 * id as f32,
+            pan: -1.0 + id as f32,
+            send: 0.3 * id as f32,
+            polyphonic: id % 2 == 1,
+            timebase: Timebase::Quarter,
+            accumulator_idx: id,
+            script_accumulator_name: Some(format!("acc-{id}")),
+            accum_limit: (1 + id) as f32,
+            accum_mode: id as u32,
+            fts_scale: id + 1,
+        }
+    }
+
+    fn sample_effect_slot_snapshot(id: usize) -> EffectSlotSnapshot {
+        EffectSlotSnapshot {
+            node_id: 100 + id as u32,
+            num_params: 2,
+            defaults: vec![id as f32, id as f32 + 0.5],
+            plocks: (0..MAX_STEPS)
+                .map(|step| {
+                    if step == id {
+                        vec![Some(id as f32), None]
+                    } else {
+                        vec![None, None]
+                    }
+                })
+                .collect(),
+            param_node_indices: vec![id as u32, id as u32 + 10],
+        }
+    }
+
+    fn sample_pattern_snapshot(num_tracks: usize) -> PatternSnapshot {
+        PatternSnapshot {
+            track_bits: (0..num_tracks)
+                .map(|track| {
+                    let mut bits = [0u64; TRACK_PATTERN_WORDS];
+                    bits[0] = (track as u64) + 1;
+                    bits
+                })
+                .collect(),
+            step_data: (0..num_tracks)
+                .map(|track| {
+                    let mut steps = vec![[0.0; NUM_PARAMS]; MAX_STEPS];
+                    steps[0][0] = track as f32 + 0.25;
+                    steps[1][1] = track as f32 + 0.5;
+                    steps
+                })
+                .collect(),
+            track_params: (0..num_tracks).map(sample_track_params).collect(),
+            effect_slots: (0..num_tracks)
+                .map(|track| vec![sample_effect_slot_snapshot(track)])
+                .collect(),
+            instrument_slots: (0..num_tracks)
+                .map(|track| sample_effect_slot_snapshot(track + 10))
+                .collect(),
+            instrument_base_note_offsets: (0..num_tracks).map(|track| track as f32 - 12.0).collect(),
+            track_sound_states: (0..num_tracks)
+                .map(|track| TrackSoundState {
+                    loaded_preset: Some(format!("preset-{track}")),
+                    dirty: track % 2 == 0,
+                    engine_id: Some(track),
+                })
+                .collect(),
+            sample_ids: (0..num_tracks)
+                .map(|track| (track as i32, format!("track-{track}")))
+                .collect(),
+            chord_snapshots: (0..num_tracks)
+                .map(|track| {
+                    let mut chord = ChordSnapshot::new_default();
+                    chord.steps[0] = vec![track as f32, track as f32 + 7.0];
+                    chord
+                })
+                .collect(),
+            timebase_plock_snapshots: (0..num_tracks)
+                .map(|track| {
+                    let mut arr = [None; MAX_STEPS];
+                    arr[0] = Some(track as u32);
+                    arr
+                })
+                .collect(),
+            swing_plock_snapshots: (0..num_tracks)
+                .map(|track| {
+                    let mut arr = [None; MAX_STEPS];
+                    arr[1] = Some((track as u32) + 10);
+                    arr
+                })
+                .collect(),
+            swing_resolution_plock_snapshots: (0..num_tracks)
+                .map(|track| {
+                    let mut arr = [None; MAX_STEPS];
+                    arr[2] = Some((track as u32) + 20);
+                    arr
+                })
+                .collect(),
+            instrument_types: (0..num_tracks)
+                .map(|track| {
+                    if track % 2 == 0 {
+                        InstrumentType::Sampler
+                    } else {
+                        InstrumentType::Custom
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn sample_sidechain_descriptor() -> EffectDescriptor {
+        EffectDescriptor {
+            name: "duck".to_string(),
+            params: vec![ParamDescriptor {
+                name: "sidechain".to_string(),
+                min: 0.0,
+                max: 3.0,
+                default: 0.0,
+                kind: ParamKind::Enum {
+                    labels: vec![
+                        "off".to_string(),
+                        "track-a".to_string(),
+                        "track-b".to_string(),
+                        "track-c".to_string(),
+                    ],
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: u32::MAX,
+                host_control: Some(HostControl::FxSidechain { input_channel: 0 }),
+            }],
+            input_channels: 2,
+            output_channels: 2,
+        }
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_compacts_all_track_lanes() {
+        let mut snapshot = sample_pattern_snapshot(3);
+
+        snapshot.remove_track(1);
+
+        assert_eq!(snapshot.track_bits.len(), 2);
+        assert_eq!(snapshot.step_data.len(), 2);
+        assert_eq!(snapshot.track_params.len(), 2);
+        assert_eq!(snapshot.effect_slots.len(), 2);
+        assert_eq!(snapshot.instrument_slots.len(), 2);
+        assert_eq!(snapshot.instrument_base_note_offsets.len(), 2);
+        assert_eq!(snapshot.track_sound_states.len(), 2);
+        assert_eq!(snapshot.sample_ids.len(), 2);
+        assert_eq!(snapshot.chord_snapshots.len(), 2);
+        assert_eq!(snapshot.timebase_plock_snapshots.len(), 2);
+        assert_eq!(snapshot.swing_plock_snapshots.len(), 2);
+        assert_eq!(snapshot.swing_resolution_plock_snapshots.len(), 2);
+        assert_eq!(snapshot.instrument_types.len(), 2);
+
+        assert_eq!(snapshot.track_bits[0][0], 1);
+        assert_eq!(snapshot.track_bits[1][0], 3);
+        assert_eq!(snapshot.step_data[0][0][0], 0.25);
+        assert_eq!(snapshot.step_data[1][0][0], 2.25);
+        assert_eq!(snapshot.track_params[0].num_steps, 8);
+        assert_eq!(snapshot.track_params[1].num_steps, 10);
+        assert_eq!(snapshot.effect_slots[0][0].node_id, 100);
+        assert_eq!(snapshot.effect_slots[1][0].node_id, 102);
+        assert_eq!(snapshot.instrument_slots[0].node_id, 110);
+        assert_eq!(snapshot.instrument_slots[1].node_id, 112);
+        assert_eq!(snapshot.instrument_base_note_offsets, vec![-12.0, -10.0]);
+        assert_eq!(
+            snapshot.track_sound_states[0].loaded_preset.as_deref(),
+            Some("preset-0")
+        );
+        assert_eq!(
+            snapshot.track_sound_states[1].loaded_preset.as_deref(),
+            Some("preset-2")
+        );
+        assert_eq!(snapshot.sample_ids[0], (0, "track-0".to_string()));
+        assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string()));
+        assert_eq!(snapshot.chord_snapshots[0].steps[0], vec![0.0, 7.0]);
+        assert_eq!(snapshot.chord_snapshots[1].steps[0], vec![2.0, 9.0]);
+        assert_eq!(snapshot.timebase_plock_snapshots[0][0], Some(0));
+        assert_eq!(snapshot.timebase_plock_snapshots[1][0], Some(2));
+        assert_eq!(snapshot.swing_plock_snapshots[0][1], Some(10));
+        assert_eq!(snapshot.swing_plock_snapshots[1][1], Some(12));
+        assert_eq!(snapshot.swing_resolution_plock_snapshots[0][2], Some(20));
+        assert_eq!(snapshot.swing_resolution_plock_snapshots[1][2], Some(22));
+        assert_eq!(snapshot.instrument_types[0], InstrumentType::Sampler);
+        assert_eq!(snapshot.instrument_types[1], InstrumentType::Sampler);
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_shifts_first_track() {
+        let mut snapshot = sample_pattern_snapshot(3);
+
+        snapshot.remove_track(0);
+
+        assert_eq!(snapshot.track_bits.len(), 2);
+        assert_eq!(snapshot.track_bits[0][0], 2);
+        assert_eq!(snapshot.track_bits[1][0], 3);
+        assert_eq!(snapshot.sample_ids[0], (1, "track-1".to_string()));
+        assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string()));
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_ignores_out_of_range_index() {
+        let mut snapshot = sample_pattern_snapshot(2);
+        let original = snapshot.clone();
+
+        snapshot.remove_track(5);
+
+        assert_eq!(snapshot.track_bits, original.track_bits);
+        assert_eq!(snapshot.step_data, original.step_data);
+        assert_eq!(snapshot.track_params.len(), original.track_params.len());
+        assert_eq!(snapshot.sample_ids, original.sample_ids);
+    }
+
+    #[test]
+    fn remap_sidechain_selection_resets_deleted_source_to_off() {
+        let remapped = remap_sidechain_selection_after_track_delete(0, 2, 2, 4);
+        assert_eq!(remapped, 0);
+    }
+
+    #[test]
+    fn remap_sidechain_selection_shifts_source_above_deleted_track() {
+        let remapped = remap_sidechain_selection_after_track_delete(0, 3, 1, 4);
+        assert_eq!(remapped, 2);
+    }
+
+    #[test]
+    fn remap_snapshot_sidechain_references_updates_defaults_and_plocks() {
+        let mut snapshot = PatternSnapshot {
+            track_bits: vec![[0; TRACK_PATTERN_WORDS]; 4],
+            step_data: vec![vec![[0.0; NUM_PARAMS]; MAX_STEPS]; 4],
+            track_params: vec![TrackParamsSnapshot::default(); 4],
+            effect_slots: vec![
+                vec![EffectSlotSnapshot::new_empty()],
+                vec![EffectSlotSnapshot {
+                    node_id: 1,
+                    num_params: 1,
+                    defaults: vec![3.0],
+                    plocks: {
+                        let mut plocks = (0..MAX_STEPS).map(|_| vec![None]).collect::<Vec<_>>();
+                        plocks[0][0] = Some(2.0);
+                        plocks
+                    },
+                    param_node_indices: vec![0],
+                }],
+                vec![EffectSlotSnapshot::new_empty()],
+                vec![EffectSlotSnapshot::new_empty()],
+            ],
+            instrument_slots: vec![EffectSlotSnapshot::new_empty(); 4],
+            instrument_base_note_offsets: vec![0.0; 4],
+            track_sound_states: vec![TrackSoundState::default(); 4],
+            sample_ids: vec![(-1, String::new()); 4],
+            chord_snapshots: (0..4).map(|_| ChordSnapshot::new_default()).collect(),
+            timebase_plock_snapshots: vec![[None; MAX_STEPS]; 4],
+            swing_plock_snapshots: vec![[None; MAX_STEPS]; 4],
+            swing_resolution_plock_snapshots: vec![[None; MAX_STEPS]; 4],
+            instrument_types: vec![InstrumentType::Sampler; 4],
+        };
+        let descriptors = vec![
+            vec![EffectDescriptor::builtin_filter()],
+            vec![sample_sidechain_descriptor()],
+            vec![EffectDescriptor::builtin_filter()],
+            vec![EffectDescriptor::builtin_filter()],
+        ];
+
+        remap_snapshot_sidechain_references_after_track_delete(&mut snapshot, &descriptors, 2, 4);
+
+        assert_eq!(snapshot.effect_slots[1][0].defaults[0], 2.0);
+        assert_eq!(snapshot.effect_slots[1][0].plocks[0][0], Some(0.0));
+    }
 
     #[test]
     fn move_step_range_preserves_chords_and_step_plocks() {
@@ -1162,6 +1780,13 @@ mod tests {
         state
     }
 
+    fn make_state_with_tracks(num_tracks: usize) -> SequencerState {
+        SequencerState::new(
+            num_tracks,
+            (0..num_tracks).map(|_| default_empty_effect_chain()).collect(),
+        )
+    }
+
     fn populate_step(state: &SequencerState, track: usize, step: usize) {
         state.pattern.patterns[track].set_step_active(step, true);
         state.pattern.step_data[track].set(step, StepParam::Velocity, 0.75);
@@ -1226,6 +1851,197 @@ mod tests {
             state.pattern.instrument_slots[track].plocks.get(step, 0),
             None
         );
+    }
+
+    #[test]
+    fn remove_track_compacts_live_state_and_runtime_bindings() {
+        let state = make_state_with_tracks(3);
+        let names = vec!["kick".to_string(), "snare".to_string(), "hat".to_string()];
+        let buffer_ids = vec![10, 20, 30];
+        let instrument_types = vec![
+            InstrumentType::Sampler,
+            InstrumentType::Custom,
+            InstrumentType::Sampler,
+        ];
+        let effect_descriptors = vec![EffectDescriptor::default_full_chain(); 3];
+
+        for track in 0..3 {
+            state.pattern.track_params[track].set_num_steps(8 + track);
+            state.pattern.track_params[track].set_volume(0.2 * (track + 1) as f32);
+            state.pattern.track_params[track].set_accumulator_idx(track);
+            state.pattern.track_params[track]
+                .set_script_accumulator_name(Some(format!("acc-{track}")));
+            state.pattern.track_params[track].set_accum_limit(10.0 + track as f32);
+            state.pattern.track_params[track].set_fts_scale(track + 1);
+            state.pattern.patterns[track].set_step_active(track, true);
+            state.pattern.step_data[track]
+                .set(track, StepParam::Velocity, 0.1 * (track + 1) as f32);
+            state.pattern.chord_data[track].add_note(track, track as f32 + 0.5);
+            state.pattern.timebase_plocks[track].set(track, Timebase::Eighth);
+            state.pattern.swing_plocks[track].set(track, 55.0 + track as f32);
+            state.pattern.swing_resolution_plocks[track].set(track, SwingResolution::Quarter);
+            state.pattern.effect_chains[track][0]
+                .node_id
+                .store((100 + track) as u32, Ordering::Relaxed);
+            state.pattern.effect_chains[track][0]
+                .num_params
+                .store(1, Ordering::Relaxed);
+            state.pattern.effect_chains[track][0]
+                .defaults
+                .set(0, track as f32 + 1.0);
+            state.pattern.effect_chains[track][0]
+                .plocks
+                .set(track, 0, 300.0 + track as f32);
+            state.pattern.instrument_slots[track]
+                .node_id
+                .store((200 + track) as u32, Ordering::Relaxed);
+            state.pattern.instrument_slots[track]
+                .num_params
+                .store(1, Ordering::Relaxed);
+            state.pattern.instrument_slots[track]
+                .plocks
+                .set(track, 0, 0.25 + track as f32);
+            state.pattern.instrument_base_note_offsets[track]
+                .store((track as f32 + 12.0).to_bits(), Ordering::Relaxed);
+            state.pattern.track_sound_state.lock().unwrap()[track] = TrackSoundState {
+                engine_id: Some(track),
+                loaded_preset: Some(format!("preset-{track}")),
+                dirty: track % 2 == 0,
+            };
+
+            state.transport.track_playheads[track].store((track * 4) as u32, Ordering::Relaxed);
+            state.transport.trigger_flash[track].store((track * 10) as u32, Ordering::Relaxed);
+            state.runtime.sampler_lids[track].store((track as u64) + 10, Ordering::Relaxed);
+            state.runtime.pan_lids[track].store((track as u64) + 20, Ordering::Relaxed);
+            state.runtime.delay_lids[track].store((track as u64) + 30, Ordering::Relaxed);
+            state.runtime.send_lids[track].store((track as u64) + 40, Ordering::Relaxed);
+            state.runtime.voice_counts[track].store((track + 1) as u32, Ordering::Relaxed);
+            state.runtime.instrument_type_flags[track]
+                .store((track % 2) as u32, Ordering::Relaxed);
+            state.runtime.track_engine_ids[track].store((track as u32) + 50, Ordering::Relaxed);
+            state.runtime.voice_lids[track][0].store((track as u64) + 60, Ordering::Relaxed);
+            state.runtime.synth_node_ids[track][0].store((track as u32) + 70, Ordering::Relaxed);
+            state.pending_accumulator_reset_tracks[track].store(track == 2, Ordering::Relaxed);
+        }
+
+        assert!(state.remove_track(
+            1,
+            &buffer_ids,
+            &names,
+            &instrument_types,
+            &effect_descriptors
+        ));
+
+        assert_eq!(state.active_track_count(), 2);
+        assert_eq!(state.pattern.track_params[1].get_num_steps(), 10);
+        assert_eq!(state.pattern.track_params[1].get_volume(), 0.6);
+        assert_eq!(state.pattern.track_params[1].get_accumulator_idx(), 2);
+        assert_eq!(
+            state.pattern.track_params[1].script_accumulator_name().as_deref(),
+            Some("acc-2")
+        );
+        assert_eq!(state.pattern.track_params[1].get_accum_limit(), 12.0);
+        assert_eq!(state.pattern.track_params[1].get_fts_scale(), 3);
+        assert!(state.pattern.patterns[1].is_active(2));
+        assert_eq!(state.pattern.step_data[1].get(2, StepParam::Velocity), 0.3);
+        assert_eq!(state.pattern.chord_data[1].get(2, 0), 2.5);
+        assert_eq!(state.pattern.timebase_plocks[1].get(2), Some(Timebase::Eighth));
+        assert_eq!(state.pattern.swing_plocks[1].get(2), Some(57.0));
+        assert_eq!(
+            state.pattern.swing_resolution_plocks[1].get(2),
+            Some(SwingResolution::Quarter)
+        );
+        assert_eq!(
+            state.pattern.effect_chains[1][0].node_id.load(Ordering::Relaxed),
+            102
+        );
+        assert_eq!(state.pattern.effect_chains[1][0].defaults.get(0), 3.0);
+        assert_eq!(state.pattern.effect_chains[1][0].plocks.get(2, 0), Some(302.0));
+        assert_eq!(
+            state.pattern.instrument_slots[1].node_id.load(Ordering::Relaxed),
+            202
+        );
+        assert_eq!(state.pattern.instrument_slots[1].plocks.get(2, 0), Some(2.25));
+        assert_eq!(
+            f32::from_bits(
+                state.pattern.instrument_base_note_offsets[1].load(Ordering::Relaxed)
+            ),
+            14.0
+        );
+        assert_eq!(
+            state.pattern.track_sound_state.lock().unwrap()[1]
+                .loaded_preset
+                .as_deref(),
+            Some("preset-2")
+        );
+        assert_eq!(state.transport.track_playheads[1].load(Ordering::Relaxed), 8);
+        assert_eq!(state.transport.trigger_flash[1].load(Ordering::Relaxed), 20);
+        assert_eq!(state.runtime.sampler_lids[1].load(Ordering::Relaxed), 12);
+        assert_eq!(state.runtime.pan_lids[1].load(Ordering::Relaxed), 22);
+        assert_eq!(state.runtime.delay_lids[1].load(Ordering::Relaxed), 32);
+        assert_eq!(state.runtime.send_lids[1].load(Ordering::Relaxed), 42);
+        assert_eq!(state.runtime.voice_counts[1].load(Ordering::Relaxed), 3);
+        assert_eq!(state.runtime.instrument_type_flags[1].load(Ordering::Relaxed), 0);
+        assert_eq!(state.runtime.track_engine_ids[1].load(Ordering::Relaxed), 52);
+        assert_eq!(state.runtime.voice_lids[1][0].load(Ordering::Relaxed), 62);
+        assert_eq!(state.runtime.synth_node_ids[1][0].load(Ordering::Relaxed), 72);
+        assert!(state.pending_accumulator_reset_tracks[1].load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn remove_track_clears_old_trailing_lane() {
+        let state = make_state_with_tracks(3);
+        let names = vec!["kick".to_string(), "snare".to_string(), "hat".to_string()];
+        let buffer_ids = vec![10, 20, 30];
+        let instrument_types = vec![InstrumentType::Sampler; 3];
+        let effect_descriptors = vec![EffectDescriptor::default_full_chain(); 3];
+
+        state.pattern.patterns[2].set_step_active(0, true);
+        state.pattern.step_data[2].set(0, StepParam::Velocity, 0.9);
+        state.pattern.chord_data[2].add_note(0, 7.0);
+        state.pattern.timebase_plocks[2].set(0, Timebase::Quarter);
+        state.pattern.swing_plocks[2].set(0, 60.0);
+        state.pattern.swing_resolution_plocks[2].set(0, SwingResolution::Eighth);
+        state.pattern.effect_chains[2][0].node_id.store(999, Ordering::Relaxed);
+        state.pattern.effect_chains[2][0].num_params.store(1, Ordering::Relaxed);
+        state.pattern.effect_chains[2][0].plocks.set(0, 0, 123.0);
+        state.pattern.instrument_slots[2].node_id.store(888, Ordering::Relaxed);
+        state.pattern.instrument_slots[2].num_params.store(1, Ordering::Relaxed);
+        state.pattern.instrument_slots[2].plocks.set(0, 0, 0.75);
+        state.transport.track_playheads[2].store(12, Ordering::Relaxed);
+        state.runtime.sampler_lids[2].store(77, Ordering::Relaxed);
+        state.runtime.track_engine_ids[2].store(66, Ordering::Relaxed);
+
+        assert!(state.remove_track(
+            1,
+            &buffer_ids,
+            &names,
+            &instrument_types,
+            &effect_descriptors
+        ));
+
+        assert!(!state.pattern.patterns[2].is_active(0));
+        assert_eq!(
+            state.pattern.step_data[2].get(0, StepParam::Velocity),
+            StepParam::Velocity.default_value()
+        );
+        assert_eq!(state.pattern.chord_data[2].count(0), 0);
+        assert_eq!(state.pattern.timebase_plocks[2].get(0), None);
+        assert_eq!(state.pattern.swing_plocks[2].get(0), None);
+        assert_eq!(state.pattern.swing_resolution_plocks[2].get(0), None);
+        assert_eq!(
+            state.pattern.effect_chains[2][0].node_id.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(state.pattern.effect_chains[2][0].plocks.get(0, 0), None);
+        assert_eq!(
+            state.pattern.instrument_slots[2].node_id.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(state.pattern.instrument_slots[2].plocks.get(0, 0), None);
+        assert_eq!(state.transport.track_playheads[2].load(Ordering::Relaxed), 0);
+        assert_eq!(state.runtime.sampler_lids[2].load(Ordering::Relaxed), 0);
+        assert_eq!(state.runtime.track_engine_ids[2].load(Ordering::Relaxed), u32::MAX);
     }
 
     #[test]
