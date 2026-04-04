@@ -913,6 +913,9 @@ impl SequencerState {
         self.transport
             .num_tracks
             .store((old_count - 1) as u32, Ordering::Release);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.schedule_mod_resync();
+        self.request_all_accumulator_resets();
         self.publish_scheduler_snapshot();
         true
     }

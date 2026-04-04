@@ -130,6 +130,7 @@ struct AudioCallbackData {
     accumulator_states: [crate::accumulator::AccumulatorRuntimeState; MAX_TRACKS],
     last_playing: bool,
     last_pattern: u32,
+    last_num_tracks: usize,
     /// Per-track flag set on pattern switch/play-start; each track clears its own flag at step 0.
     pending_accum_reset: [bool; MAX_TRACKS],
     scheduled_events: Arc<ScheduledEventQueue<4096>>,
@@ -338,6 +339,38 @@ fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut 
             if lid != 0 {
                 pool.add_voice(lid);
             }
+        }
+    }
+}
+
+fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_tracks: usize) {
+    for pool in &mut data.voice_pools {
+        pool.reset();
+    }
+    for pool in &mut data.custom_engine_pools {
+        pool.reset();
+    }
+    for tracker in &mut data.gate_off_state {
+        tracker.pending.clear();
+    }
+    for chop in &mut data.chop_state {
+        chop.remaining = 0;
+        chop.counter = 0.0;
+        chop.interval = 0.0;
+        chop.step = 0;
+        chop.chop_gate = 0.0;
+    }
+    data.active_keyboard_notes = [[None; MAX_VOICES]; MAX_TRACKS];
+    data.pending_accum_reset = [true; MAX_TRACKS];
+    data.scheduled_events.clear();
+    data.events_heap.clear();
+    data.event_seq = 0;
+    data.last_num_tracks = num_tracks;
+
+    for t in 0..num_tracks {
+        sync_sampler_voice_pool(&data.state, t, &mut data.voice_pools[t]);
+        if let Some(engine_id) = track_engine_id(&data.state, t) {
+            sync_custom_engine_pool(&data.state, engine_id, &mut data.custom_engine_pools[engine_id]);
         }
     }
 }
@@ -1184,6 +1217,9 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let callback_start = Instant::now();
     let nframes = output.len() / data.num_channels;
     let num_tracks = data.state.active_track_count();
+    if num_tracks != data.last_num_tracks {
+        reset_audio_runtime_for_track_topology(data, num_tracks);
+    }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
 
@@ -1670,6 +1706,7 @@ pub fn build_output_stream(
         accumulator_states: [crate::accumulator::AccumulatorRuntimeState::default(); MAX_TRACKS],
         last_playing: false,
         last_pattern: u32::MAX,
+        last_num_tracks: num_tracks,
         pending_accum_reset: [false; MAX_TRACKS],
         scheduled_events: Arc::clone(&scheduled_events),
         rendered_samples: Arc::clone(&rendered_samples),

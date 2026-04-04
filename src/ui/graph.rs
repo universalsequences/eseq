@@ -564,33 +564,15 @@ impl GraphController<'_> {
     }
 
     fn shift_engine_route_tables_left(&mut self, track_idx: usize, old_count: usize) {
-        for (engine_id, engine) in self.app.graph.engine_node_ids.iter_mut().enumerate() {
+        for engine in self.app.graph.engine_node_ids.iter_mut() {
             let Some(engine) = engine.as_mut() else {
                 continue;
             };
             for idx in track_idx..old_count.saturating_sub(1) {
                 engine.route_gain_ids[idx] = std::mem::take(&mut engine.route_gain_ids[idx + 1]);
-                for voice in 0..MAX_VOICES {
-                    self.app.state.runtime.engine_route_lids[engine_id][voice][idx].store(
-                        self.app.state.runtime.engine_route_lids[engine_id][voice][idx + 1]
-                            .load(Ordering::Relaxed),
-                        Ordering::Release,
-                    );
-                    self.app.state.runtime.engine_route_lids_r[engine_id][voice][idx].store(
-                        self.app.state.runtime.engine_route_lids_r[engine_id][voice][idx + 1]
-                            .load(Ordering::Relaxed),
-                        Ordering::Release,
-                    );
-                }
             }
             if old_count > 0 {
                 engine.route_gain_ids[old_count - 1].clear();
-                for voice in 0..MAX_VOICES {
-                    self.app.state.runtime.engine_route_lids[engine_id][voice][old_count - 1]
-                        .store(0, Ordering::Release);
-                    self.app.state.runtime.engine_route_lids_r[engine_id][voice][old_count - 1]
-                        .store(0, Ordering::Release);
-                }
             }
         }
     }
