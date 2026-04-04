@@ -5,7 +5,8 @@ use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MouseEventOutcome,
     WidgetDefinition, WidgetEvent, get_f32_prop, metal_widget_instance, ndc_bounds,
-    resolve_named_color, styled_cell,
+    resolve_named_color, should_trigger_integer_haptic, styled_cell,
+    trigger_level_change_haptic,
 };
 #[cfg(target_os = "macos")]
 use super::sdf_widget;
@@ -243,9 +244,13 @@ impl WidgetDefinition for VerticalSliderWidget {
             return None;
         };
         let callback = node.props.get("on-change")?.clone();
+        let previous = get_f32_prop(&node.props, "value", 0.0);
         let min = get_f32_prop(&node.props, "min", 0.0);
         let max = get_f32_prop(&node.props, "max", 1.0);
         let value = min + (max - min) * t.clamp(0.0, 1.0);
+        if should_trigger_integer_haptic(previous, value, min, max) {
+            trigger_level_change_haptic();
+        }
         Some(EventOutput {
             callback,
             args: vec![Value::Number(value as f64)],

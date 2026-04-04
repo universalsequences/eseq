@@ -9,6 +9,7 @@ use super::{
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    get_map,
 };
 use crate::vm::Value;
 
@@ -48,6 +49,10 @@ struct DropdownState {
 
 thread_local! {
     static STATES: RefCell<HashMap<u64, DropdownState>> = RefCell::new(HashMap::new());
+    /// Cached per-character cell widths for dropdown labels.
+    /// Key: (font_size_bits, text) -> cell-widths for each character.
+    static CHAR_WIDTH_CACHE: RefCell<HashMap<(u32, String), Vec<f32>>> =
+        RefCell::new(HashMap::new());
 }
 
 fn get_state(widget_id: u64) -> DropdownState {
@@ -167,6 +172,94 @@ fn get_selected(props: &HashMap<String, Value>) -> String {
     }
 }
 
+fn props_from_node(node: &Value) -> HashMap<String, Value> {
+    let Some(map) = get_map(node) else {
+        return HashMap::new();
+    };
+    map.into_iter()
+        .filter(|(key, _)| key != "type" && key != "children")
+        .collect()
+}
+
+fn cache_text_widths(text: &str, font_size: f32, ctx: &MeasureCtx<'_>) {
+    let Some(measurer) = ctx.text_measurer else {
+        return;
+    };
+    let key = (font_size.to_bits(), text.to_string());
+    CHAR_WIDTH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.entry(key).or_insert_with(|| {
+            text.chars()
+                .map(|ch| measurer.measure_text_px(&ch.to_string(), font_size) / ctx.cell_w)
+                .collect()
+        });
+    });
+}
+
+fn text_width_cells(text: &str, font_size: f32) -> f32 {
+    let key = (font_size.to_bits(), text.to_string());
+    CHAR_WIDTH_CACHE.with(|cache| {
+        cache.borrow()
+            .get(&key)
+            .map(|widths| widths.iter().sum())
+            .unwrap_or_else(|| text.chars().count() as f32 * APPROX_CHAR_WIDTH)
+    })
+}
+
+fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32) -> String {
+    if max_width <= 0.0 || text.is_empty() {
+        return String::new();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = text_width_cells(ellipsis, font_size).max(APPROX_CHAR_WIDTH);
+    let key = (font_size.to_bits(), text.to_string());
+    let widths = CHAR_WIDTH_CACHE.with(|cache| cache.borrow().get(&key).cloned());
+
+    let fits_full = widths
+        .as_ref()
+        .map(|w| w.iter().sum::<f32>() <= max_width)
+        .unwrap_or_else(|| text_width_cells(text, font_size) <= max_width);
+    if fits_full {
+        return text.to_string();
+    }
+    if max_width <= ellipsis_width {
+        return String::new();
+    }
+
+    let allowed = max_width - ellipsis_width;
+    let mut acc = 0.0;
+    let mut out = String::new();
+
+    match widths {
+        Some(widths) => {
+            for (ch, ch_width) in text.chars().zip(widths.iter().copied()) {
+                if acc + ch_width > allowed {
+                    break;
+                }
+                out.push(ch);
+                acc += ch_width;
+            }
+        }
+        None => {
+            let fallback = APPROX_CHAR_WIDTH;
+            for ch in text.chars() {
+                if acc + fallback > allowed {
+                    break;
+                }
+                out.push(ch);
+                acc += fallback;
+            }
+        }
+    }
+
+    if out.is_empty() {
+        String::new()
+    } else {
+        format!("{out}{ellipsis}")
+    }
+}
+
 fn selected_index(options: &[String], selected: &str) -> Option<usize> {
     options.iter().position(|o| o == selected)
 }
@@ -255,9 +348,23 @@ impl WidgetDefinition for DropdownWidget {
         node: &Value,
         _children: &[Value],
         _constraints: Constraints,
-        _ctx: &MeasureCtx<'_>,
+        ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
+        let font_size = get_prop_num(node, "font-size")
+            .map(f64_to_f32)
+            .unwrap_or(ctx.inherited_font_size);
+        if ctx.text_measurer.is_some() {
+            let props = props_from_node(node);
+            let selected = get_selected(&props);
+            if !selected.is_empty() {
+                cache_text_widths(&selected, font_size, ctx);
+            }
+            cache_text_widths("…", font_size, ctx);
+            for option in get_options(&props) {
+                cache_text_widths(&option, font_size, ctx);
+            }
+        }
         Some(Size {
             width: get_prop_num(node, "width").map(f64_to_f32).unwrap_or(10.0),
             height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.5),
@@ -525,17 +632,27 @@ impl WidgetDefinition for DropdownWidget {
         // ── Selected text ──
         let text_col = node.rect.col + PADDING_H;
         let text_row = node.rect.row + (node.rect.height - 1.0) * 0.5;
-        if !selected.is_empty() {
+        let text_right_pad = CHEVRON_WIDTH + PADDING_H * 0.5;
+        let text_clip_rect = Rect {
+            row: node.rect.row + 0.08,
+            col: text_col,
+            width: (node.rect.width - PADDING_H - text_right_pad).max(0.0),
+            height: (node.rect.height - 0.16).max(0.0),
+        };
+        let selected_display = truncate_text_to_width(&selected, text_clip_rect.width, font_size);
+        if !selected_display.is_empty() && text_clip_rect.width > 0.0 {
+            prims.push(MetalPrimitive::PushClipRect(text_clip_rect));
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
                     row: text_row,
                     col: text_col,
-                    text: selected.clone(),
+                    text: selected_display,
                     font_size,
                     fg: text_color,
                     bg: transparent,
                 },
             ));
+            prims.push(MetalPrimitive::PopClipRect);
         }
 
         // ── Chevron badge + arrows ──
@@ -634,7 +751,7 @@ impl WidgetDefinition for DropdownWidget {
             let text_left_pad = PADDING_H + check_col_width;
             let scrollbar_pad = if needs_scrollbar { SCROLLBAR_WIDTH + SCROLLBAR_MARGIN * 2.0 } else { 0.0 };
             let max_option_width = options.iter()
-                .map(|o| o.chars().count() as f32 * APPROX_CHAR_WIDTH)
+                .map(|o| text_width_cells(o, font_size))
                 .fold(0.0_f32, f32::max);
             let content_width = text_left_pad + max_option_width + PADDING_H + scrollbar_pad;
             let menu_width = content_width.max(node.rect.width);
@@ -669,10 +786,15 @@ impl WidgetDefinition for DropdownWidget {
                 height: menu_rect.height - inset * 2.0,
             };
             emit_rounded_rect_overlay(bg_rect, menu_bg, 0.12, viewport);
+            super::push_overlay_primitive(MetalPrimitive::PushClipRect(bg_rect));
 
             // Menu items — only emit those within the visible scroll window
             let sel_idx = selected_index(&options, &selected);
             let scroll_off = state.scroll_offset;
+            let label_col = screen_col + PADDING_H;
+            let item_text_col = label_col + 1.5;
+            let item_text_width =
+                (menu_width - (item_text_col - screen_col) - PADDING_H - scrollbar_pad).max(0.0);
             for (i, option) in options.iter().enumerate() {
                 // Item position in content space (relative to menu content start)
                 let content_y = MENU_PADDING_V + i as f32 * MENU_ROW_HEIGHT;
@@ -699,7 +821,6 @@ impl WidgetDefinition for DropdownWidget {
                 }
 
                 // Check mark for selected item
-                let label_col = screen_col + PADDING_H;
                 if sel_idx == Some(i) {
                     super::push_overlay_primitive(MetalPrimitive::ProportionalText(
                         MetalProportionalTextPrimitive {
@@ -714,17 +835,22 @@ impl WidgetDefinition for DropdownWidget {
                 }
 
                 // Option label
+                let option_display = truncate_text_to_width(option, item_text_width, font_size);
+                if option_display.is_empty() {
+                    continue;
+                }
                 super::push_overlay_primitive(MetalPrimitive::ProportionalText(
                     MetalProportionalTextPrimitive {
                         row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
-                        col: label_col + 1.5,
-                        text: option.clone(),
+                        col: item_text_col,
+                        text: option_display,
                         font_size,
                         fg: text_color,
                         bg: transparent,
                     },
                 ));
             }
+            super::push_overlay_primitive(MetalPrimitive::PopClipRect);
 
             // Scrollbar indicator (when content is taller than visible area)
             if needs_scrollbar {

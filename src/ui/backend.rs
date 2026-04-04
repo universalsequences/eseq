@@ -47,7 +47,7 @@ impl Color {
     pub const CYAN: Self = Self::rgb(0.0, 0.8, 0.8);
     pub const MAGENTA: Self = Self::rgb(0.8, 0.0, 0.8);
     pub const LIGHT_BLUE: Self = Self::rgb(0.6, 0.8, 1.0);
-    pub const GRAY: Self = Self::rgb(0.5, 0.5, 0.5);
+    pub const GRAY: Self = Self::rgb(0.7, 0.7, 0.7);
 
     /// Relative luminance (ITU-R BT.709).
     pub fn luma(self) -> f32 {

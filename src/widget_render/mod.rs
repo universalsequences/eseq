@@ -31,6 +31,12 @@ use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, get_map};
 use crate::theme;
 use crate::vm::Value;
 
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
+    NSHapticFeedbackPerformer,
+};
+
 // ── Widget state generation counter ─────────────────────────────────────────
 // Bumped whenever a widget's internal state changes (scroll offset, tree
 // expand/collapse, etc.) so that primitive caches can be invalidated.
@@ -44,6 +50,38 @@ pub fn bump_widget_state_generation() {
 pub fn widget_state_generation() -> u64 {
     WIDGET_STATE_GENERATION.load(Ordering::Relaxed)
 }
+
+fn haptic_quantum(min: f32, max: f32) -> f32 {
+    let range = (max - min).abs();
+    if range > 1000.0 {
+        100.0
+    } else if range > 40.0 {
+        10.0
+    } else {
+        1.0
+    }
+}
+
+pub fn should_trigger_integer_haptic(previous: f32, new_value: f32, min: f32, max: f32) -> bool {
+    let range = (max - min).abs();
+    if range <= 1.0 || !previous.is_finite() || !new_value.is_finite() {
+        return false;
+    }
+    let quantum = haptic_quantum(min, max);
+    (previous / quantum).floor() != (new_value / quantum).floor()
+}
+
+#[cfg(target_os = "macos")]
+pub fn trigger_level_change_haptic() {
+    let performer = NSHapticFeedbackManager::defaultPerformer();
+    performer.performFeedbackPattern_performanceTime(
+        NSHapticFeedbackPattern::LevelChange,
+        NSHapticFeedbackPerformanceTime::Now,
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn trigger_level_change_haptic() {}
 
 // ── Overlay system ───────────────────────────────────────────────────────────
 // Only one overlay (dropdown menu, etc.) can be active at a time.

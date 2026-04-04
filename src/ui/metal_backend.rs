@@ -25,7 +25,7 @@ mod inner {
     };
     use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
     use winit::{
-        dpi::PhysicalSize,
+        dpi::LogicalSize,
         event::{
             ElementState, Event as WEvent, MouseButton as WMouseButton, MouseScrollDelta,
             TouchPhase, WindowEvent,
@@ -609,10 +609,15 @@ fragment float4 waveform_frag(
         last_precise_mouse: Option<(f32, f32)>,
         last_window_bg: Option<Color>,
         start_time: Instant,
+        initial_window_size: LogicalSize<f64>,
     }
 
     impl MetalBackend {
         pub fn new() -> Result<Self, BackendError> {
+            Self::new_with_size(1200, 800)
+        }
+
+        pub fn new_with_size(width: u32, height: u32) -> Result<Self, BackendError> {
             let device = MTLCreateSystemDefaultDevice().ok_or(BackendError::MetalError)?;
             let command_queue = device.newCommandQueue().ok_or(BackendError::MetalError)?;
             let layer = CAMetalLayer::new();
@@ -651,6 +656,7 @@ fragment float4 waveform_frag(
                 last_precise_mouse: None,
                 last_window_bg: None,
                 start_time: Instant::now(),
+                initial_window_size: LogicalSize::new(width as f64, height as f64),
             })
         }
 
@@ -1623,7 +1629,7 @@ fragment float4 waveform_frag(
             let event_loop = EventLoop::new().map_err(|_| BackendError::MetalError)?;
             let window = winit::window::WindowBuilder::new()
                 .with_title("eseqlisp")
-                .with_inner_size(PhysicalSize::new(1200u32, 800u32))
+                .with_inner_size(self.initial_window_size)
                 .build(&event_loop)
                 .map_err(|_| BackendError::MetalError)?;
 
@@ -3117,11 +3123,14 @@ fragment float4 waveform_frag(
         if mods.alt_key() {
             out |= KeyModifiers::ALT;
         }
+        if mods.super_key() {
+            out |= KeyModifiers::SUPER;
+        }
         out
     }
 
     fn translate_key(key: &Key, physical_key: &PhysicalKey, mods: KeyModifiers) -> Option<Event> {
-        let code = if mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
+        let code = if mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER) {
             translate_physical_shortcut_key(physical_key).or_else(|| translate_logical_key(key))?
         } else {
             translate_logical_key(key)?
@@ -3135,7 +3144,7 @@ fragment float4 waveform_frag(
         mods: KeyModifiers,
         state: ElementState,
     ) -> Option<Event> {
-        let code = if mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL) {
+        let code = if mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER) {
             translate_physical_shortcut_key(physical_key).or_else(|| translate_logical_key(key))?
         } else {
             translate_logical_key(key)?

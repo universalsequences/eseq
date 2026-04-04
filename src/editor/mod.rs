@@ -1407,6 +1407,29 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    pub fn reset_widget_scroll_for_buffer_named(&mut self, name: &str) {
+        let Some(buffer_idx) = self.buffers.iter().position(|buffer| buffer.name == name) else {
+            return;
+        };
+        let mut changed = false;
+        for tile_id in self.tile_root.leaf_ids() {
+            let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) else {
+                continue;
+            };
+            if leaf.buffer_idx != buffer_idx {
+                continue;
+            }
+            if leaf.widget_scroll_top != 0.0 || leaf.widget_scroll_left != 0.0 {
+                leaf.widget_scroll_top = 0.0;
+                leaf.widget_scroll_left = 0.0;
+                changed = true;
+            }
+        }
+        if changed {
+            self.mark_needs_redraw();
+        }
+    }
+
     /// Combined vertical scroll: widget scroll + text scroll.
     pub fn total_scroll_top(&self) -> f32 {
         self.widget_scroll_top() + self.active_buffer().scroll_top as f32

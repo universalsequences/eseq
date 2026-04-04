@@ -5,7 +5,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    get_bool_prop, get_f32_prop, resolve_named_color, styled_cell,
+    get_bool_prop, get_f32_prop, resolve_named_color, should_trigger_integer_haptic,
+    styled_cell, trigger_level_change_haptic,
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
@@ -299,6 +300,12 @@ impl WidgetDefinition for NumberPickerWidget {
         let Value::Number(new_value) = value else {
             return None;
         };
+        let previous = get_f32_prop(&node.props, "value", 0.0);
+        let min = get_f32_prop(&node.props, "min", 0.0);
+        let max = get_f32_prop(&node.props, "max", 1.0);
+        if should_trigger_integer_haptic(previous, *new_value as f32, min, max) {
+            trigger_level_change_haptic();
+        }
         let callback = node
             .props
             .get("on-change")

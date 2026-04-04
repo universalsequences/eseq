@@ -1398,6 +1398,7 @@ mod tests {
             &layout,
             crate::widget_render::WidgetViewport {
                 scroll_top: 0.0,
+                scroll_left: 0.0,
                 vp_w: 80.0,
                 vp_h: 24.0,
                 cell_w: 1.0,
