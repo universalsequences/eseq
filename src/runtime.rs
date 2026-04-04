@@ -1,19 +1,22 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::register_audio_natives;
-use crate::buffer::BufferTextStyle;
+use crate::buffer::{BufferTextStyle, CommittedBufferUiSnapshot};
 use crate::host::{BufferId, HostCommand};
 use crate::layout::{
     LayoutEngine, LayoutNode, TextMeasurer, reuse_layout_failure_reason, reuse_layout_node,
     same_layout_geometry,
 };
 use crate::reactive::ReactiveRegistry;
-use crate::vm::{EffectTarget, PendingWidgetTree, VM, Value, register_core_natives};
+use crate::vm::{
+    EffectTarget, PendingUiUpdate, PendingWidgetTree, ReactiveFieldKey, VM, Value,
+    register_core_natives,
+};
 use crate::widgets::register_widget_natives;
 
 pub type RuntimeError = String;
@@ -31,16 +34,55 @@ pub struct RuntimeEvalProfile {
     pub flush_widget_trees: Duration,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ReactiveFlushStats {
+    pub widget_tree_flushes: usize,
+    pub pending_widget_tree_count: usize,
+    pub affected_buffers: Vec<String>,
+    pub active_buffer_targets: usize,
+    pub inactive_buffer_targets: usize,
+    pub full_buffer_reruns: usize,
+    pub subtree_reruns: usize,
+    pub reevaluated_subtree_roots: usize,
+    pub pending_subtree_patch_count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UiInvalidationTrace {
+    pub dirty_fields: Vec<String>,
+    pub affected_buffers: Vec<String>,
+    pub active_buffer_targets: usize,
+    pub inactive_buffer_targets: usize,
+    pub widget_tree_flushes: usize,
+    pub pending_widget_tree_count: usize,
+    pub full_buffer_reruns: usize,
+    pub subtree_reruns: usize,
+    pub reevaluated_subtree_roots: usize,
+    pub pending_subtree_patch_count: usize,
+    pub relayout_mode: Option<String>,
+    pub relayout_failure_reason: Option<String>,
+}
+
 struct RuntimePerfStats {
     enabled: bool,
     window_start: Instant,
     reactive_cycles: u64,
     dirty_updates: u64,
+    affected_buffers: u64,
+    widget_tree_flushes: u64,
+    pending_widget_trees: u64,
+    active_buffer_targets: u64,
+    inactive_buffer_targets: u64,
+    full_buffer_reruns: u64,
+    subtree_reruns: u64,
+    reevaluated_subtree_roots: u64,
+    pending_subtree_patch_count: u64,
     reactive_apply: Duration,
     reactive_flush: Duration,
     reactive_total: Duration,
     relayout_reused: u64,
     relayout_full: u64,
+    relayout_subtree: u64,
     relayout_total: Duration,
     relayout_failures: HashMap<String, u64>,
     reactive_exec: HashMap<String, (u64, Duration)>,
@@ -53,11 +95,21 @@ impl RuntimePerfStats {
             window_start: Instant::now(),
             reactive_cycles: 0,
             dirty_updates: 0,
+            affected_buffers: 0,
+            widget_tree_flushes: 0,
+            pending_widget_trees: 0,
+            active_buffer_targets: 0,
+            inactive_buffer_targets: 0,
+            full_buffer_reruns: 0,
+            subtree_reruns: 0,
+            reevaluated_subtree_roots: 0,
+            pending_subtree_patch_count: 0,
             reactive_apply: Duration::ZERO,
             reactive_flush: Duration::ZERO,
             reactive_total: Duration::ZERO,
             relayout_reused: 0,
             relayout_full: 0,
+            relayout_subtree: 0,
             relayout_total: Duration::ZERO,
             relayout_failures: HashMap::new(),
             reactive_exec: HashMap::new(),
@@ -71,29 +123,46 @@ impl RuntimePerfStats {
         flush: Duration,
         total: Duration,
         exec_timings: Vec<crate::vm::ReactiveExecTiming>,
+        flush_stats: &ReactiveFlushStats,
     ) {
         if !self.enabled {
             return;
         }
         self.reactive_cycles += 1;
         self.dirty_updates += dirty_updates as u64;
+        self.affected_buffers += flush_stats.affected_buffers.len() as u64;
+        self.widget_tree_flushes += flush_stats.widget_tree_flushes as u64;
+        self.pending_widget_trees += flush_stats.pending_widget_tree_count as u64;
+        self.active_buffer_targets += flush_stats.active_buffer_targets as u64;
+        self.inactive_buffer_targets += flush_stats.inactive_buffer_targets as u64;
+        self.full_buffer_reruns += flush_stats.full_buffer_reruns as u64;
+        self.subtree_reruns += flush_stats.subtree_reruns as u64;
+        self.reevaluated_subtree_roots += flush_stats.reevaluated_subtree_roots as u64;
+        self.pending_subtree_patch_count += flush_stats.pending_subtree_patch_count as u64;
         self.reactive_apply += apply;
         self.reactive_flush += flush;
         self.reactive_total += total;
         for timing in exec_timings {
-            let entry = self
-                .reactive_exec
-                .entry(timing.label)
-                .or_insert((0, Duration::ZERO));
+            let key = timing.profile_label();
+            let entry = self.reactive_exec.entry(key).or_insert((0, Duration::ZERO));
             entry.0 += 1;
             entry.1 += timing.elapsed;
         }
         self.maybe_emit();
     }
 
-    fn note_relayout(&mut self, reused: bool, elapsed: Duration, failure_reason: Option<String>) {
+    fn note_relayout(
+        &mut self,
+        reused: bool,
+        subtree_only: bool,
+        elapsed: Duration,
+        failure_reason: Option<String>,
+    ) {
         if !self.enabled {
             return;
+        }
+        if subtree_only {
+            self.relayout_subtree += 1;
         }
         if reused {
             self.relayout_reused += 1;
@@ -133,28 +202,55 @@ impl RuntimePerfStats {
         } else {
             0.0
         };
+        let affected_buffers_per_cycle = if self.reactive_cycles > 0 {
+            self.affected_buffers as f64 / self.reactive_cycles as f64
+        } else {
+            0.0
+        };
+        let flushes_per_cycle = if self.reactive_cycles > 0 {
+            self.widget_tree_flushes as f64 / self.reactive_cycles as f64
+        } else {
+            0.0
+        };
         eprintln!(
-            "[ui-profile][runtime] reactive/s={:.1} dirty/cycle={:.1} apply_avg={apply_avg_ms:.2}ms flush_avg={flush_avg_ms:.2}ms reactive_avg={reactive_avg_ms:.2}ms relayout/s={:.1} relayout_avg={relayout_avg_ms:.2}ms reused={} full={} fail={} hot={}",
+            "[ui-profile][runtime] reactive/s={:.1} dirty/cycle={:.1} buffers/cycle={affected_buffers_per_cycle:.1} flushes/cycle={flushes_per_cycle:.1} apply_avg={apply_avg_ms:.2}ms flush_avg={flush_avg_ms:.2}ms reactive_avg={reactive_avg_ms:.2}ms targets=a{} i{} reruns=full:{} sub:{} roots:{} patches:{} relayout/s={:.1} relayout_avg={relayout_avg_ms:.2}ms reused={} full={} subtree={} fail={} hot={}",
             self.reactive_cycles as f64 / secs,
             if self.reactive_cycles > 0 {
                 self.dirty_updates as f64 / self.reactive_cycles as f64
             } else {
                 0.0
             },
+            self.active_buffer_targets,
+            self.inactive_buffer_targets,
+            self.full_buffer_reruns,
+            self.subtree_reruns,
+            self.reevaluated_subtree_roots,
+            self.pending_subtree_patch_count,
             relayout_calls as f64 / secs,
             self.relayout_reused,
             self.relayout_full,
+            self.relayout_subtree,
             self.top_failure_reason(),
             self.top_reactive_exec(),
         );
         self.window_start = Instant::now();
         self.reactive_cycles = 0;
         self.dirty_updates = 0;
+        self.affected_buffers = 0;
+        self.widget_tree_flushes = 0;
+        self.pending_widget_trees = 0;
+        self.active_buffer_targets = 0;
+        self.inactive_buffer_targets = 0;
+        self.full_buffer_reruns = 0;
+        self.subtree_reruns = 0;
+        self.reevaluated_subtree_roots = 0;
+        self.pending_subtree_patch_count = 0;
         self.reactive_apply = Duration::ZERO;
         self.reactive_flush = Duration::ZERO;
         self.reactive_total = Duration::ZERO;
         self.relayout_reused = 0;
         self.relayout_full = 0;
+        self.relayout_subtree = 0;
         self.relayout_total = Duration::ZERO;
         self.relayout_failures.clear();
         self.reactive_exec.clear();
@@ -451,7 +547,7 @@ pub(crate) struct RuntimeBridgeState {
     pub pending_set_mode_for: Vec<(String, String)>, // (buffer_name, mode_name)
     pub pending_open_file: Option<String>,
     pub pending_widget_tree: Option<Value>,
-    pub pending_buffer_widget_trees: Vec<PendingWidgetTree>,
+    pub pending_buffer_widget_trees: Vec<PendingUiUpdate>,
     pub pending_create_buffer: Option<String>,
     pub pending_cleared_effect_sources: Vec<Option<BufferId>>,
     pub pending_switch_buffer: Option<String>,
@@ -616,11 +712,12 @@ impl NativeContext {
         self.shared
             .borrow_mut()
             .pending_buffer_widget_trees
-            .push(PendingWidgetTree {
+            .push(PendingUiUpdate::FullTree(PendingWidgetTree {
                 source_buffer_id,
                 target: EffectTarget::BufferName(buffer_name),
                 tree: tree.deep_clone(),
-            });
+                reactive_dependencies: Vec::new(),
+            }));
     }
 
     pub fn goto_line(&mut self, line: usize) {
@@ -731,6 +828,7 @@ pub struct Runtime {
     dirty_widget_ids: Vec<u64>,
     force_layout_revision_bump: bool,
     current_widget_tree: Option<Value>,
+    current_committed_ui_snapshot: Option<CommittedBufferUiSnapshot>,
     layout_cols: u16,
     layout_rows: u16,
     layout_aspect: f32,
@@ -738,6 +836,7 @@ pub struct Runtime {
     layout_cell_h: f32,
     text_measurer: Option<Box<dyn TextMeasurer>>,
     perf_stats: RuntimePerfStats,
+    last_ui_invalidation_trace: Option<UiInvalidationTrace>,
 }
 
 impl Default for Runtime {
@@ -769,6 +868,7 @@ impl Runtime {
             dirty_widget_ids: Vec::new(),
             force_layout_revision_bump: false,
             current_widget_tree: None,
+            current_committed_ui_snapshot: None,
             layout_cols: 80,
             layout_rows: 24,
             layout_aspect: 1.0,
@@ -776,6 +876,7 @@ impl Runtime {
             layout_cell_h: 1.0,
             text_measurer: None,
             perf_stats: RuntimePerfStats::new(),
+            last_ui_invalidation_trace: None,
         };
         runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
         crate::theme::set_current(crate::theme::default_theme());
@@ -1229,6 +1330,10 @@ impl Runtime {
         }
 
         let dirty_len = dirty.len();
+        let dirty_fields = dirty
+            .iter()
+            .map(|(namespace, field, _)| format!("{namespace}.{field}"))
+            .collect::<Vec<_>>();
         let apply_started = Instant::now();
         if self.vm.apply_reactive_changes(dirty).is_ok() {
             let apply_elapsed = apply_started.elapsed();
@@ -1236,14 +1341,30 @@ impl Runtime {
             if self.sync_theme_to_global {
                 self.sync_theme_from_vm();
             }
+            self.last_ui_invalidation_trace = Some(UiInvalidationTrace {
+                dirty_fields,
+                ..UiInvalidationTrace::default()
+            });
             let flush_started = Instant::now();
-            self.flush_widget_trees();
+            let flush_stats = self.flush_widget_trees();
+            if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                trace.affected_buffers = flush_stats.affected_buffers.clone();
+                trace.active_buffer_targets = flush_stats.active_buffer_targets;
+                trace.inactive_buffer_targets = flush_stats.inactive_buffer_targets;
+                trace.widget_tree_flushes = flush_stats.widget_tree_flushes;
+                trace.pending_widget_tree_count = flush_stats.pending_widget_tree_count;
+                trace.full_buffer_reruns = flush_stats.full_buffer_reruns;
+                trace.subtree_reruns = flush_stats.subtree_reruns;
+                trace.reevaluated_subtree_roots = flush_stats.reevaluated_subtree_roots;
+                trace.pending_subtree_patch_count = flush_stats.pending_subtree_patch_count;
+            }
             self.perf_stats.note_reactive_cycle(
                 dirty_len,
                 apply_elapsed,
                 flush_started.elapsed(),
                 total_started.elapsed(),
                 exec_timings,
+                &flush_stats,
             );
         }
     }
@@ -1330,6 +1451,10 @@ impl Runtime {
         std::mem::take(&mut self.dirty_widget_ids)
     }
 
+    pub fn last_ui_invalidation_trace(&self) -> Option<UiInvalidationTrace> {
+        self.last_ui_invalidation_trace.clone()
+    }
+
     pub(crate) fn drain_host_commands(&mut self) -> Vec<HostCommand> {
         let mut shared = self.shared.borrow_mut();
         std::mem::take(&mut shared.queued_commands)
@@ -1387,7 +1512,7 @@ impl Runtime {
         self.shared.borrow_mut().pending_widget_tree.take()
     }
 
-    pub(crate) fn take_pending_buffer_widget_trees(&mut self) -> Vec<PendingWidgetTree> {
+    pub(crate) fn take_pending_buffer_widget_trees(&mut self) -> Vec<PendingUiUpdate> {
         std::mem::take(&mut self.shared.borrow_mut().pending_buffer_widget_trees)
     }
 
@@ -1477,6 +1602,20 @@ impl Runtime {
         self.current_widget_tree.clone()
     }
 
+    pub fn current_committed_ui_snapshot(&self) -> Option<CommittedBufferUiSnapshot> {
+        self.current_committed_ui_snapshot.clone()
+    }
+
+    pub fn current_subtree_roots_for_field(&self, namespace: &str, field: &str) -> Vec<u64> {
+        let Some(snapshot) = self.current_committed_ui_snapshot.as_ref() else {
+            return Vec::new();
+        };
+        snapshot.subtree_roots_for_field(&ReactiveFieldKey {
+            namespace: namespace.to_string(),
+            field: field.to_string(),
+        })
+    }
+
     pub fn layout_snapshot_for_tree(&mut self, tree: &Value) -> Option<Arc<LayoutNode>> {
         self.layout_snapshot_for_tree_with_viewport(tree, None)
     }
@@ -1487,6 +1626,7 @@ impl Runtime {
         viewport: Option<(u16, u16)>,
     ) -> Option<Arc<LayoutNode>> {
         let saved_tree = self.current_widget_tree.clone();
+        let saved_committed_snapshot = self.current_committed_ui_snapshot.clone();
         let saved_layout = self.current_layout.clone();
         let saved_revision = self.layout_revision;
         let saved_dirty = self.dirty_widget_ids.clone();
@@ -1506,10 +1646,13 @@ impl Runtime {
         // both relayout work and profiling noise.
         self.current_layout = None;
         self.current_widget_tree = Some(tree.deep_clone());
+        self.current_committed_ui_snapshot =
+            Some(CommittedBufferUiSnapshot::from_tree(tree.deep_clone(), None, Vec::new()));
         self.relayout_current_tree();
         let snapshot = self.current_layout.clone();
 
         self.current_widget_tree = saved_tree;
+        self.current_committed_ui_snapshot = saved_committed_snapshot;
         self.current_layout = saved_layout;
         self.layout_revision = saved_revision;
         self.dirty_widget_ids = saved_dirty;
@@ -1527,6 +1670,7 @@ impl Runtime {
     /// Used when switching to a buffer/tile that has no widget tree.
     pub fn clear_current_widget_tree(&mut self) {
         self.current_widget_tree = None;
+        self.current_committed_ui_snapshot = None;
         self.current_layout = None;
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
@@ -1547,6 +1691,12 @@ impl Runtime {
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
         self.current_widget_tree = Some(tree.deep_clone());
+        self.current_committed_ui_snapshot =
+            Some(CommittedBufferUiSnapshot::from_tree(
+                tree.deep_clone(),
+                self.shared.borrow().current_buffer_id,
+                Vec::new(),
+            ));
         self.relayout_current_tree();
     }
 
@@ -1554,9 +1704,53 @@ impl Runtime {
     /// without clearing reactive effects.
     pub fn restore_widget_tree(&mut self, tree: Value) {
         self.current_widget_tree = Some(tree.deep_clone());
+        self.current_committed_ui_snapshot =
+            Some(CommittedBufferUiSnapshot::from_tree(
+                tree.deep_clone(),
+                self.shared.borrow().current_buffer_id,
+                Vec::new(),
+            ));
         self.relayout_current_tree();
         // Force layout revision bump so GPU caches rebuild
         self.layout_revision = self.layout_revision.wrapping_add(1);
+    }
+
+    pub fn replace_current_subtree(
+        &mut self,
+        subtree_root_id: u64,
+        tree: Value,
+        reactive_dependencies: Vec<ReactiveFieldKey>,
+    ) -> bool {
+        let Some(snapshot) = self.current_committed_ui_snapshot.clone() else {
+            return false;
+        };
+        let Some(merged) = snapshot.replacing_subtree(subtree_root_id, tree, reactive_dependencies)
+        else {
+            return false;
+        };
+        self.current_widget_tree = Some(merged.tree.deep_clone());
+        self.current_committed_ui_snapshot = Some(merged);
+        self.relayout_current_tree();
+        self.layout_revision = self.layout_revision.wrapping_add(1);
+        true
+    }
+
+    pub(crate) fn try_upgrade_full_tree_to_current_subtree(
+        &mut self,
+        pending: &PendingWidgetTree,
+    ) -> bool {
+        let Some(snapshot) = self.current_committed_ui_snapshot.as_ref() else {
+            return false;
+        };
+        let Some(subtree_root_id) = snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
+        else {
+            return false;
+        };
+        self.replace_current_subtree(
+            subtree_root_id,
+            pending.tree.deep_clone(),
+            pending.reactive_dependencies.clone(),
+        )
     }
 
     pub fn clear_layout_effects(&mut self) {
@@ -1570,29 +1764,79 @@ impl Runtime {
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
         self.current_widget_tree = None;
+        self.current_committed_ui_snapshot = None;
         #[cfg(test)]
         self.rendered_layouts.clear();
     }
 
-    fn flush_widget_trees(&mut self) {
+    fn flush_widget_trees(&mut self) -> ReactiveFlushStats {
         let trees = std::mem::take(&mut self.vm.pending_widget_trees);
+        let pending_widget_tree_count = trees.len();
         let (current_buffer_id, current_buffer_name) = {
             let shared = self.shared.borrow();
             (shared.current_buffer_id, shared.current_buffer_name.clone())
         };
+        let mut affected_buffers = HashSet::new();
+        let mut active_buffer_targets = 0usize;
+        let mut inactive_buffer_targets = 0usize;
+        let mut full_buffer_reruns = 0usize;
+        let mut subtree_reruns = 0usize;
+        let mut reevaluated_subtree_roots = 0usize;
+        let mut pending_subtree_patch_count = 0usize;
         for pending in &trees {
-            let targets_active_buffer = match &pending.target {
+            affected_buffers.insert(effect_target_label(pending.target()));
+            let targets_active_buffer = match pending.target() {
                 EffectTarget::BufferId(id) => *id == current_buffer_id,
                 EffectTarget::BufferName(name) => *name == current_buffer_name,
             };
             if targets_active_buffer {
-                let unchanged = self
-                    .current_widget_tree
-                    .as_ref()
-                    .is_some_and(|current| *current == pending.tree);
-                if !unchanged {
-                    self.current_widget_tree = Some(pending.tree.deep_clone());
-                    self.relayout_current_tree();
+                active_buffer_targets += 1;
+                match pending {
+                    PendingUiUpdate::FullTree(pending) => {
+                        if self.try_upgrade_full_tree_to_current_subtree(pending) {
+                            subtree_reruns += 1;
+                            reevaluated_subtree_roots += 1;
+                            pending_subtree_patch_count += 1;
+                        } else {
+                            full_buffer_reruns += 1;
+                            let unchanged = self
+                                .current_widget_tree
+                                .as_ref()
+                                .is_some_and(|current| *current == pending.tree);
+                            if !unchanged {
+                                self.current_widget_tree = Some(pending.tree.deep_clone());
+                                self.current_committed_ui_snapshot =
+                                    Some(CommittedBufferUiSnapshot::from_tree(
+                                        pending.tree.deep_clone(),
+                                        pending.source_buffer_id,
+                                        pending.reactive_dependencies.clone(),
+                                    ));
+                                self.relayout_current_tree();
+                            }
+                        }
+                    }
+                    PendingUiUpdate::ReplaceSubtree {
+                        subtree_root_id,
+                        tree,
+                        reactive_dependencies,
+                        ..
+                    } => {
+                        let merged = self.replace_current_subtree(
+                            *subtree_root_id,
+                            tree.deep_clone(),
+                            reactive_dependencies.clone(),
+                        );
+                        if merged {
+                            subtree_reruns += 1;
+                            reevaluated_subtree_roots += 1;
+                            pending_subtree_patch_count += 1;
+                        }
+                    }
+                }
+            } else {
+                inactive_buffer_targets += 1;
+                if matches!(pending, PendingUiUpdate::FullTree(_)) {
+                    full_buffer_reruns += 1;
                 }
             }
         }
@@ -1600,6 +1844,19 @@ impl Runtime {
             .borrow_mut()
             .pending_buffer_widget_trees
             .extend(trees);
+        let mut affected_buffers = affected_buffers.into_iter().collect::<Vec<_>>();
+        affected_buffers.sort();
+        ReactiveFlushStats {
+            widget_tree_flushes: pending_widget_tree_count,
+            pending_widget_tree_count,
+            affected_buffers,
+            active_buffer_targets,
+            inactive_buffer_targets,
+            full_buffer_reruns,
+            subtree_reruns,
+            reevaluated_subtree_roots,
+            pending_subtree_patch_count,
+        }
     }
 
     fn relayout_current_tree(&mut self) {
@@ -1611,8 +1868,9 @@ impl Runtime {
             if had_layout {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
+            self.update_last_trace_relayout("clear", None);
             self.perf_stats
-                .note_relayout(true, relayout_started.elapsed(), None);
+                .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
         };
         let mut dirty_widget_ids = Vec::new();
@@ -1632,8 +1890,9 @@ impl Runtime {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
             }
             self.force_layout_revision_bump = false;
+            self.update_last_trace_relayout("reuse", None);
             self.perf_stats
-                .note_relayout(true, relayout_started.elapsed(), None);
+                .note_relayout(true, false, relayout_started.elapsed(), None);
             return;
         }
         let engine = if let Some(measurer) = self.text_measurer.as_deref() {
@@ -1667,8 +1926,16 @@ impl Runtime {
                 self.dirty_widget_ids = collect_shader_widget_ids(layout);
             }
             self.force_layout_revision_bump = false;
+            self.update_last_trace_relayout("full", failure_reason.clone());
             self.perf_stats
-                .note_relayout(false, relayout_started.elapsed(), failure_reason);
+                .note_relayout(false, false, relayout_started.elapsed(), failure_reason);
+        }
+    }
+
+    fn update_last_trace_relayout(&mut self, mode: &str, failure_reason: Option<String>) {
+        if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+            trace.relayout_mode = Some(mode.to_string());
+            trace.relayout_failure_reason = failure_reason;
         }
     }
 
@@ -1683,6 +1950,14 @@ fn collect_shader_widget_ids(node: &LayoutNode) -> Vec<u64> {
     let mut ids = Vec::new();
     collect_shader_widget_ids_recursive(node, &mut ids);
     ids
+}
+
+fn effect_target_label(target: &EffectTarget) -> String {
+    match target {
+        EffectTarget::BufferId(Some(id)) => format!("buf#{id}"),
+        EffectTarget::BufferId(None) => "active-buffer".to_string(),
+        EffectTarget::BufferName(name) => name.clone(),
+    }
 }
 
 fn collect_shader_widget_ids_recursive(node: &LayoutNode, ids: &mut Vec<u64>) {

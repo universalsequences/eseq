@@ -23,7 +23,7 @@ use crate::mode::{
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{HighlightCache, SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
-use crate::vm::{EffectTarget, Value, format_lisp_value};
+use crate::vm::{EffectTarget, PendingUiUpdate, Value, format_lisp_value};
 use commands::key_str;
 use natives::register_editor_natives;
 
@@ -2920,27 +2920,107 @@ impl Editor {
         }
 
         for pending in self.runtime.take_pending_buffer_widget_trees() {
-            let buffer_idx = match pending.target {
-                EffectTarget::BufferId(Some(id)) => {
-                    let Some(idx) = self.buffers.iter().position(|buffer| buffer.id == id) else {
-                        continue;
+            match pending {
+                PendingUiUpdate::FullTree(pending) => {
+                    let buffer_idx = match pending.target {
+                        EffectTarget::BufferId(Some(id)) => {
+                            let Some(idx) =
+                                self.buffers.iter().position(|buffer| buffer.id == id)
+                            else {
+                                continue;
+                            };
+                            idx
+                        }
+                        EffectTarget::BufferId(None) => self.active_buffer_idx(),
+                        EffectTarget::BufferName(ref name) => {
+                            self.ensure_scratch_buffer_named(name)
+                        }
                     };
-                    idx
+                    let is_active = self.active_buffer_idx() == buffer_idx;
+                    let upgraded_subtree = self.buffers[buffer_idx]
+                        .committed_ui_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| {
+                            snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
+                        })
+                        .is_some_and(|subtree_root_id| {
+                            self.buffers[buffer_idx].replace_widget_subtree(
+                                subtree_root_id,
+                                pending.tree.deep_clone(),
+                                pending.source_buffer_id,
+                                pending.reactive_dependencies.clone(),
+                            )
+                        });
+                    if upgraded_subtree {
+                        self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
+                        if is_active {
+                            crate::widget_render::clear_overlay();
+                            let _ = self
+                                .runtime
+                                .try_upgrade_full_tree_to_current_subtree(&pending);
+                            self.auto_focus_first_widget();
+                        } else {
+                            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+                        }
+                    } else if is_active {
+                        crate::widget_render::clear_overlay();
+                        let buffer = &mut self.buffers[buffer_idx];
+                        buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
+                        buffer.view_mode = ViewMode::UiOnly;
+                    } else {
+                        self.apply_widget_tree_to_buffer(
+                            buffer_idx,
+                            pending.source_buffer_id,
+                            Some(pending.tree),
+                        );
+                    }
                 }
-                EffectTarget::BufferId(None) => self.active_buffer_idx(),
-                EffectTarget::BufferName(name) => self.ensure_scratch_buffer_named(&name),
-            };
-            if self.active_buffer_idx() == buffer_idx {
-                crate::widget_render::clear_overlay();
-                let buffer = &mut self.buffers[buffer_idx];
-                buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
-                buffer.view_mode = ViewMode::UiOnly;
-            } else {
-                self.apply_widget_tree_to_buffer(
-                    buffer_idx,
-                    pending.source_buffer_id,
-                    Some(pending.tree),
-                );
+                PendingUiUpdate::ReplaceSubtree {
+                    source_buffer_id,
+                    target,
+                    subtree_root_id,
+                    tree,
+                    reactive_dependencies,
+                } => {
+                    let buffer_idx = match target {
+                        EffectTarget::BufferId(Some(id)) => {
+                            let Some(idx) = self.buffers.iter().position(|buffer| buffer.id == id)
+                            else {
+                                continue;
+                            };
+                            idx
+                        }
+                        EffectTarget::BufferId(None) => self.active_buffer_idx(),
+                        EffectTarget::BufferName(name) => self.ensure_scratch_buffer_named(&name),
+                    };
+                    let is_active = self.active_buffer_idx() == buffer_idx;
+                    let replaced = {
+                        let buffer = &mut self.buffers[buffer_idx];
+                        let replaced = buffer.replace_widget_subtree(
+                            subtree_root_id,
+                            tree.deep_clone(),
+                            source_buffer_id,
+                            reactive_dependencies.clone(),
+                        );
+                        if replaced {
+                            buffer.view_mode = ViewMode::UiOnly;
+                        }
+                        replaced
+                    };
+                    if replaced {
+                        if is_active {
+                            crate::widget_render::clear_overlay();
+                            let _ = self.runtime.replace_current_subtree(
+                                subtree_root_id,
+                                tree,
+                                reactive_dependencies,
+                            );
+                            self.auto_focus_first_widget();
+                        } else {
+                            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+                        }
+                    }
+                }
             }
         }
 

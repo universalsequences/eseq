@@ -3,6 +3,8 @@ use crate::host::BufferId;
 use crate::parser::{ASTParser, Parser};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -30,6 +32,12 @@ pub type NodeId = u32;
 pub enum ReactiveSource {
     NamespaceField { namespace: String, field: String },
     LocalState { name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ReactiveFieldKey {
+    pub namespace: String,
+    pub field: String,
 }
 
 pub enum Value {
@@ -70,7 +78,7 @@ pub enum ReactiveNode {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EffectTarget {
     BufferId(Option<BufferId>),
     BufferName(String),
@@ -89,13 +97,71 @@ pub struct PendingWidgetTree {
     pub source_buffer_id: Option<BufferId>,
     pub target: EffectTarget,
     pub tree: Value,
+    pub reactive_dependencies: Vec<ReactiveFieldKey>,
+}
+
+#[derive(Clone)]
+pub enum PendingUiUpdate {
+    FullTree(PendingWidgetTree),
+    ReplaceSubtree {
+        source_buffer_id: Option<BufferId>,
+        target: EffectTarget,
+        subtree_root_id: u64,
+        tree: Value,
+        reactive_dependencies: Vec<ReactiveFieldKey>,
+    },
+}
+
+impl PendingUiUpdate {
+    pub fn source_buffer_id(&self) -> Option<BufferId> {
+        match self {
+            PendingUiUpdate::FullTree(pending) => pending.source_buffer_id,
+            PendingUiUpdate::ReplaceSubtree {
+                source_buffer_id, ..
+            } => *source_buffer_id,
+        }
+    }
+
+    pub fn target(&self) -> &EffectTarget {
+        match self {
+            PendingUiUpdate::FullTree(pending) => &pending.target,
+            PendingUiUpdate::ReplaceSubtree { target, .. } => target,
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct ReactiveExecTiming {
     pub label: String,
     pub elapsed: Duration,
+    pub source_buffer_id: Option<BufferId>,
+    pub target: EffectTarget,
+    pub subtree_root_id: Option<u64>,
 }
+
+impl ReactiveExecTiming {
+    pub fn profile_label(&self) -> String {
+        let owner = self
+            .source_buffer_id
+            .map(|id| format!("owner:buf#{id}"))
+            .unwrap_or_else(|| "owner:none".to_string());
+        let target = match &self.target {
+            EffectTarget::BufferId(Some(id)) => format!("target:buf#{id}"),
+            EffectTarget::BufferId(None) => "target:active-buffer".to_string(),
+            EffectTarget::BufferName(name) => format!("target:{name}"),
+        };
+        let subtree = self
+            .subtree_root_id
+            .map(|id| format!("root:{id}"))
+            .unwrap_or_else(|| "root:-".to_string());
+        format!("{}|{}|{}|{}", self.label, owner, target, subtree)
+    }
+}
+
+const STABLE_WIDGET_ID_PROP: &str = "__stable-widget-id";
+const SUBTREE_ROOT_ID_PROP: &str = "__subtree-root-id";
+const PARENT_SUBTREE_ROOT_ID_PROP: &str = "__parent-subtree-root-id";
+const STABLE_KEY_PROP: &str = "__stable-key";
 
 pub struct ReactiveDag {
     pub nodes: HashMap<NodeId, ReactiveNode>,
@@ -395,6 +461,114 @@ impl Value {
     }
 }
 
+fn stable_key_value(map: &HashMap<String, Rc<RefCell<Value>>>) -> Option<String> {
+    map.get("key").and_then(|value| match &*value.borrow() {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Keyword(s) => Some(format!(":{s}")),
+        Value::Symbol(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+fn stable_widget_hash(
+    source_buffer_id: Option<BufferId>,
+    target: &EffectTarget,
+    widget_type: &str,
+    path: &[usize],
+    key: Option<&str>,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    source_buffer_id.hash(&mut hasher);
+    target.hash(&mut hasher);
+    widget_type.hash(&mut hasher);
+    path.hash(&mut hasher);
+    key.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn annotate_widget_tree_stable_ids(
+    value: &Value,
+    source_buffer_id: Option<BufferId>,
+    target: &EffectTarget,
+    parent_stable_id: Option<u64>,
+    path: &mut Vec<usize>,
+) -> Value {
+    let Value::Map(map) = value else {
+        return value.deep_clone();
+    };
+    let Some(widget_type) = map.get("type").and_then(|value| match &*value.borrow() {
+        Value::Keyword(widget_type) => Some(widget_type.clone()),
+        Value::String(widget_type) => Some(widget_type.clone()),
+        _ => None,
+    }) else {
+        return value.deep_clone();
+    };
+
+    let key = stable_key_value(map);
+    let stable_id = stable_widget_hash(
+        source_buffer_id,
+        target,
+        &widget_type,
+        path,
+        key.as_deref(),
+    );
+    let mut annotated = HashMap::new();
+
+    for (name, child) in map {
+        if name == "children" {
+            let annotated_children = match &*child.borrow() {
+                Value::List(children) => Value::List(
+                    children
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, child)| {
+                            path.push(idx);
+                            let annotated_child = annotate_widget_tree_stable_ids(
+                                &child.borrow(),
+                                source_buffer_id,
+                                target,
+                                Some(stable_id),
+                                path,
+                            );
+                            path.pop();
+                            Rc::new(RefCell::new(annotated_child))
+                        })
+                        .collect(),
+                ),
+                other => other.deep_clone(),
+            };
+            annotated.insert(name.clone(), Rc::new(RefCell::new(annotated_children)));
+        } else {
+            annotated.insert(name.clone(), Rc::new(RefCell::new(child.borrow().deep_clone())));
+        }
+    }
+
+    annotated.insert(
+        STABLE_WIDGET_ID_PROP.to_string(),
+        Rc::new(RefCell::new(Value::Number(stable_id as f64))),
+    );
+    annotated.insert(
+        SUBTREE_ROOT_ID_PROP.to_string(),
+        Rc::new(RefCell::new(Value::Number(stable_id as f64))),
+    );
+    if let Some(parent_id) = parent_stable_id {
+        annotated.insert(
+            PARENT_SUBTREE_ROOT_ID_PROP.to_string(),
+            Rc::new(RefCell::new(Value::Number(parent_id as f64))),
+        );
+    }
+    if let Some(key) = key {
+        annotated.insert(
+            STABLE_KEY_PROP.to_string(),
+            Rc::new(RefCell::new(Value::String(key))),
+        );
+    }
+
+    Value::Map(annotated)
+}
+
 struct Frame {
     locals: Vec<Option<Rc<RefCell<Value>>>>,
     upvalues: Vec<Rc<RefCell<Value>>>,
@@ -407,7 +581,7 @@ pub struct VM {
     current_chunk: usize,
     globals: Vec<Option<Rc<RefCell<Value>>>>,
     pub global_names: Vec<String>,
-    pub pending_widget_trees: Vec<PendingWidgetTree>,
+    pub pending_widget_trees: Vec<PendingUiUpdate>,
     pub dag: ReactiveDag,
     tracking_stack: Vec<NodeId>,
     pub reactive_namespaces: HashSet<String>,
@@ -419,6 +593,7 @@ pub struct VM {
     reactive_exec_timings: Vec<ReactiveExecTiming>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
+    current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
     pub macros: HashMap<String, MacroDef>,
 }
 
@@ -1209,6 +1384,7 @@ impl VM {
             reactive_exec_timings: Vec::new(),
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
+            current_effect_reactive_reads: None,
             macros: HashMap::new(),
         }
     }
@@ -1378,7 +1554,7 @@ impl VM {
             self.dag.remove_node(id);
         }
         self.pending_widget_trees
-            .retain(|pending| pending.source_buffer_id != owner_buffer_id);
+            .retain(|pending| pending.source_buffer_id() != owner_buffer_id);
     }
 
     pub fn set_current_effect_context(&mut self, source_buffer_id: Option<BufferId>) {
@@ -1388,6 +1564,25 @@ impl VM {
 
     pub fn take_reactive_exec_timings(&mut self) -> Vec<ReactiveExecTiming> {
         std::mem::take(&mut self.reactive_exec_timings)
+    }
+
+    fn record_reactive_read(&mut self, namespace: &str, field: &str) {
+        if let Some(reads) = self.current_effect_reactive_reads.as_mut() {
+            reads.insert(ReactiveFieldKey {
+                namespace: namespace.to_string(),
+                field: field.to_string(),
+            });
+        }
+    }
+
+    fn sorted_current_reactive_reads(&self) -> Vec<ReactiveFieldKey> {
+        let mut reads = self
+            .current_effect_reactive_reads
+            .as_ref()
+            .map(|reads| reads.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        reads.sort();
+        reads
     }
 
     fn reactive_node_label(&self, node_id: NodeId) -> Option<String> {
@@ -1623,15 +1818,47 @@ impl VM {
                         self.current_effect_source_buffer_id = *source_buffer_id;
                         self.current_effect_target = target.clone();
                     }
+                    let pending_trees_start = self.pending_widget_trees.len();
+                    let previous_reactive_reads = self.current_effect_reactive_reads.take();
+                    let capturing_effect_reads =
+                        matches!(self.dag.nodes.get(&node_id), Some(ReactiveNode::Effect { .. }));
+                    if capturing_effect_reads {
+                        self.current_effect_reactive_reads = Some(HashSet::new());
+                    }
                     let label = self.reactive_node_label(node_id);
                     let started = Instant::now();
                     self.execute_from(chunk_idx)?;
+                    let captured_reactive_reads = if capturing_effect_reads {
+                        self.sorted_current_reactive_reads()
+                    } else {
+                        Vec::new()
+                    };
+                    if capturing_effect_reads {
+                        for pending in self.pending_widget_trees.iter_mut().skip(pending_trees_start) {
+                            match pending {
+                                PendingUiUpdate::FullTree(pending) => {
+                                    pending.reactive_dependencies =
+                                        captured_reactive_reads.clone();
+                                }
+                                PendingUiUpdate::ReplaceSubtree {
+                                    reactive_dependencies,
+                                    ..
+                                } => {
+                                    *reactive_dependencies = captured_reactive_reads.clone();
+                                }
+                            }
+                        }
+                    }
                     if let Some(label) = label {
                         self.reactive_exec_timings.push(ReactiveExecTiming {
                             label,
                             elapsed: started.elapsed(),
+                            source_buffer_id: self.current_effect_source_buffer_id,
+                            target: self.current_effect_target.clone(),
+                            subtree_root_id: None,
                         });
                     }
+                    self.current_effect_reactive_reads = previous_reactive_reads;
                     self.current_effect_source_buffer_id = previous_owner.0;
                     self.current_effect_target = previous_owner.1;
                 }
@@ -2151,6 +2378,7 @@ impl VM {
                 OpCode::LoadReactive(ns_idx, field_idx) => {
                     let namespace = self.chunks[self.current_chunk].strings[ns_idx].clone();
                     let field = self.chunks[self.current_chunk].strings[field_idx].clone();
+                    self.record_reactive_read(&namespace, &field);
                     let Some(global_idx) =
                         self.global_names.iter().position(|name| name == &namespace)
                     else {
@@ -2294,11 +2522,20 @@ impl VM {
                 }
                 OpCode::EmitTree => match stack.pop() {
                     Some(tree) => {
-                        self.pending_widget_trees.push(PendingWidgetTree {
+                        let mut path = Vec::new();
+                        let annotated_tree = annotate_widget_tree_stable_ids(
+                            &tree.borrow(),
+                            self.current_effect_source_buffer_id,
+                            &self.current_effect_target,
+                            None,
+                            &mut path,
+                        );
+                        self.pending_widget_trees.push(PendingUiUpdate::FullTree(PendingWidgetTree {
                             source_buffer_id: self.current_effect_source_buffer_id,
                             target: self.current_effect_target.clone(),
-                            tree: tree.borrow().deep_clone(),
-                        });
+                            tree: annotated_tree,
+                            reactive_dependencies: Vec::new(),
+                        }));
                         frames.last_mut().unwrap().pc += 1;
                     }
                     None => return Err(VMError::StackUnderflow),

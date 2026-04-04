@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::backend::Color;
@@ -6,7 +7,7 @@ use crate::editor::ViewMode;
 use crate::host::BufferId;
 use crate::mode::BufferMode;
 use crate::text::sexp_range_at_cursor;
-use crate::vm::Value;
+use crate::vm::{ReactiveFieldKey, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BufferTextStyle {
@@ -18,6 +19,30 @@ pub struct BufferTextStyle {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
     pub bold: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommittedSubtreeSnapshot {
+    pub stable_widget_id: Option<u64>,
+    pub subtree_root_id: Option<u64>,
+    pub parent_subtree_root_id: Option<u64>,
+    pub stable_key: Option<String>,
+    pub widget_type: Option<String>,
+    pub reactive_dependencies: Vec<ReactiveFieldKey>,
+    pub tree: Value,
+    pub children: Vec<CommittedSubtreeSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommittedBufferUiSnapshot {
+    pub source_buffer_id: Option<BufferId>,
+    pub tree: Value,
+    pub root_stable_widget_id: Option<u64>,
+    pub root_subtree_root_id: Option<u64>,
+    pub field_to_subtree_roots: HashMap<ReactiveFieldKey, Vec<u64>>,
+    pub subtree_root_dependencies: HashMap<u64, Vec<ReactiveFieldKey>>,
+    pub subtree_roots: HashMap<u64, CommittedSubtreeSnapshot>,
+    pub widgets: HashMap<u64, CommittedSubtreeSnapshot>,
 }
 
 pub struct Buffer {
@@ -38,6 +63,8 @@ pub struct Buffer {
     pub widget_tree: Option<Value>,
     pub widget_tree_source: Option<BufferId>,
     pub widget_tree_revision: u64,
+    pub committed_ui_snapshot: Option<CommittedBufferUiSnapshot>,
+    pub committed_ui_revision: u64,
     pub view_mode: ViewMode,
     pub text_styles: Vec<BufferTextStyle>,
 }
@@ -58,6 +85,8 @@ impl Buffer {
             widget_tree: None,
             widget_tree_source: None,
             widget_tree_revision: 0,
+            committed_ui_snapshot: None,
+            committed_ui_revision: 0,
             view_mode: ViewMode::Both,
             text_styles: Vec::new(),
         }
@@ -123,9 +152,63 @@ impl Buffer {
         if tree_unchanged && source_unchanged {
             return;
         }
-        self.widget_tree = tree.map(|tree| tree.deep_clone());
+        self.widget_tree = tree.as_ref().map(Value::deep_clone);
         self.widget_tree_source = source;
         self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
+        self.set_committed_ui_snapshot(
+            tree.map(|tree| CommittedBufferUiSnapshot::from_tree(tree, source, Vec::new())),
+        );
+    }
+
+    pub fn set_committed_ui_snapshot(&mut self, snapshot: Option<CommittedBufferUiSnapshot>) {
+        if self.committed_ui_snapshot == snapshot {
+            return;
+        }
+        self.committed_ui_snapshot = snapshot;
+        self.committed_ui_revision = self.committed_ui_revision.wrapping_add(1);
+    }
+
+    pub fn clear_committed_ui_snapshot(&mut self) {
+        self.set_committed_ui_snapshot(None);
+    }
+
+    pub fn replace_widget_subtree(
+        &mut self,
+        subtree_root_id: u64,
+        tree: Value,
+        source: Option<BufferId>,
+        reactive_dependencies: Vec<ReactiveFieldKey>,
+    ) -> bool {
+        let Some(snapshot) = self.committed_ui_snapshot.clone() else {
+            return false;
+        };
+        let Some(merged) = snapshot.replacing_subtree(
+            subtree_root_id,
+            tree,
+            reactive_dependencies,
+        ) else {
+            return false;
+        };
+        self.widget_tree = Some(merged.tree.deep_clone());
+        self.widget_tree_source = source.or(merged.source_buffer_id);
+        self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
+        self.set_committed_ui_snapshot(Some(merged));
+        true
+    }
+
+    pub fn replace_committed_subtree(&mut self, subtree: CommittedSubtreeSnapshot) {
+        let Some(root_id) = subtree.subtree_root_id else {
+            return;
+        };
+        let replaced = self.replace_widget_subtree(
+            root_id,
+            subtree.tree,
+            self.widget_tree_source,
+            subtree.reactive_dependencies,
+        );
+        if !replaced {
+            return;
+        }
     }
 
     pub fn save(&mut self) -> std::io::Result<PathBuf> {
@@ -576,6 +659,315 @@ impl Buffer {
     }
 }
 
+impl CommittedBufferUiSnapshot {
+    pub fn from_tree(
+        tree: Value,
+        source_buffer_id: Option<BufferId>,
+        reactive_dependencies: Vec<ReactiveFieldKey>,
+    ) -> Self {
+        let root = CommittedSubtreeSnapshot::from_tree(tree.deep_clone(), &reactive_dependencies);
+        let mut subtree_roots = HashMap::new();
+        let mut widgets = HashMap::new();
+        let mut field_to_subtree_roots = HashMap::new();
+        let mut subtree_root_dependencies = HashMap::new();
+        root.collect_indexes(
+            &mut subtree_roots,
+            &mut widgets,
+            &mut field_to_subtree_roots,
+            &mut subtree_root_dependencies,
+        );
+        Self {
+            source_buffer_id,
+            tree,
+            root_stable_widget_id: root.stable_widget_id,
+            root_subtree_root_id: root.subtree_root_id,
+            field_to_subtree_roots,
+            subtree_root_dependencies,
+            subtree_roots,
+            widgets,
+        }
+    }
+
+    pub fn subtree_roots_for_field(&self, field: &ReactiveFieldKey) -> Vec<u64> {
+        self.field_to_subtree_roots
+            .get(field)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn dependencies_for_subtree_root(&self, root_id: u64) -> Vec<ReactiveFieldKey> {
+        self.subtree_root_dependencies
+            .get(&root_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn matching_non_root_subtree_root_id_for_tree(&self, tree: &Value) -> Option<u64> {
+        let subtree_root_id = root_subtree_root_id(tree)?;
+        (Some(subtree_root_id) != self.root_subtree_root_id
+            && self.subtree_roots.contains_key(&subtree_root_id))
+        .then_some(subtree_root_id)
+    }
+
+    pub fn replacing_subtree(
+        &self,
+        subtree_root_id: u64,
+        replacement_tree: Value,
+        reactive_dependencies: Vec<ReactiveFieldKey>,
+    ) -> Option<Self> {
+        if !self.subtree_roots.contains_key(&subtree_root_id) {
+            return None;
+        }
+        let replacement_root_id = value_map(&replacement_tree)
+            .as_ref()
+            .and_then(|map| prop_u64(map, "__subtree-root-id"))?;
+        if replacement_root_id != subtree_root_id {
+            return None;
+        }
+
+        let merged_tree = replace_subtree_in_value(
+            &self.tree,
+            subtree_root_id,
+            &replacement_tree,
+        )?;
+        let mut dependency_lookup = self.subtree_root_dependencies.clone();
+        for root_id in collect_subtree_root_ids(&replacement_tree) {
+            dependency_lookup.insert(root_id, reactive_dependencies.clone());
+        }
+        Some(Self::from_tree_with_dependency_lookup(
+            merged_tree,
+            self.source_buffer_id,
+            &dependency_lookup,
+        ))
+    }
+
+    fn from_tree_with_dependency_lookup(
+        tree: Value,
+        source_buffer_id: Option<BufferId>,
+        dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
+    ) -> Self {
+        let root = CommittedSubtreeSnapshot::from_tree_with_dependency_lookup(
+            tree.deep_clone(),
+            &[],
+            dependency_lookup,
+        );
+        let mut subtree_roots = HashMap::new();
+        let mut widgets = HashMap::new();
+        let mut field_to_subtree_roots = HashMap::new();
+        let mut subtree_root_dependencies = HashMap::new();
+        root.collect_indexes(
+            &mut subtree_roots,
+            &mut widgets,
+            &mut field_to_subtree_roots,
+            &mut subtree_root_dependencies,
+        );
+        Self {
+            source_buffer_id,
+            tree,
+            root_stable_widget_id: root.stable_widget_id,
+            root_subtree_root_id: root.subtree_root_id,
+            field_to_subtree_roots,
+            subtree_root_dependencies,
+            subtree_roots,
+            widgets,
+        }
+    }
+}
+
+impl CommittedSubtreeSnapshot {
+    pub fn from_tree(tree: Value, reactive_dependencies: &[ReactiveFieldKey]) -> Self {
+        Self::from_tree_with_dependency_lookup(tree, reactive_dependencies, &HashMap::new())
+    }
+
+    fn from_tree_with_dependency_lookup(
+        tree: Value,
+        reactive_dependencies: &[ReactiveFieldKey],
+        dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
+    ) -> Self {
+        let map = value_map(&tree);
+        let stable_widget_id = map
+            .as_ref()
+            .and_then(|map| prop_u64(map, "__stable-widget-id"));
+        let subtree_root_id = map
+            .as_ref()
+            .and_then(|map| prop_u64(map, "__subtree-root-id"));
+        let parent_subtree_root_id = map
+            .as_ref()
+            .and_then(|map| prop_u64(map, "__parent-subtree-root-id"));
+        let stable_key = map
+            .as_ref()
+            .and_then(|map| prop_string(map, "__stable-key"));
+        let widget_type = map
+            .as_ref()
+            .and_then(|map| prop_widget_type(map));
+        let subtree_dependencies = subtree_root_id
+            .and_then(|root_id| dependency_lookup.get(&root_id).cloned())
+            .unwrap_or_else(|| reactive_dependencies.to_vec());
+        let children = value_children(&tree)
+            .into_iter()
+            .map(|child| {
+                Self::from_tree_with_dependency_lookup(
+                    child,
+                    reactive_dependencies,
+                    dependency_lookup,
+                )
+            })
+            .collect();
+        Self {
+            stable_widget_id,
+            subtree_root_id,
+            parent_subtree_root_id,
+            stable_key,
+            widget_type,
+            reactive_dependencies: subtree_dependencies,
+            tree,
+            children,
+        }
+    }
+
+    fn collect_indexes(
+        &self,
+        subtree_roots: &mut HashMap<u64, CommittedSubtreeSnapshot>,
+        widgets: &mut HashMap<u64, CommittedSubtreeSnapshot>,
+        field_to_subtree_roots: &mut HashMap<ReactiveFieldKey, Vec<u64>>,
+        subtree_root_dependencies: &mut HashMap<u64, Vec<ReactiveFieldKey>>,
+    ) {
+        if let Some(root_id) = self.subtree_root_id {
+            subtree_roots.insert(root_id, self.clone());
+            subtree_root_dependencies.insert(root_id, self.reactive_dependencies.clone());
+            for field in &self.reactive_dependencies {
+                field_to_subtree_roots
+                    .entry(field.clone())
+                    .or_default()
+                    .push(root_id);
+            }
+        }
+        if let Some(widget_id) = self.stable_widget_id {
+            widgets.insert(widget_id, self.clone());
+        }
+        for child in &self.children {
+            child.collect_indexes(
+                subtree_roots,
+                widgets,
+                field_to_subtree_roots,
+                subtree_root_dependencies,
+            );
+        }
+    }
+}
+
+fn value_map(value: &Value) -> Option<HashMap<String, Value>> {
+    match value {
+        Value::Map(map) => Some(
+            map.iter()
+                .map(|(key, value)| (key.clone(), value.borrow().clone()))
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn value_children(value: &Value) -> Vec<Value> {
+    let Some(map) = value_map(value) else {
+        return Vec::new();
+    };
+    match map.get("children") {
+        Some(Value::List(children)) => children
+            .iter()
+            .map(|child| child.borrow().clone())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+pub fn root_subtree_root_id(value: &Value) -> Option<u64> {
+    value_map(value)
+        .as_ref()
+        .and_then(|map| prop_u64(map, "__subtree-root-id"))
+}
+
+fn collect_subtree_root_ids(value: &Value) -> Vec<u64> {
+    let mut root_ids = Vec::new();
+    collect_subtree_root_ids_impl(value, &mut root_ids);
+    root_ids
+}
+
+fn collect_subtree_root_ids_impl(value: &Value, root_ids: &mut Vec<u64>) {
+    if let Some(map) = value_map(value)
+        && let Some(root_id) = prop_u64(&map, "__subtree-root-id")
+    {
+        root_ids.push(root_id);
+    }
+    for child in value_children(value) {
+        collect_subtree_root_ids_impl(&child, root_ids);
+    }
+}
+
+fn replace_subtree_in_value(value: &Value, subtree_root_id: u64, replacement_tree: &Value) -> Option<Value> {
+    let map = value_map(value)?;
+    if prop_u64(&map, "__subtree-root-id") == Some(subtree_root_id) {
+        return Some(replacement_tree.deep_clone());
+    }
+
+    let mut replaced_any = false;
+    let mut rebuilt = HashMap::new();
+    for (key, child) in map {
+        if key == "children" {
+            let replaced_children = match child {
+                Value::List(children) => {
+                    let mut next_children = Vec::with_capacity(children.len());
+                    for child in children {
+                        let child_value = child.borrow().clone();
+                        let replaced_child =
+                            replace_subtree_in_value(&child_value, subtree_root_id, replacement_tree);
+                        if let Some(replaced_child) = replaced_child {
+                            replaced_any = true;
+                            next_children.push(std::rc::Rc::new(std::cell::RefCell::new(replaced_child)));
+                        } else {
+                            next_children.push(std::rc::Rc::new(std::cell::RefCell::new(child_value)));
+                        }
+                    }
+                    Value::List(next_children)
+                }
+                other => other,
+            };
+            rebuilt.insert(
+                key,
+                std::rc::Rc::new(std::cell::RefCell::new(replaced_children)),
+            );
+        } else {
+            rebuilt.insert(
+                key,
+                std::rc::Rc::new(std::cell::RefCell::new(child)),
+            );
+        }
+    }
+
+    replaced_any.then_some(Value::Map(rebuilt))
+}
+
+fn prop_u64(map: &HashMap<String, Value>, key: &str) -> Option<u64> {
+    match map.get(key) {
+        Some(Value::Number(n)) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
+        _ => None,
+    }
+}
+
+fn prop_string(map: &HashMap<String, Value>, key: &str) -> Option<String> {
+    match map.get(key) {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn prop_widget_type(map: &HashMap<String, Value>) -> Option<String> {
+    match map.get("type") {
+        Some(Value::Keyword(widget_type)) => Some(widget_type.clone()),
+        Some(Value::String(widget_type)) => Some(widget_type.clone()),
+        _ => None,
+    }
+}
+
 fn normalize_range(start: (usize, usize), end: (usize, usize)) -> ((usize, usize), (usize, usize)) {
     match compare_pos(start, end) {
         Ordering::Greater => (end, start),
@@ -589,7 +981,43 @@ fn compare_pos(left: (usize, usize), right: (usize, usize)) -> Ordering {
 
 #[cfg(test)]
 mod tests {
-    use super::Buffer;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    use super::{Buffer, CommittedBufferUiSnapshot};
+    use crate::vm::{ReactiveFieldKey, Value};
+
+    fn widget(
+        widget_type: &str,
+        stable_widget_id: u64,
+        subtree_root_id: u64,
+        children: Vec<Value>,
+    ) -> Value {
+        let mut map = HashMap::new();
+        map.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::Keyword(widget_type.to_string()))),
+        );
+        map.insert(
+            "__stable-widget-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(stable_widget_id as f64))),
+        );
+        map.insert(
+            "__subtree-root-id".to_string(),
+            Rc::new(RefCell::new(Value::Number(subtree_root_id as f64))),
+        );
+        map.insert(
+            "children".to_string(),
+            Rc::new(RefCell::new(Value::List(
+                children
+                    .into_iter()
+                    .map(|child| Rc::new(RefCell::new(child)))
+                    .collect(),
+            ))),
+        );
+        Value::Map(map)
+    }
 
     #[test]
     fn move_to_line_start_sets_column_to_zero() {
@@ -804,6 +1232,61 @@ mod tests {
         buffer.adjust_scroll(4);
 
         assert_eq!(buffer.scroll_top, 0);
+    }
+
+    #[test]
+    fn committed_snapshot_replacing_subtree_rebuilds_tree_and_dependency_indexes() {
+        let tree = widget(
+            "root",
+            1,
+            1,
+            vec![
+                widget("left", 2, 2, vec![]),
+                widget("right", 3, 3, vec![]),
+            ],
+        );
+        let snapshot = CommittedBufferUiSnapshot::from_tree(
+            tree,
+            Some(7),
+            vec![ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "steps".to_string(),
+            }],
+        );
+        let merged = snapshot
+            .replacing_subtree(
+                2,
+                widget("left-updated", 22, 2, vec![]),
+                vec![ReactiveFieldKey {
+                    namespace: "SEQ".to_string(),
+                    field: "selected-step".to_string(),
+                }],
+            )
+            .expect("replace subtree");
+
+        let root_children = super::value_children(&merged.tree);
+        let left_type = super::value_map(&root_children[0])
+            .and_then(|map| super::prop_widget_type(&map))
+            .expect("left widget type");
+        let right_type = super::value_map(&root_children[1])
+            .and_then(|map| super::prop_widget_type(&map))
+            .expect("right widget type");
+        assert_eq!(left_type, "left-updated");
+        assert_eq!(right_type, "right");
+        assert_eq!(
+            merged.subtree_roots_for_field(&ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "selected-step".to_string(),
+            }),
+            vec![2]
+        );
+        assert_eq!(
+            merged.subtree_roots_for_field(&ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "steps".to_string(),
+            }),
+            vec![1, 3]
+        );
     }
 }
 

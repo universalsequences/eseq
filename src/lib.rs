@@ -245,15 +245,13 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
             }
         }
 
-        if last_render_at.elapsed() >= frame_interval {
-            if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
-                editor.handle_tiled_mouse_precise(
-                    mouse,
-                    precise_col,
-                    precise_row,
-                    0, // Metal: no cell borders
-                );
-            }
+        if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
+            editor.handle_tiled_mouse_precise(
+                mouse,
+                precise_col,
+                precise_row,
+                0, // Metal: no cell borders
+            );
         }
 
         if last_render_at.elapsed() >= frame_interval {
@@ -1657,8 +1655,9 @@ mod tests {
         let pending = runtime.take_pending_buffer_widget_trees();
         assert_eq!(pending.len(), 1, "demo should emit one named buffer effect");
         assert!(matches!(
-            pending[0].target,
-            EffectTarget::BufferName(ref name) if name == "*light*"
+            pending[0],
+            crate::vm::PendingUiUpdate::FullTree(ref update)
+                if matches!(update.target, EffectTarget::BufferName(ref name) if name == "*light*")
         ));
         assert!(
             runtime

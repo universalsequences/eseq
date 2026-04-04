@@ -32,6 +32,10 @@ pub struct Constraints {
 #[derive(Debug, Clone)]
 pub struct LayoutNode {
     pub widget_id: u64,
+    pub stable_widget_id: Option<u64>,
+    pub subtree_root_id: Option<u64>,
+    pub parent_subtree_root_id: Option<u64>,
+    pub stable_key: Option<String>,
     pub widget_type: String,
     pub rect: Rect,
     pub props: HashMap<String, Value>,
@@ -238,8 +242,16 @@ impl<'a> LayoutEngine<'a> {
         }
 
         let focusable = matches!(props.get("focusable"), Some(Value::Bool(true)));
+        let stable_widget_id = get_prop_u64(node, "__stable-widget-id");
+        let subtree_root_id = get_prop_u64(node, "__subtree-root-id");
+        let parent_subtree_root_id = get_prop_u64(node, "__parent-subtree-root-id");
+        let stable_key = get_prop_str(node, "__stable-key");
         LayoutNode {
             widget_id: 0,
+            stable_widget_id,
+            subtree_root_id,
+            parent_subtree_root_id,
+            stable_key,
             widget_type,
             rect,
             props,
@@ -358,6 +370,17 @@ fn reuse_layout_node_impl(
             existing.widget_type, widget_type
         ), path));
     }
+    let new_stable_widget_id = get_prop_u64(tree, "__stable-widget-id");
+    let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
+    let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
+    let new_stable_key = get_prop_str(tree, "__stable-key");
+    if existing.stable_widget_id != new_stable_widget_id
+        || existing.subtree_root_id != new_subtree_root_id
+        || existing.parent_subtree_root_id != new_parent_subtree_root_id
+        || existing.stable_key != new_stable_key
+    {
+        return Err(format_reason(format!("stable-identity:{widget_type}"), path));
+    }
     // Tree widgets manage internal expand/collapse state that changes their
     // height without changing props. Always force full relayout.
     if widget_type == "tree" {
@@ -420,6 +443,10 @@ fn reuse_layout_node_impl(
     let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
     Ok(LayoutNode {
         widget_id: existing.widget_id,
+        stable_widget_id: existing.stable_widget_id,
+        subtree_root_id: existing.subtree_root_id,
+        parent_subtree_root_id: existing.parent_subtree_root_id,
+        stable_key: existing.stable_key.clone(),
         widget_type,
         rect: existing.rect,
         props: new_props,
@@ -445,6 +472,10 @@ pub fn reuse_layout_failure_reason(existing: &LayoutNode, tree: &Value) -> Optio
 
 pub fn same_layout_geometry(left: &LayoutNode, right: &LayoutNode) -> bool {
     left.widget_type == right.widget_type
+        && left.stable_widget_id == right.stable_widget_id
+        && left.subtree_root_id == right.subtree_root_id
+        && left.parent_subtree_root_id == right.parent_subtree_root_id
+        && left.stable_key == right.stable_key
         && left.rect == right.rect
         && left.children.len() == right.children.len()
         && left
@@ -689,6 +720,14 @@ pub(crate) fn get_prop_str(v: &Value, key: &str) -> Option<String> {
     let map = get_map(v)?;
     match map.get(key) {
         Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+pub(crate) fn get_prop_u64(v: &Value, key: &str) -> Option<u64> {
+    let map = get_map(v)?;
+    match map.get(key) {
+        Some(Value::Number(n)) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
         _ => None,
     }
 }
