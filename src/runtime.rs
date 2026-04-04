@@ -59,6 +59,7 @@ pub struct UiInvalidationTrace {
     pub subtree_reruns: usize,
     pub reevaluated_subtree_roots: usize,
     pub pending_subtree_patch_count: usize,
+    pub subtree_failure_reason: Option<String>,
     pub relayout_mode: Option<String>,
     pub relayout_failure_reason: Option<String>,
 }
@@ -283,6 +284,59 @@ impl RuntimePerfStats {
             summary
         }
     }
+}
+
+fn summarize_cycle_exec_timings(exec_timings: &[crate::vm::ReactiveExecTiming]) -> String {
+    let mut entries = exec_timings
+        .iter()
+        .map(|timing| (timing.profile_label(), timing.elapsed))
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    let summary = entries
+        .into_iter()
+        .take(5)
+        .map(|(label, elapsed)| format!("{label}:{:.2}ms", elapsed.as_secs_f64() * 1000.0))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if summary.is_empty() {
+        "-".to_string()
+    } else {
+        summary
+    }
+}
+
+fn format_ui_invalidation_trace(
+    trace: &UiInvalidationTrace,
+    exec_timings: &[crate::vm::ReactiveExecTiming],
+) -> String {
+    let dirty_fields = if trace.dirty_fields.is_empty() {
+        "-".to_string()
+    } else {
+        trace.dirty_fields.join(",")
+    };
+    let affected_buffers = if trace.affected_buffers.is_empty() {
+        "-".to_string()
+    } else {
+        trace.affected_buffers.join(",")
+    };
+    let relayout_mode = trace.relayout_mode.as_deref().unwrap_or("-");
+    let relayout_failure = trace.relayout_failure_reason.as_deref().unwrap_or("-");
+    let subtree_failure = trace.subtree_failure_reason.as_deref().unwrap_or("-");
+    format!(
+        "[ui-trace] dirty=[{dirty_fields}] affected=[{affected_buffers}] targets=a{} i{} flushes={} pending={} reruns=full:{} sub:{} roots:{} patches:{} subtree-fail={} relayout={} fail={} hot=[{}]",
+        trace.active_buffer_targets,
+        trace.inactive_buffer_targets,
+        trace.widget_tree_flushes,
+        trace.pending_widget_tree_count,
+        trace.full_buffer_reruns,
+        trace.subtree_reruns,
+        trace.reevaluated_subtree_roots,
+        trace.pending_subtree_patch_count,
+        subtree_failure,
+        relayout_mode,
+        relayout_failure,
+        summarize_cycle_exec_timings(exec_timings),
+    )
 }
 
 fn expand_sdf_expression(
@@ -1358,6 +1412,11 @@ impl Runtime {
                 trace.reevaluated_subtree_roots = flush_stats.reevaluated_subtree_roots;
                 trace.pending_subtree_patch_count = flush_stats.pending_subtree_patch_count;
             }
+            if std::env::var_os("ESEQLISP_TRACE_UI").is_some()
+                && let Some(trace) = self.last_ui_invalidation_trace.as_ref()
+            {
+                eprintln!("{}", format_ui_invalidation_trace(trace, &exec_timings));
+            }
             self.perf_stats.note_reactive_cycle(
                 dirty_len,
                 apply_elapsed,
@@ -1721,17 +1780,72 @@ impl Runtime {
         tree: Value,
         reactive_dependencies: Vec<ReactiveFieldKey>,
     ) -> bool {
+        let replaced =
+            self.replace_current_subtree_without_relayout(subtree_root_id, tree, reactive_dependencies);
+        if replaced {
+            self.relayout_current_tree();
+            self.layout_revision = self.layout_revision.wrapping_add(1);
+        }
+        replaced
+    }
+
+    fn replace_current_subtree_without_relayout(
+        &mut self,
+        subtree_root_id: u64,
+        tree: Value,
+        reactive_dependencies: Vec<ReactiveFieldKey>,
+    ) -> bool {
         let Some(snapshot) = self.current_committed_ui_snapshot.clone() else {
+            if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                trace.subtree_failure_reason = Some("missing-snapshot".to_string());
+            }
             return false;
         };
+        if let Some(reason) = snapshot.subtree_replace_failure_reason(subtree_root_id, &tree) {
+            if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                trace.subtree_failure_reason = Some(reason.to_string());
+            }
+            return false;
+        }
         let Some(merged) = snapshot.replacing_subtree(subtree_root_id, tree, reactive_dependencies)
         else {
+            if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                trace.subtree_failure_reason = Some("replace-missed".to_string());
+            }
             return false;
         };
         self.current_widget_tree = Some(merged.tree.deep_clone());
         self.current_committed_ui_snapshot = Some(merged);
-        self.relayout_current_tree();
-        self.layout_revision = self.layout_revision.wrapping_add(1);
+        if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+            trace.subtree_failure_reason = None;
+        }
+        true
+    }
+
+    fn replace_current_subtrees_without_relayout(
+        &mut self,
+        replacements: &[(u64, Value, Vec<ReactiveFieldKey>)],
+    ) -> bool {
+        if replacements.is_empty() {
+            return false;
+        }
+        let Some(snapshot) = self.current_committed_ui_snapshot.clone() else {
+            if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                trace.subtree_failure_reason = Some("missing-snapshot".to_string());
+            }
+            return false;
+        };
+        let Some(merged) = snapshot.replacing_subtrees(replacements) else {
+            if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                trace.subtree_failure_reason = Some("replace-batch-missed".to_string());
+            }
+            return false;
+        };
+        self.current_widget_tree = Some(merged.tree.deep_clone());
+        self.current_committed_ui_snapshot = Some(merged);
+        if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+            trace.subtree_failure_reason = None;
+        }
         true
     }
 
@@ -1739,18 +1853,32 @@ impl Runtime {
         &mut self,
         pending: &PendingWidgetTree,
     ) -> bool {
+        self.try_upgrade_full_tree_to_current_subtree_without_relayout(pending)
+            .inspect(|upgraded| {
+                if *upgraded {
+                    self.relayout_current_tree();
+                    self.layout_revision = self.layout_revision.wrapping_add(1);
+                }
+            })
+            .unwrap_or(false)
+    }
+
+    fn try_upgrade_full_tree_to_current_subtree_without_relayout(
+        &mut self,
+        pending: &PendingWidgetTree,
+    ) -> Option<bool> {
         let Some(snapshot) = self.current_committed_ui_snapshot.as_ref() else {
-            return false;
+            return None;
         };
         let Some(subtree_root_id) = snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
         else {
-            return false;
+            return Some(false);
         };
-        self.replace_current_subtree(
+        Some(self.replace_current_subtree_without_relayout(
             subtree_root_id,
             pending.tree.deep_clone(),
             pending.reactive_dependencies.clone(),
-        )
+        ))
     }
 
     pub fn clear_layout_effects(&mut self) {
@@ -1783,7 +1911,21 @@ impl Runtime {
         let mut subtree_reruns = 0usize;
         let mut reevaluated_subtree_roots = 0usize;
         let mut pending_subtree_patch_count = 0usize;
-        for pending in &trees {
+        let mut active_tree_changed = false;
+        let mut active_subtree_replacements: Vec<(u64, Value, Vec<ReactiveFieldKey>)> = Vec::new();
+        let mut inactive_pending = Vec::new();
+        let flush_active_subtree_replacements = |runtime: &mut Self,
+                                                replacements: &mut Vec<(u64, Value, Vec<ReactiveFieldKey>)>,
+                                                active_tree_changed: &mut bool| {
+            if replacements.is_empty() {
+                return;
+            }
+            if runtime.replace_current_subtrees_without_relayout(replacements) {
+                *active_tree_changed = true;
+            }
+            replacements.clear();
+        };
+        for pending in trees {
             affected_buffers.insert(effect_target_label(pending.target()));
             let targets_active_buffer = match pending.target() {
                 EffectTarget::BufferId(id) => *id == current_buffer_id,
@@ -1791,13 +1933,33 @@ impl Runtime {
             };
             if targets_active_buffer {
                 active_buffer_targets += 1;
-                match pending {
+                match &pending {
                     PendingUiUpdate::FullTree(pending) => {
-                        if self.try_upgrade_full_tree_to_current_subtree(pending) {
+                        if let Some(true) = self
+                            .current_committed_ui_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| {
+                                snapshot
+                                    .matching_non_root_subtree_root_id_for_tree(&pending.tree)
+                                    .map(|subtree_root_id| {
+                                        active_subtree_replacements.push((
+                                            subtree_root_id,
+                                            pending.tree.deep_clone(),
+                                            pending.reactive_dependencies.clone(),
+                                        ));
+                                        true
+                                    })
+                            })
+                        {
                             subtree_reruns += 1;
                             reevaluated_subtree_roots += 1;
                             pending_subtree_patch_count += 1;
                         } else {
+                            flush_active_subtree_replacements(
+                                self,
+                                &mut active_subtree_replacements,
+                                &mut active_tree_changed,
+                            );
                             full_buffer_reruns += 1;
                             let unchanged = self
                                 .current_widget_tree
@@ -1811,39 +1973,56 @@ impl Runtime {
                                         pending.source_buffer_id,
                                         pending.reactive_dependencies.clone(),
                                     ));
-                                self.relayout_current_tree();
+                                active_tree_changed = true;
+                            } else {
+                                self.current_committed_ui_snapshot =
+                                    Some(CommittedBufferUiSnapshot::from_tree(
+                                        pending.tree.deep_clone(),
+                                        pending.source_buffer_id,
+                                        pending.reactive_dependencies.clone(),
+                                    ));
                             }
                         }
                     }
                     PendingUiUpdate::ReplaceSubtree {
+                        source_buffer_id,
                         subtree_root_id,
                         tree,
                         reactive_dependencies,
                         ..
                     } => {
-                        let merged = self.replace_current_subtree(
+                        let _ = source_buffer_id;
+                        active_subtree_replacements.push((
                             *subtree_root_id,
                             tree.deep_clone(),
                             reactive_dependencies.clone(),
-                        );
-                        if merged {
-                            subtree_reruns += 1;
-                            reevaluated_subtree_roots += 1;
-                            pending_subtree_patch_count += 1;
-                        }
+                        ));
+                        subtree_reruns += 1;
+                        reevaluated_subtree_roots += 1;
+                        pending_subtree_patch_count += 1;
                     }
                 }
             } else {
                 inactive_buffer_targets += 1;
-                if matches!(pending, PendingUiUpdate::FullTree(_)) {
+                if matches!(&pending, PendingUiUpdate::FullTree(_)) {
                     full_buffer_reruns += 1;
                 }
+                inactive_pending.push(pending);
             }
+        }
+        flush_active_subtree_replacements(
+            self,
+            &mut active_subtree_replacements,
+            &mut active_tree_changed,
+        );
+        if active_tree_changed {
+            self.relayout_current_tree();
+            self.layout_revision = self.layout_revision.wrapping_add(1);
         }
         self.shared
             .borrow_mut()
             .pending_buffer_widget_trees
-            .extend(trees);
+            .extend(inactive_pending);
         let mut affected_buffers = affected_buffers.into_iter().collect::<Vec<_>>();
         affected_buffers.sort();
         ReactiveFlushStats {

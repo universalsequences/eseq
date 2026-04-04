@@ -69,6 +69,71 @@ pub struct Buffer {
     pub text_styles: Vec<BufferTextStyle>,
 }
 
+pub fn debug_widget_tree_summary(tree: Option<&Value>) -> String {
+    fn value_label(value: &Value, depth: usize) -> String {
+        if depth > 1 {
+            return "...".to_string();
+        }
+        match value {
+            Value::Map(map) => {
+                let widget_type = map
+                    .get("type")
+                    .and_then(|value| match value.borrow().clone() {
+                        Value::String(s) => Some(s),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "map".to_string());
+                let text = map
+                    .get("text")
+                    .and_then(|value| match value.borrow().clone() {
+                        Value::String(s) => Some(s),
+                        _ => None,
+                    });
+                let child_labels = map
+                    .get("children")
+                    .and_then(|value| match value.borrow().clone() {
+                        Value::List(children) => Some(
+                            children
+                                .iter()
+                                .take(3)
+                                .map(|child| value_label(&child.borrow().clone(), depth + 1))
+                                .collect::<Vec<_>>(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let child_count = map
+                    .get("children")
+                    .and_then(|value| match value.borrow().clone() {
+                        Value::List(children) => Some(children.len()),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                let text_part = text
+                    .map(|text| format!(" text={text:?}"))
+                    .unwrap_or_default();
+                if child_count > 0 {
+                    format!(
+                        "{widget_type}{text_part} children={child_count}[{}]",
+                        child_labels.join(", ")
+                    )
+                } else {
+                    format!("{widget_type}{text_part}")
+                }
+            }
+            Value::List(items) => format!("list(len={})", items.len()),
+            Value::String(s) => format!("string({s:?})"),
+            Value::Number(n) => format!("number({n})"),
+            Value::Bool(b) => format!("bool({b})"),
+            Value::Nil => "nil".to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    tree.map(|value| value_label(value, 0))
+        .unwrap_or_else(|| "<none>".to_string())
+}
+
 impl Buffer {
     pub fn new(id: BufferId, name: impl Into<String>) -> Self {
         Buffer {
@@ -150,6 +215,9 @@ impl Buffer {
         let tree_unchanged = self.widget_tree.as_ref() == tree.as_ref();
         let source_unchanged = self.widget_tree_source == source;
         if tree_unchanged && source_unchanged {
+            self.set_committed_ui_snapshot(
+                tree.map(|tree| CommittedBufferUiSnapshot::from_tree(tree, source, Vec::new())),
+            );
             return;
         }
         self.widget_tree = tree.as_ref().map(Value::deep_clone);
@@ -695,6 +763,26 @@ impl CommittedBufferUiSnapshot {
             .unwrap_or_default()
     }
 
+    pub fn subtree_replace_failure_reason(
+        &self,
+        subtree_root_id: u64,
+        replacement_tree: &Value,
+    ) -> Option<&'static str> {
+        if !self.subtree_roots.contains_key(&subtree_root_id) {
+            return Some("unknown-root");
+        }
+        let Some(replacement_root_id) = value_map(replacement_tree)
+            .as_ref()
+            .and_then(|map| prop_u64(map, "__subtree-root-id"))
+        else {
+            return Some("missing-root-id");
+        };
+        if replacement_root_id != subtree_root_id {
+            return Some("root-id-mismatch");
+        }
+        None
+    }
+
     pub fn dependencies_for_subtree_root(&self, root_id: u64) -> Vec<ReactiveFieldKey> {
         self.subtree_root_dependencies
             .get(&root_id)
@@ -715,13 +803,10 @@ impl CommittedBufferUiSnapshot {
         replacement_tree: Value,
         reactive_dependencies: Vec<ReactiveFieldKey>,
     ) -> Option<Self> {
-        if !self.subtree_roots.contains_key(&subtree_root_id) {
-            return None;
-        }
-        let replacement_root_id = value_map(&replacement_tree)
-            .as_ref()
-            .and_then(|map| prop_u64(map, "__subtree-root-id"))?;
-        if replacement_root_id != subtree_root_id {
+        if self
+            .subtree_replace_failure_reason(subtree_root_id, &replacement_tree)
+            .is_some()
+        {
             return None;
         }
 
@@ -734,6 +819,36 @@ impl CommittedBufferUiSnapshot {
         for root_id in collect_subtree_root_ids(&replacement_tree) {
             dependency_lookup.insert(root_id, reactive_dependencies.clone());
         }
+        Some(Self::from_tree_with_dependency_lookup(
+            merged_tree,
+            self.source_buffer_id,
+            &dependency_lookup,
+        ))
+    }
+
+    pub fn replacing_subtrees(
+        &self,
+        replacements: &[(u64, Value, Vec<ReactiveFieldKey>)],
+    ) -> Option<Self> {
+        if replacements.is_empty() {
+            return Some(self.clone());
+        }
+
+        let mut merged_tree = self.tree.deep_clone();
+        let mut dependency_lookup = self.subtree_root_dependencies.clone();
+        for (subtree_root_id, replacement_tree, reactive_dependencies) in replacements {
+            if self
+                .subtree_replace_failure_reason(*subtree_root_id, replacement_tree)
+                .is_some()
+            {
+                return None;
+            }
+            merged_tree = replace_subtree_in_value(&merged_tree, *subtree_root_id, replacement_tree)?;
+            for root_id in collect_subtree_root_ids(replacement_tree) {
+                dependency_lookup.insert(root_id, reactive_dependencies.clone());
+            }
+        }
+
         Some(Self::from_tree_with_dependency_lookup(
             merged_tree,
             self.source_buffer_id,

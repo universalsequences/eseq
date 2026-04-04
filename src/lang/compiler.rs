@@ -72,6 +72,8 @@ pub enum OpCode {
     DerivedEnd(u32),
     EffectBegin(u32),
     EffectEnd(u32),
+    SubtreeBegin,
+    SubtreeEnd,
     LoadReactive(usize, usize),  // namespace idx, field idx
     StoreReactive(usize, usize), // namespace idx, field idx
     GetField(usize),             // pop a map, push map[strings[idx]]
@@ -977,6 +979,28 @@ impl Compiler {
         Ok(())
     }
 
+    fn compile_subtree_form(&mut self, body: &[Expression]) -> Result<(), CompilerError> {
+        if body.len() != 3 {
+            return Err(CompilerError::InvalidArg);
+        }
+        let Expression::Keyword(key_kw) = &body[0] else {
+            return Err(CompilerError::InvalidArg);
+        };
+        if key_kw != "key" {
+            return Err(CompilerError::InvalidArg);
+        }
+        self.compile_expression(&body[1])?;
+        let subtree_lambda = Expression::List(vec![
+            Expression::Symbol("lambda".to_string()),
+            Expression::List(vec![]),
+            body[2].clone(),
+        ]);
+        self.compile_expression(&subtree_lambda)?;
+        self.emit_symbol_load("subtree-owner");
+        self.emit(OpCode::Call(2));
+        Ok(())
+    }
+
     fn chunk(&self) -> Option<&Chunk> {
         self.chunks.get(self.current_chunk)
     }
@@ -1436,6 +1460,9 @@ impl Compiler {
             }
             if s == "effect-buffer" {
                 return self.compile_effect_buffer_form(&list[1..]);
+            }
+            if s == "subtree" {
+                return self.compile_subtree_form(&list[1..]);
             }
             if s == "derived" {
                 return self.compile_inline_derived(&list[1..]);

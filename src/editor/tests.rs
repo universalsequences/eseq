@@ -2087,6 +2087,150 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
     assert!(rendered.contains("\"7\""), "tree should reflect updated state: {rendered}");
 }
 
+#[test]
+fn named_effect_buffer_commits_nested_subtree_roots() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (defstate level 2)
+            (effect-buffer "*controls*"
+              (v-stack
+                (subtree :key "counter-label"
+                  (label (fmt "{}" level)))
+                (label "static")))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .unwrap();
+    let snapshot = controls
+        .committed_ui_snapshot
+        .as_ref()
+        .expect("expected committed snapshot");
+    assert!(
+        snapshot
+            .subtree_roots
+            .values()
+            .any(|subtree| subtree.stable_key.as_deref() == Some("counter-label")),
+        "expected nested subtree root to be indexed in committed snapshot"
+    );
+}
+
+#[test]
+fn named_effect_buffer_nested_subtree_updates_when_inactive() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (defstate level 2)
+            (effect-buffer "*controls*"
+              (v-stack
+                (subtree :key "counter-label"
+                  (label (fmt "{}" level)))
+                (label "static")))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*controls*")
+        .unwrap();
+    let initial_tree = editor.buffers[controls_idx]
+        .widget_tree
+        .clone()
+        .expect("initial widget tree");
+    let initial_rendered = crate::vm::format_lisp_value(&initial_tree);
+    assert!(initial_rendered.contains("\"2\""));
+
+    editor.runtime_mut().eval_str("(set! level 7)").unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let updated_tree = editor.buffers[controls_idx]
+        .widget_tree
+        .clone()
+        .expect("updated widget tree");
+    let updated_rendered = crate::vm::format_lisp_value(&updated_tree);
+    assert!(
+        updated_rendered.contains("\"7\""),
+        "inactive named buffer subtree should update in place: {updated_rendered}"
+    );
+}
+
+#[test]
+fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (defstate level 2)
+            (effect-buffer "*controls*"
+              (v-stack
+                (subtree :key "counter-label"
+                  (label (fmt "{}" level)))
+                (label "static")))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .unwrap();
+    let committed_root_id = controls
+        .committed_ui_snapshot
+        .as_ref()
+        .and_then(|snapshot| {
+            snapshot
+                .subtree_roots
+                .values()
+                .find(|subtree| subtree.stable_key.as_deref() == Some("counter-label"))
+                .and_then(|subtree| subtree.subtree_root_id)
+        })
+        .expect("committed subtree root id");
+
+    editor.runtime_mut().eval_str("(set! level 7)").unwrap();
+    let pending = editor.runtime_mut().take_pending_buffer_widget_trees();
+    let emitted_root_id = pending
+        .iter()
+        .find_map(|update| match update {
+            crate::vm::PendingUiUpdate::ReplaceSubtree {
+                target: crate::vm::EffectTarget::BufferName(name),
+                subtree_root_id,
+                ..
+            } if name == "*controls*" => Some(*subtree_root_id),
+            _ => None,
+        })
+        .expect("replace subtree update for named buffer");
+
+    assert_eq!(
+        emitted_root_id, committed_root_id,
+        "replace subtree should target committed subtree root"
+    );
+}
+
     #[test]
     fn first_layout_buffer_stays_interactive_after_second_layout_buffer_eval() {
         let runtime = Runtime::new();

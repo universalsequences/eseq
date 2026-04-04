@@ -356,6 +356,12 @@ fn reuse_layout_node_impl(
     dirty_widget_ids: &mut Vec<u64>,
     path: &mut Vec<String>,
 ) -> Result<LayoutNode, String> {
+    let format_opt_u64 = |value: Option<u64>| {
+        value
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string())
+    };
+    let format_opt_str = |value: Option<&str>| value.unwrap_or("-").to_string();
     let format_reason = |reason: String, path: &[String]| {
         if path.is_empty() {
             reason
@@ -374,12 +380,31 @@ fn reuse_layout_node_impl(
     let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
     let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
     let new_stable_key = get_prop_str(tree, "__stable-key");
-    if existing.stable_widget_id != new_stable_widget_id
-        || existing.subtree_root_id != new_subtree_root_id
-        || existing.parent_subtree_root_id != new_parent_subtree_root_id
-        || existing.stable_key != new_stable_key
-    {
-        return Err(format_reason(format!("stable-identity:{widget_type}"), path));
+    let is_explicit_subtree_root =
+        existing.subtree_root_id.is_some() && existing.subtree_root_id == new_subtree_root_id;
+    let identity_mismatch = if is_explicit_subtree_root {
+        existing.subtree_root_id != new_subtree_root_id || existing.stable_key != new_stable_key
+    } else {
+        existing.stable_widget_id != new_stable_widget_id
+            || existing.subtree_root_id != new_subtree_root_id
+            || existing.parent_subtree_root_id != new_parent_subtree_root_id
+            || existing.stable_key != new_stable_key
+    };
+    if identity_mismatch {
+        return Err(format_reason(
+            format!(
+                "stable-identity:{widget_type}:wid:{}->{}:root:{}->{}:parent:{}->{}:key:{}->{}",
+                format_opt_u64(existing.stable_widget_id),
+                format_opt_u64(new_stable_widget_id),
+                format_opt_u64(existing.subtree_root_id),
+                format_opt_u64(new_subtree_root_id),
+                format_opt_u64(existing.parent_subtree_root_id),
+                format_opt_u64(new_parent_subtree_root_id),
+                format_opt_str(existing.stable_key.as_deref()),
+                format_opt_str(new_stable_key.as_deref()),
+            ),
+            path,
+        ));
     }
     // Tree widgets manage internal expand/collapse state that changes their
     // height without changing props. Always force full relayout.

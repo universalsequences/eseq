@@ -14,7 +14,7 @@ use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, debug_widget_tree_summary};
 use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
 use crate::layout::Rect;
 use crate::mode::{
@@ -212,6 +212,18 @@ struct TileResizeDrag {
 }
 
 impl Editor {
+    fn trace_ui_tree_enabled_for(&self, buffer_name: &str) -> bool {
+        std::env::var("ESEQLISP_TRACE_UI_TREE")
+            .ok()
+            .is_some_and(|filter| filter == "*" || filter == buffer_name)
+    }
+
+    fn trace_ui_tree_event(&self, buffer_name: &str, stage: &str, detail: &str) {
+        if self.trace_ui_tree_enabled_for(buffer_name) {
+            eprintln!("[ui-tree][{buffer_name}] {stage} {detail}");
+        }
+    }
+
     pub fn new(mut runtime: Runtime, config: EditorConfig) -> Self {
         register_editor_natives(&mut runtime);
 
@@ -2919,6 +2931,7 @@ impl Editor {
             }
         }
 
+        let mut inactive_buffers_to_refresh = HashSet::new();
         for pending in self.runtime.take_pending_buffer_widget_trees() {
             match pending {
                 PendingUiUpdate::FullTree(pending) => {
@@ -2936,6 +2949,16 @@ impl Editor {
                             self.ensure_scratch_buffer_named(name)
                         }
                     };
+                    let buffer_name = self.buffers[buffer_idx].name.clone();
+                    self.trace_ui_tree_event(
+                        &buffer_name,
+                        "pending-full",
+                        &format!(
+                            "incoming={} before={}",
+                            debug_widget_tree_summary(Some(&pending.tree)),
+                            debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref()),
+                        ),
+                    );
                     let is_active = self.active_buffer_idx() == buffer_idx;
                     let upgraded_subtree = self.buffers[buffer_idx]
                         .committed_ui_snapshot
@@ -2960,7 +2983,7 @@ impl Editor {
                                 .try_upgrade_full_tree_to_current_subtree(&pending);
                             self.auto_focus_first_widget();
                         } else {
-                            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+                            inactive_buffers_to_refresh.insert(buffer_idx);
                         }
                     } else if is_active {
                         crate::widget_render::clear_overlay();
@@ -2968,12 +2991,24 @@ impl Editor {
                         buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
                         buffer.view_mode = ViewMode::UiOnly;
                     } else {
-                        self.apply_widget_tree_to_buffer(
-                            buffer_idx,
-                            pending.source_buffer_id,
-                            Some(pending.tree),
-                        );
+                        {
+                            let buffer = &mut self.buffers[buffer_idx];
+                            buffer.set_widget_tree(
+                                Some(pending.tree),
+                                pending.source_buffer_id,
+                            );
+                            buffer.view_mode = ViewMode::UiOnly;
+                        }
+                        inactive_buffers_to_refresh.insert(buffer_idx);
                     }
+                    self.trace_ui_tree_event(
+                        &buffer_name,
+                        "applied-full",
+                        &format!(
+                            "after={}",
+                            debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref())
+                        ),
+                    );
                 }
                 PendingUiUpdate::ReplaceSubtree {
                     source_buffer_id,
@@ -2993,6 +3028,16 @@ impl Editor {
                         EffectTarget::BufferId(None) => self.active_buffer_idx(),
                         EffectTarget::BufferName(name) => self.ensure_scratch_buffer_named(&name),
                     };
+                    let buffer_name = self.buffers[buffer_idx].name.clone();
+                    self.trace_ui_tree_event(
+                        &buffer_name,
+                        "pending-subtree",
+                        &format!(
+                            "root={subtree_root_id} incoming={} before={}",
+                            debug_widget_tree_summary(Some(&tree)),
+                            debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref()),
+                        ),
+                    );
                     let is_active = self.active_buffer_idx() == buffer_idx;
                     let replaced = {
                         let buffer = &mut self.buffers[buffer_idx];
@@ -3017,11 +3062,22 @@ impl Editor {
                             );
                             self.auto_focus_first_widget();
                         } else {
-                            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+                            inactive_buffers_to_refresh.insert(buffer_idx);
                         }
                     }
+                    self.trace_ui_tree_event(
+                        &buffer_name,
+                        if replaced { "applied-subtree" } else { "missed-subtree" },
+                        &format!(
+                            "root={subtree_root_id} after={}",
+                            debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref())
+                        ),
+                    );
                 }
             }
+        }
+        for buffer_idx in inactive_buffers_to_refresh {
+            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
         }
 
         // Process set-buffer-mode-for (after buffer creation so targets exist)

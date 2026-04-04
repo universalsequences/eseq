@@ -1683,6 +1683,266 @@ mod tests {
     }
 
     #[test]
+    fn subtree_form_preserves_explicit_subtree_root_metadata() {
+        fn map_prop_u64(value: &Value, key: &str) -> Option<u64> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            match map.get(key).map(|value| value.borrow().clone()) {
+                Some(Value::Number(n)) if n >= 0.0 && n.fract() == 0.0 => Some(n as u64),
+                _ => None,
+            }
+        }
+
+        fn map_prop_string(value: &Value, key: &str) -> Option<String> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            match map.get(key).map(|value| value.borrow().clone()) {
+                Some(Value::String(s)) => Some(s),
+                _ => None,
+            }
+        }
+
+        fn first_child(value: &Value) -> Option<Value> {
+            let Value::Map(map) = value else {
+                return None;
+            };
+            match map.get("children").map(|value| value.borrow().clone()) {
+                Some(Value::List(children)) => children.first().map(|child| child.borrow().clone()),
+                _ => None,
+            }
+        }
+
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*subtree*"
+                  (subtree :key "step-1"
+                    (box
+                      (label "hello"))))
+                "#,
+            )
+            .expect("eval subtree");
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        let crate::vm::PendingUiUpdate::ReplaceSubtree {
+            subtree_root_id,
+            tree,
+            ..
+        } = &pending[0]
+        else {
+            panic!("expected replace subtree update");
+        };
+        let root_id = map_prop_u64(tree, "__subtree-root-id").expect("root subtree id");
+        assert_eq!(*subtree_root_id, root_id);
+        assert_eq!(
+            map_prop_string(tree, "__stable-key").as_deref(),
+            Some("step-1")
+        );
+        let child = first_child(tree).expect("child");
+        assert_eq!(map_prop_u64(&child, "__subtree-root-id"), Some(root_id));
+        assert_eq!(
+            map_prop_u64(&child, "__parent-subtree-root-id"),
+            Some(root_id)
+        );
+    }
+
+    #[test]
+    fn nested_subtree_reactive_update_emits_replace_subtree() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("counter", Value::Number(1.0))], false);
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*subtree*"
+                  (v-stack
+                    (subtree :key "counter-label"
+                      (label (fmt "count: {}" APP.counter)))
+                    (label "static")))
+                "#,
+            )
+            .expect("eval subtree effect");
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        runtime.set_reactive("APP", "counter", Value::Number(2.0));
+        runtime.run_reactive_cycle();
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(pending.len(), 1, "expected only subtree replacement");
+        let crate::vm::PendingUiUpdate::ReplaceSubtree {
+            subtree_root_id: _,
+            tree,
+            reactive_dependencies,
+            ..
+        } = &pending[0]
+        else {
+            panic!("expected replace subtree update");
+        };
+        assert_eq!(
+            reactive_dependencies,
+            &vec![crate::vm::ReactiveFieldKey {
+                namespace: "APP".to_string(),
+                field: "counter".to_string(),
+            }]
+        );
+
+        let Value::Map(map) = tree else {
+            panic!("expected subtree tree map");
+        };
+        let Some(text) = map.get("text").map(|value| value.borrow().clone()) else {
+            panic!("expected text");
+        };
+        assert_eq!(text, Value::String("count: 2".to_string()));
+    }
+
+    #[test]
+    fn subtree_inside_each_initial_render_keeps_children() {
+        fn first_child_texts(value: &Value) -> Vec<String> {
+            let Value::Map(map) = value else {
+                return vec![];
+            };
+            let Some(Value::List(children)) =
+                map.get("children").map(|value| value.borrow().clone())
+            else {
+                return vec![];
+            };
+            children
+                .iter()
+                .filter_map(|child| {
+                    let Value::Map(child_map) = child.borrow().clone() else {
+                        return None;
+                    };
+                    match child_map.get("text").map(|value| value.borrow().clone()) {
+                        Some(Value::String(text)) => Some(text),
+                        _ => None,
+                    }
+                })
+                .collect()
+        }
+
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*loop-subtree*"
+                  (v-stack
+                    (each '(0 1 2) |i|
+                      (subtree :key (fmt "item-{}" i)
+                        (label (fmt "item-{}" i))))))
+                "#,
+            )
+            .expect("eval loop subtree effect");
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(pending.len(), 1, "expected a single initial buffer tree");
+        let crate::vm::PendingUiUpdate::FullTree(tree) = &pending[0] else {
+            panic!("expected initial full tree update");
+        };
+        assert_eq!(first_child_texts(&tree.tree), vec!["item-0", "item-1", "item-2"]);
+    }
+
+    #[test]
+    fn subtree_inside_each_reactive_update_emits_replace_subtrees() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("counter", Value::Number(1.0))], false);
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*loop-subtree*"
+                  (v-stack
+                    (each '(0 1 2) |i|
+                      (subtree :key (fmt "item-{}" i)
+                        (label (fmt "{}:{}" i APP.counter))))))
+                "#,
+            )
+            .expect("eval loop subtree effect");
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        runtime.set_reactive("APP", "counter", Value::Number(2.0));
+        runtime.run_reactive_cycle();
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(pending.len(), 3, "expected one subtree replacement per loop child");
+        for update in pending {
+            let crate::vm::PendingUiUpdate::ReplaceSubtree {
+                tree,
+                reactive_dependencies,
+                ..
+            } = update
+            else {
+                panic!("expected replace subtree update");
+            };
+            assert_eq!(
+                reactive_dependencies,
+                vec![crate::vm::ReactiveFieldKey {
+                    namespace: "APP".to_string(),
+                    field: "counter".to_string(),
+                }]
+            );
+            let Value::Map(map) = tree else {
+                panic!("expected subtree tree map");
+            };
+            let Some(Value::String(text)) = map.get("text").map(|value| value.borrow().clone())
+            else {
+                panic!("expected subtree text");
+            };
+            assert!(text.ends_with(":2"), "expected updated text, got {text}");
+        }
+    }
+
+    #[test]
+    fn subtree_inside_grid_step_cell_keeps_full_tree_widget_shape() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "APP",
+            vec![
+                ("selected", Value::List(vec![])),
+                ("active-0", Value::Bool(true)),
+                ("active-1", Value::Bool(false)),
+            ],
+            false,
+        );
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*grid-subtree*"
+                  (grid :cols 2 :col-width 4
+                    (each '(0 1) |step|
+                      (let ((selected false))
+                        (box :padding 0.25
+                          (v-stack :align :center :gap 0.5
+                            (vslider :height 4 :width 2 :min 0 :max 1 :value 0.5)
+                            (box :width 3 :height 1.5
+                              (label "x"))
+                            (subtree :key (fmt "step-playhead-label-{}" step)
+                              (box :width 3 :height 1 :align :center
+                                (label (fmt "{}" step)
+                                  :color (if selected
+                                           :yellow
+                                           (if (reactive-get "APP" (fmt "active-{}" step))
+                                             :white
+                                             :gray))))))))))
+                "#,
+            )
+            .expect("eval grid subtree effect");
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(pending.len(), 1, "expected a single initial full-tree update");
+        let crate::vm::PendingUiUpdate::FullTree(tree) = &pending[0] else {
+            panic!("expected full tree update");
+        };
+        let Value::Map(map) = &tree.tree else {
+            panic!("expected widget tree map, got {:?}", tree.tree);
+        };
+        let Some(Value::Keyword(widget_type)) = map.get("type").map(|value| value.borrow().clone()) else {
+            panic!("expected root widget type");
+        };
+        assert_eq!(widget_type, "grid");
+    }
+
+    #[test]
     #[ignore = "profiling harness; run explicitly while optimizing compiler/runtime speed"]
     fn profile_sdf_lighting_v2_demo_eval_speed() {
         let rounds = std::env::var("ESEQLISP_PROFILE_ITERS")
