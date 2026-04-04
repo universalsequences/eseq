@@ -870,3 +870,103 @@ impl TimebasePLockData {
         }
     }
 }
+
+pub struct SwingPLockData {
+    overrides: [AtomicU32; MAX_STEPS],
+}
+
+impl SwingPLockData {
+    pub fn new() -> Self {
+        Self {
+            overrides: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
+        }
+    }
+
+    pub fn get(&self, step: usize) -> Option<f32> {
+        let v = self.overrides[step].load(Ordering::Relaxed);
+        if v == u32::MAX {
+            None
+        } else {
+            Some(f32::from_bits(v))
+        }
+    }
+
+    pub fn set(&self, step: usize, swing: f32) {
+        self.overrides[step].store(swing.clamp(50.0, 75.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn clear(&self, step: usize) {
+        self.overrides[step].store(u32::MAX, Ordering::Relaxed);
+    }
+
+    pub fn has_plock(&self, step: usize) -> bool {
+        self.overrides[step].load(Ordering::Relaxed) != u32::MAX
+    }
+
+    pub fn resolve(&self, step: usize, default: f32) -> f32 {
+        self.get(step).unwrap_or(default)
+    }
+
+    pub fn snapshot(&self) -> [Option<u32>; MAX_STEPS] {
+        std::array::from_fn(|i| {
+            let v = self.overrides[i].load(Ordering::Relaxed);
+            if v == u32::MAX { None } else { Some(v) }
+        })
+    }
+
+    pub fn restore(&self, snap: &[Option<u32>; MAX_STEPS]) {
+        for (i, v) in snap.iter().enumerate() {
+            self.overrides[i].store(v.unwrap_or(u32::MAX), Ordering::Relaxed);
+        }
+    }
+}
+
+pub struct SwingResolutionPLockData {
+    overrides: [AtomicU32; MAX_STEPS],
+}
+
+impl SwingResolutionPLockData {
+    pub fn new() -> Self {
+        Self {
+            overrides: std::array::from_fn(|_| AtomicU32::new(u32::MAX)),
+        }
+    }
+
+    pub fn get(&self, step: usize) -> Option<SwingResolution> {
+        let v = self.overrides[step].load(Ordering::Relaxed);
+        if v == u32::MAX {
+            None
+        } else {
+            Some(SwingResolution::from_index(v))
+        }
+    }
+
+    pub fn set(&self, step: usize, resolution: SwingResolution) {
+        self.overrides[step].store(resolution as u32, Ordering::Relaxed);
+    }
+
+    pub fn clear(&self, step: usize) {
+        self.overrides[step].store(u32::MAX, Ordering::Relaxed);
+    }
+
+    pub fn has_plock(&self, step: usize) -> bool {
+        self.overrides[step].load(Ordering::Relaxed) != u32::MAX
+    }
+
+    pub fn resolve(&self, step: usize, default: SwingResolution) -> SwingResolution {
+        self.get(step).unwrap_or(default)
+    }
+
+    pub fn snapshot(&self) -> [Option<u32>; MAX_STEPS] {
+        std::array::from_fn(|i| {
+            let v = self.overrides[i].load(Ordering::Relaxed);
+            if v == u32::MAX { None } else { Some(v) }
+        })
+    }
+
+    pub fn restore(&self, snap: &[Option<u32>; MAX_STEPS]) {
+        for (i, v) in snap.iter().enumerate() {
+            self.overrides[i].store(v.unwrap_or(u32::MAX), Ordering::Relaxed);
+        }
+    }
+}

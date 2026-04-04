@@ -790,7 +790,7 @@ impl App {
                     super::TP_SWING => {
                         let value = (sdv + dx as f32 * 0.5).clamp(50.0, 75.0);
                         for track in tracks {
-                            apply_command(self, AppCommand::SetTrackSwing { track, value });
+                            self.set_track_swing_or_plock(track, value);
                         }
                     }
                     super::TP_STEPS => {

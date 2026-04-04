@@ -705,6 +705,8 @@ impl App {
             track_sound_states,
             chord_snapshots,
             timebase_plock_snapshots,
+            swing_plock_snapshots,
+            swing_resolution_plock_snapshots,
             instrument_types: _,
             sample_paths: _,
             sample_names: _,
@@ -739,6 +741,7 @@ impl App {
                         if self.is_sampler_track(track_idx) {
                             crate::effects::EffectSlotSnapshot::new_empty()
                         } else {
+                            let desc = self.graph.instrument_descriptors[track_idx].clone();
                             let slot =
                                 instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
                                     crate::project::ProjectEffectSlot {
@@ -753,7 +756,13 @@ impl App {
                                     &self.state.pattern.instrument_slots[track_idx],
                                 )
                             } else {
-                                slot.into_snapshot_with_node_id(node_id)
+                                let mut snapshot = slot.into_snapshot_with_node_id(node_id);
+                                // Regenerate instrument param routing from the current descriptor.
+                                // Older projects may have serialized stale absolute node ids here,
+                                // which makes restored synth edits no-op after load.
+                                snapshot.param_node_indices =
+                                    desc.params.iter().map(|p| p.node_param_idx).collect();
+                                snapshot
                             }
                         }
                     })
@@ -777,6 +786,26 @@ impl App {
                     .map(chord_snapshot_from_steps)
                     .collect(),
                 timebase_plock_snapshots: timebase_plock_snapshots
+                    .into_iter()
+                    .map(|steps| {
+                        let mut snapshot = [None; MAX_STEPS];
+                        for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                            snapshot[idx] = value;
+                        }
+                        snapshot
+                    })
+                    .collect(),
+                swing_plock_snapshots: swing_plock_snapshots
+                    .into_iter()
+                    .map(|steps| {
+                        let mut snapshot = [None; MAX_STEPS];
+                        for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                            snapshot[idx] = value;
+                        }
+                        snapshot
+                    })
+                    .collect(),
+                swing_resolution_plock_snapshots: swing_resolution_plock_snapshots
                     .into_iter()
                     .map(|steps| {
                         let mut snapshot = [None; MAX_STEPS];

@@ -14,6 +14,56 @@
         :color (* (if (= active 1) 1.0 0.3)
                   (aqua-color (rgba 0.85 0.05 0.05 1.0) (rgba 0.99 0.15 0.15 1.0)))))))
 
+(defwidget mixer-track-meter
+  :width 5 :height 0.28
+  :paint-margin 0.08
+  :state (level)
+  :shader
+  (let ((lvl (min 1.0 (max 0.0 level)))
+        (track (sdf/rounded-rect width height height))
+        (green-end (min lvl 0.60))
+        (yellow-end (min lvl 0.85))
+        (red-end lvl))
+    (sdf/layer
+      (sdf/fill track
+        (material :color (rgba 0.05 0.06 0.07 1)))
+      (if (> green-end 0.005)
+        (sdf/fill
+          (let ((__start 0.0)
+                (__end green-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.32)
+                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.34 0.86 0.40 1)))
+        (rgba 0 0 0 0))
+      (if (> (- yellow-end 0.60) 0.005)
+        (sdf/fill
+          (let ((__start 0.60)
+                (__end yellow-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.32)
+                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.86 0.72 0.22 1)))
+        (rgba 0 0 0 0))
+      (if (> (- red-end 0.85) 0.005)
+        (sdf/fill
+          (let ((__start 0.85)
+                (__end red-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.32)
+                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.92 0.24 0.22 1)))
+        (rgba 0 0 0 0)))))
+
 (effect-buffer "*mixer*"
   (v-stack :padding 1 :gap 0.5
     (each SEQ.track-names |name i|
@@ -28,7 +78,10 @@
           (label (substring name 0 16) :font-size 11 :width 12
                  :color (if (= SEQ.current-track i) :white :gray)
                  :bg :transparent))
-        (hslider :min 0 :max 1 :width 5
-                 :value (nth SEQ.track-volumes i)
-                 :material (aqua-slider-material)
-                 :on-change (lambda (v) (seq-set-track-volume i v)))))))
+        (box :width 5.2
+          (v-stack :gap 0.18
+            (hslider :min 0 :max 1 :width 5
+                     :value (nth SEQ.track-volumes i)
+                     :material (aqua-slider-material)
+                     :on-change (lambda (v) (seq-set-track-volume i v)))
+            (mixer-track-meter :level (nth SEQ.track-peaks i))))))))

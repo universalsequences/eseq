@@ -25,8 +25,13 @@
 (def page-count ()
   (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
 
-(def visible-page ()
+(def current-page ()
   (min (floor (/ (current-step) page-size)) (- (page-count) 1)))
+
+(def visible-page ()
+  (if (and SEQ.playing SEQ.auto-follow (not (seq-has-selection?)))
+    (playhead-page)
+    (current-page)))
 
 (def playhead-page ()
   (min (floor (/ (mod SEQ.playhead (max 1 SEQ.tp-num-steps)) page-size))
@@ -34,6 +39,9 @@
 
 (def page-offset ()
   (* (visible-page) page-size))
+
+(def cool-off-follow ()
+  (seq-pause-auto-follow))
 
 (def page-button-width 2.8)
 
@@ -53,33 +61,70 @@
 
 (def cursor-left ()
   (if (seq-has-selection?)
-    (seq-shift-selected-steps -1)
-    (set! cursor-step (mod (- (current-step) 1) (max 1 SEQ.tp-num-steps)))))
+    (do
+      (cool-off-follow)
+      (seq-shift-selected-steps -1))
+    (do
+      (cool-off-follow)
+      (set! cursor-step (mod (- (current-step) 1) (max 1 SEQ.tp-num-steps))))))
 
 (def cursor-right ()
   (if (seq-has-selection?)
-    (seq-shift-selected-steps 1)
-    (set! cursor-step (mod (+ (current-step) 1) (max 1 SEQ.tp-num-steps)))))
+    (do
+      (cool-off-follow)
+      (seq-shift-selected-steps 1))
+    (do
+      (cool-off-follow)
+      (set! cursor-step (mod (+ (current-step) 1) (max 1 SEQ.tp-num-steps))))))
 
 (def cursor-toggle ()
-  (seq-toggle-step (current-step)))
+  (do
+    (cool-off-follow)
+    (seq-toggle-step (current-step))))
 
 (def select-all-steps ()
-  (seq-select-all-steps))
+  (do
+    (cool-off-follow)
+    (seq-select-all-steps)))
 
 (def delete-selected-steps ()
-  (seq-delete-selected-steps))
+  (do
+    (cool-off-follow)
+    (seq-delete-selected-steps)))
+
+(def step-param-value (v)
+  (if (= param-mode 3)
+    (round v)
+    v))
+
+(def param-decimals ()
+  (if (= param-mode 3) 0 2))
+
+(def seq-grid-handle-key (key text)
+  (if (= key "LEFT")
+    (do (cursor-left) true)
+    (if (= key "RIGHT")
+      (do (cursor-right) true)
+      (if (= key "C-a")
+        (do (select-all-steps) true)
+        (if (or (= key "BS") (= key "Delete"))
+          (do (delete-selected-steps) true)
+          (if (= key "RET")
+            (do (cursor-toggle) true)
+            false))))))
 
 (def goto-page (page)
-  (set! cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1))))
+  (do
+    (cool-off-follow)
+    (set! cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 ;; Cursor keys scoped to *metal* buffer via mode
-(define-mode "seq-grid-mode" :read-only true)
+(define-mode "seq-grid-mode" :read-only true :on-key "seq-grid-handle-key")
 (mode-bind-key "seq-grid-mode" "LEFT" "cursor-left")
 (mode-bind-key "seq-grid-mode" "RIGHT" "cursor-right")
 (mode-bind-key "seq-grid-mode" "C-a" "select-all-steps")
-(mode-bind-key "seq-grid-mode" "BACKSPACE" "delete-selected-steps")
-(mode-bind-key "seq-grid-mode" "DEL" "delete-selected-steps")
+(mode-bind-key "seq-grid-mode" "BS" "delete-selected-steps")
+(mode-bind-key "seq-grid-mode" "Delete" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "RET" "cursor-toggle")
 
 (def param-values ()
@@ -293,10 +338,11 @@
             :on-click (lambda (evt)
               (if visible
                 (do
+                  (cool-off-follow)
                   (set! cursor-step step)
                   (if (get evt :shift)
                     (seq-select-step step)
-                    (do (seq-clear-selection) (seq-toggle-step step))))
+                    (seq-clear-selection)))
                 nil))
             (v-stack :align :center :gap 0.5
               (vslider :height 4
@@ -312,9 +358,13 @@
                 :material (aqua-slider-material)
                 :on-change (lambda (v)
                   (if visible
-                    (if (seq-has-selection?)
-                      (seq-set-step-param-plock (param-keyword) v)
-                      (seq-set-step-param step (param-keyword) v))
+                    (do
+                      (cool-off-follow)
+                      (set! cursor-step step)
+                      (let ((value (step-param-value v)))
+                      (if (seq-has-selection?)
+                        (seq-set-step-param-plock (param-keyword) value)
+                        (seq-set-step-param step (param-keyword) value))))
                     nil)))
               (box
                 :active (if visible (if (nth SEQ.steps step) 1 0) 0)
@@ -322,6 +372,15 @@
                 :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
                 :background "aqua-button"
                 :align :center :width 3 :height 1.5
+                :on-click (lambda (evt)
+                  (if visible
+                    (do
+                      (cool-off-follow)
+                      (set! cursor-step step)
+                      (if (get evt :shift)
+                        (seq-select-step step)
+                        (seq-toggle-step step)))
+                    nil))
                 (tick :active (if visible (if (nth SEQ.steps step) 1 0) 0)
                       :plocked (if visible (if (nth SEQ.step-has-plocks step) 1 0) 0)
                       :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)))
@@ -342,8 +401,11 @@
           (label (sync-current-label)
             :font-size 11 :color :white :bg :transparent))
         (number-picker :value (nth (param-values) (current-step))
-          :min (param-min) :max (param-max) :decimals 2
-          :on-change (lambda (v) (seq-set-step-param (current-step) (param-keyword) v))
+          :min (param-min) :max (param-max) :decimals (param-decimals)
+          :on-change (lambda (v)
+            (do
+              (cool-off-follow)
+              (seq-set-step-param (current-step) (param-keyword) (step-param-value v))))
           :width 8 :height 1.3 :font-size 11))
       (box :background "transport-btn-bg" :padding 0 :height 1.8
         (box :width (page-panel-width) :height 1.7 :padding 0.0525
@@ -368,7 +430,9 @@
         (box :width 4 :height 2
           :bg (if SEQ.tp-gate :blue :dark-gray)
           :on-click |x y r|
-            (seq-set-track-param :gate (if SEQ.tp-gate 0 1))
+            (do
+              (cool-off-follow)
+              (seq-set-track-param :gate (if SEQ.tp-gate 0 1)))
           (label (if SEQ.tp-gate "ON" "OFF")
             :font-size 11 :color :white :bg :transparent)))
       ; Poly toggle
@@ -377,7 +441,9 @@
         (box :width 4 :height 2
           :bg (if SEQ.tp-poly :blue :dark-gray)
           :on-click |x y r|
-            (seq-set-track-param :poly (if SEQ.tp-poly 0 1))
+            (do
+              (cool-off-follow)
+              (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))
           (label (if SEQ.tp-poly "ON" "OFF")
             :font-size 11 :color :white :bg :transparent)))
       ; Attack
@@ -386,32 +452,32 @@
           (label "atk" :font-size 9 :color :gray :bg :transparent)
           (number-picker :value SEQ.tp-attack :min 0 :max 500 :decimals 0
             :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (seq-set-track-param :attack v))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :attack v)))
             :width 4 :height 1))
         (box :width 10 :height 2
           (hslider :min 0 :max 500
             :value SEQ.tp-attack
             :material (aqua-slider-material)
-            :on-change (lambda (v) (seq-set-track-param :attack v)))))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :attack v))))))
       ; Release
       (v-stack :align :center :gap 0.25
         (h-stack :gap 0.25 :align :baseline
           (label "rel" :font-size 9 :color :gray :bg :transparent)
           (number-picker :value SEQ.tp-release :min 0 :max 2000 :decimals 0
             :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (seq-set-track-param :release v))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :release v)))
             :width 4 :height 1))
         (box :width 10 :height 2
           (hslider :min 0 :max 2000
             :value SEQ.tp-release
             :material (aqua-slider-material)
-            :on-change (lambda (v) (seq-set-track-param :release v)))))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :release v))))))
       ; Fit-to-scale
       (v-stack :align :center :gap 0.25
         (label "fts" :font-size 9 :color :gray :bg :transparent)
         (dropdown :value SEQ.tp-fts
           :options SEQ.fts-options
-          :on-change (lambda (v) (seq-set-fts v))
+          :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
           :width 10 :height 1.5 :font-size 10)))
 
     ; Track parameters — row 2
@@ -422,55 +488,57 @@
           (label "swg" :font-size 9 :color :gray :bg :transparent)
           (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
             :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (seq-set-track-param :swing v))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v)))
             :width 4 :height 1))
         (box :width 8 :height 2
           (hslider :min 50 :max 75
             :value SEQ.tp-swing
             :material (aqua-slider-material)
-            :on-change (lambda (v) (seq-set-track-param :swing v)))))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v))))))
       ; Send
       (v-stack :align :center :gap 0.25
         (h-stack :gap 0.25 :align :baseline
           (label "send" :font-size 9 :color :gray :bg :transparent)
           (number-picker :value SEQ.tp-send :min 0 :max 1 :decimals 2
             :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (seq-set-track-param :send v))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :send v)))
             :width 4 :height 1))
         (box :width 8 :height 2
           (hslider :min 0 :max 1
             :value SEQ.tp-send
             :material (aqua-slider-material)
-            :on-change (lambda (v) (seq-set-track-param :send v)))))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :send v))))))
       ; Steps
       (v-stack :align :center :gap 0.25
         (h-stack :gap 0.25 :align :baseline
           (label "steps" :font-size 9 :color :gray :bg :transparent)
           (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
             :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (seq-set-track-param :num-steps v))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))
             :width 3 :height 1))
         (box :width 8 :height 2
           (hslider :min 1 :max 256
             :value SEQ.tp-num-steps
             :material (aqua-slider-material)
-            :on-change (lambda (v) (seq-set-track-param :num-steps v)))))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v))))))
       ; Timebase
       (v-stack :align :center :gap 0.25
         (label "timebase" :font-size 9 :color :gray :bg :transparent)
         (dropdown :value SEQ.tp-timebase
           :options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh")
           :on-change (lambda (v)
-            (if (seq-has-selection?)
-              (seq-plock-timebase v)
-              (seq-set-timebase v)))
+            (do
+              (cool-off-follow)
+              (if (seq-has-selection?)
+                (seq-plock-timebase v)
+                (seq-set-timebase v))))
           :width 6 :height 1.5 :font-size 11))
       ; Swing resolution
       (v-stack :align :center :gap 0.25
         (label "sw-res" :font-size 9 :color :gray :bg :transparent)
         (dropdown :value SEQ.tp-swing-resolution
           :options '("1/16" "1/8" "1/4" "1/2")
-          :on-change (lambda (v) (seq-set-swing-resolution v))
+          :on-change (lambda (v) (do (cool-off-follow) (seq-set-swing-resolution v)))
           :width 5 :height 1.5 :font-size 11)))
 
     ; Accumulator controls
@@ -480,14 +548,14 @@
         (label "acc fn" :font-size 9 :color :gray :bg :transparent)
         (dropdown :value SEQ.tp-accumulator
           :options SEQ.accumulator-options
-          :on-change (lambda (v) (seq-set-accumulator v))
+          :on-change (lambda (v) (do (cool-off-follow) (seq-set-accumulator v)))
           :width 10 :height 1.5 :font-size 10))
       ; Accumulator mode
       (v-stack :align :center :gap 0.25
         (label "acc mode" :font-size 9 :color :gray :bg :transparent)
         (dropdown :value SEQ.tp-accum-mode
           :options SEQ.accum-mode-options
-          :on-change (lambda (v) (seq-set-accum-mode v))
+          :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-mode v)))
           :width 8 :height 1.5 :font-size 10))
       ; Accumulator limit
       (v-stack :align :center :gap 0.25
@@ -495,13 +563,13 @@
           (label "acc lim" :font-size 9 :color :gray :bg :transparent)
           (number-picker :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
             :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (seq-set-accum-limit v))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))
             :width 4 :height 1))
         (box :width 8 :height 2
           (hslider :min 0 :max 127
             :value SEQ.tp-accum-limit
             :material (aqua-slider-material)
-            :on-change (lambda (v) (seq-set-accum-limit v))))))))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))))))))
 
 ; Layout: samples | metal | mixer on top, fx on bottom
 (set-layout '(:rows

@@ -434,12 +434,23 @@ impl App {
         let old_selection = slot.defaults.get(param_idx).round().max(0.0) as usize;
         if let Some(old_track) = self.effect_sidechain_source_track(track, old_selection) {
             let source_port = (*input_channel).min(1) as i32;
-            unsafe {
+            let disconnected = unsafe {
                 crate::audiograph::graph_disconnect(
                     self.graph.lg.0,
                     self.graph.track_node_ids[old_track].delay_id,
                     source_port,
                     node_id,
+                    *input_channel as i32,
+                )
+            };
+            if !disconnected {
+                eprintln!(
+                    "sidechain: disconnect failed effect_node={} track={} slot={} old_track={} src_port={} dst_port={}",
+                    node_id,
+                    track,
+                    slot_idx,
+                    old_track,
+                    source_port,
                     *input_channel as i32,
                 );
             }
@@ -447,12 +458,23 @@ impl App {
 
         if let Some(new_track) = self.effect_sidechain_source_track(track, selection) {
             let source_port = (*input_channel).min(1) as i32;
-            unsafe {
+            let connected = unsafe {
                 crate::audiograph::graph_connect(
                     self.graph.lg.0,
                     self.graph.track_node_ids[new_track].delay_id,
                     source_port,
                     node_id,
+                    *input_channel as i32,
+                )
+            };
+            if !connected {
+                eprintln!(
+                    "sidechain: connect failed effect_node={} track={} slot={} new_track={} src_port={} dst_port={}",
+                    node_id,
+                    track,
+                    slot_idx,
+                    new_track,
+                    source_port,
                     *input_channel as i32,
                 );
             }

@@ -160,6 +160,20 @@ pub enum AppCommand {
         track: usize,
         value: f32,
     },
+    SetTrackSwingPlock {
+        track: usize,
+        step: usize,
+        value: Option<f32>,
+    },
+    SetTrackSwingPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        value: f32,
+    },
+    ClearTrackSwingPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+    },
     AdjustTrackSwing {
         track: usize,
         delta: f32,
@@ -168,6 +182,20 @@ pub enum AppCommand {
     SetTrackSwingResolution {
         track: usize,
         resolution: SwingResolution,
+    },
+    SetTrackSwingResolutionPlock {
+        track: usize,
+        step: usize,
+        resolution: Option<SwingResolution>,
+    },
+    SetTrackSwingResolutionPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
+        resolution: SwingResolution,
+    },
+    ClearTrackSwingResolutionPlockMulti {
+        track: usize,
+        steps: Vec<usize>,
     },
     NextTrackSwingResolution {
         track: usize,
@@ -500,6 +528,23 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.pattern.track_params[track].set_swing(value);
         }
 
+        AppCommand::SetTrackSwingPlock { track, step, value } => match value {
+            Some(value) => app.state.pattern.swing_plocks[track].set(step, value),
+            None => app.state.pattern.swing_plocks[track].clear(step),
+        },
+
+        AppCommand::SetTrackSwingPlockMulti { track, steps, value } => {
+            for step in steps {
+                app.state.pattern.swing_plocks[track].set(step, value);
+            }
+        }
+
+        AppCommand::ClearTrackSwingPlockMulti { track, steps } => {
+            for step in steps {
+                app.state.pattern.swing_plocks[track].clear(step);
+            }
+        }
+
         AppCommand::AdjustTrackSwing { track, delta } => {
             let tp = &app.state.pattern.track_params[track];
             tp.set_swing(tp.get_swing() + delta);
@@ -507,6 +552,31 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
 
         AppCommand::SetTrackSwingResolution { track, resolution } => {
             app.state.pattern.track_params[track].set_swing_resolution(resolution);
+        }
+
+        AppCommand::SetTrackSwingResolutionPlock {
+            track,
+            step,
+            resolution,
+        } => match resolution {
+            Some(resolution) => app.state.pattern.swing_resolution_plocks[track].set(step, resolution),
+            None => app.state.pattern.swing_resolution_plocks[track].clear(step),
+        },
+
+        AppCommand::SetTrackSwingResolutionPlockMulti {
+            track,
+            steps,
+            resolution,
+        } => {
+            for step in steps {
+                app.state.pattern.swing_resolution_plocks[track].set(step, resolution);
+            }
+        }
+
+        AppCommand::ClearTrackSwingResolutionPlockMulti { track, steps } => {
+            for step in steps {
+                app.state.pattern.swing_resolution_plocks[track].clear(step);
+            }
         }
 
         AppCommand::NextTrackSwingResolution { track } => {

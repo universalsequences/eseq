@@ -901,13 +901,25 @@ fn draw_trigger_row(frame: &mut Frame, app: &App, area: Rect) {
 
         let active = app.state.pattern.patterns[app.ui.cursor_track].is_active(step);
         let chord_count = app.state.pattern.chord_data[app.ui.cursor_track].count(step);
-        // Check all slots for p-locks
-        let has_plock = app.state.pattern.effect_chains[app.ui.cursor_track]
-            .iter()
-            .any(|slot| {
-                let np = slot.num_params.load(Ordering::Relaxed) as usize;
-                slot.plocks.step_has_any_plock(step, np)
-            });
+        let track = app.ui.cursor_track;
+        let effect_has_plock = app.state.pattern.effect_chains[track].iter().any(|slot| {
+            let np = slot.num_params.load(Ordering::Relaxed) as usize;
+            slot.plocks.step_has_any_plock(step, np)
+        });
+        let instrument_has_plock = {
+            let slot = &app.state.pattern.instrument_slots[track];
+            let np = slot.num_params.load(Ordering::Relaxed) as usize;
+            slot.plocks.step_has_any_plock(step, np)
+        };
+        let timebase_has_plock = app.state.pattern.timebase_plocks[track].has_plock(step);
+        let swing_has_plock = app.state.pattern.swing_plocks[track].has_plock(step);
+        let swing_resolution_has_plock =
+            app.state.pattern.swing_resolution_plocks[track].has_plock(step);
+        let has_plock = effect_has_plock
+            || instrument_has_plock
+            || timebase_has_plock
+            || swing_has_plock
+            || swing_resolution_has_plock;
         // Symbol: circle base; append chord count digit when > 1
         let base_sym = if has_plock { "\u{25c9}" } else { "\u{25cf}" }; // ◉ or ●
         let ch: String = if !active {

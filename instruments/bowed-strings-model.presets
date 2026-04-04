@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "engine_name": "bowed-strings-model",
+  "source_file": "instruments/bowed-strings-model.lisp",
+  "presets": [
+    {
+      "id": "bsm-natural-section",
+      "name": "BSM NATURAL SECTION",
+      "base_note_offset": 0.0,
+      "params": {
+        "bow_pressure": 0.34,
+        "bow_attack_ms": 160,
+        "bow_position": 0.14,
+        "bow_velocity": 0.56,
+        "rosin": 0.62,
+        "brightness": 0.58,
+        "pick_pos": 0.16,
+        "decay_time_ms": 2200,
+        "soundboard": 0.62,
+        "sympathetic": 0.34,
+        "stereo_width": 0.50,
+        "vibrato_rate": 5.2,
+        "vibrato_depth": 0.10,
+        "ensemble": 0.28,
+        "gain": 0.16
+      }
+    },
+    {
+      "id": "bsm-dark-legato",
+      "name": "BSM DARK LEGATO",
+      "base_note_offset": 0.0,
+      "params": {
+        "bow_pressure": 0.27,
+        "bow_attack_ms": 340,
+        "bow_position": 0.20,
+        "bow_velocity": 0.40,
+        "rosin": 0.44,
+        "brightness": 0.30,
+        "pick_pos": 0.28,
+        "decay_time_ms": 3400,
+        "soundboard": 0.84,
+        "sympathetic": 0.22,
+        "stereo_width": 0.26,
+        "vibrato_rate": 4.8,
+        "vibrato_depth": 0.07,
+        "ensemble": 0.18,
+        "gain": 0.18
+      }
+    },
+    {
+      "id": "bsm-solo-sheen",
+      "name": "BSM SOLO SHEEN",
+      "base_note_offset": 0.0,
+      "params": {
+        "bow_pressure": 0.38,
+        "bow_attack_ms": 90,
+        "bow_position": 0.10,
+        "bow_velocity": 0.70,
+        "rosin": 0.72,
+        "brightness": 0.76,
+        "pick_pos": 0.09,
+        "decay_time_ms": 1800,
+        "soundboard": 0.46,
+        "sympathetic": 0.48,
+        "stereo_width": 0.72,
+        "vibrato_rate": 5.7,
+        "vibrato_depth": 0.16,
+        "ensemble": 0.22,
+        "gain": 0.14
+      }
+    },
+    {
+      "id": "bsm-cinematic-wide",
+      "name": "BSM CINEMATIC WIDE",
+      "base_note_offset": 0.0,
+      "params": {
+        "bow_pressure": 0.36,
+        "bow_attack_ms": 240,
+        "bow_position": 0.15,
+        "bow_velocity": 0.52,
+        "rosin": 0.58,
+        "brightness": 0.48,
+        "pick_pos": 0.18,
+        "decay_time_ms": 4200,
+        "soundboard": 0.80,
+        "sympathetic": 0.64,
+        "stereo_width": 0.92,
+        "vibrato_rate": 5.0,
+        "vibrato_depth": 0.12,
+        "ensemble": 0.46,
+        "gain": 0.13
+      }
+    },
+    {
+      "id": "bsm-rosin-grit",
+      "name": "BSM ROSIN GRIT",
+      "base_note_offset": 0.0,
+      "params": {
+        "bow_pressure": 0.40,
+        "bow_attack_ms": 70,
+        "bow_position": 0.08,
+        "bow_velocity": 0.78,
+        "rosin": 0.88,
+        "brightness": 0.66,
+        "pick_pos": 0.07,
+        "decay_time_ms": 1600,
+        "soundboard": 0.38,
+        "sympathetic": 0.30,
+        "stereo_width": 0.40,
+        "vibrato_rate": 5.4,
+        "vibrato_depth": 0.06,
+        "ensemble": 0.16,
+        "gain": 0.13
+      }
+    },
+    {
+      "id": "bsm-chamber-soft",
+      "name": "BSM CHAMBER SOFT",
+      "base_note_offset": 0.0,
+      "params": {
+        "bow_pressure": 0.24,
+        "bow_attack_ms": 420,
+        "bow_position": 0.24,
+        "bow_velocity": 0.34,
+        "rosin": 0.34,
+        "brightness": 0.24,
+        "pick_pos": 0.30,
+        "decay_time_ms": 3000,
+        "soundboard": 0.92,
+        "sympathetic": 0.18,
+        "stereo_width": 0.12,
+        "vibrato_rate": 4.6,
+        "vibrato_depth": 0.05,
+        "ensemble": 0.12,
+        "gain": 0.17
+      }
+    }
+  ]
+}

@@ -500,8 +500,13 @@ pub fn spawn_scheduler_thread(
                                     AccumulatorRuntimeState::default();
                             }
                         }
-                        let swing_pct = track.params.swing;
-                        let swing_resolution = track.params.swing_resolution;
+                        let step_snapshot = &track.steps[trigger.step];
+                        let swing_pct = step_snapshot
+                            .swing_override
+                            .unwrap_or(track.params.swing);
+                        let swing_resolution = step_snapshot
+                            .swing_resolution_override
+                            .unwrap_or(track.params.swing_resolution);
                         let swing_step =
                             swing_bucket_index(trigger.cycle_start_beats, swing_resolution);
                         let is_odd_step = swing_step % 2 == 1;
@@ -517,7 +522,6 @@ pub fn spawn_scheduler_thread(
                             sample_time = sample_time.saturating_add(swing_delay.max(0.0) as u64);
                         }
 
-                        let step_snapshot = &track.steps[trigger.step];
                         let mut resolved = ResolvedStep {
                             duration: step_snapshot.params[StepParam::Duration.index()],
                             velocity: step_snapshot.params[StepParam::Velocity.index()],

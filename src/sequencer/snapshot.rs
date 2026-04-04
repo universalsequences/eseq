@@ -3,7 +3,8 @@ use std::sync::atomic::Ordering;
 use crate::effects::EffectSlotSnapshot;
 
 use super::data::{
-    InstrumentType, StepParam, Timebase, TrackParamsSnapshot, MAX_STEPS, NUM_PARAMS,
+    InstrumentType, StepParam, SwingResolution, Timebase, TrackParamsSnapshot, MAX_STEPS,
+    NUM_PARAMS,
 };
 use super::state::SequencerState;
 
@@ -22,6 +23,8 @@ pub struct SequencerStepSnapshot {
     pub params: [f32; NUM_PARAMS],
     pub chord: Vec<f32>,
     pub timebase_override: Option<Timebase>,
+    pub swing_override: Option<f32>,
+    pub swing_resolution_override: Option<SwingResolution>,
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +129,9 @@ impl SequencerSnapshot {
                     params: step_params,
                     chord,
                     timebase_override: state.pattern.timebase_plocks[track_idx].get(step_idx),
+                    swing_override: state.pattern.swing_plocks[track_idx].get(step_idx),
+                    swing_resolution_override: state.pattern.swing_resolution_plocks[track_idx]
+                        .get(step_idx),
                 });
             }
 

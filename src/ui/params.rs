@@ -29,6 +29,88 @@ pub(super) enum ToolRow {
 // ── App impl: params input ──
 
 impl App {
+    fn displayed_track_swing(&self, track: usize) -> (f32, bool) {
+        let tp = &self.state.pattern.track_params[track];
+        if self.has_selection() {
+            let step = self.selected_steps()[0];
+            if let Some(value) = self.state.pattern.swing_plocks[track].get(step) {
+                return (value, true);
+            }
+        }
+        (tp.get_swing(), false)
+    }
+
+    fn displayed_track_swing_resolution(&self, track: usize) -> (SwingResolution, bool) {
+        let tp = &self.state.pattern.track_params[track];
+        if self.has_selection() {
+            let step = self.selected_steps()[0];
+            if let Some(value) = self.state.pattern.swing_resolution_plocks[track].get(step) {
+                return (value, true);
+            }
+        }
+        (tp.get_swing_resolution(), false)
+    }
+
+    pub(super) fn set_track_swing_or_plock(&mut self, track: usize, value: f32) {
+        if self.has_selection() {
+            apply_command(
+                self,
+                AppCommand::SetTrackSwingPlockMulti {
+                    track,
+                    steps: self.selected_steps(),
+                    value,
+                },
+            );
+        } else {
+            apply_command(self, AppCommand::SetTrackSwing { track, value });
+        }
+    }
+
+    fn adjust_track_swing_or_plock(&mut self, track: usize, delta: f32) {
+        if self.has_selection() {
+            let default = self.state.pattern.track_params[track].get_swing();
+            for step in self.selected_steps() {
+                let current = self.state.pattern.swing_plocks[track]
+                    .get(step)
+                    .unwrap_or(default);
+                apply_command(
+                    self,
+                    AppCommand::SetTrackSwingPlock {
+                        track,
+                        step,
+                        value: Some(current + delta),
+                    },
+                );
+            }
+        } else {
+            apply_command(self, AppCommand::AdjustTrackSwing { track, delta });
+        }
+    }
+
+    fn cycle_track_swing_resolution_or_plock(&mut self, track: usize, next: bool) {
+        if self.has_selection() {
+            let default = self.state.pattern.track_params[track].get_swing_resolution();
+            for step in self.selected_steps() {
+                let current = self.state.pattern.swing_resolution_plocks[track]
+                    .get(step)
+                    .unwrap_or(default);
+                let resolution = if next { current.next() } else { current.prev() };
+                apply_command(
+                    self,
+                    AppCommand::SetTrackSwingResolutionPlock {
+                        track,
+                        step,
+                        resolution: Some(resolution),
+                    },
+                );
+            }
+        } else if next {
+            apply_command(self, AppCommand::NextTrackSwingResolution { track });
+        } else {
+            apply_command(self, AppCommand::PrevTrackSwingResolution { track });
+        }
+    }
+
     fn accumulator_names(&self) -> Vec<String> {
         let mut names = ACCUMULATOR_REGISTRY
             .iter()
@@ -122,7 +204,9 @@ impl App {
                 ToolRow::Track(TP_SWING_RESOLUTION) => {
                     self.ui.dropdown_open = true;
                     self.ui.track_param_dropdown = true;
-                    self.ui.dropdown_cursor = tp.get_swing_resolution() as usize;
+                    self.ui.dropdown_cursor = self
+                        .displayed_track_swing_resolution(self.ui.cursor_track)
+                        .0 as usize;
                     self.ui.input_mode = InputMode::Dropdown;
                 }
                 ToolRow::Track(TP_FTS) => {
@@ -157,11 +241,11 @@ impl App {
                 }
                 ToolRow::Track(TP_SWING) => {
                     let track = self.ui.cursor_track;
-                    apply_command(self, AppCommand::AdjustTrackSwing { track, delta: 1.0 });
+                    self.adjust_track_swing_or_plock(track, 1.0);
                 }
                 ToolRow::Track(TP_SWING_RESOLUTION) => {
                     let track = self.ui.cursor_track;
-                    apply_command(self, AppCommand::NextTrackSwingResolution { track });
+                    self.cycle_track_swing_resolution_or_plock(track, true);
                 }
                 ToolRow::Track(TP_STEPS) => {
                     let track = self.ui.cursor_track;
@@ -232,11 +316,11 @@ impl App {
                 }
                 ToolRow::Track(TP_SWING) => {
                     let track = self.ui.cursor_track;
-                    apply_command(self, AppCommand::AdjustTrackSwing { track, delta: -1.0 });
+                    self.adjust_track_swing_or_plock(track, -1.0);
                 }
                 ToolRow::Track(TP_SWING_RESOLUTION) => {
                     let track = self.ui.cursor_track;
-                    apply_command(self, AppCommand::PrevTrackSwingResolution { track });
+                    self.cycle_track_swing_resolution_or_plock(track, false);
                 }
                 ToolRow::Track(TP_STEPS) => {
                     let track = self.ui.cursor_track;
@@ -313,6 +397,20 @@ impl App {
                     let track = self.ui.cursor_track;
                     let steps = self.selected_steps();
                     apply_command(self, AppCommand::ClearTimebasePlockMulti { track, steps });
+                } else if self.active_tool_row() == ToolRow::Track(TP_SWING) && self.has_selection()
+                {
+                    let track = self.ui.cursor_track;
+                    let steps = self.selected_steps();
+                    apply_command(self, AppCommand::ClearTrackSwingPlockMulti { track, steps });
+                } else if self.active_tool_row() == ToolRow::Track(TP_SWING_RESOLUTION)
+                    && self.has_selection()
+                {
+                    let track = self.ui.cursor_track;
+                    let steps = self.selected_steps();
+                    apply_command(
+                        self,
+                        AppCommand::ClearTrackSwingResolutionPlockMulti { track, steps },
+                    );
                 }
             }
             KeyCode::Char(c) if c.is_ascii_digit() => match self.active_tool_row() {
@@ -650,12 +748,23 @@ impl App {
                 }
                 ToolRow::Track(TP_SWING_RESOLUTION) => {
                     let resolution = SwingResolution::from_index(self.ui.dropdown_cursor as u32);
-                    let tracks = self.selected_tracks();
-                    for track in tracks {
+                    if self.has_selection() {
                         apply_command(
                             self,
-                            AppCommand::SetTrackSwingResolution { track, resolution },
+                            AppCommand::SetTrackSwingResolutionPlockMulti {
+                                track: self.ui.cursor_track,
+                                steps: self.selected_steps(),
+                                resolution,
+                            },
                         );
+                    } else {
+                        let tracks = self.selected_tracks();
+                        for track in tracks {
+                            apply_command(
+                                self,
+                                AppCommand::SetTrackSwingResolution { track, resolution },
+                            );
+                        }
                     }
                 }
                 ToolRow::Track(_) => {
@@ -804,8 +913,9 @@ fn draw_tools_list(frame: &mut Frame, app: &App, area: Rect, col_focused: bool) 
     let tp = &app.state.pattern.track_params[app.ui.cursor_track];
     let attack = tp.get_attack_ms();
     let release = tp.get_release_ms();
-    let swing = tp.get_swing();
-    let swing_resolution = tp.get_swing_resolution();
+    let (swing, swing_is_plock) = app.displayed_track_swing(app.ui.cursor_track);
+    let (swing_resolution, swing_resolution_is_plock) =
+        app.displayed_track_swing_resolution(app.ui.cursor_track);
     let steps = tp.get_num_steps();
     let volume = tp.get_volume();
     let pan = tp.get_pan();
@@ -840,10 +950,18 @@ fn draw_tools_list(frame: &mut Frame, app: &App, area: Rect, col_focused: bool) 
         ),
         (
             "swing",
-            format!("{:.0}%", swing),
+            format!("{:.0}%{}", swing, if swing_is_plock { " [P]" } else { "" }),
             Some((swing - 50.0) / 25.0),
         ),
-        ("swing res", swing_resolution.label().to_string(), None),
+        (
+            "swing res",
+            format!(
+                "{}{}",
+                swing_resolution.label(),
+                if swing_resolution_is_plock { " [P]" } else { "" }
+            ),
+            None,
+        ),
         (
             "steps",
             format!("{}", steps),

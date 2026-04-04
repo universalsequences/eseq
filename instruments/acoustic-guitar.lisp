@@ -39,19 +39,19 @@
 (def safe_pitch (max pitch 40.0))
 (def delay_nominal (/ 44100.0 safe_pitch))
 
-; ── Exciter: pitch-adaptive noise burst, length controlled by hardness ──
-; Counter resets to 0 on trigger and increments each sample.
-; This avoids a clock dependency and is pitch-independent.
+; ── Exciter: sample counter reset on gate rising edge ──
+; This mirrors the working editor patch more closely than relying on trigger timing.
+(make-history gate_hist)
 (make-history counter_hist)
+(def prev_gate    (read-history gate_hist))
 (def counter_prev (read-history counter_hist))
-(def counter      (gswitch (gt trigger 0.5) 0.0 (+ counter_prev 1.0)))
-
-; Hard pick = short, bright burst; soft = longer, darker
-(def burst_len   (+ 40.0 (* (- 1.0 (clip (mod hardness) 0 1)) 120.0)))
-(def noise_gate  (lt counter burst_len))
+(def note_on      (gt (- gate prev_gate) 0.0))
+(def counter      (gswitch note_on 0.0 (+ counter_prev 1.0)))
+(def burst_len    (+ 40.0 (* (- 1.0 (clip (mod hardness) 0 1)) 120.0)))
+(def noise_env    (lt counter burst_len))
 (def exc_cutoff  (+ 400.0 (* (clip (mod hardness) 0 1) 12000.0)))
 (def exc_q       (+ 0.3 (* (- 1.0 (clip (mod hardness) 0 1)) 0.7)))
-(def burst       (biquad (* (noise) noise_gate) exc_cutoff exc_q 1 0))
+(def burst       (biquad (* (noise) noise_env) exc_cutoff exc_q 1 0))
 
 ; Pluck position comb: notch at harmonics of 1/pickPos
 ; (subtracts a delayed copy of the exciter to simulate where along the string it's plucked)
@@ -64,7 +64,7 @@
 (def eff_bright  (clip (+ (mod brightness) (* vel_bright velocity)) 0.05 0.99))
 (def lp_freq     (max (* safe_pitch 1.5)
                        (+ 200.0 (* eff_bright 18000.0))))
-(def exp1        (exp (/ (* (- 0.0) twopi lp_freq) 44100.0)))
+(def exp1        (exp (/ (* -1.0 twopi lp_freq) 44100.0)))
 
 ; ── Stretch: compensates for LP attenuation at the fundamental ──
 ; |H(e^j2πf/sr)| = (1-exp1) / sqrt(1 + exp1² - 2*exp1*cos(2πf/sr))
@@ -84,12 +84,13 @@
 (def delay_len    (max 1.5 (- delay_nominal lp_group_dly)))
 
 ; ── Digital waveguide loop ──
-; loop_input → delay(N) → one-pole LP → output (also feeds back as ks_prev)
+; Match the working editor patch:
+; current loop input feeds the delay directly, and history stores the prior filtered output.
 (make-history ks_hist)
 (def ks_prev    (read-history ks_hist))
 (def loop_input (+ comb_exc (* ks_prev stretch)))
 (def delayed    (delay loop_input delay_len))
-; One-pole LP applied after delay — inside the loop
+; One-pole LP applied to the delayed sample — inside the loop
 (def ks_out     (+ (* delayed (- 1.0 exp1)) (* ks_prev exp1)))
 
 ; ── Acoustic body resonances ──
@@ -112,9 +113,12 @@
 (def dc_out (- lp_out dc_lp))
 
 ; ── Commit histories ──
+(write-history gate_hist gate)
 (write-history counter_hist counter)
 (write-history ks_hist ks_out)
 (write-history dc_hist dc_lp)
 
 (def vel_scale (+ 0.3 (* 0.7 velocity)))
-(out (* dc_out vel_scale gain) 1 @name audio)
+(def final_out (* dc_out vel_scale gain))
+(out final_out 1 @name left)
+(out final_out 2 @name right)

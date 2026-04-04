@@ -74,6 +74,18 @@ pub struct ProjectPattern {
         deserialize_with = "deserialize_timebase_plock_snapshots"
     )]
     pub timebase_plock_snapshots: Vec<Vec<Option<u32>>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_timebase_plock_snapshots",
+        deserialize_with = "deserialize_timebase_plock_snapshots"
+    )]
+    pub swing_plock_snapshots: Vec<Vec<Option<u32>>>,
+    #[serde(
+        default,
+        serialize_with = "serialize_timebase_plock_snapshots",
+        deserialize_with = "deserialize_timebase_plock_snapshots"
+    )]
+    pub swing_resolution_plock_snapshots: Vec<Vec<Option<u32>>>,
     pub instrument_types: Vec<ProjectInstrumentType>,
     pub sample_paths: Vec<Option<String>>,
     pub sample_names: Vec<String>,
@@ -167,6 +179,16 @@ impl ProjectPattern {
                 .collect(),
             timebase_plock_snapshots: snapshot
                 .timebase_plock_snapshots
+                .iter()
+                .map(|steps| steps.to_vec())
+                .collect(),
+            swing_plock_snapshots: snapshot
+                .swing_plock_snapshots
+                .iter()
+                .map(|steps| steps.to_vec())
+                .collect(),
+            swing_resolution_plock_snapshots: snapshot
+                .swing_resolution_plock_snapshots
                 .iter()
                 .map(|steps| steps.to_vec())
                 .collect(),
@@ -819,6 +841,8 @@ mod tests {
                 ],
                 chord_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
                 timebase_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
+                swing_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
+                swing_resolution_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 instrument_types: vec![
                     ProjectInstrumentType::Custom,
                     ProjectInstrumentType::Sampler,

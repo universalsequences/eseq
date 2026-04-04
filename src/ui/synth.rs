@@ -1068,7 +1068,7 @@ impl App {
         }
     }
 
-    pub(super) fn send_instrument_param(&self, track: usize, param_idx: usize, value: f32) {
+    pub fn send_instrument_param(&self, track: usize, param_idx: usize, value: f32) {
         let slot = &self.state.pattern.instrument_slots[track];
         let idx = slot.resolve_node_idx(param_idx);
         if crate::voice_modulator::is_bar_resync_param(idx as u32) {

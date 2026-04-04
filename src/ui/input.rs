@@ -1500,10 +1500,7 @@ impl App {
                         super::params::ToolRow::Track(super::TP_SWING) => {
                             let tracks = self.selected_tracks();
                             for track in tracks {
-                                apply_command(
-                                    self,
-                                    AppCommand::SetTrackSwing { track, value: val },
-                                );
+                                self.set_track_swing_or_plock(track, val);
                             }
                         }
                         super::params::ToolRow::Track(super::TP_STEPS) => {

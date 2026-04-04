@@ -630,8 +630,17 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
         continue;
       }
       // Use release on decrement to ensure buffer writes are visible to successor
-      if (atomic_fetch_sub_explicit(&lg->sched.pending[succ], 1, memory_order_release) == 1) {
+      int prev_pending =
+          atomic_fetch_sub_explicit(&lg->sched.pending[succ], 1, memory_order_release);
+      if (prev_pending == 1) {
         rq_push_or_spin(lg->sched.readyQueue, succ);
+      } else if (prev_pending <= 0) {
+        RTNode *succ_node = &lg->nodes[succ];
+        fprintf(stderr,
+                "[audiograph] WARN: pending underflow/duplicate fanout src=%d(%s) succ=%d(%s) prev_pending=%d indegree=%d\n",
+                nid, node->debug_name ? node->debug_name : "<unnamed>", succ,
+                succ_node->debug_name ? succ_node->debug_name : "<unnamed>",
+                prev_pending, lg->sched.indegree[succ]);
       }
     }
   }
@@ -672,7 +681,7 @@ static void dump_stalled_nodes(LiveGraph *lg) {
     bool orphaned = lg->sched.is_orphaned[i];
     bool has_out = node_has_any_output_connected(lg, i);
 
-    if (pending <= 0 && !orphaned && !deleted) {
+    if (pending < 0 && !orphaned && !deleted) {
       continue;
     }
 
@@ -684,6 +693,131 @@ static void dump_stalled_nodes(LiveGraph *lg) {
             node->debug_name ? node->debug_name : "<unnamed>");
   }
   fprintf(stderr, "[audiograph] stalled-node dump end\n");
+}
+
+typedef struct {
+  int total_jobs;
+  int source_count;
+} SchedulingCounts;
+
+static SchedulingCounts recount_scheduling_counts(LiveGraph *lg, bool dump_nodes,
+                                                  const char *reason) {
+  SchedulingCounts counts = {0, 0};
+  if (!lg) {
+    return counts;
+  }
+
+  if (dump_nodes) {
+    fprintf(stderr, "[audiograph] scheduling recount begin reason=%s\n",
+            reason ? reason : "<none>");
+  }
+
+  for (int i = 0; i < lg->node_count; i++) {
+    RTNode *node = &lg->nodes[i];
+    bool deleted = (node->vtable.process == NULL && node->nInputs == 0 &&
+                    node->nOutputs == 0);
+    bool orphaned = lg->sched.is_orphaned[i];
+    bool has_out = node_has_any_output_connected(lg, i);
+    bool is_sink = !has_out && lg->sched.indegree[i] > 0;
+
+    if (deleted || orphaned) {
+      continue;
+    }
+
+    if (has_out || is_sink) {
+      counts.total_jobs++;
+      if (dump_nodes) {
+        fprintf(stderr,
+                "[audiograph] recount-job id=%d logical=%llu indegree=%d hasOut=%d isSink=%d succCount=%d nIn=%d nOut=%d name=%s\n",
+                i, (unsigned long long)node->logical_id, lg->sched.indegree[i],
+                has_out ? 1 : 0, is_sink ? 1 : 0, node->succCount, node->nInputs,
+                node->nOutputs, node->debug_name ? node->debug_name : "<unnamed>");
+      }
+      if (lg->sched.indegree[i] == 0 && has_out) {
+        counts.source_count++;
+      }
+    }
+  }
+
+  if (dump_nodes) {
+    fprintf(stderr,
+            "[audiograph] scheduling recount end reason=%s total_jobs=%d source_count=%d cached_total_jobs=%d cached_source_count=%d\n",
+            reason ? reason : "<none>", counts.total_jobs, counts.source_count,
+            lg->sched.cached_total_jobs, lg->sched.source_count);
+  }
+
+  return counts;
+}
+
+static void dump_cached_source_nodes(LiveGraph *lg) {
+  if (!lg) {
+    return;
+  }
+  fprintf(stderr, "[audiograph] cached source nodes begin\n");
+  for (int idx = 0; idx < lg->sched.source_count; idx++) {
+    int nid = lg->sched.source_nodes[idx];
+    if (nid < 0 || nid >= lg->node_count) {
+      fprintf(stderr, "[audiograph] cached-source idx=%d nid=%d INVALID\n", idx, nid);
+      continue;
+    }
+    RTNode *node = &lg->nodes[nid];
+    fprintf(stderr,
+            "[audiograph] cached-source idx=%d nid=%d logical=%llu indegree=%d succCount=%d nIn=%d nOut=%d name=%s\n",
+            idx, nid, (unsigned long long)node->logical_id, lg->sched.indegree[nid],
+            node->succCount, node->nInputs, node->nOutputs,
+            node->debug_name ? node->debug_name : "<unnamed>");
+  }
+  fprintf(stderr, "[audiograph] cached source nodes end\n");
+}
+
+static void dump_ready_queue_state(LiveGraph *lg) {
+  if (!lg || !lg->sched.readyQueue || !lg->sched.readyQueue->ring) {
+    return;
+  }
+  ReadyQ *q = lg->sched.readyQueue;
+  MPMCQueue *ring = q->ring;
+  int qlen = atomic_load_explicit(&q->qlen, memory_order_acquire);
+  int waiters = atomic_load_explicit(&q->waiters, memory_order_acquire);
+  uint64_t head = atomic_load_explicit(&ring->head, memory_order_acquire);
+  uint64_t tail = atomic_load_explicit(&ring->tail, memory_order_acquire);
+  fprintf(stderr,
+          "[audiograph] readyq state qlen=%d waiters=%d head=%llu tail=%llu mask=%u approx_ring_count=%llu\n",
+          qlen, waiters, (unsigned long long)head, (unsigned long long)tail,
+          ring->mask, (unsigned long long)(head - tail));
+}
+
+static int rescue_ready_zero_pending_nodes(LiveGraph *lg) {
+  if (!lg) {
+    return 0;
+  }
+
+  int rescued = 0;
+  for (int i = 0; i < lg->node_count; i++) {
+    RTNode *node = &lg->nodes[i];
+    bool deleted = (node->vtable.process == NULL && node->nInputs == 0 &&
+                    node->nOutputs == 0);
+    if (deleted || lg->sched.is_orphaned[i]) {
+      continue;
+    }
+    int pending = atomic_load_explicit(&lg->sched.pending[i], memory_order_acquire);
+    if (pending != 0) {
+      continue;
+    }
+    rq_push_or_spin(lg->sched.readyQueue, i);
+    atomic_store_explicit(&lg->sched.pending[i], -2, memory_order_release);
+    rescued++;
+    fprintf(stderr,
+            "[audiograph] rescue requeued node=%d logical=%llu name=%s indegree=%d succCount=%d\n",
+            i, (unsigned long long)node->logical_id,
+            node->debug_name ? node->debug_name : "<unnamed>",
+            lg->sched.indegree[i], node->succCount);
+  }
+
+  if (rescued > 0) {
+    fprintf(stderr, "[audiograph] rescue requeued %d ready-zero-pending nodes\n",
+            rescued);
+  }
+  return rescued;
 }
 
 // ===================== OPTIMIZATION: Scheduling Cache =====================
@@ -875,11 +1009,18 @@ void process_live_block(LiveGraph *lg, int nframes) {
           if (waited_ms >= 10) {
             int jobs = atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire);
             int qlen = atomic_load_explicit(&lg->sched.readyQueue->qlen, memory_order_acquire);
+            SchedulingCounts recounted =
+                recount_scheduling_counts(lg, /*dump_nodes=*/true, "stall");
             fprintf(stderr,
-                    "[audiograph] process_live_block stall: waited=%ldms jobsInFlight=%d readyQ=%d node_count=%d source_count=%d\n",
-                    waited_ms, jobs, qlen, lg->node_count, lg->sched.source_count);
+                    "[audiograph] process_live_block stall: waited=%ldms jobsInFlight=%d readyQ=%d node_count=%d source_count=%d cached_total_jobs=%d recounted_total_jobs=%d recounted_source_count=%d dirty=%d\n",
+                    waited_ms, jobs, qlen, lg->node_count, lg->sched.source_count,
+                    lg->sched.cached_total_jobs, recounted.total_jobs,
+                    recounted.source_count, lg->sched.dirty ? 1 : 0);
+            dump_ready_queue_state(lg);
+            dump_cached_source_nodes(lg);
             dump_stalled_nodes(lg);
             dump_inflight_nodes(lg);
+            (void)rescue_ready_zero_pending_nodes(lg);
             stall_logged = true;
           }
         }

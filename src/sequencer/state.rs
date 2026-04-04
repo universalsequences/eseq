@@ -5,9 +5,10 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot, EffectSlotState, MAX_
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, InstrumentType, StepData, StepParam, Timebase, TimebasePLockData,
-    TrackParams, TrackParamsSnapshot, TrackPattern, TrackSoundState, DEFAULT_BPM, MAX_STEPS,
-    MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    ChordData, ChordSnapshot, InstrumentType, StepData, StepParam, SwingPLockData,
+    SwingResolution, SwingResolutionPLockData, Timebase, TimebasePLockData, TrackParams,
+    TrackParamsSnapshot, TrackPattern, TrackSoundState, DEFAULT_BPM, MAX_STEPS, MAX_TRACKS,
+    NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
 
@@ -22,6 +23,8 @@ pub struct StepSnapshot {
     pub params: [f32; NUM_PARAMS],
     pub chord: Vec<f32>,
     pub timebase: Option<Timebase>,
+    pub swing: Option<f32>,
+    pub swing_resolution: Option<SwingResolution>,
     pub effect_plocks: Vec<StepSlotPlocks>,
     pub instrument_plocks: StepSlotPlocks,
 }
@@ -38,6 +41,8 @@ pub struct PatternSnapshot {
     pub sample_ids: Vec<(i32, String)>,
     pub chord_snapshots: Vec<ChordSnapshot>,
     pub timebase_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
+    pub swing_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
+    pub swing_resolution_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub instrument_types: Vec<InstrumentType>,
 }
 
@@ -60,6 +65,8 @@ impl PatternSnapshot {
         let mut sample_ids = Vec::with_capacity(num_tracks);
         let mut chord_snapshots = Vec::with_capacity(num_tracks);
         let mut timebase_plock_snapshots = Vec::with_capacity(num_tracks);
+        let mut swing_plock_snapshots = Vec::with_capacity(num_tracks);
+        let mut swing_resolution_plock_snapshots = Vec::with_capacity(num_tracks);
         let mut inst_types = Vec::with_capacity(num_tracks);
 
         for t in 0..num_tracks {
@@ -128,6 +135,9 @@ impl PatternSnapshot {
             sample_ids.push((buf_id, name));
             chord_snapshots.push(ChordSnapshot::capture(&state.pattern.chord_data[t]));
             timebase_plock_snapshots.push(state.pattern.timebase_plocks[t].snapshot());
+            swing_plock_snapshots.push(state.pattern.swing_plocks[t].snapshot());
+            swing_resolution_plock_snapshots
+                .push(state.pattern.swing_resolution_plocks[t].snapshot());
             inst_types.push(if t < instrument_types.len() {
                 instrument_types[t]
             } else {
@@ -146,6 +156,8 @@ impl PatternSnapshot {
             sample_ids,
             chord_snapshots,
             timebase_plock_snapshots,
+            swing_plock_snapshots,
+            swing_resolution_plock_snapshots,
             instrument_types: inst_types,
         }
     }
@@ -211,7 +223,37 @@ impl PatternSnapshot {
             if t < self.timebase_plock_snapshots.len() {
                 state.pattern.timebase_plocks[t].restore(&self.timebase_plock_snapshots[t]);
             }
+            if t < self.swing_plock_snapshots.len() {
+                state.pattern.swing_plocks[t].restore(&self.swing_plock_snapshots[t]);
+            }
+            if t < self.swing_resolution_plock_snapshots.len() {
+                state.pattern.swing_resolution_plocks[t]
+                    .restore(&self.swing_resolution_plock_snapshots[t]);
+            }
         }
+    }
+
+    pub fn clone_track_lane_from(&mut self, source: &PatternSnapshot, track: usize) {
+        if track >= source.track_bits.len() {
+            return;
+        }
+        while self.track_bits.len() <= track {
+            self.push_default_track(track, &[]);
+        }
+        self.track_bits[track] = source.track_bits[track];
+        self.step_data[track] = source.step_data[track].clone();
+        self.track_params[track] = source.track_params[track].clone();
+        self.effect_slots[track] = source.effect_slots[track].clone();
+        self.instrument_slots[track] = source.instrument_slots[track].clone();
+        self.instrument_base_note_offsets[track] = source.instrument_base_note_offsets[track];
+        self.track_sound_states[track] = source.track_sound_states[track].clone();
+        self.sample_ids[track] = source.sample_ids[track].clone();
+        self.chord_snapshots[track] = source.chord_snapshots[track].clone();
+        self.timebase_plock_snapshots[track] = source.timebase_plock_snapshots[track];
+        self.swing_plock_snapshots[track] = source.swing_plock_snapshots[track];
+        self.swing_resolution_plock_snapshots[track] =
+            source.swing_resolution_plock_snapshots[track];
+        self.instrument_types[track] = source.instrument_types[track];
     }
 
     fn default_step_data() -> Vec<[f32; NUM_PARAMS]> {
@@ -256,6 +298,8 @@ impl PatternSnapshot {
         self.sample_ids.push((-1, String::new()));
         self.chord_snapshots.push(ChordSnapshot::new_default());
         self.timebase_plock_snapshots.push([None; MAX_STEPS]);
+        self.swing_plock_snapshots.push([None; MAX_STEPS]);
+        self.swing_resolution_plock_snapshots.push([None; MAX_STEPS]);
         self.instrument_types.push(InstrumentType::Sampler);
     }
 
@@ -271,6 +315,8 @@ impl PatternSnapshot {
             sample_ids: Vec::with_capacity(num_tracks),
             chord_snapshots: Vec::with_capacity(num_tracks),
             timebase_plock_snapshots: Vec::with_capacity(num_tracks),
+            swing_plock_snapshots: Vec::with_capacity(num_tracks),
+            swing_resolution_plock_snapshots: Vec::with_capacity(num_tracks),
             instrument_types: Vec::with_capacity(num_tracks),
         };
         for t in 0..num_tracks {
@@ -346,6 +392,8 @@ pub struct PatternState {
     pub current_pattern: AtomicU32,
     pub num_patterns: AtomicU32,
     pub timebase_plocks: Vec<TimebasePLockData>,
+    pub swing_plocks: Vec<SwingPLockData>,
+    pub swing_resolution_plocks: Vec<SwingResolutionPLockData>,
     pub instrument_slots: Vec<EffectSlotState>,
     pub instrument_base_note_offsets: Vec<AtomicU32>,
     pub track_sound_state: Mutex<Vec<TrackSoundState>>,
@@ -433,6 +481,10 @@ impl SequencerState {
                 current_pattern: AtomicU32::new(0),
                 num_patterns: AtomicU32::new(1),
                 timebase_plocks: (0..MAX_TRACKS).map(|_| TimebasePLockData::new()).collect(),
+                swing_plocks: (0..MAX_TRACKS).map(|_| SwingPLockData::new()).collect(),
+                swing_resolution_plocks: (0..MAX_TRACKS)
+                    .map(|_| SwingResolutionPLockData::new())
+                    .collect(),
                 instrument_slots: (0..MAX_TRACKS).map(|_| EffectSlotState::empty()).collect(),
                 instrument_base_note_offsets: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
@@ -676,12 +728,43 @@ impl SequencerState {
         Some(bank[new_idx].sample_ids.clone())
     }
 
+    pub fn propagate_track_to_all_patterns(
+        &self,
+        track: usize,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> bool {
+        let mut bank = self.pattern.pattern_bank.lock().unwrap();
+        let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        if cur >= bank.len() || track >= num_tracks {
+            return false;
+        }
+        bank[cur] = PatternSnapshot::capture(self, num_tracks, buffer_ids, names, instrument_types);
+        let source = bank[cur].clone();
+        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+            if pattern_idx != cur {
+                snapshot.clone_track_lane_from(&source, track);
+            }
+        }
+        true
+    }
+
     pub fn toggle_step_and_clear_plocks(&self, track: usize, step: usize) {
         let was_active = self.pattern.patterns[track].is_active(step);
         self.pattern.patterns[track].toggle_step(step);
         if was_active {
             for slot in &self.pattern.effect_chains[track] {
                 slot.plocks.clear_step(step);
+            }
+            self.pattern.timebase_plocks[track].clear(step);
+            self.pattern.swing_plocks[track].clear(step);
+            self.pattern.swing_resolution_plocks[track].clear(step);
+            for param_idx in 0..MAX_SLOT_PARAMS {
+                self.pattern.instrument_slots[track]
+                    .plocks
+                    .clear_param(step, param_idx);
             }
             self.pattern.chord_data[track].clear_step(step);
         }
@@ -722,6 +805,8 @@ impl SequencerState {
             params,
             chord,
             timebase: self.pattern.timebase_plocks[track].get(step),
+            swing: self.pattern.swing_plocks[track].get(step),
+            swing_resolution: self.pattern.swing_resolution_plocks[track].get(step),
             effect_plocks,
             instrument_plocks: StepSlotPlocks {
                 params: instrument_plocks,
@@ -738,6 +823,8 @@ impl SequencerState {
 
         self.pattern.chord_data[track].clear_step(step);
         self.pattern.timebase_plocks[track].clear(step);
+        self.pattern.swing_plocks[track].clear(step);
+        self.pattern.swing_resolution_plocks[track].clear(step);
 
         for slot in &self.pattern.effect_chains[track] {
             slot.plocks.clear_step(step);
@@ -809,6 +896,14 @@ impl SequencerState {
         match snapshot.timebase {
             Some(tb) => self.pattern.timebase_plocks[track].set(step, tb),
             None => self.pattern.timebase_plocks[track].clear(step),
+        }
+        match snapshot.swing {
+            Some(swing) => self.pattern.swing_plocks[track].set(step, swing),
+            None => self.pattern.swing_plocks[track].clear(step),
+        }
+        match snapshot.swing_resolution {
+            Some(resolution) => self.pattern.swing_resolution_plocks[track].set(step, resolution),
+            None => self.pattern.swing_resolution_plocks[track].clear(step),
         }
 
         for (slot_idx, slot) in self.pattern.effect_chains[track].iter().enumerate() {
@@ -945,6 +1040,14 @@ impl SequencerState {
             match self.pattern.timebase_plocks[track].get(src) {
                 Some(tb) => self.pattern.timebase_plocks[track].set(step, tb),
                 None => self.pattern.timebase_plocks[track].clear(step),
+            }
+            match self.pattern.swing_plocks[track].get(src) {
+                Some(swing) => self.pattern.swing_plocks[track].set(step, swing),
+                None => self.pattern.swing_plocks[track].clear(step),
+            }
+            match self.pattern.swing_resolution_plocks[track].get(src) {
+                Some(resolution) => self.pattern.swing_resolution_plocks[track].set(step, resolution),
+                None => self.pattern.swing_resolution_plocks[track].clear(step),
             }
         }
 

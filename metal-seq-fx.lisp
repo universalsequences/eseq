@@ -62,7 +62,7 @@
     (h-stack :gap 0.45 :align :center :no-clamp-width true
       (box :width 13.2 :height 1.25 :no-clamp-width true
         (h-stack :gap 0.25 :align :baseline :no-clamp-width true
-          (label (substring (get p :name) 0 11) :font-size 9 :width 7
+          (label (substring (get p :name) 0 9) :font-size 12 :width 7
                  :color :gray :bg :transparent)
           (if (get p :boolean)
             (box :width 5.5 :height 1.25 :align :center
@@ -72,7 +72,7 @@
                      (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))
                      (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1)))
               (label (if (> (get p :value) 0.5) "ON" "OFF")
-                     :font-size 10 :width 5.5
+                     :font-size 13 :width 5.5
                      :color :white :bg :transparent))
             (if (get p :options)
             (dropdown :value (get p :text-value)
@@ -83,10 +83,10 @@
                     (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")
                     (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :label v))
                   (fx-set-instrument-option p v)))
-              :width 5.8 :height 1.2 :font-size 10)
+              :width 5.8 :height 1.2 :font-size 13)
             (number-picker :value (get p :value)
               :min (get p :min) :max (get p :max) :decimals 2
-              :noui true :font-size 9 :text-color :gray
+              :noui true :font-size 12 :text-color :gray
               :on-change (lambda (v)
                 (if fx
                   (fx-set-effect-value fx p v)
@@ -113,14 +113,14 @@
   (h-stack :gap 2 :no-clamp-width true
     (each sections |section si|
       (v-stack :gap 0.25 :no-clamp-width true
-        (label (get section :name) :font-size 11 :color :white :bg :transparent)
+        (label (get section :name) :font-size 14 :color :white :bg :transparent)
         (each (get section :params) |p pi|
           (fx-param-row p false))))))
 
 (def fx-panel (title params fx)
   (box :background "fx-panel-bg" :padding 1.5 :no-clamp-width true
     (v-stack :gap 0.5 :no-clamp-width true
-      (label title :font-size 12 :color :white :bg :transparent)
+      (label title :font-size 15 :color :white :bg :transparent)
       (fx-param-grid params fx))))
 
 (def instrument-tab-button (label idx width)
@@ -162,13 +162,13 @@
       ;; Add effect
       (box :background "fx-panel-bg" :padding 1.5
         (v-stack :gap 0.5 :align :center
-          (label "+" :font-size 12 :color :gray :bg :transparent)
+          (label "+" :font-size 15 :color :gray :bg :transparent)
           (dropdown :value ""
             :options SEQ.available-effects
             :placeholder "Add Effect"
             :on-change (lambda (v)
               (host-command "add-effect" (dict :name v)))
-            :width 12 :height 1.5 :font-size 11)
+            :width 12 :height 1.5 :font-size 14)
           (compile-progress
             :active (if SEQ.compiling 1 0)
             :width 12 :height 0.3))))))

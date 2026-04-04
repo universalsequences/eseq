@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossterm::event::Event;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use eseqlisp::backend::Backend;
+use eseqlisp::editor::ViewMode;
 use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::vm::Value;
 use eseqlisp::{Editor, EditorConfig, HostCommand, HostEvent, Runtime};
@@ -27,6 +28,7 @@ const DEFAULT_SAMPLES: &[&str] = &[
     "samples/producers/donda/PABLO HAT.wav",
 ];
 const PAGE_SIZE: usize = 16;
+const AUTO_FOLLOW_COOLDOWN: Duration = Duration::from_secs(5);
 const BUILTIN_ACCUMULATOR_NAMES: &[&str] = &[
     "Off",
     "TransposeRamp",
@@ -120,6 +122,14 @@ fn build_sample_tree_node(dir: &std::path::Path) -> Vec<SampleTreeNode> {
     }
 
     items
+}
+
+fn auto_follow_enabled(override_until: &Arc<Mutex<Option<Instant>>>) -> bool {
+    let guard = override_until.lock().unwrap();
+    match *guard {
+        Some(until) => Instant::now() >= until,
+        None => true,
+    }
 }
 
 fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
@@ -222,11 +232,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let current_track = Arc::new(AtomicUsize::new(0));
     // Selected steps for p-locking
     let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+    let step_clipboard: Arc<Mutex<Option<Vec<(usize, sequencer::sequencer::StepSnapshot)>>>> =
+        Arc::new(Mutex::new(None));
     // UI-only counter for changes that shouldn't affect pattern_epoch (e.g. volume, selection)
     let ui_epoch = Arc::new(AtomicUsize::new(0));
     // FX/instrument panel refresh counter for changes that affect *fx* but
     // should not force *fx* to rerun on unrelated step-grid edits.
     let fx_epoch = Arc::new(AtomicUsize::new(0));
+    // When set, pagination stays on the user-selected page until the cooldown expires.
+    let auto_follow_override_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
     // Recording state shared between native functions and event loop
     let recording = Arc::new(AtomicBool::new(false));
@@ -261,7 +275,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "num-patterns",
                 Value::Number(state.pattern.num_patterns.load(Ordering::Relaxed) as f64),
             ),
+            ("auto-follow", Value::Bool(true)),
             ("playhead", Value::Number(0.0)),
+            ("transport-playhead", Value::Number(0.0)),
             ("track-names", build_track_names(&track_names)),
             ("steps", build_steps_value(&state, 0)),
             (
@@ -281,6 +297,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("syncs", build_param_list(&state, 0, StepParam::Sync)),
             ("sync-labels", build_sync_labels()),
             ("track-volumes", build_track_volumes(&state)),
+            (
+                "track-peaks",
+                build_track_peaks_value_from_bits(&vec![0.0f32.to_bits(); track_count]),
+            ),
             (
                 "effects",
                 build_effects_value(&state, 0, &effect_descriptors, &selected_steps),
@@ -368,6 +388,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             ("compiling", Value::Bool(false)),
             ("recording", Value::Bool(false)),
+            ("cpu-load-pct", Value::Number(0.0)),
+            ("master-peak-l", Value::Number(0.0)),
+            ("master-peak-r", Value::Number(0.0)),
             (
                 "record-armed",
                 build_record_armed_value(&record_armed.lock().unwrap()),
@@ -388,6 +411,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // seq-toggle-step — toggle step on current track
     let st = state.clone();
     let ct = current_track.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-toggle-step", move |args, _ctx| {
         let Some(Value::Number(step)) = args.first() else {
             return Err("seq-toggle-step: expected step number".into());
@@ -398,12 +423,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let track = ct.load(Ordering::Relaxed);
         st.toggle_step_and_clear_plocks(track, step);
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
     });
 
     // seq-set-step-param — set param on current track
     let st = state.clone();
     let ct = current_track.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    let ui_ep = ui_epoch.clone();
     runtime.register_native("seq-set-step-param", move |args, _ctx| {
         let (Some(Value::Number(step)), Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -428,6 +457,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let val = (*val as f32).clamp(param.min(), param.max());
         st.pattern.step_data[track].set(step, param, val);
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(val as f64))
     });
 
@@ -482,6 +513,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let descs = effect_descriptors.clone();
     let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-effect-param", move |args, _ctx| {
         let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -536,6 +568,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Publish snapshot so the scheduler sees the new default
         // (otherwise it re-applies the old value on next step trigger)
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(clamped as f64))
@@ -602,6 +635,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-delete-selected-steps", move |_args, _ctx| {
         let track = ct.load(Ordering::Relaxed);
         let steps: Vec<usize> = {
@@ -615,6 +649,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             st.clear_step_payload(track, *step);
         }
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(steps.len() as f64))
@@ -626,6 +661,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-shift-selected-steps", move |args, _ctx| {
         let Some(Value::Number(direction)) = args.first() else {
             return Err("seq-shift-selected-steps: expected direction".into());
@@ -644,8 +680,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if steps.is_empty() {
             return Ok(Value::Bool(false));
         }
-        st.rotate_steps(track, &steps, direction.signum());
+        let num_steps = st.pattern.track_params[track].get_num_steps();
+        let delta = direction.signum();
+        let can_shift = if delta < 0 {
+            steps[0] > 0
+        } else {
+            steps[steps.len() - 1] + 1 < num_steps
+        };
+        if !can_shift {
+            return Ok(Value::Bool(false));
+        }
+
+        let snapshots: Vec<(usize, sequencer::sequencer::StepSnapshot)> = steps
+            .iter()
+            .map(|&step| (step, st.capture_step_snapshot(track, step)))
+            .collect();
+        for &(step, _) in &snapshots {
+            st.clear_step_payload(track, step);
+        }
+        let shifted_steps: Vec<usize> = snapshots
+            .iter()
+            .map(|(step, _)| (*step as isize + delta) as usize)
+            .collect();
+        for ((_, snapshot), dst_step) in snapshots.iter().zip(shifted_steps.iter().copied()) {
+            st.restore_step_snapshot(track, dst_step, snapshot);
+        }
+        {
+            let mut set = sel.lock().unwrap();
+            set.clear();
+            set.extend(shifted_steps);
+        }
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(true))
@@ -657,6 +723,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
     let fx_ep = fx_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-effect-plock", move |args, _ctx| {
         let (Some(Value::Number(slot)), Some(Value::Number(param)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -676,6 +743,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             slot_state.plocks.set(step, param_idx, val);
         }
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(val as f64))
@@ -686,6 +754,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-step-param-plock", move |args, _ctx| {
         let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1))
@@ -709,6 +778,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             st.pattern.step_data[track].set(step, param, val);
         }
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(val as f64))
     });
@@ -742,7 +812,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // seq-set-track-param — set a track parameter on the current track
     let st = state.clone();
     let ct = current_track.clone();
+    let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-track-param", move |args, _ctx| {
         let (Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1))
@@ -764,7 +836,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "swing" => {
                 let v = (*val as f32).clamp(50.0, 75.0);
-                tp.set_swing(v);
+                let steps = sel.lock().unwrap();
+                if steps.is_empty() {
+                    tp.set_swing(v);
+                } else {
+                    for &step in steps.iter() {
+                        st.pattern.swing_plocks[track].set(step, v);
+                    }
+                }
                 Ok(Value::Number(v as f64))
             }
             "num-steps" => {
@@ -795,6 +874,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         .map(|v| {
             st.publish_scheduler_snapshot();
+            *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
             ui_ep.fetch_add(1, Ordering::Relaxed);
             v
         })
@@ -804,6 +884,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
     let accumulator_names_for_native = accumulator_names.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-accumulator", move |args, _ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
@@ -824,6 +905,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tp.set_script_accumulator_name(Some(names[idx].clone()));
         }
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(names[idx].clone()))
     });
@@ -831,6 +913,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-accum-mode", move |args, _ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
@@ -844,6 +927,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let track = ct.load(Ordering::Relaxed);
         st.pattern.track_params[track].set_accum_mode(mode);
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(accum_mode_label(mode).to_string()))
     });
@@ -851,6 +935,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-accum-limit", move |args, _ctx| {
         let Some(Value::Number(limit)) = args.first() else {
             return Err("seq-set-accum-limit: expected number".into());
@@ -859,6 +944,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let track = ct.load(Ordering::Relaxed);
         st.pattern.track_params[track].set_accum_limit(limit);
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(limit as f64))
     });
@@ -885,10 +971,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Value::Number(new_len as f64))
     });
 
+    let ct = current_track.clone();
+    runtime.register_native("seq-propagate-current-track-to-all-patterns", move |_args, ctx| {
+        let track = ct.load(Ordering::Relaxed);
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "propagate-current-track-to-all-patterns".to_string(),
+            payload: Value::Number(track as f64),
+        });
+        Ok(Value::Bool(true))
+    });
+
     // seq-set-timebase — set the default timebase for the current track (by label string)
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-timebase", move |args, _ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
@@ -903,6 +1000,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let track = ct.load(Ordering::Relaxed);
         st.pattern.track_params[track].set_timebase(tb);
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(tb.label().to_string()))
     });
@@ -910,6 +1008,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-fts", move |args, _ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
@@ -923,6 +1022,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let track = ct.load(Ordering::Relaxed);
         st.pattern.track_params[track].set_fts_scale(scale_idx);
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(FTS_SCALE_NAMES[scale_idx].to_string()))
     });
@@ -932,6 +1032,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ct = current_track.clone();
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-plock-timebase", move |args, _ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
@@ -949,6 +1050,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             st.pattern.timebase_plocks[track].set(step, tb);
         }
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(tb.label().to_string()))
     });
@@ -956,7 +1058,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // seq-set-swing-resolution — set the default swing resolution for the current track (by label string)
     let st = state.clone();
     let ct = current_track.clone();
+    let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-set-swing-resolution", move |args, _ctx| {
         let label = match args.first() {
             Some(Value::String(s)) => s.as_str(),
@@ -969,10 +1073,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|i| SwingResolution::ALL[i])
             .ok_or_else(|| format!("seq-set-swing-resolution: unknown resolution '{label}'"))?;
         let track = ct.load(Ordering::Relaxed);
-        st.pattern.track_params[track].set_swing_resolution(resolution);
+        let steps = sel.lock().unwrap();
+        if steps.is_empty() {
+            st.pattern.track_params[track].set_swing_resolution(resolution);
+        } else {
+            for &step in steps.iter() {
+                st.pattern.swing_resolution_plocks[track].set(step, resolution);
+            }
+        }
         st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::String(resolution.label().to_string()))
+    });
+
+    let ui_ep = ui_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    runtime.register_native("seq-pause-auto-follow", move |_args, _ctx| {
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(false))
     });
 
     // seq-toggle-record — toggle recording mode (requires at least one armed track)
@@ -1125,9 +1245,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
+    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
     push_project_scratch_to_named_buffer(&mut editor, &app);
 
-    let mut backend = MetalBackend::new().map_err(|_| "Metal backend creation failed")?;
+    let mut backend =
+        MetalBackend::new_with_size(1100, 700).map_err(|_| "Metal backend creation failed")?;
     backend
         .initialize()
         .map_err(|_| "Metal backend init failed")?;
@@ -1149,11 +1272,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_playing = false;
     let mut prev_bpm: u32 = 0;
     let mut prev_playhead: u32 = u32::MAX;
+    let mut prev_transport_playhead: u32 = u32::MAX;
     let mut prev_pattern_epoch: u64 = 0;
     let mut prev_snapshot_version: u64 = 0;
     let mut prev_current_track: usize = usize::MAX;
+    let mut prev_cpu_load_bits: u32 = u32::MAX;
+    let mut prev_peak_l_bits: u32 = u32::MAX;
+    let mut prev_peak_r_bits: u32 = u32::MAX;
+    let mut prev_track_peak_bits: Vec<u32> = Vec::new();
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
+    let mut prev_auto_follow = true;
 
     eprintln!("metal_seq: entering event loop");
 
@@ -1179,10 +1308,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Duration::from_millis(50)
         };
         match backend.poll_event(timeout) {
-            Some(Event::Key(key)) => {
+            Some(Event::Key(raw_key)) => {
+                if handle_metal_command_shortcut(
+                    &mut editor,
+                    &raw_key,
+                    &state,
+                    &current_track,
+                    &selected_steps,
+                    &step_clipboard,
+                ) {
+                    continue;
+                }
+                let key = normalize_command_shortcuts(raw_key);
+                if should_toggle_play_on_space(&editor, &key) {
+                    let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
+                    editor.refresh_runtime_side_effects();
+                    continue;
+                }
                 // Intercept keyboard for live recording when any track is armed
                 let any_armed = record_armed.lock().unwrap().iter().any(|a| *a);
-                let intercepted = if any_armed {
+                let intercepted = if any_armed && should_route_to_live_keyboard(&editor, &key, &held_notes) {
                     handle_recording_key(
                         &key,
                         &state,
@@ -1377,6 +1522,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "track-volumes",
                                         build_track_volumes(&state),
                                     );
+                                    let track_peak_bits =
+                                        read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "track-peaks",
+                                        build_track_peaks_value_from_bits(&track_peak_bits),
+                                    );
                                     rt.set_reactive(
                                         "SEQ",
                                         "effects",
@@ -1460,6 +1612,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 "track-volumes",
                                                 build_track_volumes(&state),
                                             );
+                                            let track_peak_bits =
+                                                read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "track-peaks",
+                                                build_track_peaks_value_from_bits(&track_peak_bits),
+                                            );
                                             rt.set_reactive(
                                                 "SEQ",
                                                 "effects",
@@ -1531,6 +1690,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ) {
                                     Ok(()) => {
                                         let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "instrument-panel",
+                                            build_instrument_panel_value(
+                                                &app,
+                                                track,
+                                                &selected_steps,
+                                            ),
+                                        );
                                         sync_sidebar_browser(rt, &app, track);
                                         rt.run_reactive_cycle();
                                         editor.refresh_runtime_side_effects();
@@ -1997,6 +2165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.push_all_restored_defaults();
                                     let ct = current_track.load(Ordering::Relaxed);
                                     let rt = editor.runtime_mut();
+                                    sync_track_name_state(rt, &mut track_names, &app);
                                     sync_pattern_state(rt, &state);
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                                     sync_step_param_lists(rt, &state, ct);
@@ -2004,6 +2173,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "SEQ",
                                         "track-volumes",
                                         build_track_volumes(&state),
+                                    );
+                                    let track_peak_bits =
+                                        read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "track-peaks",
+                                        build_track_peaks_value_from_bits(&track_peak_bits),
                                     );
                                     rt.set_reactive(
                                         "SEQ",
@@ -2040,6 +2216,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "propagate-current-track-to-all-patterns" => {
+                        let track = match payload {
+                            Value::Number(n) => n as usize,
+                            _ => current_track.load(Ordering::Relaxed),
+                        };
+                        let num_patterns =
+                            state.pattern.num_patterns.load(Ordering::Relaxed) as usize;
+                        if track >= app.tracks.len() {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Track {} is out of range",
+                                track + 1
+                            )));
+                        } else if num_patterns <= 1 {
+                            editor.handle_host_event(HostEvent::Status(
+                                "Nothing to propagate: only one pattern exists".to_string(),
+                            ));
+                        } else if app.state.propagate_track_to_all_patterns(
+                            track,
+                            app.tracks.len(),
+                            &app.graph.track_buffer_ids,
+                            &app.tracks,
+                            &app.graph.track_instrument_types,
+                        ) {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Propagated track {} to {} patterns",
+                                track + 1,
+                                num_patterns
+                            )));
+                        } else {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Failed to propagate track {}",
+                                track + 1
+                            )));
+                        }
+                    }
                     "clone-pattern" => {
                         let num_tracks = app.tracks.len();
                         let new_idx = app.state.clone_pattern(
@@ -2070,10 +2281,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.push_all_restored_defaults();
                             let ct = current_track.load(Ordering::Relaxed);
                             let rt = editor.runtime_mut();
+                            sync_track_name_state(rt, &mut track_names, &app);
                             sync_pattern_state(rt, &state);
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
                             rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                            let track_peak_bits =
+                                read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
+                            rt.set_reactive(
+                                "SEQ",
+                                "track-peaks",
+                                build_track_peaks_value_from_bits(&track_peak_bits),
+                            );
                             rt.set_reactive(
                                 "SEQ",
                                 "effects",
@@ -2138,7 +2357,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             state.transport.track_playheads[ct].load(Ordering::Relaxed)
                         };
+                        let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
                         let bpm = state.transport.bpm.load(Ordering::Relaxed);
+                        let cpu_load_bits = state.transport.cpu_load_pct.load(Ordering::Relaxed);
+                        let peak_l_bits = state.transport.peak_l.load(Ordering::Relaxed);
+                        let peak_r_bits = state.transport.peak_r.load(Ordering::Relaxed);
+                        let cpu_load_pct = f32::from_bits(cpu_load_bits);
                         let playing = state.transport.playing.load(Ordering::Relaxed);
                         let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
                         let snap_ver = state.scheduler_snapshot_version();
@@ -2148,6 +2372,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         sync_project_state(rt, &app);
                         rt.set_reactive("SEQ", "playing", Value::Bool(playing));
                         rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
+                        rt.set_reactive(
+                            "SEQ",
+                            "transport-playhead",
+                            Value::Number(transport_playhead as f64),
+                        );
+                        rt.set_reactive("SEQ", "cpu-load-pct", Value::Number(cpu_load_pct as f64));
+                        rt.set_reactive(
+                            "SEQ",
+                            "master-peak-l",
+                            Value::Number(master_meter_level(f32::from_bits(peak_l_bits))),
+                        );
+                        rt.set_reactive(
+                            "SEQ",
+                            "master-peak-r",
+                            Value::Number(master_meter_level(f32::from_bits(peak_r_bits))),
+                        );
                         rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
                         rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
                         rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
@@ -2164,6 +2404,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if app.tracks.is_empty() {
                             rt.set_reactive("SEQ", "playhead", Value::Number(0.0));
+                            rt.set_reactive("SEQ", "transport-playhead", Value::Number(0.0));
                             rt.set_reactive("SEQ", "steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
                             rt.set_reactive("SEQ", "durations", Value::List(vec![]));
@@ -2171,14 +2412,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "pans", Value::List(vec![]));
                             rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-peaks", Value::List(vec![]));
                             rt.set_reactive("SEQ", "effects", Value::List(vec![]));
                             rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
                         } else {
                             rt.set_reactive("SEQ", "playhead", Value::Number(playhead as f64));
+                            rt.set_reactive(
+                                "SEQ",
+                                "transport-playhead",
+                                Value::Number(transport_playhead as f64),
+                            );
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
                             rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                            let track_peak_bits =
+                                read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
+                            rt.set_reactive(
+                                "SEQ",
+                                "track-peaks",
+                                build_track_peaks_value_from_bits(&track_peak_bits),
+                            );
                             rt.set_reactive(
                                 "SEQ",
                                 "effects",
@@ -2209,10 +2463,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         prev_current_track = ct;
                         prev_playhead = playhead;
+                        prev_transport_playhead = transport_playhead;
                         prev_bpm = bpm;
                         prev_playing = playing;
                         prev_pattern_epoch = epoch;
                         prev_snapshot_version = snap_ver;
+                        prev_cpu_load_bits = cpu_load_bits;
+                        prev_peak_l_bits = peak_l_bits;
+                        prev_peak_r_bits = peak_r_bits;
+                        prev_track_peak_bits =
+                            read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
                         prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
 
                         if let Some((status, _)) = app.editor.status_message.take() {
@@ -2256,6 +2516,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             let playing = state.transport.playing.load(Ordering::Relaxed);
             let bpm = state.transport.bpm.load(Ordering::Relaxed);
+            let cpu_load_bits = state.transport.cpu_load_pct.load(Ordering::Relaxed);
+            let peak_l_bits = state.transport.peak_l.load(Ordering::Relaxed);
+            let peak_r_bits = state.transport.peak_r.load(Ordering::Relaxed);
+            let track_peak_bits = read_track_peak_bits(app.graph.lg, &track_pan_ids.lock().unwrap());
+            let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
             let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed);
             let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
             let snap_ver = state.scheduler_snapshot_version();
@@ -2264,15 +2529,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Track switch — rebuild everything
             if ct != prev_current_track {
-                editor.reset_widget_scroll_top();
-                editor.reset_widget_scroll_left();
+                editor.reset_widget_scroll_for_buffer_named("*metal*");
                 let rt = editor.runtime_mut();
+                sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
                 rt.set_reactive("SEQ", "playhead", Value::Number(playhead as f64));
+                rt.set_reactive(
+                    "SEQ",
+                    "transport-playhead",
+                    Value::Number(transport_playhead as f64),
+                );
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_step_param_lists(rt, &state, ct);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                rt.set_reactive(
+                    "SEQ",
+                    "track-peaks",
+                    build_track_peaks_value_from_bits(&track_peak_bits),
+                );
                 rt.set_reactive(
                     "SEQ",
                     "effects",
@@ -2293,6 +2568,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_sidebar_browser(rt, &app, ct);
                 prev_current_track = ct;
                 prev_playhead = playhead;
+                prev_transport_playhead = transport_playhead;
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
                 needs_reactive_cycle = true;
@@ -2312,12 +2588,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_bpm = bpm;
                 needs_reactive_cycle = true;
             }
+            if cpu_load_bits != prev_cpu_load_bits {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "cpu-load-pct",
+                    Value::Number(f32::from_bits(cpu_load_bits) as f64),
+                );
+                prev_cpu_load_bits = cpu_load_bits;
+                needs_reactive_cycle = true;
+            }
+            if peak_l_bits != prev_peak_l_bits {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "master-peak-l",
+                    Value::Number(master_meter_level(f32::from_bits(peak_l_bits))),
+                );
+                prev_peak_l_bits = peak_l_bits;
+                needs_reactive_cycle = true;
+            }
+            if peak_r_bits != prev_peak_r_bits {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "master-peak-r",
+                    Value::Number(master_meter_level(f32::from_bits(peak_r_bits))),
+                );
+                prev_peak_r_bits = peak_r_bits;
+                needs_reactive_cycle = true;
+            }
+            if track_peak_bits != prev_track_peak_bits {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "track-peaks",
+                    build_track_peaks_value_from_bits(&track_peak_bits),
+                );
+                prev_track_peak_bits = track_peak_bits.clone();
+                needs_reactive_cycle = true;
+            }
             if epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version {
                 let rt = editor.runtime_mut();
+                sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_step_param_lists(rt, &state, ct);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                rt.set_reactive(
+                    "SEQ",
+                    "track-peaks",
+                    build_track_peaks_value_from_bits(&track_peak_bits),
+                );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
@@ -2333,7 +2651,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
                 let rt = editor.runtime_mut();
+                sync_track_name_state(rt, &mut track_names, &app);
                 rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                rt.set_reactive(
+                    "SEQ",
+                    "track-peaks",
+                    build_track_peaks_value_from_bits(&track_peak_bits),
+                );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
@@ -2384,6 +2708,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Value::Number(playhead as f64),
                 );
                 prev_playhead = playhead;
+                needs_reactive_cycle = true;
+            }
+            if transport_playhead != prev_transport_playhead {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "transport-playhead",
+                    Value::Number(transport_playhead as f64),
+                );
+                prev_transport_playhead = transport_playhead;
+                needs_reactive_cycle = true;
+            }
+            let auto_follow = auto_follow_enabled(&auto_follow_override_until);
+            if auto_follow != prev_auto_follow {
+                editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "auto-follow", Value::Bool(auto_follow));
+                prev_auto_follow = auto_follow;
                 needs_reactive_cycle = true;
             }
 
@@ -2544,6 +2885,222 @@ fn build_record_armed_value(armed: &[bool]) -> Value {
     Value::List(items)
 }
 
+fn layout_node_by_id(
+    node: &eseqlisp::layout::LayoutNode,
+    id: u64,
+) -> Option<&eseqlisp::layout::LayoutNode> {
+    if node.widget_id == id {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = layout_node_by_id(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn focused_widget_captures_typing(editor: &Editor) -> bool {
+    let Some(focused_id) = editor.focused_widget_id() else {
+        return false;
+    };
+    let Some(layout) = editor.widget_layout() else {
+        return false;
+    };
+    let Some(node) = layout_node_by_id(&layout, focused_id) else {
+        return false;
+    };
+    matches!(
+        node.widget_type.as_str(),
+        "text-input" | "number-picker" | "dropdown"
+    )
+}
+
+fn held_note_for_key(
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    let c = match key.code {
+        crossterm::event::KeyCode::Char(c) => c,
+        _ => return false,
+    };
+    held_notes.lock().unwrap().iter().any(|note| note.key == c)
+}
+
+fn should_route_to_live_keyboard(
+    editor: &Editor,
+    key: &crossterm::event::KeyEvent,
+    held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
+) -> bool {
+    use crossterm::event::{KeyEventKind, KeyModifiers};
+
+    if matches!(key.kind, KeyEventKind::Release) {
+        return held_note_for_key(held_notes, key);
+    }
+
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    if key
+        .modifiers
+        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return false;
+    }
+
+    if focused_widget_captures_typing(editor) {
+        return false;
+    }
+
+    matches!(key.code, crossterm::event::KeyCode::Char(_))
+}
+
+fn normalize_command_shortcuts(key: crossterm::event::KeyEvent) -> crossterm::event::KeyEvent {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    if matches!(
+        key.code,
+        KeyCode::Char('a')
+            | KeyCode::Char('A')
+            | KeyCode::Char('c')
+            | KeyCode::Char('C')
+            | KeyCode::Char('v')
+            | KeyCode::Char('V')
+    )
+        && key.modifiers.contains(KeyModifiers::SUPER)
+    {
+        let mut modifiers = key.modifiers;
+        modifiers.remove(KeyModifiers::SUPER);
+        modifiers.insert(KeyModifiers::CONTROL);
+        return KeyEvent::new(key.code, modifiers);
+    }
+
+    key
+}
+
+fn should_toggle_play_on_space(
+    editor: &Editor,
+    key: &crossterm::event::KeyEvent,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    if key.code != KeyCode::Char(' ') || key.modifiers != KeyModifiers::NONE {
+        return false;
+    }
+
+    if editor.minibuffer_prompt().is_some() || focused_widget_captures_typing(editor) {
+        return false;
+    }
+
+    let buffer = editor.active_buffer();
+    buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly) || buffer.name == "*metal*"
+}
+
+fn current_metal_cursor_step(editor: &mut Editor) -> Option<usize> {
+    match editor.runtime_mut().eval_str("(current-step)") {
+        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
+fn handle_metal_command_shortcut(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    step_clipboard: &Arc<Mutex<Option<Vec<(usize, sequencer::sequencer::StepSnapshot)>>>>,
+) -> bool {
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    if editor.active_buffer().name != "*metal*" {
+        return false;
+    }
+
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                let _ = editor.runtime_mut().eval_str("(select-all-steps)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                let track = current_track.load(Ordering::Relaxed);
+                let steps: Vec<usize> = {
+                    let set = selected_steps.lock().unwrap();
+                    if set.is_empty() {
+                        current_metal_cursor_step(editor).into_iter().collect()
+                    } else {
+                        let mut steps: Vec<usize> = set.iter().copied().collect();
+                        steps.sort_unstable();
+                        steps
+                    }
+                };
+                if steps.is_empty() {
+                    return true;
+                }
+                let anchor = steps[0];
+                let clipboard: Vec<(usize, sequencer::sequencer::StepSnapshot)> = steps
+                    .iter()
+                    .map(|&s| (s - anchor, state.capture_step_snapshot(track, s)))
+                    .collect();
+                let count = clipboard.len();
+                *step_clipboard.lock().unwrap() = Some(clipboard);
+                editor.handle_host_event(HostEvent::Status(format!(
+                    "Copied {} step{}",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                )));
+                return true;
+            }
+            KeyCode::Char('v') | KeyCode::Char('V') => {
+                let dest_start = match current_metal_cursor_step(editor) {
+                    Some(step) => step,
+                    None => return true,
+                };
+                let clipboard = {
+                    let guard = step_clipboard.lock().unwrap();
+                    guard.clone()
+                };
+                let Some(clipboard) = clipboard else {
+                    return true;
+                };
+                let track = current_track.load(Ordering::Relaxed);
+                let num_steps = state.pattern.track_params[track].get_num_steps();
+                for (offset, snapshot) in &clipboard {
+                    let dest = dest_start + offset;
+                    if dest >= num_steps {
+                        continue;
+                    }
+                    if !snapshot.active && state.pattern.patterns[track].is_active(dest) {
+                        continue;
+                    }
+                    state.restore_step_snapshot(track, dest, snapshot);
+                }
+                state.publish_scheduler_snapshot();
+                editor.handle_host_event(HostEvent::Status(format!(
+                    "Pasted {} step{}",
+                    clipboard.len(),
+                    if clipboard.len() == 1 { "" } else { "s" }
+                )));
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    false
+}
+
 /// Build a Lisp Value::List of track name strings.
 fn build_track_names(names: &[String]) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = names
@@ -2551,6 +3108,15 @@ fn build_track_names(names: &[String]) -> Value {
         .map(|name| Rc::new(RefCell::new(Value::String(name.clone()))))
         .collect();
     Value::List(items)
+}
+
+fn sync_track_name_state(rt: &mut Runtime, track_names: &mut Vec<String>, app: &ui::App) {
+    if *track_names == app.tracks {
+        return;
+    }
+    *track_names = app.tracks.clone();
+    rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
+    rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
 }
 
 /// Build a Lisp Value::List of per-track volumes (0.0–1.0).
@@ -2561,6 +3127,47 @@ fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
             let vol = state.pattern.track_params[t].get_volume();
             Rc::new(RefCell::new(Value::Number(vol as f64)))
         })
+        .collect();
+    Value::List(items)
+}
+
+fn read_track_peak_bits(lg: sequencer::audiograph::LiveGraphPtr, pan_ids: &[i32]) -> Vec<u32> {
+    pan_ids
+        .iter()
+        .map(|&pan_id| {
+            if pan_id < 0 {
+                return 0.0f32.to_bits();
+            }
+            let mut state_size = 0usize;
+            let snapshot = unsafe {
+                sequencer::audiograph::get_node_state(lg.0, pan_id, &mut state_size as *mut usize)
+            };
+            if snapshot.is_null()
+                || state_size < sequencer::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>()
+            {
+                if !snapshot.is_null() {
+                    unsafe { sequencer::audiograph::free_c_ptr(snapshot) };
+                }
+                return 0.0f32.to_bits();
+            }
+            let peak = unsafe {
+                let state = std::slice::from_raw_parts(
+                    snapshot as *const f32,
+                    sequencer::stereo_panner::STEREO_PANNER_STATE_SIZE,
+                );
+                state[sequencer::stereo_panner::STATE_PEAK_L]
+                    .max(state[sequencer::stereo_panner::STATE_PEAK_R])
+            };
+            unsafe { sequencer::audiograph::free_c_ptr(snapshot) };
+            peak.to_bits()
+        })
+        .collect()
+}
+
+fn build_track_peaks_value_from_bits(bits: &[u32]) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = bits
+        .iter()
+        .map(|&bits| Rc::new(RefCell::new(Value::Number(master_meter_level(f32::from_bits(bits))))))
         .collect();
     Value::List(items)
 }
@@ -3199,6 +3806,14 @@ fn build_string_list(items: &[String]) -> Value {
     Value::List(items)
 }
 
+fn master_meter_level(peak: f32) -> f64 {
+    if peak <= 0.0 {
+        0.0
+    } else {
+        peak.sqrt().min(1.2) as f64
+    }
+}
+
 fn build_flat_tree_items(items: &[String]) -> Value {
     use std::collections::HashMap;
     let items: Vec<Rc<RefCell<Value>>> = items
@@ -3389,6 +4004,7 @@ fn load_instrument_preset_into_track(
                 .unwrap_or(param.default);
             let clamped = param.clamp(value);
             slot.defaults.set(param_idx, clamped);
+            app.send_instrument_param(track, param_idx, clamped);
         }
     }
 
@@ -3433,13 +4049,20 @@ fn sync_track_params(
     selected: &Arc<Mutex<HashSet<usize>>>,
 ) {
     let tp = &state.pattern.track_params[track];
+    let selected_step = {
+        let sel = selected.lock().unwrap();
+        sel.iter().copied().min()
+    };
     rt.set_reactive("SEQ", "tp-attack", Value::Number(tp.get_attack_ms() as f64));
     rt.set_reactive(
         "SEQ",
         "tp-release",
         Value::Number(tp.get_release_ms() as f64),
     );
-    rt.set_reactive("SEQ", "tp-swing", Value::Number(tp.get_swing() as f64));
+    let swing = selected_step
+        .and_then(|step| state.pattern.swing_plocks[track].get(step))
+        .unwrap_or_else(|| tp.get_swing());
+    rt.set_reactive("SEQ", "tp-swing", Value::Number(swing as f64));
     rt.set_reactive("SEQ", "tp-send", Value::Number(tp.get_send() as f64));
     rt.set_reactive(
         "SEQ",
@@ -3449,21 +4072,19 @@ fn sync_track_params(
     rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
     rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp.is_polyphonic()));
     // Resolve timebase: show p-locked value from first selected step, otherwise track default
-    let timebase_label = {
-        let sel = selected.lock().unwrap();
-        sel.iter()
-            .copied()
-            .min()
-            .and_then(|step| state.pattern.timebase_plocks[track].get(step))
-            .unwrap_or_else(|| tp.get_timebase())
-            .label()
-            .to_string()
-    };
+    let timebase_label = selected_step
+        .and_then(|step| state.pattern.timebase_plocks[track].get(step))
+        .unwrap_or_else(|| tp.get_timebase())
+        .label()
+        .to_string();
     rt.set_reactive("SEQ", "tp-timebase", Value::String(timebase_label));
+    let swing_resolution = selected_step
+        .and_then(|step| state.pattern.swing_resolution_plocks[track].get(step))
+        .unwrap_or_else(|| tp.get_swing_resolution());
     rt.set_reactive(
         "SEQ",
         "tp-swing-resolution",
-        Value::String(tp.get_swing_resolution().label().to_string()),
+        Value::String(swing_resolution.label().to_string()),
     );
     rt.set_reactive(
         "SEQ",
@@ -3566,15 +4187,27 @@ fn build_step_has_plocks(
 ) -> Value {
     let chain = &state.pattern.effect_chains[track];
     let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
+    let instrument_slot = &state.pattern.instrument_slots[track];
+    let instrument_num_params = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
+    let timebase_plocks = &state.pattern.timebase_plocks[track];
+    let swing_plocks = &state.pattern.swing_plocks[track];
+    let swing_resolution_plocks = &state.pattern.swing_resolution_plocks[track];
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
         .map(|step| {
-            let has_plock = (0..num_slots).any(|slot_idx| {
+            let effect_has_plock = (0..num_slots).any(|slot_idx| {
                 let Some(slot) = chain.get(slot_idx) else {
                     return false;
                 };
                 let np = slot.num_params.load(Ordering::Relaxed) as usize;
                 (0..np).any(|p| slot.plocks.get(step, p).is_some())
             });
+            let instrument_has_plock = (0..instrument_num_params)
+                .any(|p| instrument_slot.plocks.get(step, p).is_some());
+            let has_plock = effect_has_plock
+                || instrument_has_plock
+                || timebase_plocks.has_plock(step)
+                || swing_plocks.has_plock(step)
+                || swing_resolution_plocks.has_plock(step);
             Rc::new(RefCell::new(Value::Bool(has_plock)))
         })
         .collect();

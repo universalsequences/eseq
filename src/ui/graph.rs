@@ -269,6 +269,7 @@ impl GraphController<'_> {
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.send_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
+                crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, track.pan_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.pan_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_r_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_id);
@@ -382,6 +383,9 @@ impl GraphController<'_> {
                 0,
             )
         };
+        unsafe {
+            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, pan_id);
+        }
 
         let filter_name = CString::new(format!("{}_filter", name)).unwrap();
         let filter_id = unsafe {

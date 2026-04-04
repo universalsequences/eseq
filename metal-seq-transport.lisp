@@ -28,6 +28,64 @@
           (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
         :shadow (shadow :color (rgba 0 0 0 0.5) :blur 0.06 :offset (vec2 0 0.02))))))
 
+(defwidget transport-master-meter
+  :width 10.5 :height 0.34
+  :paint-margin 0.12
+  :state (level)
+  :shader
+  (let ((lvl (min 1.0 (max 0.0 level)))
+        (track (sdf/rounded-rect width height height))
+        (green-end (min lvl 0.60))
+        (yellow-end (min lvl 0.85))
+        (red-end lvl))
+    (sdf/layer
+      (sdf/fill track
+        (material :color (rgba 0.06 0.07 0.08 1)))
+      (if (> green-end 0.005)
+        (sdf/fill
+          (let ((__start 0.0)
+                (__end green-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.32)
+                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.34 0.86 0.40 1)))
+        (rgba 0 0 0 0))
+      (if (> (- yellow-end 0.60) 0.005)
+        (sdf/fill
+          (let ((__start 0.60)
+                (__end yellow-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.32)
+                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.86 0.72 0.22 1)))
+        (rgba 0 0 0 0))
+      (if (> (- red-end 0.85) 0.005)
+        (sdf/fill
+          (let ((__start 0.85)
+                (__end red-end)
+                (__half_w (* 0.5 aspect (- __end __start)))
+                (__half_h 0.32)
+                (__radius (min 0.16 (min __half_h (max __half_w 0.001)))))
+            (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ __start __end)))))
+                  (y (* 0.5 y)))
+              (sdf/rounded-rect __half_w __half_h __radius)))
+          (material :color (rgba 0.92 0.24 0.22 1)))
+        (rgba 0 0 0 0))
+      (sdf/fill
+        track
+        (material :color
+          (rgba
+            (+ 0.02 (* 0.03 (smoothstep 0.0 0.8 (- y))))
+            (+ 0.02 (* 0.03 (smoothstep 0.0 0.8 (- y))))
+            (+ 0.03 (* 0.05 (smoothstep 0.0 0.8 (- y))))
+            0.18))))))
+
 (defwidget pattern-pill-bg
   :width 1 :height 1
   :state (active)
@@ -236,15 +294,15 @@
             :on-click |x y r| (sbrowser-open-project-save)
             :active (if (sbrowser-project-save-mode?) 1 0))
     
-    (box :width 5.0 :height 1.25 :padding 0.135
+    (box :width 5.0 :height 1.40 :padding 0.255
       :background "transport-tool-chip-bg"
       :active (if (sbrowser-project-browser-mode?) 1 0)
       :on-click |x y r| (sbrowser-open-project-browser)
       (box :width 5.0 
         (v-stack :align :center
           (label " files "
-            :font-size 11
-            :color (if (sbrowser-project-browser-mode?) :white :gray)
+            :font-size 12
+            :color (if (sbrowser-project-browser-mode?) :white :white)
             :bg :transparent))))
     
     ;; Transport buttons in a shared rounded-rect container
@@ -264,27 +322,50 @@
           (rec-icon :active (if SEQ.recording 1 0)))))
     
     ;; Single continuous LED panel
-    (box :background "transport-led-bg" :height 1.4 :width 34
+    (box :background "transport-led-bg" :height 1.4 :width 41
+      (h-stack
       (h-stack :gap 0 :align :center :padding 0.5
-        (label (fmt "{:>3}" (+ (floor (/ (mod SEQ.playhead 16) 4)) 1))
+        (label (fmt "{:>3}" (+ (floor (/ SEQ.transport-playhead 16)) 1))
           :font-size 15 :width 4
           :color '(rgba 0.85 0.85 0.85 1)
           :bg :transparent)
-        (label (fmt "{:>3}" (+ (mod (mod SEQ.playhead 16) 4) 1))
-          :font-size 15 :width 4
+        (label (fmt "{:>3}" (+ (floor (/ (mod SEQ.transport-playhead 16) 4)) 1))
+          :font-size 15 :width 3
           :color '(rgba 0.85 0.85 0.85 1)
           :bg :transparent)
-        (label (fmt "{:>3}" (+ (mod SEQ.playhead 16) 1))
-          :font-size 15 :width 4
+        (label (fmt "{:>3}" (+ (mod (mod SEQ.transport-playhead 16) 4) 1))
+          :font-size 15 :width 3
           :color '(rgba 0.85 0.85 0.85 1)
           :bg :transparent)
-        (label "" :width 4 :bg :transparent)
+        (label "" :width 1 :bg :transparent)
         (number-picker :value SEQ.bpm :min 20 :max 300 :decimals 1
           :noui true
           :font-size 15
           :text-color (rgba 0.85 0.85 0.85 1)
           :on-change (lambda (v) (seq-set-bpm v))
-          :width 8 :height 1.2)))
+          :width 7 :height 1.2))
+      (v-stack :gap 0.05 :align :center :padding 0.18
+        (h-stack :gap 0.25 :align :center
+          (label "L"
+            :font-size 8 :width 0.9
+            :color '(rgba 0.63 0.88 0.41 1)
+            :bg :transparent)
+          (transport-master-meter :level SEQ.master-peak-l))
+        (h-stack :gap 0.25 :align :center
+          (label "R"
+            :font-size 8 :width 0.9
+            :color '(rgba 0.63 0.88 0.41 1)
+            :bg :transparent)
+          (transport-master-meter :level SEQ.master-peak-r)))
+      (h-stack :gap 0 :align :center :padding 0.3
+        (label "cpu"
+          :font-size 12 :width 2.5
+          :color '(rgba 0.30 0.30 0.32 1)
+          :bg :transparent)
+        (label (fmt "{:>2.0}%" SEQ.cpu-load-pct)
+          :font-size 12 :width 4.5
+          :color :gray
+          :bg :transparent))))
     
     (box :background "transport-btn-bg" :padding 0.2 :height 1.4
       (h-stack :gap 0.1 :align :center

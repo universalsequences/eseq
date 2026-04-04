@@ -6,8 +6,10 @@ const STATE_PAN: usize = 1;
 const STATE_SMOOTH_L: usize = 2;
 const STATE_SMOOTH_R: usize = 3;
 const STATE_SAMPLE_RATE: usize = 4;
+pub const STATE_PEAK_L: usize = 5;
+pub const STATE_PEAK_R: usize = 6;
 
-pub const STEREO_PANNER_STATE_SIZE: usize = 5;
+pub const STEREO_PANNER_STATE_SIZE: usize = 7;
 
 pub const STEREO_PANNER_PARAM_VOLUME: u64 = STATE_VOLUME as u64;
 pub const STEREO_PANNER_PARAM_PAN: u64 = STATE_PAN as u64;
@@ -39,6 +41,8 @@ unsafe extern "C" fn stereo_panner_init(
     let (gain_l, gain_r) = gains_for(1.0, 0.0);
     *s.add(STATE_SMOOTH_L) = gain_l;
     *s.add(STATE_SMOOTH_R) = gain_r;
+    *s.add(STATE_PEAK_L) = 0.0;
+    *s.add(STATE_PEAK_R) = 0.0;
 }
 
 unsafe extern "C" fn stereo_panner_process(
@@ -54,7 +58,11 @@ unsafe extern "C" fn stereo_panner_process(
     let sample_rate = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
     let mut smooth_l = *s.add(STATE_SMOOTH_L);
     let mut smooth_r = *s.add(STATE_SMOOTH_R);
+    let prev_peak_l = *s.add(STATE_PEAK_L);
+    let prev_peak_r = *s.add(STATE_PEAK_R);
     let smooth_coeff = 1.0 - (-2.0 * std::f32::consts::PI * 60.0 / sample_rate).exp();
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
 
     let in0 = *inp.add(0);
     let in1 = *inp.add(1);
@@ -66,12 +74,18 @@ unsafe extern "C" fn stereo_panner_process(
     for i in 0..nframes as usize {
         smooth_l += smooth_coeff * (target_l - smooth_l);
         smooth_r += smooth_coeff * (target_r - smooth_r);
-        *out0.add(i) = *in0.add(i) * smooth_l;
-        *out1.add(i) = *in1.add(i) * smooth_r;
+        let sample_l = *in0.add(i) * smooth_l;
+        let sample_r = *in1.add(i) * smooth_r;
+        *out0.add(i) = sample_l;
+        *out1.add(i) = sample_r;
+        peak_l = peak_l.max(sample_l.abs());
+        peak_r = peak_r.max(sample_r.abs());
     }
 
     *s.add(STATE_SMOOTH_L) = smooth_l;
     *s.add(STATE_SMOOTH_R) = smooth_r;
+    *s.add(STATE_PEAK_L) = peak_l.max(prev_peak_l * 0.92);
+    *s.add(STATE_PEAK_R) = peak_r.max(prev_peak_r * 0.92);
 }
 
 pub fn stereo_panner_vtable() -> NodeVTable {
