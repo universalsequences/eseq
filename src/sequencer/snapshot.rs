@@ -14,6 +14,7 @@ pub struct SequencerTransportSnapshot {
     pub playing: bool,
     pub current_pattern: usize,
     pub pattern_epoch: u64,
+    pub topology_epoch: u64,
     pub num_tracks: usize,
 }
 
@@ -52,6 +53,7 @@ impl SequencerSnapshot {
                 playing: false,
                 current_pattern: 0,
                 pattern_epoch: 0,
+                topology_epoch: 0,
                 num_tracks: 0,
             },
             tracks: Vec::new(),
@@ -65,6 +67,7 @@ impl SequencerSnapshot {
             playing: state.transport.playing.load(Ordering::Relaxed),
             current_pattern: state.pattern.current_pattern.load(Ordering::Relaxed) as usize,
             pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
+            topology_epoch: state.transport.topology_epoch.load(Ordering::Relaxed),
             num_tracks,
         };
         let mut tracks = Vec::with_capacity(num_tracks);

@@ -279,6 +279,30 @@ impl PatternSnapshot {
         self.instrument_types[track] = source.instrument_types[track];
     }
 
+    pub fn clear_track(
+        &mut self,
+        track: usize,
+        slot_descriptors: &[Vec<EffectDescriptor>],
+        instrument_type: InstrumentType,
+    ) {
+        if track >= self.track_bits.len() {
+            return;
+        }
+        self.track_bits[track] = [0u64; TRACK_PATTERN_WORDS];
+        self.step_data[track] = Self::default_step_data();
+        self.track_params[track] = TrackParamsSnapshot::default();
+        self.effect_slots[track] = Self::default_effect_slots(track, slot_descriptors);
+        self.instrument_slots[track] = Self::default_instrument_slot();
+        self.instrument_base_note_offsets[track] = 0.0;
+        self.track_sound_states[track] = TrackSoundState::default();
+        self.sample_ids[track] = (-1, String::new());
+        self.chord_snapshots[track] = ChordSnapshot::new_default();
+        self.timebase_plock_snapshots[track] = [None; MAX_STEPS];
+        self.swing_plock_snapshots[track] = [None; MAX_STEPS];
+        self.swing_resolution_plock_snapshots[track] = [None; MAX_STEPS];
+        self.instrument_types[track] = instrument_type;
+    }
+
     fn default_step_data() -> Vec<[f32; NUM_PARAMS]> {
         (0..MAX_STEPS)
             .map(|_| {
@@ -543,6 +567,12 @@ pub struct TransportState {
     pub bpm: AtomicU32,
     pub master_volume: AtomicU32,
     pub pattern_epoch: AtomicU64,
+    pub topology_epoch: AtomicU64,
+    pub topology_edit_kind: AtomicU32,
+    pub topology_edit_track: AtomicU32,
+    pub topology_edit_request_id: AtomicU64,
+    pub topology_edit_ready_id: AtomicU64,
+    pub topology_edit_applied_id: AtomicU64,
     pub mod_reset_counter: AtomicU32,
     pub pending_mod_resync: AtomicBool,
     pub peak_l: AtomicU32,
@@ -586,6 +616,9 @@ pub struct SequencerState {
     pending_accumulator_reset_all: AtomicBool,
     pending_accumulator_reset_tracks: [AtomicBool; MAX_TRACKS],
 }
+
+const TOPOLOGY_EDIT_NONE: u32 = 0;
+const TOPOLOGY_EDIT_DELETE_TRACK: u32 = 1;
 
 impl SequencerState {
     pub fn new(num_tracks: usize, initial_chains: Vec<Vec<EffectSlotState>>) -> Self {
@@ -639,6 +672,12 @@ impl SequencerState {
                 bpm: AtomicU32::new(DEFAULT_BPM),
                 master_volume: AtomicU32::new(1.0_f32.to_bits()),
                 pattern_epoch: AtomicU64::new(0),
+                topology_epoch: AtomicU64::new(0),
+                topology_edit_kind: AtomicU32::new(TOPOLOGY_EDIT_NONE),
+                topology_edit_track: AtomicU32::new(u32::MAX),
+                topology_edit_request_id: AtomicU64::new(0),
+                topology_edit_ready_id: AtomicU64::new(0),
+                topology_edit_applied_id: AtomicU64::new(0),
                 mod_reset_counter: AtomicU32::new(0),
                 pending_mod_resync: AtomicBool::new(false),
                 peak_l: AtomicU32::new(0.0_f32.to_bits()),
@@ -714,6 +753,42 @@ impl SequencerState {
         snapshot
     }
 
+    pub fn request_track_delete_boundary(&self, track_idx: usize) -> u64 {
+        let request_id = self
+            .transport
+            .topology_edit_request_id
+            .fetch_add(1, Ordering::AcqRel)
+            + 1;
+        self.transport
+            .topology_edit_track
+            .store(track_idx as u32, Ordering::Release);
+        self.transport
+            .topology_edit_kind
+            .store(TOPOLOGY_EDIT_DELETE_TRACK, Ordering::Release);
+        request_id
+    }
+
+    pub fn topology_edit_ready(&self, request_id: u64) -> bool {
+        self.transport.topology_edit_ready_id.load(Ordering::Acquire) >= request_id
+    }
+
+    pub fn topology_edit_in_flight(&self) -> bool {
+        self.transport.topology_edit_kind.load(Ordering::Acquire) != TOPOLOGY_EDIT_NONE
+    }
+
+    pub fn complete_topology_edit(&self, request_id: u64) {
+        self.transport.topology_epoch.fetch_add(1, Ordering::Relaxed);
+        self.transport
+            .topology_edit_applied_id
+            .store(request_id, Ordering::Release);
+        self.transport
+            .topology_edit_kind
+            .store(TOPOLOGY_EDIT_NONE, Ordering::Release);
+        self.transport
+            .topology_edit_track
+            .store(u32::MAX, Ordering::Release);
+    }
+
     fn reset_track_params_to_default(&self, track: usize) {
         let defaults = TrackParamsSnapshot::default();
         let params = &self.pattern.track_params[track];
@@ -756,6 +831,27 @@ impl SequencerState {
         self.pattern.instrument_base_note_offsets[track].store(0.0f32.to_bits(), Ordering::Relaxed);
         if let Some(sound) = self.pattern.track_sound_state.lock().unwrap().get_mut(track) {
             *sound = TrackSoundState::default();
+        }
+    }
+
+    fn clear_runtime_track_binding_in_place(&self, track: usize) {
+        self.transport.track_playheads[track].store(0, Ordering::Relaxed);
+        self.transport.trigger_flash[track].store(0, Ordering::Relaxed);
+        self.runtime.sampler_lids[track].store(0, Ordering::Relaxed);
+        self.runtime.voice_counts[track].store(0, Ordering::Relaxed);
+        self.runtime.instrument_type_flags[track].store(0, Ordering::Relaxed);
+        self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Relaxed);
+        for voice in 0..MAX_VOICES {
+            self.runtime.voice_lids[track][voice].store(0, Ordering::Relaxed);
+            self.runtime.synth_node_ids[track][voice].store(0, Ordering::Relaxed);
+        }
+        self.pending_accumulator_reset_tracks[track].store(false, Ordering::Relaxed);
+        for engine_id in 0..MAX_TRACKS {
+            for voice in 0..MAX_VOICES {
+                self.runtime.engine_route_lids[engine_id][voice][track].store(0, Ordering::Relaxed);
+                self.runtime.engine_route_lids_r[engine_id][voice][track]
+                    .store(0, Ordering::Relaxed);
+            }
         }
     }
 
@@ -908,6 +1004,32 @@ impl SequencerState {
         self.transport
             .num_tracks
             .store((old_count - 1) as u32, Ordering::Release);
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.schedule_mod_resync();
+        self.request_all_accumulator_resets();
+        self.publish_scheduler_snapshot();
+        true
+    }
+
+    pub fn clear_track_in_place(
+        &self,
+        track_idx: usize,
+        effect_descriptors: &[Vec<EffectDescriptor>],
+    ) -> bool {
+        let track_count = self.active_track_count();
+        if track_idx >= track_count {
+            return false;
+        }
+
+        {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            for snapshot in bank.iter_mut() {
+                snapshot.clear_track(track_idx, effect_descriptors, InstrumentType::Sampler);
+            }
+        }
+
+        self.clear_live_track_lane(track_idx);
+        self.clear_runtime_track_binding_in_place(track_idx);
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.schedule_mod_resync();
         self.request_all_accumulator_resets();

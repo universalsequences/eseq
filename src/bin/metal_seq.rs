@@ -1695,9 +1695,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => None,
                         }
                         .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
+                        let request_id = if state.is_playing() {
+                            let request_id = state.request_track_delete_boundary(track);
+                            let wait_deadline = Instant::now() + Duration::from_millis(250);
+                            while !state.topology_edit_ready(request_id)
+                                && Instant::now() < wait_deadline
+                            {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            if !state.topology_edit_ready(request_id) {
+                                state.complete_topology_edit(request_id);
+                                state.publish_scheduler_snapshot();
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Delete timed out waiting for playback boundary".to_string(),
+                                ));
+                                continue;
+                            }
+                            Some(request_id)
+                        } else {
+                            None
+                        };
 
                         match app.graph_controller().delete_track(track) {
                             Ok(new_idx) => {
+                                if let Some(request_id) = request_id {
+                                    state.complete_topology_edit(request_id);
+                                    state.publish_scheduler_snapshot();
+                                }
                                 current_track.store(new_idx, Ordering::Relaxed);
                                 *track_pan_ids.lock().unwrap() = app
                                     .graph
@@ -1731,6 +1755,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 )));
                             }
                             Err(e) => {
+                                if let Some(request_id) = request_id {
+                                    state.complete_topology_edit(request_id);
+                                    state.publish_scheduler_snapshot();
+                                }
                                 editor.handle_host_event(HostEvent::Status(format!(
                                     "Error deleting track: {e}"
                                 )));

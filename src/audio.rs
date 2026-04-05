@@ -131,6 +131,7 @@ struct AudioCallbackData {
     last_playing: bool,
     last_pattern: u32,
     last_num_tracks: usize,
+    last_topology_epoch: u64,
     /// Per-track flag set on pattern switch/play-start; each track clears its own flag at step 0.
     pending_accum_reset: [bool; MAX_TRACKS],
     scheduled_events: Arc<ScheduledEventQueue<4096>>,
@@ -384,6 +385,7 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     data.events_heap.clear();
     data.event_seq = 0;
     data.last_num_tracks = num_tracks;
+    data.last_topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
     data.last_playing = false;
     data.last_pattern = u32::MAX;
 
@@ -1237,8 +1239,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let callback_start = Instant::now();
     let nframes = output.len() / data.num_channels;
     let num_tracks = data.state.active_track_count();
-    if num_tracks != data.last_num_tracks {
+    let topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
+    if num_tracks != data.last_num_tracks || topology_epoch != data.last_topology_epoch {
         reset_audio_runtime_for_track_topology(data, num_tracks);
+    }
+    if data.state.topology_edit_in_flight() {
+        data.scheduled_events.clear();
+        data.events_heap.clear();
+        data.event_seq = 0;
     }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
@@ -1708,6 +1716,7 @@ pub fn build_output_stream(
     let gate_off_state = (0..MAX_TRACKS).map(|_| GateOffTracker::new()).collect();
     let scheduled_events = Arc::new(ScheduledEventQueue::new());
     let rendered_samples = Arc::new(AtomicU64::new(0));
+    let initial_topology_epoch = state.transport.topology_epoch.load(Ordering::Relaxed);
 
     let mut cb_data = AudioCallbackData {
         lg: LiveGraphPtr(lg),
@@ -1727,6 +1736,7 @@ pub fn build_output_stream(
         last_playing: false,
         last_pattern: u32::MAX,
         last_num_tracks: num_tracks,
+        last_topology_epoch: initial_topology_epoch,
         pending_accum_reset: [false; MAX_TRACKS],
         scheduled_events: Arc::clone(&scheduled_events),
         rendered_samples: Arc::clone(&rendered_samples),

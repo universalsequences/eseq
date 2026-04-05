@@ -380,6 +380,7 @@ pub fn spawn_scheduler_thread(
             let mut scheduled_until_sample = 0u64;
             let mut last_pattern = usize::MAX;
             let mut last_pattern_epoch = u64::MAX;
+            let mut last_topology_epoch = u64::MAX;
             let mut last_playing = false;
             let lookahead_target_samples = (scheduler_block_size.max(1) * 4) as u64;
             let mut accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
@@ -392,9 +393,23 @@ pub fn spawn_scheduler_thread(
                 let playing = snapshot.transport.playing;
                 let pattern = snapshot.transport.current_pattern;
                 let pattern_epoch = snapshot.transport.pattern_epoch;
+                let topology_epoch = snapshot.transport.topology_epoch;
                 let rendered = rendered_samples.load(Ordering::Acquire);
                 let latest_scratch_source_version = state.scratch_source_version();
                 let (reset_all, reset_tracks) = state.take_accumulator_reset_requests();
+                let requested_edit = state
+                    .transport
+                    .topology_edit_request_id
+                    .load(Ordering::Acquire);
+                let ready_edit = state
+                    .transport
+                    .topology_edit_ready_id
+                    .load(Ordering::Acquire);
+                let applied_edit = state
+                    .transport
+                    .topology_edit_applied_id
+                    .load(Ordering::Acquire);
+                let topology_edit_in_flight = state.topology_edit_in_flight();
 
                 if latest_scratch_source_version != scratch_source_version {
                     let source = state.scratch_source();
@@ -419,10 +434,28 @@ pub fn spawn_scheduler_thread(
                     last_playing = false;
                     last_pattern = pattern;
                     last_pattern_epoch = pattern_epoch;
+                    last_topology_epoch = topology_epoch;
                     pending_accum_reset = [false; MAX_TRACKS];
                     accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
                     thread::sleep(Duration::from_millis(2));
                     continue;
+                }
+
+                if topology_edit_in_flight {
+                    queue.clear();
+                    clock.reset();
+                    scheduled_until_sample = rendered;
+                    pending_accum_reset = [true; MAX_TRACKS];
+                    if ready_edit < requested_edit {
+                        state
+                            .transport
+                            .topology_edit_ready_id
+                            .store(requested_edit, Ordering::Release);
+                    }
+                    if applied_edit < requested_edit {
+                        thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
                 }
 
                 if reset_all {
@@ -468,6 +501,12 @@ pub fn spawn_scheduler_thread(
                 if !last_playing {
                     queue.clear();
                     clock.reset();
+                    scheduled_until_sample = rendered;
+                    pending_accum_reset = [true; MAX_TRACKS];
+                } else if last_topology_epoch != topology_epoch {
+                    let previous_scheduled_until = scheduled_until_sample;
+                    queue.clear();
+                    clock.seek_to_rendered_position(&snapshot, rendered, previous_scheduled_until);
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                 } else if last_pattern_epoch != pattern_epoch {
@@ -732,6 +771,7 @@ pub fn spawn_scheduler_thread(
                 last_playing = playing;
                 last_pattern = pattern;
                 last_pattern_epoch = pattern_epoch;
+                last_topology_epoch = topology_epoch;
                 thread::sleep(Duration::from_millis(1));
             }
         });

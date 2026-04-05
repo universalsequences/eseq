@@ -10,6 +10,8 @@ use crate::voice::MAX_VOICES;
 
 use super::{App, EngineNodeIds, TrackNodeIds};
 
+const DELETE_WITHOUT_SHIFT_ENV: &str = "TINYSEQ_DELETE_TRACK_WITHOUT_SHIFT";
+
 struct TrackShell {
     voice_sum_id: i32,
     voice_sum_r_id: i32,
@@ -316,6 +318,9 @@ impl GraphController<'_> {
     }
 
     pub fn delete_track(&mut self, track_idx: usize) -> Result<usize, String> {
+        if delete_without_shift_enabled() {
+            return self.clear_track_in_place(track_idx);
+        }
         let old_count = self.app.tracks.len();
         if old_count <= 1 {
             return Err("Cannot delete the last remaining track".to_string());
@@ -374,6 +379,72 @@ impl GraphController<'_> {
             .min(self.app.state.pattern.track_params[new_selected].get_num_steps().saturating_sub(1));
 
         Ok(new_selected)
+    }
+
+    fn clear_track_in_place(&mut self, track_idx: usize) -> Result<usize, String> {
+        if track_idx >= self.app.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+
+        if self.app.is_sampler_track(track_idx) {
+            self.send_buffer_to_all_voices(track_idx, -1);
+        }
+
+        for engine_id in 0..MAX_TRACKS {
+            for voice in 0..MAX_VOICES {
+                let lid_l = self.app.state.runtime.engine_route_lids[engine_id][voice][track_idx]
+                    .load(Ordering::Relaxed);
+                let lid_r = self.app.state.runtime.engine_route_lids_r[engine_id][voice][track_idx]
+                    .load(Ordering::Relaxed);
+                unsafe {
+                    if lid_l != 0 {
+                        crate::audiograph::params_push_wrapper(
+                            self.app.graph.lg.0,
+                            crate::audiograph::ParamMsg {
+                                idx: 0,
+                                logical_id: lid_l,
+                                fvalue: 0.0,
+                            },
+                        );
+                    }
+                    if lid_r != 0 {
+                        crate::audiograph::params_push_wrapper(
+                            self.app.graph.lg.0,
+                            crate::audiograph::ParamMsg {
+                                idx: 0,
+                                logical_id: lid_r,
+                                fvalue: 0.0,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        if !self
+            .app
+            .state
+            .clear_track_in_place(track_idx, &self.app.graph.effect_descriptors)
+        {
+            return Err("Failed to clear track in place".to_string());
+        }
+
+        self.app.tracks[track_idx] = format!("Empty {}", track_idx + 1);
+        self.app.sampler_paths[track_idx] = None;
+        self.app.graph.track_buffer_ids[track_idx] = -1;
+        self.app.graph.track_instrument_types[track_idx] = InstrumentType::Sampler;
+        self.app.graph.track_engine_ids[track_idx] = None;
+        self.app.graph.track_synth_node_ids[track_idx].clear();
+        self.app.graph.track_gatepitch_node_ids[track_idx].clear();
+        self.app.graph.effect_descriptors[track_idx] = EffectDescriptor::default_full_chain();
+        self.app.graph.instrument_descriptors[track_idx] = EffectDescriptor::empty_custom_slot();
+        self.app.graph.record_armed[track_idx] = false;
+        self.rebind_live_track_runtime_after_delete();
+        self.app.push_all_restored_defaults();
+        self.app.ui.cursor_track = track_idx;
+        self.app.ui.cursor_step = 0;
+
+        Ok(track_idx)
     }
 
     pub fn send_buffer_to_all_voices(&self, track: usize, buffer_id: i32) {
@@ -1535,5 +1606,15 @@ impl GraphController<'_> {
         } else {
             self.app.graph.instrument_descriptors.push(inst_desc);
         }
+    }
+}
+
+fn delete_without_shift_enabled() -> bool {
+    match std::env::var(DELETE_WITHOUT_SHIFT_ENV) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
     }
 }
