@@ -14,8 +14,18 @@
       (material
         :lighting (lighting :edge-min -0.35 :edge-max 0.5
           :light (vec3 0.0 -1.0 1.5) :shininess 82.0)
-        :color (* (if (= active 1) 1.0 0.3)
-                  (aqua-color (rgba 0.85 0.05 0.05 1.0) (rgba 0.99 0.15 0.15 1.0)))))))
+        :color 
+        (* (if (= active 1) 1.0 (+ 0.2 (smoothstep -0.4 0.1 d)))
+          (aqua-color 
+            (rgba 
+              (if (= active 1) 0.85 0.5)
+              (if (= active 1) 0.05 0.5) 
+              (if (= active 1) 0.05 0.5) 
+              1.0) 
+            (rgba 0.99 0.15 0.15 1.0))
+          )
+        
+        ))))
 
 (defwidget mixer-track-meter
   :width 5 :height 0.28

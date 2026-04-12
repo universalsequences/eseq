@@ -63,3 +63,245 @@ stack trace:
 5   libsystem_pthread.dylib             0x00000001899d0ba8 thread_start + 8
 
 
+
+sequencer caught fatal signal 10 (SIGBUS)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 10 (SIGBUS)
+crash log: sequencer-crash.log
+stack trace:
+0   metal_seq                           0x00000001027f9914 _ZN9sequencer5crash3imp14signal_handler17hc852aea169cb435cE + 484
+1   libsystem_platform.dylib            0x00000001899df744 _sigtramp + 56
+2   instrument_0.dylib                  0x0000000128025020 process + 2748
+3   metal_seq                           0x000000010278ccb8 _ZN9sequencer11lisp_effect35dgenlisp_instrument_wrapper_process17he474b64cad8a0560E + 1276
+4   metal_seq                           0x00000001028074fc bind_and_run_live + 400
+5   metal_seq                           0x000000010280829c execute_and_fanout + 108
+6   metal_seq                           0x0000000102807cd8 process_live_block + 1844
+7   metal_seq                           0x000000010280861c process_next_block + 568
+8   metal_seq                           0x00000001026b5734 _ZN9sequencer5audio12render_chunk17h5e3ea5d8fdcd8196E + 176
+9   metal_seq                           0x00000001026b8278 _ZN9sequencer5audio14audio_callback17hea3b08047de634a8E + 5016
+10  metal_seq                           0x0000000102747130 _ZN9sequencer5audio19build_output_stream28_$u7b$$u7b$closure$u7d$$u7d$17hd3fc84ca5b62ef9bE + 40
+11  metal_seq                           0x0000000102708e84 _ZN4cpal6traits11DeviceTrait19build_output_stream28_$u7b$$u7b$closure$u7d$$u7d$17h417a2336465791acE + 116
+12  metal_seq                           0x00000001026ebd18 _ZN4cpal4host9coreaudio5macos6Device23build_output_stream_raw28_$u7b$$u7b$closure$u7d$$u7d$17h0f7fb9794ce84267E + 740
+13  metal_seq                           0x00000001026e37b4 _ZN9coreaudio10audio_unit15render_callback50_$LT$impl$u20$coreaudio..audio_unit..AudioUnit$GT$19set_render_callback28_$u7b$$u7b$closure$u7d$$u7d$17hb81e6967ca9dd326E + 356
+14  metal_seq                           0x00000001028b5ebc _ZN9coreaudio10audio_unit15render_callback10input_proc17h7169fc033b8d64f3E + 212
+15  CoreAudio                           0x000000010a78b024 CoreAudio + 12324
+16  CoreAudio                           0x000000010a78ac60 CoreAudio + 11360
+17  CoreAudio                           0x000000010a8978bc AUNotQuiteSoSimpleTimeFactory + 33488
+18  CoreAudio                           0x000000010a795da4 AUGenericOutputFactory + 39644
+19  CoreAudio                           0x000000018ccecc90 _ZN19HALC_ProxyIOContext10IOWorkLoopEv + 10588
+20  CoreAudio                           0x000000018cce9c8c ___ZN19HALC_ProxyIOContextC2Ejj_block_invoke + 172
+21  CoreAudio                           0x000000018ceb7710 _ZN13HALC_IOThread5EntryEPv + 88
+22  libsystem_pthread.dylib             0x00000001899d5c08 _pthread_start + 136
+23  libsystem_pthread.dylib             0x00000001899d0ba8 thread_start + 8
+
+
+
+sequencer caught fatal signal 6 (SIGABRT)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 6 (SIGABRT)
+crash log: sequencer-crash.log
+stack trace:
+0   metal_seq                           0x00000001043f18fc _ZN9sequencer5crash3imp14signal_handler17he219926bac46b6b4E + 336
+1   libsystem_platform.dylib            0x00000001899df744 _sigtramp + 56
+2   libsystem_pthread.dylib             0x00000001899d5888 pthread_kill + 296
+3   libsystem_c.dylib                   0x00000001898da850 abort + 124
+4   metal_seq                           0x000000010465de10 _ZN3std3sys3pal4unix4sync5mutex5Mutex4lock4fail17h4772a0c4b10c89f0E + 0
+5   metal_seq                           0x000000010465ebfc _ZN3std9panicking11begin_panic17h45b9a862ecdf9440E + 0
+6   metal_seq                           0x000000010465ea30 _ZN3std5panic13resume_unwind17h69aec4648a6b8cddE + 0
+7   metal_seq                           0x000000010465e7d8 _ZN3std4sync4mpmc7context7Context3new17h3a5444aabceedfd0E + 0
+8   metal_seq                           0x000000010465e9fc _ZN3std5alloc8rust_oom28_$u7b$$u7b$closure$u7d$$u7d$17h09636b79a495f04bE + 0
+9   metal_seq                           0x000000010465dc50 _ZN103_$LT$std..sys..thread_local..abort_on_dtor_unwind..DtorUnwindGuard$u20$as$u20$core..ops..drop..Drop$GT$4drop17ha045b9879589e40eE + 0
+10  metal_seq                           0x00000001046622fc _ZN5alloc7raw_vec12handle_error17h2d2c5c9552d6042aE + 0
+11  metal_seq                           0x0000000104662310 _ZN5alloc7raw_vec17capacity_overflow17h7291b9950a4872d0E + 0
+12  metal_seq                           0x00000001046384fc _ZN62_$LT$alloc..string..Drain$u20$as$u20$core..ops..drop..Drop$GT$4drop17h430eed0bc4c805e2E + 0
+13  metal_seq                           0x0000000104509218 _ZN67_$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$5clone17h1cfed30476d83bb2E + 144
+14  metal_seq                           0x0000000104509b10 _ZN67_$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$5clone17hbdf8bb6c7c6a0632E + 292
+15  metal_seq                           0x000000010450e924 _ZN76_$LT$hashbrown..raw..RawTable$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$5clone17h4b1e4886b8b5fd71E + 492
+16  metal_seq                           0x0000000104576eec _ZN82_$LT$eseqlisp..buffer..CommittedBufferUiSnapshot$u20$as$u20$core..clone..Clone$GT$5clone17h890c0ada38684430E + 160
+17  metal_seq                           0x000000010458a034 _ZN8eseqlisp7runtime7Runtime38layout_snapshot_for_tree_with_viewport17hd3ad595a4dc8d5b0E + 92
+18  metal_seq                           0x00000001044fa638 _ZN8eseqlisp6editor6Editor40refresh_inactive_tile_layouts_for_buffer17h48bb3fad5206981dE + 348
+19  metal_seq                           0x00000001044f6280 _ZN8eseqlisp6editor6Editor28refresh_runtime_side_effects17hb3c541d61df180a1E + 9048
+20  metal_seq                           0x0000000104370740 _ZN9metal_seq4main17he52331a1a5bb19c9E + 60800
+21  metal_seq                           0x00000001043a2edc _ZN3std3sys9backtrace28__rust_begin_short_backtrace17hac5851f422241a53E + 12
+22  metal_seq                           0x00000001043a07b0 _ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17hc28b823aca5fdf22E + 16
+23  metal_seq                           0x000000010460b190 _ZN3std2rt19lang_start_internal17h48672da3ca81ba76E + 952
+24  metal_seq                           0x0000000104374fe8 main + 52
+25  dyld                                0x000000018960dd54 start + 7184
+
+
+
+sequencer caught fatal signal 10 (SIGBUS)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 10 (SIGBUS)
+crash log: sequencer-crash.log
+stack trace:
+0   metal_seq                           0x00000001026e98fc _ZN9sequencer5crash3imp14signal_handler17he219926bac46b6b4E + 336
+1   libsystem_platform.dylib            0x00000001899df744 _sigtramp + 56
+2   instrument_0.dylib                  0x00000001252dd510 process + 4012
+3   metal_seq                           0x000000010276299c bind_and_run_live + 400
+4   metal_seq                           0x00000001027639a4 execute_and_fanout + 108
+5   metal_seq                           0x00000001027625ac worker_main + 972
+6   libsystem_pthread.dylib             0x00000001899d5c08 _pthread_start + 136
+7   libsystem_pthread.dylib             0x00000001899d0ba8 thread_start + 8
+
+
+
+sequencer caught fatal signal 11 (SIGSEGV)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 11 (SIGSEGV)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 11 (SIGSEGV)
+crash log: sequencer-crash.log
+stack trace:
+0   metal_seq                           0x0000000100ce18fc _ZN9sequencer5crash3imp14signal_handler17he219926bac46b6b4E + 336
+1   libsystem_platform.dylib            0x00000001899df744 _sigtramp + 56
+2   AGXMetalG13X                        0x000000010a279c30 _ZN3AGX13RenderContextINS_3G138EncodersENS1_7ClassesENS1_10ObjClassesENS1_15CommandEncodingEE24encodeAndEmitRenderStateEPKNS1_20VertexProgramVariantEPKNS1_22FragmentProgramVariantEPNS1_28FixedLayoutUserArgumentTableESE_RNS_15RenderDirtyBitsIS3_EEb + 1768
+3   AGXMetalG13X                        0x000000010a28336c -[AGXG13XFamilyRenderContext drawPrimitives:vertexStart:vertexCount:instanceCount:] + 340
+4   metal_seq                           0x0000000100e11c40 _ZN8eseqlisp2ui13metal_backend5inner12MetalBackend12render_tiled17h75f5f85bfa72f87dE + 4808
+5   metal_seq                           0x0000000100c60850 _ZN9metal_seq4main17he52331a1a5bb19c9E + 61072
+6   metal_seq                           0x0000000100c92edc _ZN3std3sys9backtrace28__rust_begin_short_backtrace17hac5851f422241a53E + 12
+7   metal_seq                           0x0000000100c907b0 _ZN3std2rt10lang_start28_$u7b$$u7b$closure$u7d$$u7d$17hc28b823aca5fdf22E + 16
+8   metal_seq                           0x0000000100efb190 _ZN3std2rt19lang_start_internal17h48672da3ca81ba76E + 952
+9   metal_seq                           0x0000000100c64fe8 main + 52
+10  dyld                                0x000000018960dd54 start + 7184
+
+
+
+sequencer caught fatal signal 10 (SIGBUS)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 10 (SIGBUS)
+crash log: sequencer-crash.log
+stack trace:
+0   metal_seq                           0x00000001006c8c28 _ZN9sequencer5crash3imp14signal_handler17hc852aea169cb435cE + 484
+1   libsystem_platform.dylib            0x00000001899df744 _sigtramp + 56
+2   instrument_0.dylib                  0x0000000123fdd88c process + 4904
+3   metal_seq                           0x000000010065c790 _ZN9sequencer11lisp_effect35dgenlisp_instrument_wrapper_process17he474b64cad8a0560E + 1276
+4   metal_seq                           0x00000001006d684c bind_and_run_live + 400
+5   metal_seq                           0x00000001006d7854 execute_and_fanout + 108
+6   metal_seq                           0x00000001006d645c worker_main + 972
+7   libsystem_pthread.dylib             0x00000001899d5c08 _pthread_start + 136
+8   libsystem_pthread.dylib             0x00000001899d0ba8 thread_start + 8
+
+
+
+sequencer caught fatal signal 10 (SIGBUS)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 10 (SIGBUS)
+crash log: sequencer-crash.log
+stack trace:
+0   metal_seq                           0x0000000104cd787c _ZN9sequencer5crash3imp14signal_handler17he219926bac46b6b4E + 344
+1   libsystem_platform.dylib            0x00000001899df744 _sigtramp + 56
+2   instrument_0.dylib                  0x000000015fa8d020 process + 2748
+3   metal_seq                           0x0000000104d2d3f8 bind_and_run_live + 400
+4   metal_seq                           0x0000000104d2e400 execute_and_fanout + 108
+5   metal_seq                           0x0000000104d2d008 worker_main + 972
+6   libsystem_pthread.dylib             0x00000001899d5c08 _pthread_start + 136
+7   libsystem_pthread.dylib             0x00000001899d0ba8 thread_start + 8
+
+
+
+sequencer panic: panicked at src/sequencer/state.rs:73:36:
+removal index (is 2) should be < len (is 0)
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::capture::Backtrace::create
+   1: backtrace::capture::Backtrace::new
+   2: sequencer::crash::imp::install_panic_hook::{{closure}}
+   3: std::panicking::panic_with_hook
+   4: std::panicking::panic_handler::{{closure}}
+   5: std::sys::backtrace::__rust_end_short_backtrace
+   6: __rustc::rust_begin_unwind
+   7: core::panicking::panic_fmt
+   8: alloc::vec::Vec<T,A>::remove::assert_failed
+   9: sequencer::sequencer::state::PatternSnapshot::remove_track
+  10: sequencer::sequencer::state::SequencerState::remove_track
+  11: sequencer::ui::graph::GraphController::delete_track
+  12: metal_seq::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace
+  14: std::rt::lang_start::{{closure}}
+  15: std::rt::lang_start_internal
+  16: _main
+
+
+sequencer panic: panicked at src/sequencer/state.rs:73:36:
+removal index (is 2) should be < len (is 0)
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::capture::Backtrace::create
+   1: backtrace::capture::Backtrace::new
+   2: sequencer::crash::imp::install_panic_hook::{{closure}}
+   3: std::panicking::panic_with_hook
+   4: std::panicking::panic_handler::{{closure}}
+   5: std::sys::backtrace::__rust_end_short_backtrace
+   6: __rustc::rust_begin_unwind
+   7: core::panicking::panic_fmt
+   8: alloc::vec::Vec<T,A>::remove::assert_failed
+   9: sequencer::sequencer::state::PatternSnapshot::remove_track
+  10: sequencer::sequencer::state::SequencerState::remove_track
+  11: sequencer::ui::graph::GraphController::delete_track
+  12: metal_seq::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace
+  14: std::rt::lang_start::{{closure}}
+  15: std::rt::lang_start_internal
+  16: _main
+
+
+sequencer panic: panicked at src/sequencer/state.rs:73:36:
+removal index (is 1) should be < len (is 0)
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::capture::Backtrace::create
+   1: backtrace::capture::Backtrace::new
+   2: sequencer::crash::imp::install_panic_hook::{{closure}}
+   3: std::panicking::panic_with_hook
+   4: std::panicking::panic_handler::{{closure}}
+   5: std::sys::backtrace::__rust_end_short_backtrace
+   6: __rustc::rust_begin_unwind
+   7: core::panicking::panic_fmt
+   8: alloc::vec::Vec<T,A>::remove::assert_failed
+   9: sequencer::sequencer::state::PatternSnapshot::remove_track
+  10: sequencer::sequencer::state::SequencerState::remove_track
+  11: sequencer::ui::graph::GraphController::delete_track
+  12: metal_seq::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace
+  14: std::rt::lang_start::{{closure}}
+  15: std::rt::lang_start_internal
+  16: _main
+
+
+sequencer panic: panicked at src/sequencer/state.rs:73:36:
+removal index (is 1) should be < len (is 0)
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::capture::Backtrace::create
+   1: backtrace::capture::Backtrace::new
+   2: sequencer::crash::imp::install_panic_hook::{{closure}}
+   3: std::panicking::panic_with_hook
+   4: std::panicking::panic_handler::{{closure}}
+   5: std::sys::backtrace::__rust_end_short_backtrace
+   6: __rustc::rust_begin_unwind
+   7: core::panicking::panic_fmt
+   8: alloc::vec::Vec<T,A>::remove::assert_failed
+   9: sequencer::sequencer::state::PatternSnapshot::remove_track
+  10: sequencer::sequencer::state::SequencerState::remove_track
+  11: sequencer::ui::graph::GraphController::delete_track
+  12: metal_seq::main
+  13: std::sys::backtrace::__rust_begin_short_backtrace
+  14: std::rt::lang_start::{{closure}}
+  15: std::rt::lang_start_internal
+  16: _main
+

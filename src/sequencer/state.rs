@@ -61,18 +61,18 @@ impl PatternSnapshot {
         }
 
         self.track_bits.remove(track_idx);
-        self.step_data.remove(track_idx);
-        self.track_params.remove(track_idx);
-        self.effect_slots.remove(track_idx);
-        self.instrument_slots.remove(track_idx);
-        self.instrument_base_note_offsets.remove(track_idx);
-        self.track_sound_states.remove(track_idx);
-        self.sample_ids.remove(track_idx);
-        self.chord_snapshots.remove(track_idx);
-        self.timebase_plock_snapshots.remove(track_idx);
-        self.swing_plock_snapshots.remove(track_idx);
-        self.swing_resolution_plock_snapshots.remove(track_idx);
-        self.instrument_types.remove(track_idx);
+        remove_track_lane_if_present(&mut self.step_data, track_idx);
+        remove_track_lane_if_present(&mut self.track_params, track_idx);
+        remove_track_lane_if_present(&mut self.effect_slots, track_idx);
+        remove_track_lane_if_present(&mut self.instrument_slots, track_idx);
+        remove_track_lane_if_present(&mut self.instrument_base_note_offsets, track_idx);
+        remove_track_lane_if_present(&mut self.track_sound_states, track_idx);
+        remove_track_lane_if_present(&mut self.sample_ids, track_idx);
+        remove_track_lane_if_present(&mut self.chord_snapshots, track_idx);
+        remove_track_lane_if_present(&mut self.timebase_plock_snapshots, track_idx);
+        remove_track_lane_if_present(&mut self.swing_plock_snapshots, track_idx);
+        remove_track_lane_if_present(&mut self.swing_resolution_plock_snapshots, track_idx);
+        remove_track_lane_if_present(&mut self.instrument_types, track_idx);
     }
 
     pub fn capture(
@@ -416,6 +416,12 @@ impl PatternSnapshot {
     }
 }
 
+fn remove_track_lane_if_present<T>(lanes: &mut Vec<T>, track_idx: usize) {
+    if track_idx < lanes.len() {
+        lanes.remove(track_idx);
+    }
+}
+
 fn sidechain_source_track(
     owner_track: usize,
     selection_idx: usize,
@@ -581,6 +587,8 @@ pub struct TransportState {
     pub trigger_flash: Vec<AtomicU32>,
     pub num_tracks: AtomicU32,
     pub track_playheads: Vec<AtomicU32>,
+    /// Per-track sampler playhead as normalized 0.0–1.0 (f32 bits).
+    pub sampler_playheads: Vec<AtomicU32>,
     pub playhead_phase: AtomicU32,
     pub record_quantize_thresh: AtomicU32,
 }
@@ -686,6 +694,9 @@ impl SequencerState {
                 trigger_flash,
                 num_tracks: AtomicU32::new(num_tracks as u32),
                 track_playheads: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_playheads: (0..MAX_TRACKS)
+                    .map(|_| AtomicU32::new(0.0_f32.to_bits()))
+                    .collect(),
                 playhead_phase: AtomicU32::new(0.0_f32.to_bits()),
                 record_quantize_thresh: AtomicU32::new(0.5_f32.to_bits()),
             },
@@ -1751,6 +1762,23 @@ mod tests {
         assert_eq!(snapshot.step_data, original.step_data);
         assert_eq!(snapshot.track_params.len(), original.track_params.len());
         assert_eq!(snapshot.sample_ids, original.sample_ids);
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_tolerates_sparse_legacy_lanes() {
+        let mut snapshot = sample_pattern_snapshot(3);
+        snapshot.swing_plock_snapshots.clear();
+        snapshot.swing_resolution_plock_snapshots.truncate(1);
+        snapshot.instrument_types.truncate(2);
+
+        snapshot.remove_track(1);
+
+        assert_eq!(snapshot.track_bits.len(), 2);
+        assert_eq!(snapshot.step_data.len(), 2);
+        assert_eq!(snapshot.track_params.len(), 2);
+        assert_eq!(snapshot.swing_plock_snapshots.len(), 0);
+        assert_eq!(snapshot.swing_resolution_plock_snapshots.len(), 1);
+        assert_eq!(snapshot.instrument_types.len(), 1);
     }
 
     #[test]

@@ -264,12 +264,6 @@
   (box :background "browser-panel-bg" :padding 0 :flex 1
     (scroll :flex 1
       (tree
-        :row-bg-even  '(0.16 0.16 0.17)
-        :row-bg-odd   '(0.19 0.19 0.20)
-        :selected-bg  '(0.00 0.35 0.82)
-        :folder-color '(0.88 0.88 0.89)
-        :file-color   '(0.88 0.88 0.89)
-        :chevron-color '(0.50 0.50 0.53)
         :items (sbrowser-create-items)
         :expand-all false
         :on-select (lambda (item) (sbrowser-select-create-item item))
@@ -285,12 +279,6 @@
           :bg :transparent))
       (scroll :flex 1
         (tree
-          :row-bg-even  '(0.16 0.16 0.17)
-          :row-bg-odd   '(0.19 0.19 0.20)
-          :selected-bg  '(0.00 0.35 0.82)
-          :folder-color '(0.88 0.88 0.89)
-          :file-color   '(0.88 0.88 0.89)
-          :chevron-color '(0.50 0.50 0.53)
           :items SEQ.sidebar-preset-tree
           :selected-label SEQ.sidebar-loaded-preset
           :expand-all false
@@ -308,12 +296,6 @@
             :bg :transparent))
         (scroll :flex 1
           (tree
-            :row-bg-even  '(0.16 0.16 0.17)
-            :row-bg-odd   '(0.19 0.19 0.20)
-            :selected-bg  '(0.00 0.35 0.82)
-            :folder-color '(0.88 0.88 0.89)
-            :file-color   '(0.88 0.88 0.89)
-            :chevron-color '(0.50 0.50 0.53)
             :items items
             :selected-label SEQ.current-project-name
             :expand-all false
@@ -348,12 +330,6 @@
               (box :background "browser-panel-bg" :padding 0 :flex 1
                 (scroll :flex 1
                   (tree
-                    :row-bg-even  '(0.16 0.16 0.17)
-                    :row-bg-odd   '(0.19 0.19 0.20)
-                    :selected-bg  '(0.00 0.35 0.82)
-                    :folder-color '(0.88 0.88 0.89)
-                    :file-color   '(0.62 0.62 0.65)
-                    :chevron-color '(0.50 0.50 0.53)
                     :items (seq-filter-sample-tree sbrowser-filter)
                     :selected-path SEQ.sidebar-selected-sample
                     :expand-all (not (= sbrowser-filter ""))

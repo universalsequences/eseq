@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "engine_name": "digitone",
+  "source_file": "instruments/digitone.lisp",
+  "presets": [
+    {
+      "id": "dn-epiano",
+      "name": "DN ELECTRIC PIANO",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 2,
+        "amp_attack": 4, "amp_decay": 2000, "amp_sustain": 0.0, "amp_release": 400,
+        "mix_xy": 0.6,
+        "c_ratio": 1.0, "c_detune": 0.0, "c_level": 1.0, "c_harmonics": 0.0, "c_octave": 0,
+        "a_ratio": 14.0, "a_detune": 0.0, "a_level": 0.8, "a_index": 3.5, "a_harmonics": 0.0, "a_octave": 0,
+        "b_ratio": 1.0, "b_detune": 0.3, "b_level": 0.5, "b_index": 2.8, "b_harmonics": 0.0, "b_octave": 0,
+        "feedback": 0.0,
+        "a_env_attack": 4, "a_env_decay": 300, "a_env_sustain": 0.0,
+        "b_env_attack": 4, "b_env_decay": 250, "b_env_sustain": 0.0,
+        "filt_mode": 0, "filt_cutoff": 6000, "filt_res": 0.7, "filt_env_depth": 0.3,
+        "filt_attack": 4, "filt_decay": 400, "filt_sustain": 0.0, "filt_release": 300,
+        "vel_sensitivity": 0.7, "gain": 0.15
+      }
+    },
+    {
+      "id": "dn-glass-bell",
+      "name": "DN GLASS BELL",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 1,
+        "amp_attack": 2, "amp_decay": 3000, "amp_sustain": 0.0, "amp_release": 800,
+        "mix_xy": 0.4,
+        "c_ratio": 1.0, "c_detune": 0.0, "c_level": 1.0, "c_harmonics": 0.3, "c_octave": 0,
+        "a_ratio": 3.5, "a_detune": 0.0, "a_level": 0.7, "a_index": 4.0, "a_harmonics": 0.0, "a_octave": 0,
+        "b_ratio": 7.0, "b_detune": 1.0, "b_level": 0.4, "b_index": 2.5, "b_harmonics": 0.5, "b_octave": 0,
+        "feedback": 0.1,
+        "a_env_attack": 4, "a_env_decay": 1500, "a_env_sustain": 0.0,
+        "b_env_attack": 4, "b_env_decay": 800, "b_env_sustain": 0.0,
+        "filt_mode": 0, "filt_cutoff": 12000, "filt_res": 1.2, "filt_env_depth": 0.0,
+        "filt_attack": 4, "filt_decay": 500, "filt_sustain": 0.0, "filt_release": 500,
+        "vel_sensitivity": 0.8, "gain": 0.13
+      }
+    },
+    {
+      "id": "dn-dark-bass",
+      "name": "DN DARK BASS",
+      "base_note_offset": -12.0,
+      "params": {
+        "algorithm": 4,
+        "amp_attack": 2, "amp_decay": 400, "amp_sustain": 0.6, "amp_release": 60,
+        "mix_xy": 0.5,
+        "c_ratio": 1.0, "c_detune": 0.0, "c_level": 1.0, "c_harmonics": 0.8, "c_octave": 0,
+        "a_ratio": 1.0, "a_detune": 0.0, "a_level": 0.9, "a_index": 5.0, "a_harmonics": 0.0, "a_octave": 0,
+        "b_ratio": 2.0, "b_detune": 0.0, "b_level": 0.7, "b_index": 3.5, "b_harmonics": 1.2, "b_octave": 0,
+        "feedback": 0.4,
+        "a_env_attack": 2, "a_env_decay": 120, "a_env_sustain": 0.15,
+        "b_env_attack": 2, "b_env_decay": 80, "b_env_sustain": 0.0,
+        "filt_mode": 0, "filt_cutoff": 2500, "filt_res": 2.0, "filt_env_depth": 0.5,
+        "filt_attack": 2, "filt_decay": 200, "filt_sustain": 0.0, "filt_release": 60,
+        "vel_sensitivity": 0.6, "gain": 0.18
+      }
+    },
+    {
+      "id": "dn-metallic-pad",
+      "name": "DN METALLIC PAD",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 3,
+        "amp_attack": 800, "amp_decay": 2000, "amp_sustain": 0.8, "amp_release": 1500,
+        "mix_xy": 0.5,
+        "c_ratio": 1.0, "c_detune": 0.0, "c_level": 1.0, "c_harmonics": 0.0, "c_octave": 0,
+        "a_ratio": 1.41, "a_detune": 0.5, "a_level": 0.6, "a_index": 2.5, "a_harmonics": 0.4, "a_octave": 0,
+        "b_ratio": 2.76, "b_detune": -0.3, "b_level": 0.5, "b_index": 1.8, "b_harmonics": 0.0, "b_octave": 0,
+        "feedback": 0.25,
+        "a_env_attack": 600, "a_env_decay": 2000, "a_env_sustain": 0.5,
+        "b_env_attack": 400, "b_env_decay": 1500, "b_env_sustain": 0.3,
+        "filt_mode": 0, "filt_cutoff": 5000, "filt_res": 1.5, "filt_env_depth": 0.4,
+        "filt_attack": 500, "filt_decay": 1500, "filt_sustain": 0.2, "filt_release": 1000,
+        "vel_sensitivity": 0.3, "gain": 0.12
+      }
+    },
+    {
+      "id": "dn-perc-hit",
+      "name": "DN PERC HIT",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 5,
+        "amp_attack": 1, "amp_decay": 250, "amp_sustain": 0.0, "amp_release": 80,
+        "mix_xy": 0.35,
+        "c_ratio": 1.0, "c_detune": 0.0, "c_level": 1.0, "c_harmonics": 1.5, "c_octave": 0,
+        "a_ratio": 2.0, "a_detune": 3.0, "a_level": 0.7, "a_index": 6.0, "a_harmonics": 0.8, "a_octave": 0,
+        "b_ratio": 5.0, "b_detune": -2.0, "b_level": 0.5, "b_index": 4.0, "b_harmonics": 1.0, "b_octave": 0,
+        "feedback": 0.15,
+        "a_env_attack": 1, "a_env_decay": 60, "a_env_sustain": 0.0,
+        "b_env_attack": 1, "b_env_decay": 40, "b_env_sustain": 0.0,
+        "filt_mode": 0, "filt_cutoff": 8000, "filt_res": 0.8, "filt_env_depth": 0.6,
+        "filt_attack": 1, "filt_decay": 100, "filt_sustain": 0.0, "filt_release": 80,
+        "vel_sensitivity": 0.9, "gain": 0.14
+      }
+    }
+  ]
+}

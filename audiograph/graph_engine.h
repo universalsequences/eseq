@@ -86,6 +86,7 @@ typedef struct LiveGraph {
     int cached_total_jobs;
     bool has_cycle;
     bool dirty;            // true when topology changed, triggers cache rebuild
+    bool *completed_this_block; // per-node flag: set at completion site, cleared at block start
   } sched;
 
   ParamRing *params;

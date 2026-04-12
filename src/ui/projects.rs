@@ -712,6 +712,13 @@ impl App {
             sample_names: _,
         } = pattern;
 
+        // Pre-extract attack/release for sampler instrument slot migration
+        // before track_params is consumed by into_iter().
+        let sampler_attack_release: Vec<(f32, f32)> = track_params
+            .iter()
+            .map(|tp| (tp.attack_ms, tp.release_ms))
+            .collect();
+
         Ok((
             PatternSnapshot {
                 track_bits,
@@ -739,7 +746,43 @@ impl App {
                             .node_id
                             .load(Ordering::Relaxed);
                         if self.is_sampler_track(track_idx) {
-                            crate::effects::EffectSlotSnapshot::new_empty()
+                            let saved_slot =
+                                instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
+                                    crate::project::ProjectEffectSlot {
+                                        num_params: 0,
+                                        defaults: Vec::new(),
+                                        plocks: vec![Vec::new(); MAX_STEPS],
+                                        param_node_indices: Vec::new(),
+                                    }
+                                });
+                            if saved_slot.num_params >= 4 {
+                                // New project format: sampler params already saved
+                                saved_slot.into_snapshot_with_node_id(0)
+                            } else {
+                                // Old project: migrate attack/release from TrackParams
+                                let sampler_desc =
+                                    crate::effects::EffectDescriptor::builtin_sampler();
+                                let mut defaults: Vec<f32> =
+                                    sampler_desc.params.iter().map(|p| p.default).collect();
+                                let (attack, release) = sampler_attack_release
+                                    .get(track_idx)
+                                    .copied()
+                                    .unwrap_or((0.0, 0.0));
+                                defaults[0] = attack;
+                                defaults[1] = release;
+                                // start=0.0, end=1.0 already set from defaults
+                                crate::effects::EffectSlotSnapshot {
+                                    node_id: 0,
+                                    num_params: defaults.len() as u32,
+                                    defaults,
+                                    plocks: vec![Vec::new(); MAX_STEPS],
+                                    param_node_indices: sampler_desc
+                                        .params
+                                        .iter()
+                                        .map(|p| p.node_param_idx)
+                                        .collect(),
+                                }
+                            }
                         } else {
                             let desc = self.graph.instrument_descriptors[track_idx].clone();
                             let slot =

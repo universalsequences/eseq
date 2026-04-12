@@ -443,7 +443,9 @@ pub fn spawn_scheduler_thread(
 
                 if topology_edit_in_flight {
                     queue.clear();
-                    clock.reset();
+                    // Freeze future scheduling while the topology edit is in
+                    // flight, but preserve the clock's current musical phase
+                    // so resuming after the edit does not jump backwards.
                     scheduled_until_sample = rendered;
                     pending_accum_reset = [true; MAX_TRACKS];
                     if ready_edit < requested_edit {

@@ -3,6 +3,7 @@ mod accumulator;
 mod agent;
 pub mod audio;
 pub mod audiograph;
+pub mod crash;
 #[allow(dead_code)]
 mod delay;
 #[allow(dead_code)]

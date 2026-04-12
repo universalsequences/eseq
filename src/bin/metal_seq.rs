@@ -22,6 +22,87 @@ use sequencer::sequencer::{
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
 
+/// Read the current sampler playhead position (in seconds) for a track.
+/// Scans all voices and returns the most recently triggered one (smallest
+/// non-zero playhead, meaning it just started playing).
+fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 {
+    let sampler_ids = match app.graph.track_node_ids.get(track) {
+        Some(ids) => &ids.sampler_ids,
+        None => return 0.0,
+    };
+    let min_state_bytes =
+        sequencer::sampler::SAMPLER_STATE_SIZE * std::mem::size_of::<f32>();
+
+    // Find the voice with the smallest positive playhead (most recently triggered)
+    let mut best_playhead: f64 = 0.0;
+    let mut best_is_playing = false;
+
+    for &node_id in sampler_ids {
+        if node_id < 0 {
+            continue;
+        }
+        let mut state_size = 0usize;
+        let snapshot = unsafe {
+            sequencer::audiograph::get_node_state(
+                app.graph.lg.0,
+                node_id,
+                &mut state_size as *mut usize,
+            )
+        };
+        if snapshot.is_null() || state_size < min_state_bytes {
+            if !snapshot.is_null() {
+                unsafe { sequencer::audiograph::free_c_ptr(snapshot) };
+            }
+            continue;
+        }
+        let (ph, playing) = unsafe {
+            let state = snapshot as *const f32;
+            let ph = *state.add(sequencer::sampler::PARAM_PLAYHEAD as usize);
+            let playing = *state.add(sequencer::sampler::PARAM_TRIGGER as usize);
+            sequencer::audiograph::free_c_ptr(snapshot);
+            (ph as f64, playing > 0.0)
+        };
+        // Prefer playing voices; among those, pick the smallest playhead (most recent trigger)
+        if playing && (!best_is_playing || ph < best_playhead) {
+            best_playhead = ph;
+            best_is_playing = true;
+        } else if !best_is_playing && ph > best_playhead {
+            // No playing voice found yet — pick the largest playhead (last to finish)
+            best_playhead = ph;
+        }
+    }
+
+    if best_playhead <= 0.0 {
+        return 0.0;
+    }
+
+    // Convert frame index to seconds using the registered sample's metadata
+    let sample = app
+        .sampler_paths
+        .get(track)
+        .and_then(|p| p.as_ref())
+        .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()));
+    match sample {
+        Some(s) if s.frames > 0 => best_playhead * s.duration_seconds / s.frames as f64,
+        _ => {
+            let sr = app.graph.sample_rate.max(1) as f64;
+            best_playhead / sr
+        }
+    }
+}
+
+/// Register a WAV file with eseqlisp's sample registry so the waveform widget can display it.
+fn register_waveform_sample(path: &Path) {
+    match eseqlisp::audio::sample::SampleBuffer::load_wav(path) {
+        Ok(sample) => {
+            sample.register();
+        }
+        Err(e) => {
+            eprintln!("waveform: failed to register sample {}: {e}", path.display());
+        }
+    }
+}
+
 const DEFAULT_SAMPLES: &[&str] = &[
     "samples/producers/Boom-Bap/Boom-Bap Kick 51.wav",
     "samples/producers/madlib/Snare SwaggedOut 3.wav",
@@ -214,6 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new(sample_path);
         if path.exists() {
             let idx = app.graph_controller().add_track(path)?;
+            register_waveform_sample(path);
             let name = app.tracks[idx].clone();
             eprintln!("metal_seq: track {idx} = {name} ({sample_path})");
             track_names.push(name);
@@ -284,6 +366,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("auto-follow", Value::Bool(true)),
             ("playhead", Value::Number(0.0)),
             ("transport-playhead", Value::Number(0.0)),
+            ("sampler-playhead", Value::Number(0.0)),
             ("track-names", build_track_names(&track_names)),
             ("steps", build_steps_value(&state, 0)),
             (
@@ -1475,6 +1558,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let track = current_track.load(Ordering::Relaxed);
                             match sequencer::sampler::load_wav_buffer(lg_raw, path) {
                                 Ok((new_buffer_id, new_name)) => {
+                                    register_waveform_sample(path);
                                     app.graph_controller()
                                         .send_buffer_to_all_voices(track, new_buffer_id);
                                     app.graph.track_buffer_ids[track] = new_buffer_id;
@@ -1490,6 +1574,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "SEQ",
                                         "track-names",
                                         build_track_names(&track_names),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "instrument-panel",
+                                        build_instrument_panel_value(
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                        ),
                                     );
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
@@ -1511,6 +1604,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let path = Path::new(&path_str);
                             match app.graph_controller().add_track(path) {
                                 Ok(idx) => {
+                                    register_waveform_sample(path);
                                     current_track.store(idx, Ordering::Relaxed);
                                     let new_name = app.tracks[idx].clone();
                                     track_names.push(new_name.clone());
@@ -2420,6 +2514,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.tracks.len(),
                             app.current_project_name
                         );
+                        // Register all sampler track WAVs with eseqlisp for waveform display
+                        for (t, path) in app.sampler_paths.iter().enumerate() {
+                            if app.is_sampler_track(t) {
+                                if let Some(p) = path {
+                                    register_waveform_sample(p);
+                                }
+                            }
+                        }
                         track_names = app.tracks.clone();
                         current_track.store(0, Ordering::Relaxed);
                         *track_pan_ids.lock().unwrap() = app
@@ -2807,6 +2909,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_transport_playhead = transport_playhead;
                 needs_reactive_cycle = true;
             }
+            // Update sampler playhead for waveform display
+            {
+                let ct = current_track.load(Ordering::Relaxed);
+                if app.is_sampler_track(ct) {
+                    let ph = read_sampler_playhead_seconds(&app, ct);
+                    if ph > 0.0 {
+                        editor
+                            .runtime_mut()
+                            .set_reactive("SEQ", "sampler-playhead", Value::Number(ph));
+                        needs_reactive_cycle = true;
+                    }
+                }
+            }
             let auto_follow = auto_follow_enabled(&auto_follow_override_until);
             if auto_follow != prev_auto_follow {
                 editor
@@ -2989,7 +3104,10 @@ fn layout_node_by_id(
     None
 }
 
-fn focused_widget_captures_typing(editor: &Editor) -> bool {
+fn focused_widget_matches(
+    editor: &Editor,
+    predicate: impl FnOnce(&str) -> bool,
+) -> bool {
     let Some(focused_id) = editor.focused_widget_id() else {
         return false;
     };
@@ -2999,10 +3117,17 @@ fn focused_widget_captures_typing(editor: &Editor) -> bool {
     let Some(node) = layout_node_by_id(&layout, focused_id) else {
         return false;
     };
-    matches!(
-        node.widget_type.as_str(),
-        "text-input" | "number-picker" | "dropdown"
-    )
+    predicate(node.widget_type.as_str())
+}
+
+fn focused_widget_captures_typing(editor: &Editor) -> bool {
+    focused_widget_matches(editor, |widget_type| {
+        matches!(widget_type, "text-input" | "number-picker")
+    })
+}
+
+fn focused_widget_captures_text_input(editor: &Editor) -> bool {
+    focused_widget_matches(editor, |widget_type| widget_type == "text-input")
 }
 
 fn held_note_for_key(
@@ -3038,7 +3163,7 @@ fn should_route_to_live_keyboard(
         return false;
     }
 
-    if focused_widget_captures_typing(editor) {
+    if focused_widget_captures_text_input(editor) {
         return false;
     }
 
@@ -3564,6 +3689,115 @@ fn build_effects_value(
     Value::List(slots)
 }
 
+fn build_sampler_panel_value(
+    app: &ui::App,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    use std::collections::HashMap;
+
+    let sel = selected.lock().unwrap();
+    let plock_step = sel.iter().copied().min();
+    let slot = &app.state.pattern.instrument_slots[track];
+    let desc = app
+        .graph
+        .instrument_descriptors
+        .get(track)
+        .cloned()
+        .unwrap_or_else(sequencer::effects::EffectDescriptor::builtin_sampler);
+
+    // Look up the pre-registered SampleBuffer and pass its Value map directly
+    // to the Lisp side, so the waveform widget can use it without re-loading.
+    let registered_sample = app
+        .sampler_paths
+        .get(track)
+        .and_then(|p| p.as_ref())
+        .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()));
+    let buffer_value = registered_sample.as_ref().map(|s| s.to_value());
+    let sample_duration = registered_sample
+        .as_ref()
+        .map(|s| s.duration_seconds)
+        .unwrap_or(1.0);
+
+    let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    for (param_idx, pdesc) in desc.params.iter().enumerate() {
+        let default_val = slot.defaults.get(param_idx);
+        let current_val = plock_step
+            .and_then(|step| slot.plocks.get(step, param_idx))
+            .unwrap_or(default_val);
+        let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        pmap.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(pdesc.name.clone()))),
+        );
+        pmap.insert(
+            "idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(param_idx as f64))),
+        );
+        pmap.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(
+                pdesc.stored_to_user(current_val) as f64,
+            ))),
+        );
+        pmap.insert(
+            "min".to_string(),
+            Rc::new(RefCell::new(Value::Number(
+                pdesc.stored_to_user(pdesc.min) as f64,
+            ))),
+        );
+        pmap.insert(
+            "max".to_string(),
+            Rc::new(RefCell::new(Value::Number(
+                pdesc.stored_to_user(pdesc.max) as f64,
+            ))),
+        );
+        params.push(Rc::new(RefCell::new(Value::Map(pmap))));
+    }
+
+    let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    panel_map.insert(
+        "type".to_string(),
+        Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+    );
+    if let Some(buf_val) = buffer_value {
+        panel_map.insert(
+            "buffer".to_string(),
+            Rc::new(RefCell::new(buf_val)),
+        );
+    }
+    panel_map.insert(
+        "params".to_string(),
+        Rc::new(RefCell::new(Value::List(params))),
+    );
+    // Start/end as seconds for the waveform selection overlay.
+    // Raw stored values are 0.0-1.0 normalized; multiply by duration.
+    let start_raw = plock_step
+        .and_then(|step| slot.plocks.get(step, 2))
+        .unwrap_or_else(|| slot.defaults.get(2));
+    let end_raw = plock_step
+        .and_then(|step| slot.plocks.get(step, 3))
+        .unwrap_or_else(|| slot.defaults.get(3));
+    panel_map.insert(
+        "start-time".to_string(),
+        Rc::new(RefCell::new(Value::Number(
+            (start_raw as f64) * sample_duration,
+        ))),
+    );
+    panel_map.insert(
+        "end-time".to_string(),
+        Rc::new(RefCell::new(Value::Number(
+            (end_raw as f64) * sample_duration,
+        ))),
+    );
+    panel_map.insert(
+        "duration".to_string(),
+        Rc::new(RefCell::new(Value::Number(sample_duration))),
+    );
+
+    Value::List(vec![Rc::new(RefCell::new(Value::Map(panel_map)))])
+}
+
 fn build_instrument_panel_value(
     app: &ui::App,
     track: usize,
@@ -3603,7 +3837,7 @@ fn build_instrument_panel_value(
     const PARAM_DRIFT_DIV: usize = 41;
 
     if app.is_sampler_track(track) {
-        return Value::List(vec![]);
+        return build_sampler_panel_value(app, track, selected);
     }
     let Some(desc) = app.graph.instrument_descriptors.get(track) else {
         return Value::List(vec![]);

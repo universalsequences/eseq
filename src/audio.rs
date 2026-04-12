@@ -13,8 +13,9 @@ use crate::delay;
 use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
-    PARAM_ATTACK_SAMPLES, PARAM_GATE_MODE, PARAM_GATE_SAMPLES, PARAM_PLAYHEAD,
-    PARAM_RELEASE_SAMPLES, PARAM_SPEED, PARAM_TRANSPOSE, PARAM_TRIGGER, PARAM_VELOCITY,
+    PARAM_ATTACK_SAMPLES, PARAM_END_POINT, PARAM_GATE_MODE, PARAM_GATE_SAMPLES, PARAM_PLAYHEAD,
+    PARAM_RELEASE_SAMPLES, PARAM_SPEED, PARAM_START_POINT, PARAM_TRANSPOSE, PARAM_TRIGGER,
+    PARAM_VELOCITY,
 };
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
@@ -408,6 +409,8 @@ unsafe fn send_trigger(
     release_samples: f32,
     gate_mode: f32,
     transpose: f32,
+    start_point: f32,
+    end_point: f32,
 ) {
     params_push_wrapper(
         lg,
@@ -468,6 +471,22 @@ unsafe fn send_trigger(
     params_push_wrapper(
         lg,
         ParamMsg {
+            idx: PARAM_START_POINT,
+            logical_id: lid,
+            fvalue: start_point,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_END_POINT,
+            logical_id: lid,
+            fvalue: end_point,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
             idx: PARAM_PLAYHEAD,
             logical_id: lid,
             fvalue: 0.0,
@@ -492,6 +511,8 @@ unsafe fn send_keyboard_trigger(
     attack_samples: f32,
     release_samples: f32,
     gate_mode: f32,
+    start_point: f32,
+    end_point: f32,
 ) {
     params_push_wrapper(
         lg,
@@ -547,6 +568,22 @@ unsafe fn send_keyboard_trigger(
             idx: PARAM_GATE_MODE,
             logical_id: lid,
             fvalue: gate_mode,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_START_POINT,
+            logical_id: lid,
+            fvalue: start_point,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_END_POINT,
+            logical_id: lid,
+            fvalue: end_point,
         },
     );
     params_push_wrapper(
@@ -954,12 +991,27 @@ fn fire_resolved(
     let total_gate = (resolved.duration as f64 * samples_per_step) as f32;
     let chop_gate = total_gate / chop as f32;
 
-    // Envelope params from track params
-    let attack_ms = tp.get_attack_ms();
-    let release_ms = tp.get_release_ms();
+    // Envelope and sampler params from instrument slot (params 0-3)
+    let inst_slot = &data.state.pattern.instrument_slots[track_idx];
+    let attack_ms = inst_slot
+        .plocks
+        .get(step, 0)
+        .unwrap_or_else(|| inst_slot.defaults.get(0));
+    let release_ms = inst_slot
+        .plocks
+        .get(step, 1)
+        .unwrap_or_else(|| inst_slot.defaults.get(1));
     let attack_samples = attack_ms * data.sample_rate as f32 / 1000.0;
     let release_samples = release_ms * data.sample_rate as f32 / 1000.0;
     let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
+    let start_point = inst_slot
+        .plocks
+        .get(step, 2)
+        .unwrap_or_else(|| inst_slot.defaults.get(2));
+    let end_point = inst_slot
+        .plocks
+        .get(step, 3)
+        .unwrap_or_else(|| inst_slot.defaults.get(3));
     let velocity = resolved.velocity;
     let base_note_offset = f32::from_bits(
         data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
@@ -1103,6 +1155,8 @@ fn fire_resolved(
                         release_samples,
                         gate_mode,
                         transpose,
+                        start_point,
+                        end_point,
                     );
                 }
             }
@@ -1199,6 +1253,8 @@ fn fire_resolved(
                     release_samples,
                     gate_mode,
                     transpose,
+                    start_point,
+                    end_point,
                 );
             }
         }
@@ -1389,9 +1445,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     continue;
                 }
                 let tp = &data.state.pattern.track_params[kt.track];
-                let attack_samples = tp.get_attack_ms() * data.sample_rate as f32 / 1000.0;
-                let release_samples = tp.get_release_ms() * data.sample_rate as f32 / 1000.0;
+                let kb_inst_slot = &data.state.pattern.instrument_slots[kt.track];
+                let attack_samples =
+                    kb_inst_slot.defaults.get(0) * data.sample_rate as f32 / 1000.0;
+                let release_samples =
+                    kb_inst_slot.defaults.get(1) * data.sample_rate as f32 / 1000.0;
                 let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
+                let kb_start = kb_inst_slot.defaults.get(2);
+                let kb_end = kb_inst_slot.defaults.get(3);
                 unsafe {
                     send_keyboard_trigger(
                         data.lg.0,
@@ -1401,6 +1462,8 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         attack_samples,
                         release_samples,
                         gate_mode,
+                        kb_start,
+                        kb_end,
                     );
                 }
                 store_active_keyboard_note(
@@ -1505,9 +1568,28 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         if cs.remaining > 0 {
             cs.counter -= nframes as f64;
             let tp = &data.state.pattern.track_params[track_idx];
-            let attack_samples = tp.get_attack_ms() * data.sample_rate as f32 / 1000.0;
-            let release_samples = tp.get_release_ms() * data.sample_rate as f32 / 1000.0;
             let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
+            let chop_inst_slot = &data.state.pattern.instrument_slots[track_idx];
+            let attack_samples = chop_inst_slot
+                .plocks
+                .get(cs.step, 0)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(0))
+                * data.sample_rate as f32
+                / 1000.0;
+            let release_samples = chop_inst_slot
+                .plocks
+                .get(cs.step, 1)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(1))
+                * data.sample_rate as f32
+                / 1000.0;
+            let chop_start = chop_inst_slot
+                .plocks
+                .get(cs.step, 2)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(2));
+            let chop_end = chop_inst_slot
+                .plocks
+                .get(cs.step, 3)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(3));
             let sd = &data.state.pattern.step_data[track_idx];
             while cs.counter <= 0.0 && cs.remaining > 0 {
                 // Allocate a voice for the chop re-trigger
@@ -1532,6 +1614,8 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         release_samples,
                         gate_mode,
                         transpose,
+                        chop_start,
+                        chop_end,
                     );
                 }
                 data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);

@@ -57,57 +57,61 @@
     (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
     (seq-set-effect-param (get fx :slot-idx) (get p :idx) v)))
 
-(def fx-param-row (p fx)
-  (box :height 1.25 :no-clamp-width true
-    (h-stack :gap 0.45 :align :center :no-clamp-width true
-      (box :width 13.2 :height 1.25 :no-clamp-width true
-        (h-stack :gap 0.25 :align :baseline :no-clamp-width true
-          (label (substring (get p :name) 0 9) :font-size 12 :width 7
-                 :color :gray :bg :transparent)
-          (if (get p :boolean)
-            (box :width 5.5 :height 1.25 :align :center
-                 :bg :transparent
-                 :on-click |x y r|
-                   (if fx
-                     (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))
-                     (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1)))
-              (label (if (> (get p :value) 0.5) "ON" "OFF")
-                     :font-size 13 :width 5.5
-                     :color :white :bg :transparent))
-            (if (get p :options)
-            (dropdown :value (get p :text-value)
-              :options (get p :options)
-              :on-change (lambda (v)
-                (if fx
-                  (host-command
-                    (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")
-                    (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :label v))
-                  (fx-set-instrument-option p v)))
-              :width 5.8 :height 1.2 :font-size 13)
-            (number-picker :value (get p :value)
-              :min (get p :min) :max (get p :max) :decimals 2
-              :noui true :font-size 12 :text-color :gray
-              :on-change (lambda (v)
-                (if fx
-                  (fx-set-effect-value fx p v)
-                  (fx-set-instrument-value p v)))
-              :width 5.2 :height 1.1)))))
-      (if (or (get p :options) (get p :boolean))
-        (label "" :width 7.8 :bg :transparent)
-        (hslider :width 7.8 :min (get p :min) :max (get p :max)
-                 :value (get p :value)
-                 :material (aqua-slider-material)
-                 :on-change (lambda (v)
-                   (if fx
-                     (fx-set-effect-value fx p v)
-                     (fx-set-instrument-value p v))))))))
+(def fx-param-row (p fx subtree-key)
+  (subtree :key subtree-key
+    (box :height 1.25 :no-clamp-width true
+      (h-stack :gap 0.45 :align :center :no-clamp-width true
+        (box :width 13.2 :height 1.25 :no-clamp-width true
+          (h-stack :gap 0.25 :align :baseline :no-clamp-width true
+            (label (substring (get p :name) 0 9) :font-size 12 :width 7
+                   :color :gray :bg :transparent)
+            (if (get p :boolean)
+              (box :width 5.5 :height 1.25 :align :center
+                   :bg :transparent
+                   :on-click |x y r|
+                     (if fx
+                       (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))
+                       (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1)))
+                (label (if (> (get p :value) 0.5) "ON" "OFF")
+                       :font-size 13 :width 5.5
+                       :color :white :bg :transparent))
+              (if (get p :options)
+              (dropdown :value (get p :text-value)
+                :options (get p :options)
+                :on-change (lambda (v)
+                  (if fx
+                    (host-command
+                      (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")
+                      (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :label v))
+                    (fx-set-instrument-option p v)))
+                :width 5.8 :height 1.2 :font-size 13)
+              (number-picker :value (get p :value)
+                :min (get p :min) :max (get p :max) :decimals 2
+                :noui true :font-size 12 :text-color :gray
+                :on-change (lambda (v)
+                  (if fx
+                    (fx-set-effect-value fx p v)
+                    (fx-set-instrument-value p v)))
+                :width 5.2 :height 1.1)))))
+        (if (or (get p :options) (get p :boolean))
+          (label "" :width 7.8 :bg :transparent)
+          (hslider :width 7.8 :min (get p :min) :max (get p :max)
+                   :value (get p :value)
+                   :material (aqua-slider-material)
+                   :on-change (lambda (v)
+                     (if fx
+                       (fx-set-effect-value fx p v)
+                       (fx-set-instrument-value p v)))))))))
 
 (def fx-param-grid (params fx)
   (h-stack :gap 1.5 :no-clamp-width true
     (each (chunks params 6) |chunk ci|
       (v-stack :gap 0.25 :no-clamp-width true
         (each chunk |p pi|
-          (fx-param-row p fx))))))
+          (fx-param-row p fx
+            (if fx
+              (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx))
+              (str "instrument-tab-" instrument-panel-tab "-chunk-" ci "-param-" (get p :idx)))))))))
 
 (def instrument-sources-grid (sections)
   (h-stack :gap 2 :no-clamp-width true
@@ -115,7 +119,8 @@
       (v-stack :gap 0.25 :no-clamp-width true
         (label (get section :name) :font-size 14 :color :white :bg :transparent)
         (each (get section :params) |p pi|
-          (fx-param-row p false))))))
+          (fx-param-row p false
+            (str "instrument-source-" si "-param-" (get p :idx))))))))
 
 (def fx-panel (title params fx)
   (box :background "fx-panel-bg" :padding 1.5 :no-clamp-width true
@@ -138,22 +143,87 @@
       (fx-param-grid (get inst :mod) false)
       (instrument-sources-grid (get inst :sources)))))
 
-(def instrument-panel (inst)
+(defstate sampler-view-start 0.0)
+(defstate sampler-view-duration 0)
+(defstate sampler-cursor-time 0.0)
+
+(def sampler-set-start-end (start-seconds end-seconds duration)
+  (if (> duration 0)
+    (do
+      (fx-set-instrument-value (dict :idx 2 :control "param") (* 100 (/ start-seconds duration)))
+      (fx-set-instrument-value (dict :idx 3 :control "param") (* 100 (/ end-seconds duration))))))
+
+(def sampler-clamp-start (next-start duration)
+  (max 0 (min next-start (max 0 (- duration sampler-view-duration)))))
+
+(def sampler-clamp-duration (next-duration duration)
+  (max 0.001 (min next-duration (max 0.001 duration))))
+
+(def handle-sampler-waveform-action (event duration)
+  (match event.type
+    :set-cursor
+    (set! sampler-cursor-time event.time)
+    :set-selection
+    (sampler-set-start-end event.start event.end duration)
+    :clear-selection
+    (sampler-set-start-end 0 duration duration)
+    :scroll-view
+    (set! sampler-view-start (sampler-clamp-start (+ sampler-view-start event.delta-time) duration))
+    :zoom-view
+    (let ((cur-duration (if (= sampler-view-duration 0) duration sampler-view-duration)))
+      (let ((anchor-ratio (/ (- event.anchor-time sampler-view-start) cur-duration))
+            (next-duration (sampler-clamp-duration (/ cur-duration event.factor) duration)))
+        (set! sampler-view-duration next-duration)
+        (set! sampler-view-start (sampler-clamp-start (- event.anchor-time (* anchor-ratio next-duration)) duration))))
+    _
+    nil))
+
+(def sampler-panel (inst)
   (box :background "fx-panel-bg" :padding 1.5 :no-clamp-width true
-    (v-stack :gap 0.6 :no-clamp-width true
-      (tabs :items (list "synth" "mod" "sources")
-            :bind instrument-panel-tab
-            :compact true
-            :no-clamp-width true
-            :gap 0.75
-            :tab-padding 0.5
-            :header-height 1.2
-        (fx-param-grid (get inst :synth) false)
-        (fx-param-grid (get inst :mod) false)
-        (instrument-sources-grid (get inst :sources))))))
+    (v-stack :gap 0.8 :no-clamp-width true
+      (label "Sampler" :font-size 15 :color :white :bg :transparent)
+      (if (get inst :buffer)
+        (box :width 25 :height 2.5
+          (waveform
+            :height 2.5
+            :header-height 0.3
+            :ruler-font-size 8
+            :ruler-color :gray
+            :ruler-bg :black
+            :grid-major-color (rgba 0.15 0.15 0.15 1)
+            :grid-minor-color (rgba 0.10 0.10 0.10 1)
+            :bg :black
+            :focusable true
+            :buffer (get inst :buffer)
+            :view-start sampler-view-start
+            :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
+            :cursor-time sampler-cursor-time
+            :playhead-time SEQ.sampler-playhead
+            :selection-start (get inst :start-time)
+            :selection-end (get inst :end-time)
+            :time-ruler (dict :mode :seconds)
+            :on-action |event| (handle-sampler-waveform-action event (get inst :duration))))
+        (label "No sample" :font-size 12 :color :gray :bg :transparent))
+      (fx-param-grid (get inst :params) false))))
+
+(def instrument-panel (inst)
+  (if (= (get inst :type) "sampler")
+    (sampler-panel inst)
+    (box :background "fx-panel-bg" :padding 1.5 :no-clamp-width true
+      (v-stack :gap 0.6 :no-clamp-width true
+        (tabs :items (list "synth" "mod" "sources")
+              :bind instrument-panel-tab
+              :compact true
+              :no-clamp-width true
+              :gap 0.75
+              :tab-padding 0.5
+              :header-height 1.2
+          (fx-param-grid (get inst :synth) false)
+          (fx-param-grid (get inst :mod) false)
+          (instrument-sources-grid (get inst :sources)))))))
 
 (effect-buffer "*fx*"
-  (v-stack :padding 1 :gap 1 :no-clamp-width true
+  (v-stack :padding 0.5 :gap 1 :no-clamp-width true
     (h-stack :gap 1 :no-clamp-width true
       (each SEQ.instrument-panel |inst inst-idx|
         (instrument-panel inst))

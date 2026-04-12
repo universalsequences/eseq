@@ -452,6 +452,65 @@ impl EffectDescriptor {
         }
     }
 
+    /// Built-in sampler instrument descriptor.
+    pub fn builtin_sampler() -> Self {
+        Self {
+            name: "Sampler".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "attack".to_string(),
+                    min: 0.0,
+                    max: 500.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 0,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "release".to_string(),
+                    min: 0.0,
+                    max: 2000.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "start".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 2,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "end".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 3,
+                    host_control: None,
+                },
+            ],
+        }
+    }
+
     /// Default effect chain descriptors: [Filter, Delay].
     pub fn default_chain() -> Vec<Self> {
         vec![Self::builtin_filter(), Self::builtin_delay()]

@@ -1431,6 +1431,12 @@ impl GraphController<'_> {
                 {
                     sound.engine_id = None;
                 }
+                // Add all sampler voices to watchlist for playhead monitoring
+                for &sid in &sampler_ids {
+                    unsafe {
+                        crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, sid);
+                    }
+                }
                 self.app.graph.track_buffer_ids.push(buffer_id);
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids,
@@ -1444,10 +1450,13 @@ impl GraphController<'_> {
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
                 self.app.graph.track_engine_ids.push(None);
+                let sampler_desc = EffectDescriptor::builtin_sampler();
+                self.app.state.pattern.instrument_slots[idx]
+                    .apply_descriptor(&sampler_desc, 0);
                 self.app
                     .graph
                     .instrument_descriptors
-                    .push(EffectDescriptor::empty_custom_slot());
+                    .push(sampler_desc);
             }
             InstrumentRegistration::Custom {
                 engine_id,

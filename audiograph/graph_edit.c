@@ -556,6 +556,9 @@ bool apply_graph_edits(GraphEditQueue *r, LiveGraph *lg) {
       if (cmd.u.add_node.initial_state) {
         free(cmd.u.add_node.initial_state);
       }
+      if (cmd.u.add_node.name) {
+        free(cmd.u.add_node.name);
+      }
       break;
     }
     case GE_REMOVE_NODE:
@@ -961,8 +964,11 @@ bool apply_delete_node_internal(LiveGraph *lg, int node_id) {
 
       // remove this node's consumption
       node->inEdgeId[dst_port] = -1;
+      // Keep successor removal coupled to the "last remaining predecessor"
+      // check. Removing it unconditionally can drop a valid fanout edge while
+      // leaving indegree intact when multiple source ports still feed the same
+      // destination node.
       indegree_dec_on_last_pred(lg, s, node_id);
-      remove_successor(&lg->nodes[s], node_id);
 
       LiveEdge *e = &lg->edges[eid];
       if (e->refcount > 0)
@@ -1122,11 +1128,12 @@ static bool grow_node_capacity(LiveGraph *lg, int required_capacity) {
   int *new_indegree = malloc(new_capacity * sizeof(int));
   bool *new_orphaned = malloc(new_capacity * sizeof(bool));
   atomic_int *new_pending = calloc(new_capacity, sizeof(atomic_int));
+  bool *new_completed = calloc(new_capacity, sizeof(bool));
   void **new_state_snapshots = calloc(new_capacity, sizeof(void *));
   size_t *new_state_sizes = calloc(new_capacity, sizeof(size_t));
   int32_t *new_source_nodes = malloc(new_source_capacity * sizeof(int32_t));
 
-  if (!new_nodes || !new_pending || !new_indegree || !new_orphaned ||
+  if (!new_nodes || !new_pending || !new_completed || !new_indegree || !new_orphaned ||
       !new_state_snapshots || !new_state_sizes || !new_source_nodes) {
     // Clean up any successful allocations
     if (new_nodes)
@@ -1137,6 +1144,8 @@ static bool grow_node_capacity(LiveGraph *lg, int required_capacity) {
       free(new_orphaned);
     if (new_pending)
       free(new_pending);
+    if (new_completed)
+      free(new_completed);
     if (new_state_snapshots)
       free(new_state_snapshots);
     if (new_state_sizes)
@@ -1249,6 +1258,7 @@ static bool grow_node_capacity(LiveGraph *lg, int required_capacity) {
   free(lg->sched.pending);
   free(lg->sched.indegree);
   free(lg->sched.is_orphaned);
+  free(lg->sched.completed_this_block);
   if (lg->watch.snapshots)
     free(lg->watch.snapshots);
   if (lg->watch.sizes)
@@ -1257,6 +1267,7 @@ static bool grow_node_capacity(LiveGraph *lg, int required_capacity) {
   // Update pointers and capacity
   lg->nodes = new_nodes;
   lg->sched.pending = new_pending;
+  lg->sched.completed_this_block = new_completed;
   lg->sched.indegree = new_indegree;
   lg->sched.is_orphaned = new_orphaned;
   lg->watch.snapshots = new_state_snapshots;
@@ -1280,6 +1291,7 @@ fail:
   free(new_indegree);
   free(new_orphaned);
   free(new_pending);
+  free(new_completed);
   free(new_state_snapshots);
   free(new_state_sizes);
   free(new_source_nodes);

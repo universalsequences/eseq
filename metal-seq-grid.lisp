@@ -111,12 +111,28 @@
           (do (delete-selected-steps) true)
           (if (= key "RET")
             (do (cursor-toggle) true)
-            false))))))
+            (if (= key "+")
+              (do (double-track-pattern) true)
+              (if (or (= key "_") (= key "-"))
+                (do (halve-track-pattern) true)
+                false))))))))
 
 (def goto-page (page)
   (do
     (cool-off-follow)
     (set! cursor-step (min (* page page-size) (- (max 1 SEQ.tp-num-steps) 1)))))
+
+(def double-track-pattern ()
+  (do
+    (cool-off-follow)
+    (seq-double-track-pattern)
+    (set! cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
+
+(def halve-track-pattern ()
+  (do
+    (cool-off-follow)
+    (seq-halve-track-pattern)
+    (set! cursor-step (min (current-step) (- (max 1 SEQ.tp-num-steps) 1)))))
 
 ;; Cursor keys scoped to *metal* buffer via mode
 (define-mode "seq-grid-mode" :read-only true :on-key "seq-grid-handle-key")
@@ -126,6 +142,23 @@
 (mode-bind-key "seq-grid-mode" "BS" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "Delete" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "RET" "cursor-toggle")
+(mode-bind-key "seq-grid-mode" "+" "double-track-pattern")
+(mode-bind-key "seq-grid-mode" "_" "halve-track-pattern")
+(mode-bind-key "seq-grid-mode" "-" "halve-track-pattern")
+
+(def set-vel-mode () (set! param-mode 0))
+(mode-bind-key "seq-grid-mode" "v" "set-vel-mode")
+(def set-dur-mode () (set! param-mode 1))
+(mode-bind-key "seq-grid-mode" "d" "set-dur-mode")
+(def set-aux-mode () (set! param-mode 2))
+(mode-bind-key "seq-grid-mode" "a" "set-aux-mode")
+(def set-transpose-mode () (set! param-mode 3))
+(mode-bind-key "seq-grid-mode" "t" "set-transpose-mode")
+(def set-pan-mode () (set! param-mode 4))
+(mode-bind-key "seq-grid-mode" "p" "set-pan-mode")
+(def set-sync-mode () (set! param-mode 5))
+(mode-bind-key "seq-grid-mode" "s" "set-sync-mode")
+
 
 (def param-values ()
   (if (= param-mode 0) SEQ.velocities
@@ -418,22 +451,37 @@
               (cool-off-follow)
               (seq-set-step-param (current-step) (param-keyword) (step-param-value v))))
           :width 8 :height 1.3 :font-size 11))
-      (box :background "transport-btn-bg" :padding 0 :height 1.8
-        (box :width (page-panel-width) :height 1.7 :padding 0.0525
-          (h-stack :gap 0.4 :padding 0.3
-            (h-stack :gap 0.4 
-              (each (range 0 (page-count)) |page|
-                (box :width page-button-width :height 1.25 :align :center
-                    :bg (if (= page (visible-page)) :blue :dark-gray)
-                    :on-click |x y r| (goto-page page)
-                    (v-stack :gap 0.02 :align :center
-                      (label (str (+ page 1))
-                        :font-size 10
-                        :color (if (= page (visible-page)) :white :gray)
-                        :bg :transparent)
-                      (page-playhead-dot :active (if (= page (playhead-page)) 1 0))))))))))
+      (h-stack :gap 0.4 :align :center
+        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+          :on-click |x y r| (halve-track-pattern)
+          (v-stack :align :center
+            (label "-"
+              :font-size 12
+              :color :white
+              :bg :transparent)))
+        (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+          :on-click |x y r| (double-track-pattern)
+          (v-stack :align :center
+            (label "+"
+              :font-size 12
+              :color :white
+              :bg :transparent)))
+        (box :background "transport-btn-bg" :padding 0 :height 1.8
+          (box :width (page-panel-width) :height 1.7 :padding 0.0525
+            (h-stack :gap 0.4 :padding 0.3
+              (h-stack :gap 0.4
+                (each (range 0 (page-count)) |page|
+                  (box :width page-button-width :height 1.25 :align :center
+                      :bg (if (= page (visible-page)) :blue :dark-gray)
+                      :on-click |x y r| (goto-page page)
+                      (v-stack :gap 0.02 :align :center
+                        (label (str (+ page 1))
+                          :font-size 10
+                          :color (if (= page (visible-page)) :white :gray)
+                          :bg :transparent)
+                        (page-playhead-dot :active (if (= page (playhead-page)) 1 0)))))))))))
 
-    ; Track parameters — row 1
+    ; Track parameters — row 1: gate, poly, fts, timebase, swing, sw-res
     (h-stack :gap 1.5
       ; Gate toggle
       (v-stack :align :center :gap 0.25
@@ -457,42 +505,25 @@
               (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))
           (label (if SEQ.tp-poly "ON" "OFF")
             :font-size 11 :color :white :bg :transparent)))
-      ; Attack
-      (v-stack :align :center :gap 0.25
-        (h-stack :gap 0.25 :align :baseline
-          (label "atk" :font-size 9 :color :gray :bg :transparent)
-          (number-picker :value SEQ.tp-attack :min 0 :max 500 :decimals 0
-            :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :attack v)))
-            :width 4 :height 1))
-        (box :width 10 :height 2
-          (hslider :min 0 :max 500
-            :value SEQ.tp-attack
-            :material (aqua-slider-material)
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :attack v))))))
-      ; Release
-      (v-stack :align :center :gap 0.25
-        (h-stack :gap 0.25 :align :baseline
-          (label "rel" :font-size 9 :color :gray :bg :transparent)
-          (number-picker :value SEQ.tp-release :min 0 :max 2000 :decimals 0
-            :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :release v)))
-            :width 4 :height 1))
-        (box :width 10 :height 2
-          (hslider :min 0 :max 2000
-            :value SEQ.tp-release
-            :material (aqua-slider-material)
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :release v))))))
       ; Fit-to-scale
       (v-stack :align :center :gap 0.25
         (label "fts" :font-size 9 :color :gray :bg :transparent)
         (dropdown :value SEQ.tp-fts
           :options SEQ.fts-options
           :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
-          :width 10 :height 1.5 :font-size 10)))
-
-    ; Track parameters — row 2
-    (h-stack :gap 1.5
+          :width 10 :height 1.5 :font-size 10))
+      ; Timebase
+      (v-stack :align :center :gap 0.25
+        (label "timebase" :font-size 9 :color :gray :bg :transparent)
+        (dropdown :value SEQ.tp-timebase
+          :options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh")
+          :on-change (lambda (v)
+            (do
+              (cool-off-follow)
+              (if (seq-has-selection?)
+                (seq-plock-timebase v)
+                (seq-set-timebase v))))
+          :width 6 :height 1.5 :font-size 11))
       ; Swing
       (v-stack :align :center :gap 0.25
         (h-stack :gap 0.25 :align :baseline
@@ -506,6 +537,29 @@
             :value SEQ.tp-swing
             :material (aqua-slider-material)
             :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v))))))
+      ; Swing resolution
+      (v-stack :align :center :gap 0.25
+        (label "swg resolution" :font-size 9 :color :gray :bg :transparent)
+        (dropdown :value SEQ.tp-swing-resolution
+          :options '("1/16" "1/8" "1/4" "1/2")
+          :on-change (lambda (v) (do (cool-off-follow) (seq-set-swing-resolution v)))
+          :width 5 :height 1.5 :font-size 11))
+      ; Steps
+      (v-stack :align :center :gap 0.25
+        (h-stack :gap 0.25 :align :baseline
+          (label "steps" :font-size 9 :color :gray :bg :transparent)
+          (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
+            :noui true :font-size 9 :text-color :gray
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))
+            :width 3 :height 1))
+        (box :width 8 :height 2
+          (hslider :min 1 :max 256
+            :value SEQ.tp-num-steps
+            :material (aqua-slider-material)
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))))))
+
+    ; Track parameters — row 2: send, acc fn, acc mode, acc lim
+    (h-stack :gap 1.5
       ; Send
       (v-stack :align :center :gap 0.25
         (h-stack :gap 0.25 :align :baseline
@@ -519,41 +573,6 @@
             :value SEQ.tp-send
             :material (aqua-slider-material)
             :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :send v))))))
-      ; Steps
-      (v-stack :align :center :gap 0.25
-        (h-stack :gap 0.25 :align :baseline
-          (label "steps" :font-size 9 :color :gray :bg :transparent)
-          (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
-            :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))
-            :width 3 :height 1))
-        (box :width 8 :height 2
-          (hslider :min 1 :max 256
-            :value SEQ.tp-num-steps
-            :material (aqua-slider-material)
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v))))))
-      ; Timebase
-      (v-stack :align :center :gap 0.25
-        (label "timebase" :font-size 9 :color :gray :bg :transparent)
-        (dropdown :value SEQ.tp-timebase
-          :options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh")
-          :on-change (lambda (v)
-            (do
-              (cool-off-follow)
-              (if (seq-has-selection?)
-                (seq-plock-timebase v)
-                (seq-set-timebase v))))
-          :width 6 :height 1.5 :font-size 11))
-      ; Swing resolution
-      (v-stack :align :center :gap 0.25
-        (label "sw-res" :font-size 9 :color :gray :bg :transparent)
-        (dropdown :value SEQ.tp-swing-resolution
-          :options '("1/16" "1/8" "1/4" "1/2")
-          :on-change (lambda (v) (do (cool-off-follow) (seq-set-swing-resolution v)))
-          :width 5 :height 1.5 :font-size 11)))
-
-    ; Accumulator controls
-    (h-stack :gap 1.5
       ; Accumulator function
       (v-stack :align :center :gap 0.25
         (label "acc fn" :font-size 9 :color :gray :bg :transparent)

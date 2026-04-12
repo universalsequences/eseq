@@ -20,6 +20,7 @@ LiveGraph *create_live_graph(int initial_capacity, int block_size,
   lg->sched.pending = calloc(lg->node_capacity, sizeof(atomic_int));
   lg->sched.indegree = calloc(lg->node_capacity, sizeof(int));
   lg->sched.is_orphaned = calloc(lg->node_capacity, sizeof(bool));
+  lg->sched.completed_this_block = calloc(lg->node_capacity, sizeof(bool));
 
   // Buffer storage
   lg->buffer_capacity = initial_capacity;
@@ -67,6 +68,7 @@ LiveGraph *create_live_graph(int initial_capacity, int block_size,
     free(lg->sched.pending);
     free(lg->sched.indegree);
     free(lg->sched.is_orphaned);
+    free(lg->sched.completed_this_block);
     free(lg);
     return NULL;
   }
@@ -199,6 +201,8 @@ void destroy_live_graph(LiveGraph *lg) {
     free(lg->sched.indegree);
   if (lg->sched.is_orphaned)
     free(lg->sched.is_orphaned);
+  if (lg->sched.completed_this_block)
+    free(lg->sched.completed_this_block);
 
   // Free support buffers
   if (lg->silence_buf)
@@ -335,10 +339,21 @@ int add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
 
   // Create a copy of initial_state if provided
   void *initial_state_copy = NULL;
+  char *name_copy = NULL;
   if (initial_state && initial_state_size > 0) {
     initial_state_copy = malloc(initial_state_size);
     if (initial_state_copy) {
       memcpy(initial_state_copy, initial_state, initial_state_size);
+    }
+  }
+  if (name) {
+    name_copy = strdup(name);
+    if (!name_copy) {
+      if (initial_state_copy) {
+        free(initial_state_copy);
+      }
+      add_failed_id(lg, node_id);
+      return -1;
     }
   }
 
@@ -351,7 +366,7 @@ int add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
           .state_size = state_size,
           .logical_id =
               node_id, // Use node_id as the logical_id (they're the same)
-          .name = (char *)name,
+          .name = name_copy,
           .nInputs = nInputs,
           .nOutputs = nOutputs,
           .initial_state = initial_state_copy,
@@ -362,6 +377,9 @@ int add_node(LiveGraph *lg, NodeVTable vtable, size_t state_size,
     // Queue full - consider this a failure
     if (initial_state_copy) {
       free(initial_state_copy);
+    }
+    if (name_copy) {
+      free(name_copy);
     }
     add_failed_id(lg, node_id);
     return -1;
