@@ -97,6 +97,11 @@ impl Editor {
         let has_focus = self.active_leaf().focused_widget_id.is_some();
 
         match key.code {
+            KeyCode::Esc if has_focus => {
+                self.active_leaf_mut().focused_widget_id = None;
+                self.mark_needs_redraw();
+                true
+            }
             KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right if has_focus => {
                 self.navigate_focus(key.code);
                 true
@@ -164,6 +169,12 @@ impl Editor {
         let Some(node) = find_node_by_id(&layout, focused_id) else {
             return false;
         };
+        // Space bar should only be consumed by text-input widgets (for typing).
+        // All other widgets let space fall through to keybindings.
+        let is_text_input = node.widget_type == "text-input";
+        if key.code == KeyCode::Char(' ') && !is_text_input {
+            return false;
+        }
         let widget_event = map_key_event(
             &node,
             WidgetKeyEvent {
@@ -334,7 +345,10 @@ impl Editor {
 
     pub(super) fn restore_buffer_widget_tree(&mut self) {
         crate::widget_render::clear_overlay();
-        let tree = self.active_buffer().widget_tree.clone();
+        let buf = self.active_buffer();
+        let tree = buf.widget_tree.clone();
+        let buffer_id = buf.id as u64;
+        self.runtime.set_widget_id_offset(buffer_id * 100_000);
         match tree {
             Some(tree) => {
                 self.runtime.restore_widget_tree(tree);

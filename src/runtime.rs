@@ -888,6 +888,7 @@ pub struct Runtime {
     layout_aspect: f32,
     layout_cell_w: f32,
     layout_cell_h: f32,
+    widget_id_offset: u64,
     text_measurer: Option<Box<dyn TextMeasurer>>,
     perf_stats: RuntimePerfStats,
     last_ui_invalidation_trace: Option<UiInvalidationTrace>,
@@ -928,6 +929,7 @@ impl Runtime {
             layout_aspect: 1.0,
             layout_cell_w: 1.0,
             layout_cell_h: 1.0,
+            widget_id_offset: 0,
             text_measurer: None,
             perf_stats: RuntimePerfStats::new(),
             last_ui_invalidation_trace: None,
@@ -1347,6 +1349,16 @@ impl Runtime {
         self.relayout_current_tree();
     }
 
+    pub fn set_widget_id_offset(&mut self, offset: u64) {
+        if self.widget_id_offset == offset {
+            return;
+        }
+        self.widget_id_offset = offset;
+        self.current_layout = None;
+        self.dirty_widget_ids.clear();
+        self.relayout_current_tree();
+    }
+
     pub fn set_layout_aspect(&mut self, aspect: f32) {
         if (self.layout_aspect - aspect).abs() < f32::EPSILON {
             return;
@@ -1684,6 +1696,15 @@ impl Runtime {
         tree: &Value,
         viewport: Option<(u16, u16)>,
     ) -> Option<Arc<LayoutNode>> {
+        self.layout_snapshot_for_tree_with_viewport_and_offset(tree, viewport, 0)
+    }
+
+    pub fn layout_snapshot_for_tree_with_viewport_and_offset(
+        &mut self,
+        tree: &Value,
+        viewport: Option<(u16, u16)>,
+        widget_id_offset: u64,
+    ) -> Option<Arc<LayoutNode>> {
         let saved_tree = self.current_widget_tree.clone();
         let saved_committed_snapshot = self.current_committed_ui_snapshot.clone();
         let saved_layout = self.current_layout.clone();
@@ -1694,11 +1715,13 @@ impl Runtime {
         let saved_rendered_layouts = self.rendered_layouts.clone();
         let saved_cols = self.layout_cols;
         let saved_rows = self.layout_rows;
+        let saved_widget_id_offset = self.widget_id_offset;
 
         if let Some((cols, rows)) = viewport {
             self.layout_cols = cols;
             self.layout_rows = rows;
         }
+        self.widget_id_offset = widget_id_offset;
 
         // Snapshotting an arbitrary buffer/tree should not try to reuse against
         // the currently active layout; that mixes unrelated trees and inflates
@@ -1722,6 +1745,7 @@ impl Runtime {
         }
         self.layout_cols = saved_cols;
         self.layout_rows = saved_rows;
+        self.widget_id_offset = saved_widget_id_offset;
         snapshot
     }
 
@@ -2086,7 +2110,7 @@ impl Runtime {
         } else {
             LayoutEngine::new(self.layout_cols, self.layout_rows, self.layout_aspect)
         };
-        if let Some(layout) = engine.layout(tree) {
+        if let Some(layout) = engine.layout_with_id_offset(tree, self.widget_id_offset) {
             let geometry_changed = self
                 .current_layout
                 .as_ref()

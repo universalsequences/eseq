@@ -356,55 +356,36 @@ impl WidgetDefinition for TextInputWidget {
             Some(Value::Keyword(k)) if k == "transparent"
         );
 
+        let theme_bg = crate::theme::BG();
         let bg_color = resolve_named_color(
             &node.props,
             "bg-color",
             Color {
-                r: 0.20,
-                g: 0.21,
-                b: 0.23,
+                r: (theme_bg.r + 0.09).min(1.0),
+                g: (theme_bg.g + 0.10).min(1.0),
+                b: (theme_bg.b + 0.11).min(1.0),
                 a: 1.0,
             },
         );
         let text_color = resolve_named_color(
             &node.props,
             "text-color",
-            Color {
-                r: 0.90,
-                g: 0.90,
-                b: 0.92,
-                a: 1.0,
-            },
+            crate::theme::FG(),
         );
         let placeholder_color = resolve_named_color(
             &node.props,
             "placeholder-color",
-            Color {
-                r: 0.40,
-                g: 0.40,
-                b: 0.45,
-                a: 1.0,
-            },
+            crate::theme::FG_MUTED(),
         );
         let ring_color = resolve_named_color(
             &node.props,
             "ring-color",
-            Color {
-                r: 0.25,
-                g: 0.52,
-                b: 0.96,
-                a: 1.0,
-            },
+            crate::theme::ACCENT(),
         );
         let cursor_color = resolve_named_color(
             &node.props,
             "cursor-color",
-            Color {
-                r: 0.25,
-                g: 0.52,
-                b: 0.96,
-                a: 1.0,
-            },
+            crate::theme::CURSOR(),
         );
 
         let mut prims = Vec::new();

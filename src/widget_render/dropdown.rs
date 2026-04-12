@@ -444,10 +444,10 @@ impl WidgetDefinition for DropdownWidget {
         let selected = get_selected(&node.props);
 
         if !state.open {
-            // When closed: Enter/Space opens the menu.
+            // When closed: only Enter opens the menu.
             // Up/Down are NOT consumed — they fall through to focus navigation.
             match key.code {
-                KeyCode::Enter | KeyCode::Char(' ') => {
+                KeyCode::Enter => {
                     close_other_dropdowns(node.widget_id);
                     state.open = true;
                     state.hovered_idx = selected_index(&options, &selected);

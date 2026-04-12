@@ -1251,6 +1251,38 @@ impl Editor {
         }
     }
 
+    fn text_page_height(&self) -> usize {
+        self.runtime.layout_rows().max(1) as usize
+    }
+
+    fn move_page_forward(&mut self) {
+        let page_height = self.text_page_height();
+        let buffer = self.active_buffer_mut();
+        let max_row = buffer.lines.len().saturating_sub(1);
+        buffer.cursor.0 = (buffer.cursor.0 + page_height).min(max_row);
+        buffer.cursor.1 = buffer.cursor.1.min(buffer.lines[buffer.cursor.0].chars().count());
+        let max_scroll = buffer.lines.len().saturating_sub(page_height);
+        buffer.scroll_top = (buffer.scroll_top + page_height).min(max_scroll);
+        buffer.adjust_scroll(page_height);
+    }
+
+    fn move_page_backward(&mut self) {
+        let page_height = self.text_page_height();
+        let buffer = self.active_buffer_mut();
+        buffer.cursor.0 = buffer.cursor.0.saturating_sub(page_height);
+        buffer.cursor.1 = buffer.cursor.1.min(buffer.lines[buffer.cursor.0].chars().count());
+        buffer.scroll_top = buffer.scroll_top.saturating_sub(page_height);
+        buffer.adjust_scroll(page_height);
+    }
+
+    fn recenter_cursor(&mut self) {
+        let page_height = self.text_page_height();
+        let buffer = self.active_buffer_mut();
+        let max_scroll = buffer.lines.len().saturating_sub(page_height);
+        let desired_top = buffer.cursor.0.saturating_sub(page_height / 2);
+        buffer.scroll_top = desired_top.min(max_scroll);
+    }
+
     fn goto_definition(&mut self) {
         self.completion = None;
         let Some(symbol) = self.symbol_under_cursor() else {
@@ -2521,6 +2553,8 @@ impl Editor {
             }
         }
         if is_active {
+            let buffer_id = self.buffers[buffer_idx].id as u64;
+            self.runtime.set_widget_id_offset(buffer_id * 100_000);
             match tree {
                 Some(tree) => {
                     self.runtime.set_widget_tree(tree);
@@ -2534,6 +2568,7 @@ impl Editor {
 
     fn refresh_inactive_tile_layouts_for_buffer(&mut self, buffer_idx: usize) {
         let tree = self.buffers[buffer_idx].widget_tree.clone();
+        let buffer_id = self.buffers[buffer_idx].id as u64;
         let tile_ids = self.tile_root.leaf_ids();
         // Collect tile viewports first to avoid borrow issues
         let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
@@ -2561,7 +2596,7 @@ impl Editor {
         for (tile_id, cols, rows) in tiles_to_update {
             let layout = tree.as_ref().and_then(|tree| {
                 self.runtime
-                    .layout_snapshot_for_tree_with_viewport(tree, Some((cols, rows)))
+                    .layout_snapshot_for_tree_with_viewport_and_offset(tree, Some((cols, rows)), buffer_id * 100_000)
             });
             let layout_revision = self.runtime.layout_revision();
             if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
@@ -2922,6 +2957,7 @@ impl Editor {
                 }
                 tree => {
                     let source_id = self.active_buffer().id;
+                    self.runtime.set_widget_id_offset(source_id as u64 * 100_000);
                     let buffer = self.active_buffer_mut();
                     buffer.set_widget_tree(Some(tree.deep_clone()), Some(source_id));
                     buffer.view_mode = ViewMode::UiOnly;
@@ -3291,10 +3327,11 @@ impl Editor {
     }
 
     fn guard_read_only(&mut self) -> bool {
-        if self.active_buffer().read_only {
-            self.minibuffer = Some("Buffer is read-only".to_string());
+        if self.active_buffer().view_mode == ViewMode::UiOnly {
+            // Widget-only buffers silently ignore text insertion attempts.
             true
-        } else if self.active_buffer().view_mode == ViewMode::UiOnly {
+        } else if self.active_buffer().read_only {
+            self.minibuffer = Some("Buffer is read-only".to_string());
             true
         } else {
             false

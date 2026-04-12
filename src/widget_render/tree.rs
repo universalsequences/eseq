@@ -647,12 +647,17 @@ impl WidgetDefinition for TreeWidget {
 
         let rh = ROW_HEIGHT;
 
-        let default_odd = Color { r: 0.06, g: 0.06, b: 0.07, a: 1.0 };
+        let bg = theme::BG();
+        let default_odd = Color { r: bg.r + 0.04, g: bg.g + 0.04, b: bg.b + 0.04, a: 1.0 };
         let bg_odd = resolve_named_color(&node.props, "row-bg-odd", default_odd);
         let selected_bg = resolve_named_color(&node.props, "selected-bg", theme::WIDGET_FOCUS_BG());
-        let folder_fg = resolve_named_color(&node.props, "folder-color", theme::WIDGET_LABEL_FG());
-        let file_fg = resolve_named_color(&node.props, "file-color", Color { r: 0.65, g: 0.65, b: 0.68, a: 1.0 });
-        let triangle_fg = resolve_named_color(&node.props, "chevron-color", Color { r: 0.45, g: 0.45, b: 0.50, a: 1.0 });
+        let folder_fg = resolve_named_color(&node.props, "folder-color", theme::FG());
+        let fg = theme::FG();
+        let default_file = Color { r: fg.r * 0.72, g: fg.g * 0.72, b: fg.b * 0.72, a: 1.0 };
+        let file_fg = resolve_named_color(&node.props, "file-color", default_file);
+        let chevron_fg = theme::FG_MUTED();
+        let default_chevron = Color { r: (chevron_fg.r + fg.r) * 0.5, g: (chevron_fg.g + fg.g) * 0.5, b: (chevron_fg.b + fg.b) * 0.5, a: 1.0 };
+        let triangle_fg = resolve_named_color(&node.props, "chevron-color", default_chevron);
 
         let mut prims = Vec::new();
 

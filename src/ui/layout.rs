@@ -103,6 +103,10 @@ impl<'a> LayoutEngine<'a> {
     }
 
     pub fn layout(&self, tree: &Value) -> Option<LayoutNode> {
+        self.layout_with_id_offset(tree, 0)
+    }
+
+    pub fn layout_with_id_offset(&self, tree: &Value, widget_id_offset: u64) -> Option<LayoutNode> {
         let size = self.measure(
             tree,
             Constraints {
@@ -135,7 +139,7 @@ impl<'a> LayoutEngine<'a> {
             },
             DEFAULT_FONT_SIZE,
         );
-        let mut next_widget_id = 1;
+        let mut next_widget_id = widget_id_offset.wrapping_add(1);
         assign_widget_ids(&mut layout, &mut next_widget_id);
         Some(layout)
     }

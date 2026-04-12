@@ -225,7 +225,8 @@ impl Editor {
                     self.minibuffer_input = Some(MinibufferMode::Search { state });
                 }
                 _ => {
-                    self.minibuffer_input = Some(MinibufferMode::Search { state });
+                    self.minibuffer = None;
+                    return false;
                 }
             },
         }

@@ -10,6 +10,9 @@ impl Editor {
             (KeyCode::Char(' '), KeyModifiers::CONTROL, "set-mark"),
             (KeyCode::Char('a'), KeyModifiers::CONTROL, "move-line-start"),
             (KeyCode::Char('e'), KeyModifiers::CONTROL, "move-line-end"),
+            (KeyCode::Char('f'), KeyModifiers::CONTROL, "move-page-forward"),
+            (KeyCode::Char('b'), KeyModifiers::CONTROL, "move-page-backward"),
+            (KeyCode::Char('l'), KeyModifiers::CONTROL, "recenter-cursor"),
             (
                 KeyCode::Char('w'),
                 KeyModifiers::CONTROL,
@@ -134,6 +137,24 @@ impl Editor {
                 self.completion = None;
                 self.minibuffer = None;
                 self.active_buffer_mut().move_to_line_end();
+                self.sync_text_horizontal_scroll_to_viewport();
+            }
+            "move-page-forward" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.move_page_forward();
+                self.sync_text_horizontal_scroll_to_viewport();
+            }
+            "move-page-backward" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.move_page_backward();
+                self.sync_text_horizontal_scroll_to_viewport();
+            }
+            "recenter-cursor" => {
+                self.completion = None;
+                self.minibuffer = None;
+                self.recenter_cursor();
                 self.sync_text_horizontal_scroll_to_viewport();
             }
             "move-word-left" => {

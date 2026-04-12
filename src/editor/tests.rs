@@ -343,6 +343,62 @@
     }
 
     #[test]
+    fn ctrl_f_moves_forward_one_page() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.open_scratch_buffer("*test*", &text);
+        editor.set_layout_viewport(20, 6);
+        editor.active_buffer_mut().cursor = (2, 2);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+
+        assert_eq!(editor.active_buffer().cursor, (8, 2));
+        assert_eq!(editor.active_buffer().scroll_top, 6);
+    }
+
+    #[test]
+    fn ctrl_b_moves_backward_one_page() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.open_scratch_buffer("*test*", &text);
+        editor.set_layout_viewport(20, 6);
+        editor.active_buffer_mut().cursor = (14, 2);
+        editor.active_buffer_mut().scroll_top = 12;
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+
+        assert_eq!(editor.active_buffer().cursor, (8, 2));
+        assert_eq!(editor.active_buffer().scroll_top, 6);
+    }
+
+    #[test]
+    fn ctrl_l_recenters_cursor_without_moving_it() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.open_scratch_buffer("*test*", &text);
+        editor.set_layout_viewport(20, 6);
+        editor.active_buffer_mut().cursor = (10, 2);
+        editor.active_buffer_mut().scroll_top = 0;
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+
+        assert_eq!(editor.active_buffer().cursor, (10, 2));
+        assert_eq!(editor.active_buffer().scroll_top, 7);
+    }
+
+    #[test]
     fn ctrl_s_opens_incremental_search_in_minibuffer() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -395,6 +451,58 @@
 
         assert_eq!(editor.active_buffer().cursor, (0, 7));
         assert_eq!(editor.minibuffer_prompt(), None);
+    }
+
+    #[test]
+    fn search_arrow_key_exits_search_mode_and_allows_normal_editing() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha beta alpha");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 11));
+        assert_eq!(editor.minibuffer_prompt().as_deref(), Some("I-search: alpha"));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 12));
+        assert_eq!(editor.minibuffer_prompt(), None);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "alpha beta azlpha");
+    }
+
+    #[test]
+    fn search_enter_exits_search_mode_without_editing_buffer() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha beta alpha");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().cursor, (0, 11));
+        assert_eq!(editor.active_buffer().text(), "alpha beta alpha");
+        assert_eq!(editor.minibuffer_prompt(), None);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "alpha beta zalpha");
     }
 
     #[test]

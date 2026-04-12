@@ -88,7 +88,7 @@
     :comp_selected_bg "#2e2b38" :comp_unselected_bg "#15141b"
     :comp_fg "#edecee" :comp_doc_bg "#15141b"
     :comp_doc_fg "#cdccce" :comp_doc_title_fg "#a277ff"
-    :widget_focus_bg "#3b334b"
+    :widget_focus_bg "#5a4b8a"
     :widget_label_fg "#edecee"
     :widget_slider_filled "#a277ff" :widget_slider_track "#6d6d6d"
     :widget_knob_filled "#a277ff" :widget_knob_track "#6d6d6d"
@@ -156,7 +156,7 @@
       :bg-region      '(0.00 0.35 0.82 1)
       :bg-sexp        '(0.13 0.14 0.17 1)
       :bg-eval-flash  '(0.00 0.48 0.95 0.15)
-      :bg-match-paren '(0.00 0.48 0.95)
+      :bg-match-paren '(0.00 0.18 0.35)
       :fg-match-paren '(1.00 1.00 1.00)
       :status-fg         '(0.58 0.58 0.60)
       :status-bg         '(0.14 0.14 0.15)
