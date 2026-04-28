@@ -708,6 +708,7 @@ fragment float4 waveform_frag(
             owner_frame_key: u64,
             layout_cache_key: u64,
             layout: &crate::layout::LayoutNode,
+            dirty_widget_ids: &[u64],
             viewport: WidgetViewport,
             scroll_top: f32,
             max_rows: u16,
@@ -727,7 +728,9 @@ fragment float4 waveform_frag(
                 scroll_top,
                 max_rows,
             );
-            if let Some(scene) = self.cached_widget_scenes.get(&cache_key) {
+            if dirty_widget_ids.is_empty()
+                && let Some(scene) = self.cached_widget_scenes.get(&cache_key)
+            {
                 let mut primitives = scene.primitives.clone();
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 return primitives;
@@ -1121,6 +1124,7 @@ fragment float4 waveform_frag(
                         tile.frame.widget_content_cache_key,
                         tile.frame.widget_layout_cache_key,
                         layout,
+                        &tile.frame.dirty_widget_ids,
                         viewport,
                         tile.frame.widget_scroll_top,
                         inner_rows,
@@ -2050,6 +2054,7 @@ fragment float4 waveform_frag(
                         frame.widget_content_cache_key,
                         frame.widget_layout_cache_key,
                         layout,
+                        &frame.dirty_widget_ids,
                         WidgetViewport {
                             cell_w,
                             cell_h,

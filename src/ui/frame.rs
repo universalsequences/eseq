@@ -503,6 +503,7 @@ fn build_tiled_render_frame_impl(
                 leaf.widget_scroll_left,
                 leaf.layout_revision,
                 leaf.cached_layout.clone(),
+                leaf.dirty_widget_ids.clone(),
                 buf.id,
                 buf.revision,
                 buf.widget_tree_revision,
@@ -528,6 +529,7 @@ fn build_tiled_render_frame_impl(
         widget_scroll_left,
         layout_revision,
         cached_layout,
+        dirty_widget_ids,
         buffer_id,
         buffer_revision,
         widget_tree_revision,
@@ -571,6 +573,7 @@ fn build_tiled_render_frame_impl(
         );
         let cached = cached_frame
             .as_ref()
+            .filter(|_| dirty_widget_ids.is_empty())
             .filter(|(key, _)| *key == frame_key)
             .map(|(_, frame)| frame.clone());
 
@@ -598,13 +601,17 @@ fn build_tiled_render_frame_impl(
                     widget_scroll_left,
                     layout_revision,
                     cached_layout,
+                    dirty_widget_ids.clone(),
                     syms,
                     inner_width,
                     inner_height,
                 );
                 // Cache for next frame
                 if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
-                    leaf.cached_inactive_frame = Some((frame_key, frame.clone()));
+                    leaf.dirty_widget_ids.clear();
+                    let mut clean_frame = frame.clone();
+                    clean_frame.dirty_widget_ids.clear();
+                    leaf.cached_inactive_frame = Some((frame_key, clean_frame));
                 }
                 frame
             };
@@ -631,6 +638,7 @@ fn build_inactive_tile_frame_from_parts(
     widget_scroll_left: f32,
     layout_revision: u64,
     cached_layout: Option<std::sync::Arc<crate::layout::LayoutNode>>,
+    dirty_widget_ids: Vec<u64>,
     symbols: &[String],
     viewport_width: usize,
     viewport_height: usize,
@@ -708,7 +716,7 @@ fn build_inactive_tile_frame_from_parts(
         text_cache_key,
         widget_layout_cache_key: layout_revision,
         widget_content_cache_key: buffer.widget_tree_revision,
-        dirty_widget_ids: vec![],
+        dirty_widget_ids,
         widget_layout: cached_layout,
         focused_widget_id,
         widget_scroll_top,

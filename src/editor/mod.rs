@@ -2689,14 +2689,33 @@ impl Editor {
             .collect();
 
         for (tile_id, cols, rows) in tiles_to_update {
-            let layout = tree.as_ref().and_then(|tree| {
-                self.runtime
-                    .layout_snapshot_for_tree_with_viewport_and_offset(tree, Some((cols, rows)), buffer_id * 100_000)
+            let existing_layout = self
+                .tile_root
+                .find_leaf(tile_id)
+                .and_then(|leaf| leaf.cached_layout.clone());
+            let reused_layout_and_dirty = tree.as_ref().and_then(|tree| {
+                let existing = existing_layout.as_ref()?;
+                let mut dirty_widget_ids = Vec::new();
+                crate::layout::reuse_layout_node(existing, tree, &mut dirty_widget_ids)
+                    .map(|layout| (std::sync::Arc::new(layout), dirty_widget_ids))
             });
-            let layout_revision = self.runtime.layout_revision();
+            let (layout, dirty_widget_ids) =
+                if let Some((layout, dirty_widget_ids)) = reused_layout_and_dirty {
+                    (Some(layout), dirty_widget_ids)
+                } else {
+                    let layout = tree.as_ref().and_then(|tree| {
+                        self.runtime.layout_snapshot_for_tree_with_viewport_and_offset(
+                            tree,
+                            Some((cols, rows)),
+                            buffer_id * 100_000,
+                        )
+                    });
+                    (layout, Vec::new())
+                };
             if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
                 leaf.cached_layout = layout;
-                leaf.layout_revision = layout_revision;
+                leaf.dirty_widget_ids = dirty_widget_ids;
+                leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
                 leaf.cached_inactive_frame = None;
             }
         }
