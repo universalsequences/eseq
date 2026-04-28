@@ -780,13 +780,33 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
       // Delete the SUM node (use internal to avoid nested orphan updates)
       apply_delete_node_internal(lg, sum_id);
     } else if (SUM->nInputs == 1) {
-      // Only one input left - collapse SUM back to direct connection
+      // Only one input left - collapse SUM back to direct connection.
+      // Deletion of a source feeding a SUM can leave a cleared (-1) or retired
+      // edge in the SUM input array until a later logical disconnect compacts
+      // the SUM. Do not index lg->edges unless the remaining SUM input still
+      // names a live edge.
       int remaining_eid = SUM->inEdgeId[0];
-      int sum_out = SUM->outEdgeId[0];
+      int sum_out = SUM->outEdgeId ? SUM->outEdgeId[0] : -1;
+      if (remaining_eid < 0 || remaining_eid >= lg->edge_capacity ||
+          !lg->edges[remaining_eid].in_use) {
+        D->inEdgeId[dst_port] = -1;
+        D->fanin_sum_node_id[dst_port] = -1;
+        indegree_dec_on_last_pred(lg, sum_id, dst_node);
+        apply_delete_node_internal(lg, sum_id);
+        return true;
+      }
 
       // Find the source of the remaining edge
       int remaining_src = lg->edges[remaining_eid].src_node;
       int remaining_src_port = lg->edges[remaining_eid].src_port;
+      if (remaining_src < 0 || remaining_src >= lg->node_count ||
+          remaining_src_port < 0) {
+        D->inEdgeId[dst_port] = -1;
+        D->fanin_sum_node_id[dst_port] = -1;
+        indegree_dec_on_last_pred(lg, sum_id, dst_node);
+        apply_delete_node_internal(lg, sum_id);
+        return true;
+      }
 
       // Create a new edge for the direct connection
       int direct_eid = alloc_edge(lg);
@@ -942,6 +962,11 @@ bool apply_delete_node_internal(LiveGraph *lg, int node_id) {
 
   RTNode *node = &lg->nodes[node_id];
 
+  // Remove from watchlist before freeing node state. Otherwise deleted watched
+  // nodes leave stale IDs/snapshots behind, which can accumulate in dynamic
+  // patches/presets and keep adding watchlist scan/snapshot overhead.
+  apply_remove_watchlist_internal(lg, node_id);
+
   // Special handling for DAC node
   if (lg->dac_node_id == node_id) {
     lg->dac_node_id = -1; // Clear DAC reference
@@ -982,6 +1007,23 @@ bool apply_delete_node_internal(LiveGraph *lg, int node_id) {
           src_node->outEdgeId[sp] = -1;
         }
       }
+
+      // If this inbound edge belonged to a hidden SUM node, compact/collapse is
+      // handled by logical disconnects. During node deletion, at least scrub
+      // the SUM bookkeeping so a later disconnect cannot treat this destination
+      // port as still SUM-backed after the SUM has been deleted.
+      if (node->fanin_sum_node_id && node->fanin_sum_node_id[dst_port] >= 0) {
+        int sum_id = node->fanin_sum_node_id[dst_port];
+        node->fanin_sum_node_id[dst_port] = -1;
+        if (sum_id >= 0 && sum_id < lg->node_count) {
+          RTNode *sum = &lg->nodes[sum_id];
+          if (sum->inEdgeId) {
+            for (int i = 0; i < sum->nInputs; i++) {
+              sum->inEdgeId[i] = -1;
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1013,6 +1055,24 @@ bool apply_delete_node_internal(LiveGraph *lg, int node_id) {
             cleared_consumers++;
             // Mark this destination as touched (don't decrement yet)
             touched[dst_node] = true;
+          }
+        }
+      }
+
+      // If this output fed a hidden SUM node, clear matching SUM inputs too.
+      // Otherwise a later disconnect can compact the SUM to one input containing
+      // -1/stale edge ID and crash when collapsing it back to a direct edge.
+      for (int maybe_sum = 0; maybe_sum < lg->node_count; maybe_sum++) {
+        if (maybe_sum == node_id)
+          continue;
+        RTNode *sum = &lg->nodes[maybe_sum];
+        if (!sum->inEdgeId || sum->nInputs <= 0)
+          continue;
+        for (int sum_port = 0; sum_port < sum->nInputs; sum_port++) {
+          if (sum->inEdgeId[sum_port] == edge_id) {
+            sum->inEdgeId[sum_port] = -1;
+            cleared_consumers++;
+            touched[maybe_sum] = true;
           }
         }
       }

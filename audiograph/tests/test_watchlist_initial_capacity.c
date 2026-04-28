@@ -7,7 +7,9 @@
 
 static void expect_watch_snapshot(LiveGraph *lg, int node_id, float expected) {
   float block[128];
-  process_next_block(lg, block, 128);
+  for (int i = 0; i < 4; i++) {
+    process_next_block(lg, block, 128);
+  }
 
   size_t snapshot_size = 0;
   float *snapshot = (float *)get_node_state(lg, node_id, &snapshot_size);

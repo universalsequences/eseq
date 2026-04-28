@@ -94,8 +94,8 @@ int main() {
   ok = graph_connect(lg, nodeB, 0, nodeC, 0);
   assert(ok);
 
-  // Process a few blocks to let things run
-  for (int i = 0; i < 3; i++) {
+  // Process enough blocks to let the throttled watchlist snapshot refresh.
+  for (int i = 0; i < 4; i++) {
     memset(out, 0, sizeof(out));
     process_next_block(lg, out, 128);
   }

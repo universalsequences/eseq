@@ -132,7 +132,8 @@ typedef struct LiveGraph {
 
 typedef struct Engine {
   pthread_t *threads;
-  int workerCount;
+  int workerCount; // maximum worker count started by host
+  _Atomic int activeWorkerLimit; // adaptive per-block worker count (0..workerCount)
   _Atomic int runFlag; // 1 = running, 0 = shutdown
 
   _Atomic(LiveGraph *) workSession; // published at block start, NULL after

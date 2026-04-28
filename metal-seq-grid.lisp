@@ -439,7 +439,7 @@
     (h-stack :gap 1 :align :center
       (box :width 11.5 :height 1.3
         (label (fmt "Step {}  {}" (+ (current-step) 1) (param-name))
-          :font-size 11 :color :gray :bg :transparent))
+          :font-size 11 :width 11.5 :color :gray :bg :transparent))
       (if (= param-mode 5)
         (box :width 8 :height 1.3
           (label (sync-current-label)

@@ -78,7 +78,11 @@ int main() {
 
   printf("\nProcessing first block...\n");
   float output_buffer[128];
-  process_next_block(lg, output_buffer, 128);
+  // Snapshots are throttled on the audio path, so process enough blocks to
+  // reach the next watchlist refresh after changing the graph.
+  for (int i = 0; i < 4; i++) {
+    process_next_block(lg, output_buffer, 128);
+  }
 
   // Get recorder state and validate
   size_t state_size;
@@ -140,7 +144,7 @@ int main() {
          recorder_state2->last_input_sample);
   printf("Updated processing count: %f\n", recorder_state2->processing_count);
 
-  // Should now show 0.8 as input and count of 2
+  // Should now show 0.8 as input after the throttled snapshot refresh.
   if (float_equals(recorder_state2->last_input_sample, 0.8f, 0.001f)) {
     printf("✓ Recorder captured CORRECT updated input (0.8)\n");
   } else {
@@ -152,10 +156,10 @@ int main() {
     return 1;
   }
 
-  if (float_equals(recorder_state2->processing_count, 2.0f, 0.001f)) {
-    printf("✓ Processing count incremented correctly (2.0)\n");
+  if (float_equals(recorder_state2->processing_count, 5.0f, 0.001f)) {
+    printf("✓ Processing count incremented correctly (5.0)\n");
   } else {
-    printf("✗ Processing count incorrect: expected 2.0, got %f\n",
+    printf("✗ Processing count incorrect: expected 5.0, got %f\n",
            recorder_state2->processing_count);
     free(state2);
     destroy_live_graph(lg);

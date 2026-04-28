@@ -137,6 +137,138 @@ const FTS_SCALE_NAMES: &[&str] = &[
     "Diminished",
 ];
 
+struct UiLoopStats {
+    enabled: bool,
+    window_start: Instant,
+    events: u64,
+    syncs: u64,
+    frames: u64,
+    event_handle: Duration,
+    gestures: Duration,
+    host_commands: Duration,
+    reactive_sync: Duration,
+    frame_build: Duration,
+    render: Duration,
+    max_event: Duration,
+    max_sync: Duration,
+    max_frame_build: Duration,
+    max_render: Duration,
+}
+
+impl UiLoopStats {
+    fn new() -> Self {
+        Self {
+            enabled: std::env::var_os("ESEQLISP_PROFILE_UI").is_some(),
+            window_start: Instant::now(),
+            events: 0,
+            syncs: 0,
+            frames: 0,
+            event_handle: Duration::ZERO,
+            gestures: Duration::ZERO,
+            host_commands: Duration::ZERO,
+            reactive_sync: Duration::ZERO,
+            frame_build: Duration::ZERO,
+            render: Duration::ZERO,
+            max_event: Duration::ZERO,
+            max_sync: Duration::ZERO,
+            max_frame_build: Duration::ZERO,
+            max_render: Duration::ZERO,
+        }
+    }
+
+    fn note_event(&mut self, elapsed: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.events += 1;
+        self.event_handle += elapsed;
+        self.max_event = self.max_event.max(elapsed);
+        self.maybe_emit();
+    }
+
+    fn note_gestures(&mut self, elapsed: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.gestures += elapsed;
+        self.maybe_emit();
+    }
+
+    fn note_host_commands(&mut self, elapsed: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.host_commands += elapsed;
+        self.maybe_emit();
+    }
+
+    fn note_sync(&mut self, elapsed: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.reactive_sync += elapsed;
+        self.syncs += 1;
+        self.max_sync = self.max_sync.max(elapsed);
+        self.maybe_emit();
+    }
+
+    fn note_frame(&mut self, build: Duration, render: Duration) {
+        if !self.enabled {
+            return;
+        }
+        self.frames += 1;
+        self.frame_build += build;
+        self.render += render;
+        self.max_frame_build = self.max_frame_build.max(build);
+        self.max_render = self.max_render.max(render);
+        self.maybe_emit();
+    }
+
+    fn maybe_emit(&mut self) {
+        if !self.enabled || self.window_start.elapsed().as_secs_f64() < 1.0 {
+            return;
+        }
+        let secs = self.window_start.elapsed().as_secs_f64();
+        eprintln!(
+            "[ui-profile][sequencer] events/s={:.1} frames/s={:.1} event_avg={:.2}ms event_max={:.2}ms gestures={:.2}ms host={:.2}ms sync_avg={:.2}ms sync_max={:.2}ms frame_build_avg={:.2}ms frame_build_max={:.2}ms render_avg={:.2}ms render_max={:.2}ms",
+            self.events as f64 / secs,
+            self.frames as f64 / secs,
+            avg_ms(self.event_handle, self.events),
+            self.max_event.as_secs_f64() * 1000.0,
+            self.gestures.as_secs_f64() * 1000.0,
+            self.host_commands.as_secs_f64() * 1000.0,
+            avg_ms(self.reactive_sync, self.syncs),
+            self.max_sync.as_secs_f64() * 1000.0,
+            avg_ms(self.frame_build, self.frames),
+            self.max_frame_build.as_secs_f64() * 1000.0,
+            avg_ms(self.render, self.frames),
+            self.max_render.as_secs_f64() * 1000.0,
+        );
+        self.window_start = Instant::now();
+        self.events = 0;
+        self.syncs = 0;
+        self.frames = 0;
+        self.event_handle = Duration::ZERO;
+        self.gestures = Duration::ZERO;
+        self.host_commands = Duration::ZERO;
+        self.reactive_sync = Duration::ZERO;
+        self.frame_build = Duration::ZERO;
+        self.render = Duration::ZERO;
+        self.max_event = Duration::ZERO;
+        self.max_sync = Duration::ZERO;
+        self.max_frame_build = Duration::ZERO;
+        self.max_render = Duration::ZERO;
+    }
+}
+
+fn avg_ms(total: Duration, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total.as_secs_f64() * 1000.0 / count as f64
+    }
+}
+
 #[derive(Clone)]
 struct SampleTreeNode {
     label: String,
@@ -1402,6 +1534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cached_cpu_load_bits: u32 = 0.0f32.to_bits();
 
     eprintln!("metal_seq: entering event loop");
+    let mut ui_loop_stats = UiLoopStats::new();
 
     loop {
         pull_named_scratch_buffer_into_project(&editor, &mut app);
@@ -1424,66 +1557,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Duration::from_millis(50)
         };
-        match backend.poll_event(timeout) {
-            Some(Event::Key(raw_key)) => {
-                if handle_metal_command_shortcut(
-                    &mut editor,
-                    &raw_key,
-                    &state,
-                    &current_track,
-                    &selected_steps,
-                    &step_clipboard,
-                ) {
-                    continue;
-                }
-                let key = normalize_command_shortcuts(raw_key);
-                if should_toggle_play_on_space(&editor, &key) {
-                    let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
-                    editor.refresh_runtime_side_effects();
-                    continue;
-                }
-                // Intercept keyboard for live recording when any track is armed
-                let any_armed = record_armed.lock().unwrap().iter().any(|a| *a);
-                let intercepted = if any_armed && should_route_to_live_keyboard(&editor, &key, &held_notes) {
-                    handle_recording_key(
-                        &key,
+        if let Some(event) = backend.poll_event(timeout) {
+            let event_started = Instant::now();
+            match event {
+                Event::Key(raw_key) => {
+                    if handle_metal_command_shortcut(
+                        &mut editor,
+                        &raw_key,
                         &state,
-                        &record_armed,
-                        &recording,
-                        &keyboard_tx,
-                        &keyboard_octave,
                         &current_track,
-                        &held_notes,
-                    )
-                } else {
-                    false
-                };
-                // Only pass Press events to the editor (Release is only for note-off)
-                if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
-                    editor.handle_key(key);
-                }
-            }
-            Some(Event::Mouse(mouse)) => {
-                let (precise_col, precise_row) = backend
-                    .take_last_precise_mouse()
-                    .unwrap_or((mouse.column as f32, mouse.row as f32));
-                if matches!(
-                    mouse.kind,
-                    crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left)
-                ) {
-                    pending_drag = Some((Event::Mouse(mouse), (precise_col, precise_row)));
-                } else {
-                    if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_)) {
-                        pending_drag = None;
+                        &selected_steps,
+                        &step_clipboard,
+                    ) {
+                        ui_loop_stats.note_event(event_started.elapsed());
+                        continue;
                     }
-                    editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+                    let key = normalize_command_shortcuts(raw_key);
+                    if should_toggle_play_on_space(&editor, &key) {
+                        let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
+                        editor.refresh_runtime_side_effects();
+                        ui_loop_stats.note_event(event_started.elapsed());
+                        continue;
+                    }
+                    // Intercept keyboard for live recording when any track is armed
+                    let any_armed = record_armed.lock().unwrap().iter().any(|a| *a);
+                    let intercepted = if any_armed
+                        && should_route_to_live_keyboard(&editor, &key, &held_notes)
+                    {
+                        handle_recording_key(
+                            &key,
+                            &state,
+                            &record_armed,
+                            &recording,
+                            &keyboard_tx,
+                            &keyboard_octave,
+                            &current_track,
+                            &held_notes,
+                        )
+                    } else {
+                        false
+                    };
+                    // Only pass Press events to the editor (Release is only for note-off)
+                    if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
+                        editor.handle_key(key);
+                    }
                 }
+                Event::Mouse(mouse) => {
+                    let (precise_col, precise_row) = backend
+                        .take_last_precise_mouse()
+                        .unwrap_or((mouse.column as f32, mouse.row as f32));
+                    if matches!(
+                        mouse.kind,
+                        crossterm::event::MouseEventKind::Drag(
+                            crossterm::event::MouseButton::Left
+                        )
+                    ) {
+                        pending_drag = Some((Event::Mouse(mouse), (precise_col, precise_row)));
+                    } else {
+                        if matches!(mouse.kind, crossterm::event::MouseEventKind::Up(_)) {
+                            pending_drag = None;
+                        }
+                        editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+                    }
+                }
+                Event::Resize(_, _) => editor.mark_needs_redraw(),
+                _ => {}
             }
-            Some(Event::Resize(_, _)) => editor.mark_needs_redraw(),
-            _ => {}
+            ui_loop_stats.note_event(event_started.elapsed());
         }
 
         // Touchpad gestures
+        let gestures_started = Instant::now();
         while let Some((delta, (precise_col, precise_row))) = backend.take_pending_magnify() {
             editor.handle_tiled_touchpad_magnify(precise_col, precise_row, 0, delta);
         }
@@ -1557,8 +1701,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
             editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
         }
+        ui_loop_stats.note_gestures(gestures_started.elapsed());
 
         // 1b. Drain host commands (sample browser etc.)
+        let host_commands_started = Instant::now();
         for command in editor.drain_host_commands() {
             if let HostCommand::Custom { name, payload } = command {
                 match name.as_str() {
@@ -3161,6 +3307,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        ui_loop_stats.note_host_commands(host_commands_started.elapsed());
 
         // 1c. Poll for async effect compilation
         if let Some(status) = app.poll_pending_compile() {
@@ -3185,6 +3332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 2. Sync reactive state AFTER events
         let ct = current_track.load(Ordering::Relaxed);
+        let reactive_sync_started = Instant::now();
         {
             let playing = state.transport.playing.load(Ordering::Relaxed);
             let bpm = state.transport.bpm.load(Ordering::Relaxed);
@@ -3423,6 +3571,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 editor.mark_needs_redraw();
             }
         }
+        ui_loop_stats.note_sync(reactive_sync_started.elapsed());
 
         // Keep selection animation live only during playback; when paused, edits/events
         // still request redraws explicitly, but idle should stay cheap.
@@ -3432,11 +3581,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Render
         if editor.needs_redraw() && last_render_at.elapsed() >= frame_interval {
+            let frame_build_started = Instant::now();
             let tiled_frame =
                 eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
+            let frame_build_elapsed = frame_build_started.elapsed();
+            let render_started = Instant::now();
             backend
                 .render_tiled(&tiled_frame)
                 .map_err(|_| "render failed")?;
+            let render_elapsed = render_started.elapsed();
+            ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
             editor.clear_needs_redraw();
             last_render_at = Instant::now();
         }

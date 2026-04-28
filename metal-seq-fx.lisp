@@ -192,26 +192,27 @@
     (v-stack :gap 0.8 :no-clamp-width true
       (label "Sampler" :font-size 15 :color :white :bg :transparent)
       (if (get inst :buffer)
-        (box :width 25 :height 2.5
-          (waveform
-            :height 2.5
-            :header-height 0.3
-            :ruler-font-size 8
-            :ruler-color :gray
-            :ruler-bg :black
-            :grid-major-color (rgba 0.15 0.15 0.15 1)
-            :grid-minor-color (rgba 0.10 0.10 0.10 1)
-            :bg :black
-            :focusable true
-            :buffer (get inst :buffer)
-            :view-start sampler-view-start
-            :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
-            :cursor-time sampler-cursor-time
-            :playhead-time SEQ.sampler-playhead
-            :selection-start (get inst :start-time)
-            :selection-end (get inst :end-time)
-            :time-ruler (dict :mode :seconds)
-            :on-action |event| (handle-sampler-waveform-action event (get inst :duration))))
+        (subtree :key (str "sampler-waveform-" (get inst :buffer))
+          (box :width 25 :height 2.5
+            (waveform
+              :height 2.5
+              :header-height 0.3
+              :ruler-font-size 8
+              :ruler-color :gray
+              :ruler-bg :black
+              :grid-major-color (rgba 0.15 0.15 0.15 1)
+              :grid-minor-color (rgba 0.10 0.10 0.10 1)
+              :bg :black
+              :focusable true
+              :buffer (get inst :buffer)
+              :view-start sampler-view-start
+              :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
+              :cursor-time sampler-cursor-time
+              :playhead-time SEQ.sampler-playhead
+              :selection-start (get inst :start-time)
+              :selection-end (get inst :end-time)
+              :time-ruler (dict :mode :seconds)
+              :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
         (label "No sample" :font-size 12 :color :gray :bg :transparent))
       (fx-param-grid (get inst :params) false))))
 

@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 int main() {
   printf("=== GraphEditQueue Test ===\n");
@@ -103,7 +104,7 @@ int main() {
                                .u.add_node = {.vt = GAIN_VTABLE,
                                               .state_size = GAIN_MEMORY_SIZE * sizeof(float),
                                               .logical_id = lg->node_count,
-                                              .name = "queued_gain",
+                                              .name = strdup("queued_gain"),
                                               .nInputs = 1,
                                               .nOutputs = 1}};
 
