@@ -12,7 +12,7 @@ use eseqlisp::backend::Backend;
 use eseqlisp::editor::ViewMode;
 use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::vm::Value;
-use eseqlisp::{Editor, EditorConfig, HostCommand, HostEvent, Runtime};
+use eseqlisp::{BufferMode, Editor, EditorConfig, HostCommand, HostEvent, Runtime};
 
 use sequencer::engine;
 use sequencer::sequencer::{
@@ -488,6 +488,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("sidebar-presets", Value::List(vec![])),
             ("sidebar-preset-tree", Value::List(vec![])),
             ("current-project-name", Value::String(String::new())),
+            // Editor mode state (for inline instrument/effect creation/editing)
+            ("editor-active", Value::Bool(false)),
+            ("editor-error", Value::String(String::new())),
+            ("editor-mode", Value::String(String::new())),
+            ("editor-buffer-name", Value::String(String::new())),
             ];
             for idx in 0..track_count {
                 fields.push((
@@ -1369,6 +1374,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
 
+    // Inline editor session state (instrument/effect creation/editing)
+    let mut editor_buffer_name: Option<String> = None;
+    let mut editor_mode: Option<String> = None;
+    let mut editor_effect_name: Option<String> = None;  // original effect name (without .lisp)
+    let mut editor_effect_slot: Option<usize> = None;   // effect slot index for hot-swap
+
     let mut prev_playing = false;
     let mut prev_bpm: u32 = 0;
     let mut prev_playhead: u32 = u32::MAX;
@@ -1900,6 +1911,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                    }
+                    "save-preset" => {
+                        if let Value::Map(ref map) = payload {
+                            let preset_name = map.get("name").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            let overwrite = map.get("overwrite").map(|cell| match &*cell.borrow() {
+                                Value::Bool(b) => *b,
+                                _ => false,
+                            }).unwrap_or(false);
+                            if let Some(name) = preset_name {
+                                let name = name.trim().to_string();
+                                if name.is_empty() {
+                                    editor.handle_host_event(HostEvent::Status(
+                                        "Preset name cannot be empty".to_string(),
+                                    ));
+                                } else {
+                                    let track = current_track.load(Ordering::Relaxed);
+                                    app.ui.cursor_track = track;
+                                    app.save_current_track_as_preset(&name, overwrite);
+                                    // Refresh sidebar presets list
+                                    let rt = editor.runtime_mut();
+                                    sync_sidebar_browser(rt, &app, track);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Saved preset '{name}'"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    "overwrite-preset" => {
+                        let track = current_track.load(Ordering::Relaxed);
+                        app.ui.cursor_track = track;
+                        app.overwrite_loaded_preset();
+                        let rt = editor.runtime_mut();
+                        sync_sidebar_browser(rt, &app, track);
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
                     }
                     "save-project" => {
                         let requested_name = if let Value::Map(ref map) = payload {
@@ -2494,6 +2546,440 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    // ── Inline instrument/effect editor commands ──
+
+                    "enter-new-instrument-editor" => {
+                        let temp_path = std::path::PathBuf::from("instruments/.untitled-instrument.lisp");
+                        std::fs::create_dir_all("instruments").ok();
+                        if let Err(e) = std::fs::write(&temp_path, sequencer::lisp_effect::INSTRUMENT_TEMPLATE) {
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to write template: {e}"
+                            )));
+                        } else {
+                            let buf_name = match editor.create_file_buffer(&temp_path, BufferMode::DGenLisp) {
+                                Ok(name) => name,
+                                Err(e) => {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Failed to create buffer: {e:?}"
+                                    )));
+                                    continue;
+                                }
+                            };
+                            editor.swap_buffer_in_tile_showing("*metal*", &buf_name);
+                            editor_buffer_name = Some(buf_name.clone());
+                            editor_mode = Some("new-instrument".to_string());
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
+                            rt.set_reactive("SEQ", "editor-mode", Value::String("new-instrument".to_string()));
+                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                            rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                        }
+                    }
+
+                    "save-new-instrument" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(cell) = map.get("name") {
+                                if let Value::String(inst_name) = &*cell.borrow() {
+                                    let inst_name = inst_name.trim().to_string();
+                                    if inst_name.is_empty() {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive("SEQ", "editor-error", Value::String("Name cannot be empty".to_string()));
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+                                    let buf_name = editor_buffer_name.clone().unwrap_or_default();
+                                    let source = editor.read_buffer_text(&buf_name).unwrap_or_default();
+
+                                    // Write to final path
+                                    let final_path = format!("instruments/{inst_name}.lisp");
+                                    if let Err(e) = std::fs::write(&final_path, &source) {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive("SEQ", "editor-error", Value::String(format!("Failed to save: {e}")));
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+
+                                    // Try to compile FIRST — stay in editor on failure
+                                    match app.add_saved_instrument_track_sync(&inst_name) {
+                                        Ok(idx) => {
+                                            // Success — clean up temp file, close editor
+                                            let _ = std::fs::remove_file("instruments/.untitled-instrument.lisp");
+                                            editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                                            editor.remove_buffer_by_name(&buf_name);
+                                            editor_buffer_name = None;
+                                            editor_mode = None;
+
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                                            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                                            rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+
+                                            current_track.store(idx, Ordering::Relaxed);
+                                            let new_name = app.tracks[idx].clone();
+                                            track_names.push(new_name.clone());
+                                            track_pan_ids.lock().unwrap().push(app.graph.track_node_ids[idx].pan_id);
+                                            record_armed.lock().unwrap().push(false);
+                                            rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
+                                            rt.set_reactive("SEQ", "current-track", Value::Number(idx as f64));
+                                            rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
+                                            rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
+                                            sync_step_param_lists(rt, &state, idx);
+                                            rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                                            sync_track_peak_fields(rt, &cached_track_peak_levels);
+                                            rt.set_reactive("SEQ", "effects", build_effects_value(&state, idx, &app.graph.effect_descriptors, &selected_steps));
+                                            rt.set_reactive("SEQ", "instrument-panel", build_instrument_panel_value(&app, idx, &selected_steps));
+                                            *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                                            sync_track_params(rt, &app, &state, idx, &selected_steps);
+                                            rt.set_reactive("SEQ", "step-has-plocks", build_step_has_plocks(&state, idx, &app.graph.effect_descriptors));
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Created instrument '{inst_name}' and added track {}",
+                                                idx + 1
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            // Compile failed — stay in editor, show error
+                                            // Clean up the written file so stale source doesn't linger
+                                            let _ = std::fs::remove_file(&final_path);
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive("SEQ", "editor-error", Value::String(format!("{e}")));
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    "enter-edit-instrument" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(cell) = map.get("name") {
+                                if let Value::String(inst_name) = &*cell.borrow() {
+                                    let inst_name = inst_name.clone();
+                                    let file_path = std::path::PathBuf::from(format!("instruments/{inst_name}.lisp"));
+                                    if !file_path.exists() {
+                                        editor.handle_host_event(HostEvent::Error(format!(
+                                            "Instrument file not found: {}", file_path.display()
+                                        )));
+                                        continue;
+                                    }
+                                    let buf_name = match editor.create_file_buffer(&file_path, BufferMode::DGenLisp) {
+                                        Ok(name) => name,
+                                        Err(e) => {
+                                            editor.handle_host_event(HostEvent::Error(format!(
+                                                "Failed to open buffer: {e:?}"
+                                            )));
+                                            continue;
+                                        }
+                                    };
+                                    editor.swap_buffer_in_tile_showing("*metal*", &buf_name);
+                                    editor_buffer_name = Some(buf_name.clone());
+                                    editor_mode = Some("edit-instrument".to_string());
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
+                                    rt.set_reactive("SEQ", "editor-mode", Value::String("edit-instrument".to_string()));
+                                    rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                                    rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                }
+                            }
+                        }
+                    }
+
+                    "update-instrument" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(cell) = map.get("name") {
+                                if let Value::String(inst_name) = &*cell.borrow() {
+                                    let inst_name = inst_name.clone();
+                                    let buf_name = editor_buffer_name.clone().unwrap_or_default();
+                                    let source = editor.read_buffer_text(&buf_name).unwrap_or_default();
+
+                                    // Save to file
+                                    let final_path = format!("instruments/{inst_name}.lisp");
+                                    if let Err(e) = std::fs::write(&final_path, &source) {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive("SEQ", "editor-error", Value::String(format!("Failed to save: {e}")));
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+
+                                    // Try hot-swap FIRST — stay in editor on failure
+                                    app.ui.cursor_track = current_track.load(Ordering::Relaxed);
+                                    match app.replace_current_custom_instrument_sync(&inst_name, &source) {
+                                        Ok(()) => {
+                                            // Success — close editor
+                                            editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                                            editor.remove_buffer_by_name(&buf_name);
+                                            editor_buffer_name = None;
+                                            editor_mode = None;
+
+                                            let ct = current_track.load(Ordering::Relaxed);
+                                            track_names[ct] = inst_name.clone();
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                                            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                                            rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+                                            rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
+                                            rt.set_reactive("SEQ", "instrument-panel", build_instrument_panel_value(&app, ct, &selected_steps));
+                                            rt.set_reactive("SEQ", "effects", build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps));
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Hot-swapped instrument '{inst_name}'"
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            // Compile failed — stay in editor, show error
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive("SEQ", "editor-error", Value::String(format!("{e}")));
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    "enter-new-effect-editor" => {
+                        let temp_path = std::path::PathBuf::from("effects/.untitled-effect.lisp");
+                        std::fs::create_dir_all("effects").ok();
+                        if let Err(e) = std::fs::write(&temp_path, sequencer::lisp_effect::EFFECT_TEMPLATE) {
+                            editor.handle_host_event(HostEvent::Error(format!(
+                                "Failed to write template: {e}"
+                            )));
+                        } else {
+                            let buf_name = match editor.create_file_buffer(&temp_path, BufferMode::DGenLisp) {
+                                Ok(name) => name,
+                                Err(e) => {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Failed to create buffer: {e:?}"
+                                    )));
+                                    continue;
+                                }
+                            };
+                            editor.swap_buffer_in_tile_showing("*metal*", &buf_name);
+                            editor_buffer_name = Some(buf_name.clone());
+                            editor_mode = Some("new-effect".to_string());
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
+                            rt.set_reactive("SEQ", "editor-mode", Value::String("new-effect".to_string()));
+                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                            rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                        }
+                    }
+
+                    "save-new-effect" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(cell) = map.get("name") {
+                                if let Value::String(effect_name) = &*cell.borrow() {
+                                    let effect_name = effect_name.trim().to_string();
+                                    if effect_name.is_empty() {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive("SEQ", "editor-error", Value::String("Name cannot be empty".to_string()));
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+                                    let buf_name = editor_buffer_name.clone().unwrap_or_default();
+                                    let source = editor.read_buffer_text(&buf_name).unwrap_or_default();
+
+                                    // Validate compilation before saving — stay in editor on failure
+                                    let sr = app.graph.sample_rate;
+                                    if let Err(e) = sequencer::lisp_effect::compile_and_load(&source, sr) {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive("SEQ", "editor-error", Value::String(format!("{e}")));
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+
+                                    let final_path = format!("effects/{effect_name}.lisp");
+                                    if let Err(e) = std::fs::write(&final_path, &source) {
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive("SEQ", "editor-error", Value::String(format!("Failed to save: {e}")));
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        continue;
+                                    }
+                                    let _ = std::fs::remove_file("effects/.untitled-effect.lisp");
+
+                                    // Compilation validated — close editor
+                                    editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                                    editor.remove_buffer_by_name(&buf_name);
+                                    editor_buffer_name = None;
+                                    editor_mode = None;
+
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                                    rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                                    rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                                    rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+                                    rt.set_reactive("SEQ", "available-effects", build_available_effects());
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+
+                                    // Add effect to current track (re-compiles from file, uses cache)
+                                    app.ui.cursor_track = current_track.load(Ordering::Relaxed);
+                                    if let Some(slot_idx) = app.next_free_custom_slot() {
+                                        app.start_effect_compile(&effect_name, slot_idx);
+                                        editor.runtime_mut().set_reactive("SEQ", "compiling", Value::Bool(true));
+                                    } else {
+                                        editor.handle_host_event(HostEvent::Status(
+                                            "No free effect slots available".to_string(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    "enter-edit-effect" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(cell) = map.get("name") {
+                                if let Value::String(effect_name) = &*cell.borrow() {
+                                    let effect_name = effect_name.clone();
+                                    let slot_idx = map.get("slot").and_then(|cell| match &*cell.borrow() {
+                                        Value::Number(n) => Some(*n as usize),
+                                        _ => None,
+                                    });
+                                    let file_path = std::path::PathBuf::from(format!("effects/{effect_name}.lisp"));
+                                    if !file_path.exists() {
+                                        editor.handle_host_event(HostEvent::Error(format!(
+                                            "Effect file not found: {}", file_path.display()
+                                        )));
+                                        continue;
+                                    }
+                                    let buf_name = match editor.create_file_buffer(&file_path, BufferMode::DGenLisp) {
+                                        Ok(name) => name,
+                                        Err(e) => {
+                                            editor.handle_host_event(HostEvent::Error(format!(
+                                                "Failed to open buffer: {e:?}"
+                                            )));
+                                            continue;
+                                        }
+                                    };
+                                    editor.swap_buffer_in_tile_showing("*metal*", &buf_name);
+                                    editor_buffer_name = Some(buf_name.clone());
+                                    editor_mode = Some("edit-effect".to_string());
+                                    editor_effect_name = Some(effect_name.clone());
+                                    editor_effect_slot = slot_idx;
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
+                                    rt.set_reactive("SEQ", "editor-mode", Value::String("edit-effect".to_string()));
+                                    rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                                    rt.set_reactive("SEQ", "editor-buffer-name", Value::String(buf_name));
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                }
+                            }
+                        }
+                    }
+
+                    "update-effect" => {
+                        {
+                            let effect_name = match editor_effect_name.clone() {
+                                Some(n) => n,
+                                None => {
+                                    editor.handle_host_event(HostEvent::Error(
+                                        "No effect being edited".to_string(),
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let buf_name = editor_buffer_name.clone().unwrap_or_default();
+                            let source = editor.read_buffer_text(&buf_name).unwrap_or_default();
+
+                            // Validate compilation before saving — stay in editor on failure
+                            let sr = app.graph.sample_rate;
+                            if let Err(e) = sequencer::lisp_effect::compile_and_load(&source, sr) {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive("SEQ", "editor-error", Value::String(format!("{e}")));
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                continue;
+                            }
+
+                            let final_path = format!("effects/{effect_name}.lisp");
+                            if let Err(e) = std::fs::write(&final_path, &source) {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive("SEQ", "editor-error", Value::String(format!("Failed to save: {e}")));
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                continue;
+                            }
+
+                            // Compilation validated — close editor
+                            editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                            editor.remove_buffer_by_name(&buf_name);
+                            let slot_idx = editor_effect_slot.take();
+                            editor_buffer_name = None;
+                            editor_mode = None;
+                            editor_effect_name = None;
+
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                            rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                            rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                            rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+
+                            // Recompile at the stored slot
+                            if let Some(slot_idx) = slot_idx {
+                                app.ui.cursor_track = current_track.load(Ordering::Relaxed);
+                                app.start_effect_compile(&effect_name, slot_idx);
+                                editor.runtime_mut().set_reactive("SEQ", "compiling", Value::Bool(true));
+                            } else {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Saved effect '{effect_name}'"
+                                )));
+                            }
+                        }
+                    }
+
+                    "cancel-editor" => {
+                        if let Some(buf_name) = editor_buffer_name.take() {
+                            editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                            editor.remove_buffer_by_name(&buf_name);
+                        }
+
+                        // Clean up temp files for new-* modes
+                        if let Some(ref mode) = editor_mode {
+                            if mode == "new-instrument" {
+                                let _ = std::fs::remove_file("instruments/.untitled-instrument.lisp");
+                            } else if mode == "new-effect" {
+                                let _ = std::fs::remove_file("effects/.untitled-effect.lisp");
+                            }
+                        }
+                        editor_mode = None;
+                        editor_effect_name = None;
+                        editor_effect_slot = None;
+
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                        rt.set_reactive("SEQ", "editor-mode", Value::String(String::new()));
+                        rt.set_reactive("SEQ", "editor-error", Value::String(String::new()));
+                        rt.set_reactive("SEQ", "editor-buffer-name", Value::String(String::new()));
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.handle_host_event(HostEvent::Status("Editor cancelled".to_string()));
+                    }
+
                     other => {
                         editor.handle_host_event(HostEvent::Status(format!(
                             "Unknown host command: {other}"
@@ -4236,12 +4722,17 @@ fn build_selection_value(selected: &Arc<Mutex<HashSet<usize>>>) -> Value {
 }
 
 /// Build list of available effect names from the effects/ directory.
+/// Prepends "+ New Effect" as a special entry for inline creation.
 fn build_available_effects() -> Value {
     let names = sequencer::lisp_effect::list_saved_effects();
-    let items: Vec<Rc<RefCell<Value>>> = names
-        .into_iter()
-        .map(|n| Rc::new(RefCell::new(Value::String(n))))
-        .collect();
+    let mut items: Vec<Rc<RefCell<Value>>> = vec![
+        Rc::new(RefCell::new(Value::String("+ New Effect".to_string()))),
+    ];
+    items.extend(
+        names
+            .into_iter()
+            .map(|n| Rc::new(RefCell::new(Value::String(n)))),
+    );
     Value::List(items)
 }
 

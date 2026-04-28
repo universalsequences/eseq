@@ -857,11 +857,22 @@ pub unsafe fn add_effect_to_chain_at(
 
 // ── Full interactive editor-compile-load flow ──
 
-const TEMPLATE: &str = r#"; DGenLisp effect — processes audio from the track's sampler
-; Input on channel 1, output on channel 1
+pub const EFFECT_TEMPLATE: &str = r#"; DGenLisp stereo effect
+;
+; Params: (def name (param name @min 0 @max 1 @default 0.5))
+; Delay:  (def h (history N)), (read-history h delay_samples), (write-history h sample)
+; Math:   +, -, *, /, tanh, clamp, min, max, mix
+; Filters: (onepole input coeff)
 
 (def input (in 1 @name signal))
-(out input 1 @name audio)
+(def mix-amt (param mix @min 0 @max 1 @default 0.5))
+
+; -- Your processing here --
+(def processed input)
+
+; -- Stereo output --
+(out (mix input processed mix-amt) 1 @name Left)
+(out (mix input processed mix-amt) 2 @name Right)
 "#;
 
 pub struct LispEditResult {
@@ -886,7 +897,7 @@ pub fn run_editor_flow(
     sample_rate: u32,
 ) -> Option<LispEditResult> {
     let initial = if last_source.is_empty() {
-        TEMPLATE.to_string()
+        EFFECT_TEMPLATE.to_string()
     } else {
         last_source.to_string()
     };
@@ -1372,11 +1383,15 @@ pub fn compile_and_load_instrument(
 
 // ── Instrument editor flow ──
 
-const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument — generates audio from gate, pitch, velocity, trigger, and shared mod buses
-; Inputs: gate (ch 1), pitch_hz (ch 2), velocity (ch 3), trigger (ch 4)
-; Mod inputs: mod1..mod6 (ch 5..10)
-; Output: audio (ch 1)
-; Helpers injected at compile time: adsr/modulation macros
+pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
+;
+; Params:  (param name @default 1.0 @min 0 @max 10)
+; Modulatable: add @mod true @mod-mode additive
+;   then use (mod name) to read the modulated value
+; Envelope: (adsr gate trigger attack_ms decay_ms sustain release_ms)
+; Oscillators: (sin expr), (phasor freq_hz), (noise)
+; Math: +, -, *, /, tanh, clamp, min, max
+; Constants: twopi, samplerate
 
 (def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
@@ -1388,8 +1403,20 @@ const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument — generates audio f
 (def mod4 (in 8 @name mod4 @modulator 4))
 (def mod5 (in 9 @name mod5 @modulator 5))
 (def mod6 (in 10 @name mod6 @modulator 6))
+
+; -- Parameters --
+(param attack  @default 5    @min 0   @max 1000 @unit ms)
+(param release @default 200  @min 10  @max 5000 @unit ms)
+(param gain    @default 0.5  @min 0   @max 1    @mod true @mod-mode additive)
+
+; -- Envelope --
+(def env (adsr gate trigger attack 100 1 release))
+
+; -- Oscillator --
 (def osc (sin (* (phasor pitch) twopi)))
-(out (* osc gate velocity) 1 @name audio)
+
+; -- Output --
+(out (* osc env velocity (mod gain)) 1 @name audio)
 "#;
 
 pub struct InstrumentEditResult {
@@ -1440,7 +1467,7 @@ fn editor_file_path(kind: CompileKind, existing_name: Option<&str>) -> PathBuf {
 fn default_template_for_kind(kind: &CompileKind) -> &'static str {
     match kind {
         CompileKind::Instrument => INSTRUMENT_TEMPLATE,
-        CompileKind::Effect => TEMPLATE,
+        CompileKind::Effect => EFFECT_TEMPLATE,
     }
 }
 

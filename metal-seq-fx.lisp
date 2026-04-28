@@ -125,7 +125,16 @@
 (def fx-panel (title params fx)
   (box :background "fx-panel-bg" :padding 1.5 :no-clamp-width true
     (v-stack :gap 0.5 :no-clamp-width true
-      (label title :font-size 15 :color :white :bg :transparent)
+      (h-stack :gap 0.5 :align :center
+        (label title :font-size 15 :color :white :bg :transparent)
+        ;; Only show edit button for custom dgenlisp effects (not built-in Filter/Delay)
+        (if (and (not (= title "Filter")) (not (= title "Delay")))
+          (box :bg :dark-gray :width 4 :height 1.2 :align :center
+            :on-click |x y r|
+              (host-command "enter-edit-effect"
+                (dict :name title :slot (get fx :slot-idx)))
+            (label "edit" :font-size 8 :color :gray :bg :transparent))
+          (box)))
       (fx-param-grid params fx))))
 
 (def instrument-tab-button (label idx width)
@@ -211,16 +220,25 @@
     (sampler-panel inst)
     (box :background "fx-panel-bg" :padding 1.5 :no-clamp-width true
       (v-stack :gap 0.6 :no-clamp-width true
-        (tabs :items (list "synth" "mod" "sources")
-              :bind instrument-panel-tab
-              :compact true
-              :no-clamp-width true
-              :gap 0.75
-              :tab-padding 0.5
-              :header-height 1.2
-          (fx-param-grid (get inst :synth) false)
-          (fx-param-grid (get inst :mod) false)
-          (instrument-sources-grid (get inst :sources)))))))
+        (h-stack :gap 0.5 :no-clamp-width true
+          (tabs :items (list "synth" "mod" "sources")
+                :bind instrument-panel-tab
+                :compact true
+                :no-clamp-width true
+                :gap 0.75
+                :tab-padding 0.5
+                :header-height 1.2
+            (fx-param-grid (get inst :synth) false)
+            (fx-param-grid (get inst :mod) false)
+            (instrument-sources-grid (get inst :sources)))
+          (box :bg :dark-gray :width 4 :height 1.2 :align :center
+            :on-click |x y r|
+              (host-command "enter-edit-instrument"
+                (dict :name SEQ.sidebar-instrument-name))
+            (label "edit" :font-size 8 :color :gray :bg :transparent))
+          (save-icon
+            :on-click |x y r| (sbrowser-enter-preset-save)
+            :active 0))))))
 
 (effect-buffer "*fx*"
   (v-stack :padding 0.5 :gap 1 :no-clamp-width true
@@ -237,7 +255,11 @@
             :options SEQ.available-effects
             :placeholder "Add Effect"
             :on-change (lambda (v)
-              (host-command "add-effect" (dict :name v)))
+              (if (= v "+ New Effect")
+                (do
+                  (set! sbrowser-editor-name "")
+                  (host-command "enter-new-effect-editor" (dict)))
+                (host-command "add-effect" (dict :name v))))
             :width 12 :height 1.5 :font-size 14)
           (compile-progress
             :active (if SEQ.compiling 1 0)

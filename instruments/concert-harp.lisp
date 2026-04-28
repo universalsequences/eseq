@@ -33,7 +33,7 @@
 (param gain         @default 0.20 @min 0    @max 1)
 
 ; ── Safe pitch ──
-(def safe_pitch (max pitch 55.0))
+(def safe_pitch (max pitch 25.0))
 (def delay_nominal (/ 44100.0 safe_pitch))
 
 ; ── Note-on detector / exciter window ──

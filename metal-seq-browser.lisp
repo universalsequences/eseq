@@ -8,6 +8,12 @@
 (defstate sbrowser-mode "audition")
 (defstate sbrowser-project-name "")
 
+;; Editor state for inline instrument/effect creation
+(def sbrowser-editor-name (state ""))
+;; Preset save state
+(defstate sbrowser-preset-name "")
+(defstate sbrowser-preset-save-mode "")  ;; "" or "save-preset"
+
 (def sbrowser-audition-mode? ()
   (= sbrowser-mode "audition"))
 
@@ -22,6 +28,9 @@
 
 (def sbrowser-project-save-mode? ()
   (= sbrowser-mode "project-save"))
+
+(def sbrowser-editor-mode? ()
+  (not (= SEQ.editor-mode "")))
 
 (def sbrowser-create-mode? ()
   (or (sbrowser-track-type-mode?) (sbrowser-create-sampler-mode?)))
@@ -183,7 +192,18 @@
           (label (sbrowser-mode-label)
             :font-size 9
             :color :gray
-            :bg :transparent)))
+            :bg :transparent))
+        ;; Edit button (only for custom instruments, not Sampler)
+        (if (not (= SEQ.sidebar-instrument-name ""))
+          (box :bg :dark-gray :width 5 :height 1.5 :align :center
+            :on-click |x y r|
+              (host-command "enter-edit-instrument"
+                (dict :name SEQ.sidebar-instrument-name))
+            (label "Edit"
+              :font-size 9
+              :color :white
+              :bg :transparent))
+          (box)))
       (label
         (str "Current preset: "
           (if (= SEQ.sidebar-loaded-preset "") "none" SEQ.sidebar-loaded-preset))
@@ -250,7 +270,8 @@
 
 (def sbrowser-create-items ()
   (append
-    (list (dict :label "Sampler" :kind "sampler"))
+    (list (dict :label "Sampler" :kind "sampler")
+          (dict :label "+ New Instrument" :kind "new-instrument"))
     (map (lambda (name)
       (dict :label name :kind "instrument"))
       (seq-saved-instruments))))
@@ -258,7 +279,11 @@
 (def sbrowser-select-create-item (item)
   (if (= (get item :kind) "sampler")
     (sbrowser-enter-create-sampler-mode)
-    (sbrowser-add-instrument-track (get item :label))))
+    (if (= (get item :kind) "new-instrument")
+      (do
+        (set! sbrowser-editor-name "")
+        (host-command "enter-new-instrument-editor" (dict)))
+      (sbrowser-add-instrument-track (get item :label)))))
 
 (def sbrowser-create-picker ()
   (box :background "browser-panel-bg" :padding 0 :flex 1
@@ -305,21 +330,155 @@
 (def sbrowser-project-save-panel ()
   (box :background "browser-panel-bg" :padding 0 :flex 1))
 
+;; ── Preset save sidebar ──
+
+(def sbrowser-preset-save-mode? ()
+  (= sbrowser-preset-save-mode "save-preset"))
+
+(def sbrowser-enter-preset-save ()
+  (set! sbrowser-preset-name "")
+  (set! sbrowser-preset-save-mode "save-preset"))
+
+(def sbrowser-exit-preset-save ()
+  (set! sbrowser-preset-save-mode ""))
+
+(def sbrowser-preset-save-header ()
+  (box :padding 0.25
+    (v-stack :gap 0.4
+      (h-stack :gap 0.5 :align :center
+        (label "Save Preset"
+          :font-size 12
+          :color :white
+          :bg :transparent)
+        (box :bg :dark-gray :width 6 :height 1.5 :align :center
+          :on-click |x y r| (sbrowser-exit-preset-save)
+          (label "cancel"
+            :font-size 9
+            :color :gray
+            :bg :transparent)))
+      (text-input
+        :value sbrowser-preset-name
+        :placeholder "preset name..."
+        :on-change (lambda (v) (set! sbrowser-preset-name v))
+        :width 30
+        :height 1.5
+        :font-size 12)
+      ;; Save as New button
+      (box :background "browser-pill-btn-bg" :width 10 :height 1.2
+        :on-click |x y r|
+          (do
+            (host-command "save-preset" (dict :name sbrowser-preset-name :overwrite false))
+            (sbrowser-exit-preset-save))
+        (box :width 10 :height 1.2
+          (v-stack :align :center
+            (label " Save as New "
+              :font-size 11
+              :color :white
+              :bg :transparent))))
+      ;; Overwrite button (only if a preset is currently loaded)
+      (if (not (= SEQ.sidebar-loaded-preset ""))
+        (box :bg :dark-gray :width 16 :height 1.2 :align :center
+          :on-click |x y r|
+            (do
+              (host-command "overwrite-preset" (dict))
+              (sbrowser-exit-preset-save))
+          (label (str " Overwrite: " SEQ.sidebar-loaded-preset " ")
+            :font-size 10
+            :color :white
+            :bg :transparent))
+        (box)))))
+
+(def sbrowser-preset-save-panel ()
+  (box :background "browser-panel-bg" :padding 0 :flex 1))
+
+;; ── Editor sidebar panels ──
+
+(def sbrowser-editor-header ()
+  (box :padding 0.25
+    (v-stack :gap 0.4
+      (h-stack :gap 0.5 :align :center
+        (label
+          (if (= SEQ.editor-mode "new-instrument") "New Instrument"
+            (if (= SEQ.editor-mode "edit-instrument") "Edit Instrument"
+              (if (= SEQ.editor-mode "new-effect") "New Effect"
+                (if (= SEQ.editor-mode "edit-effect") "Edit Effect"
+                  "Editor"))))
+          :font-size 12
+          :color :white
+          :bg :transparent)
+        (box :bg :dark-gray :width 6 :height 1.5 :align :center
+          :on-click |x y r| (host-command "cancel-editor" (dict))
+          (label "cancel"
+            :font-size 9
+            :color :gray
+            :bg :transparent)))
+      ;; Name input (only for new-* modes)
+      (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "new-effect"))
+        (text-input
+          :value sbrowser-editor-name
+          :placeholder (if (= SEQ.editor-mode "new-instrument") "instrument-name" "effect-name")
+          :on-change (lambda (v) (set! sbrowser-editor-name v))
+          :width 30
+          :height 1.5
+          :font-size 12)
+        ;; For edit modes, show the file name
+        (label SEQ.editor-buffer-name
+          :font-size 10
+          :color :gray
+          :bg :transparent))
+      ;; Error display
+      (if (not (= SEQ.editor-error ""))
+        (label SEQ.editor-error
+          :font-size 9
+          :color :red
+          :bg :transparent)
+        (box))
+      ;; Save button
+      (box :background "browser-pill-btn-bg" :width 10 :height 1.2
+        :on-click |x y r|
+          (if (= SEQ.editor-mode "new-instrument")
+            (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
+            (if (= SEQ.editor-mode "edit-instrument")
+              (host-command "update-instrument" (dict :name SEQ.sidebar-instrument-name))
+              (if (= SEQ.editor-mode "new-effect")
+                (host-command "save-new-effect" (dict :name sbrowser-editor-name))
+                (host-command "update-effect" (dict)))))
+        (box :width 10 :height 1.2
+          (v-stack :align :center
+            (label
+              (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "new-effect"))
+                " Save & Add "
+                " Save ")
+              :font-size 11
+              :color :white
+              :bg :transparent)))))))
+
+(def sbrowser-editor-panel ()
+  (box :background "browser-panel-bg" :padding 0 :flex 1))
+
 ;; ── Build widgets ──
 
 (def sbrowser-build-widgets ()
-  (if (sbrowser-project-save-mode?)
+  (if (sbrowser-editor-mode?)
     (list
-      (sbrowser-project-save-header)
-      (sbrowser-project-save-panel))
-    (if (sbrowser-project-browser-mode?)
+      (sbrowser-editor-header)
+      (sbrowser-editor-panel))
+    (if (sbrowser-preset-save-mode?)
       (list
-        (sbrowser-project-header)
-        (sbrowser-projects-panel))
-      (if (sbrowser-track-type-mode?)
+        (sbrowser-preset-save-header)
+        (sbrowser-preset-save-panel))
+      (if (sbrowser-project-save-mode?)
+      (list
+        (sbrowser-project-save-header)
+        (sbrowser-project-save-panel))
+      (if (sbrowser-project-browser-mode?)
         (list
-          (sbrowser-create-header)
-          (sbrowser-create-picker))
+          (sbrowser-project-header)
+          (sbrowser-projects-panel))
+        (if (sbrowser-track-type-mode?)
+          (list
+            (sbrowser-create-header)
+            (sbrowser-create-picker))
         (if (= SEQ.sidebar-kind "instrument")
           (list
             (sbrowser-instrument-header)
@@ -334,7 +493,7 @@
                     :selected-path SEQ.sidebar-selected-sample
                     :expand-all (not (= sbrowser-filter ""))
                     :on-select (lambda (item) (sbrowser-select-item item))
-                    :on-activate (lambda (item) (sbrowser-select-item item))))))))))))
+                    :on-activate (lambda (item) (sbrowser-select-item item))))))))))))))
 
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──
 

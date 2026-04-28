@@ -124,7 +124,7 @@ impl App {
         }
     }
 
-    pub(super) fn replace_current_custom_instrument_sync(
+    pub fn replace_current_custom_instrument_sync(
         &mut self,
         name: &str,
         source: &str,

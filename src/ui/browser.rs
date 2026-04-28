@@ -701,7 +701,7 @@ impl App {
             Some((format!("Loaded preset '{}'", preset.name), Instant::now()));
     }
 
-    fn save_current_track_as_preset(&mut self, preset_name: &str, overwrite: bool) {
+    pub fn save_current_track_as_preset(&mut self, preset_name: &str, overwrite: bool) {
         let Some(instrument_name) = self.current_custom_instrument_name() else {
             return;
         };
@@ -761,7 +761,7 @@ impl App {
         }
     }
 
-    pub(super) fn overwrite_loaded_preset(&mut self) {
+    pub fn overwrite_loaded_preset(&mut self) {
         let meta = self.current_track_sound_state();
         let Some(name) = meta.loaded_preset else {
             self.editor.status_message =

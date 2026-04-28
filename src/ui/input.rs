@@ -969,7 +969,7 @@ impl App {
         // Trigger row: click selects step, double-click toggles
         if rect_contains(l.trigger_row, col, row) {
             if let Some(step) = self.step_from_click_x(col, l.trigger_row.x) {
-                self.handle_step_click(step);
+                self.handle_step_click(step, modifiers);
             }
             return;
         }
@@ -1337,9 +1337,10 @@ impl App {
         }
     }
 
-    fn handle_step_click(&mut self, step: usize) {
+    fn handle_step_click(&mut self, step: usize, modifiers: KeyModifiers) {
         self.touch_follow_timer();
         let now = Instant::now();
+        let previous_step = self.ui.cursor_step;
         let is_double = self
             .ui
             .last_step_click
@@ -1350,6 +1351,16 @@ impl App {
 
         self.ui.cursor_step = step;
         self.ui.focused_region = Region::Cirklon;
+
+        let range_select =
+            modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::SUPER);
+        if range_select {
+            if self.ui.selection_anchor.is_none() {
+                self.ui.selection_anchor = Some(previous_step);
+            }
+        } else {
+            self.ui.selection_anchor = None;
+        }
 
         if is_double && !self.tracks.is_empty() {
             self.state
