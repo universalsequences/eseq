@@ -399,16 +399,27 @@ impl Editor {
 
     /// Switch the active tile (updates runtime context, saves/restores widget trees).
     pub fn switch_active_tile(&mut self, new_tile: TileId) {
+        self.switch_active_tile_with_viewport(new_tile, None);
+    }
+
+    /// Switch the active tile and restore its widget layout for a known viewport.
+    pub fn switch_active_tile_with_viewport(
+        &mut self,
+        new_tile: TileId,
+        viewport: Option<(u16, u16)>,
+    ) {
         if new_tile == self.active_tile {
             return;
         }
-        if self.tile_root.find_leaf(new_tile).is_none() {
+        let Some(target_leaf) = self.tile_root.find_leaf(new_tile) else {
             return;
-        }
+        };
+        let cached_layout = target_leaf.cached_layout.clone();
+        let layout_revision = target_leaf.layout_revision;
         self.save_current_widget_tree();
         self.active_tile = new_tile;
         self.sync_runtime_context();
-        self.restore_buffer_widget_tree();
+        self.restore_buffer_widget_tree_with_cached_layout(cached_layout, viewport, layout_revision);
         self.mark_needs_redraw();
     }
 
@@ -845,13 +856,13 @@ impl Editor {
             .tile_content_area(previous_tile, border_inset)
             .map(|(_, _, width, height)| (width, height));
 
-        if switched {
-            self.switch_active_tile(tile_id);
-        }
-        if let Some((width, height)) = self
+        let target_viewport = self
             .tile_content_area(tile_id, border_inset)
-            .map(|(_, _, width, height)| (width, height))
-        {
+            .map(|(_, _, width, height)| (width, height));
+
+        if switched {
+            self.switch_active_tile_with_viewport(tile_id, target_viewport);
+        } else if let Some((width, height)) = target_viewport {
             self.set_layout_viewport(width, height);
         }
 
@@ -1688,6 +1699,90 @@ impl Editor {
         self.clear_mark();
         self.clear_widget_focus();
         Ok(id)
+    }
+
+    /// Create a file-backed buffer without switching the active tile to it.
+    /// Returns the buffer name (filename) for later use with `swap_buffer_in_tile_showing`.
+    pub fn create_file_buffer(
+        &mut self,
+        path: impl Into<PathBuf>,
+        mode: BufferMode,
+    ) -> Result<String, EditorError> {
+        let path = path.into();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(EditorError::Io(err)),
+        };
+        let name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        let id = self.alloc_buffer_id();
+        let mut buffer = Buffer::new(id, &name);
+        buffer.set_text(&text);
+        buffer.set_path(path);
+        buffer.set_mode(mode);
+        buffer.dirty = false;
+        self.buffers.push(buffer);
+        Ok(name)
+    }
+
+    /// Switch the buffer shown in the tile currently displaying `current_name`
+    /// to the buffer named `new_name`. Does not change which tile is active.
+    pub fn swap_buffer_in_tile_showing(&mut self, current_name: &str, new_name: &str) -> bool {
+        let current_idx = self.buffers.iter().position(|b| b.name == current_name);
+        let new_idx = self.buffers.iter().position(|b| b.name == new_name);
+        if let (Some(cur), Some(new)) = (current_idx, new_idx) {
+            if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(cur) {
+                leaf.buffer_idx = new;
+                // Invalidate all cached rendering state so the new buffer
+                // renders immediately instead of showing the old widget tree.
+                leaf.cached_layout = None;
+                leaf.cached_inactive_frame = None;
+                leaf.hit_grid_cache = None;
+                leaf.highlight_cache = None;
+                leaf.widget_scroll_top = 0.0;
+                leaf.widget_scroll_left = 0.0;
+                self.mark_needs_redraw();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Read the text content of a buffer by name.
+    pub fn read_buffer_text(&self, name: &str) -> Option<String> {
+        self.buffers
+            .iter()
+            .find(|b| b.name == name)
+            .map(|b| b.lines.join("\n"))
+    }
+
+    /// Remove a buffer by name. Returns true if found and removed.
+    pub fn remove_buffer_by_name(&mut self, name: &str) -> bool {
+        if let Some(idx) = self.buffers.iter().position(|b| b.name == name) {
+            self.buffers.remove(idx);
+            // Fix up any tile leaf buffer indices that pointed past the removed slot
+            Self::fix_leaf_indices(&mut self.tile_root, idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn fix_leaf_indices(node: &mut crate::tile::TileNode, removed_idx: usize) {
+        match node {
+            crate::tile::TileNode::Leaf(leaf) => {
+                if leaf.buffer_idx > removed_idx {
+                    leaf.buffer_idx -= 1;
+                }
+            }
+            crate::tile::TileNode::Split(s) => {
+                Self::fix_leaf_indices(&mut s.a, removed_idx);
+                Self::fix_leaf_indices(&mut s.b, removed_idx);
+            }
+        }
     }
 
     pub fn set_active_buffer(&mut self, id: BufferId) {
@@ -3205,6 +3300,13 @@ impl Editor {
                         self.refresh_inactive_tile_layouts_for_buffer(idx);
                     } else {
                         self.minibuffer = Some(format!("No buffer named '{name}'"));
+                    }
+                }
+                crate::runtime::TileOp::SetWindowBufferFor { current, new_name } => {
+                    if !self.swap_buffer_in_tile_showing(&current, &new_name) {
+                        self.minibuffer = Some(format!(
+                            "Could not swap '{current}' → '{new_name}'"
+                        ));
                     }
                 }
             }

@@ -821,6 +821,23 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
     );
 
     runtime.register_native_with_docs(
+        "set-window-buffer-for",
+        "(set-window-buffer-for current-name new-name)",
+        "Switch the buffer in the tile currently showing current-name to new-name.",
+        |args, ctx| {
+            let (Some(Value::String(current)), Some(Value::String(new_name))) =
+                (args.first(), args.get(1))
+            else {
+                return Err(
+                    "set-window-buffer-for expects two buffer name strings".to_string(),
+                );
+            };
+            ctx.set_window_buffer_for(current.clone(), new_name.clone());
+            Ok(Value::Bool(true))
+        },
+    );
+
+    runtime.register_native_with_docs(
         "window-hide-status",
         "(window-hide-status)",
         "Toggle the status bar for the current tile.",

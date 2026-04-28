@@ -359,6 +359,35 @@ impl Editor {
         }
     }
 
+    pub(super) fn restore_buffer_widget_tree_with_cached_layout(
+        &mut self,
+        cached_layout: Option<std::sync::Arc<LayoutNode>>,
+        viewport: Option<(u16, u16)>,
+        layout_revision: u64,
+    ) {
+        crate::widget_render::clear_overlay();
+        let buf = self.active_buffer();
+        let tree = buf.widget_tree.clone();
+        let snapshot = buf.committed_ui_snapshot.clone();
+        let buffer_id = buf.id as u64;
+        match tree {
+            Some(tree) => {
+                self.runtime.restore_widget_tree_with_cached_layout(
+                    tree,
+                    snapshot,
+                    cached_layout,
+                    viewport,
+                    buffer_id * 100_000,
+                    layout_revision,
+                );
+                self.sync_layout_to_active_leaf();
+            }
+            None => {
+                self.clear_widget_focus();
+            }
+        }
+    }
+
     pub(super) fn auto_focus_first_widget(&mut self) {
         if !self.widgets_active() {
             self.active_leaf_mut().focused_widget_id = None;

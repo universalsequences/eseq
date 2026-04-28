@@ -554,6 +554,8 @@ pub enum TileOp {
     DeleteOtherWindows,
     OtherWindow,
     SetWindowBuffer(String),
+    /// Switch the buffer in the tile currently showing `current` to `new_name`.
+    SetWindowBufferFor { current: String, new_name: String },
     SetLayout(LayoutSpec),
 }
 
@@ -839,6 +841,13 @@ impl NativeContext {
             .borrow_mut()
             .pending_tile_ops
             .push(TileOp::SetWindowBuffer(name));
+    }
+
+    pub fn set_window_buffer_for(&mut self, current: String, new_name: String) {
+        self.shared
+            .borrow_mut()
+            .pending_tile_ops
+            .push(TileOp::SetWindowBufferFor { current, new_name });
     }
 
     pub fn window_hide_status(&mut self) {
@@ -1796,6 +1805,41 @@ impl Runtime {
         self.relayout_current_tree();
         // Force layout revision bump so GPU caches rebuild
         self.layout_revision = self.layout_revision.wrapping_add(1);
+    }
+
+    /// Restore a previously saved widget tree and, when available, its cached
+    /// layout for the viewport that is about to become active.
+    pub fn restore_widget_tree_with_cached_layout(
+        &mut self,
+        tree: Value,
+        snapshot: Option<CommittedBufferUiSnapshot>,
+        cached_layout: Option<Arc<LayoutNode>>,
+        viewport: Option<(u16, u16)>,
+        widget_id_offset: u64,
+        layout_revision: u64,
+    ) {
+        if let Some((cols, rows)) = viewport {
+            self.layout_cols = cols.max(1);
+            self.layout_rows = rows.max(1);
+        }
+        self.widget_id_offset = widget_id_offset;
+        self.current_widget_tree = Some(tree.clone());
+        self.current_committed_ui_snapshot = snapshot.or_else(|| {
+            Some(CommittedBufferUiSnapshot::from_tree(
+                tree,
+                self.shared.borrow().current_buffer_id,
+                Vec::new(),
+            ))
+        });
+        if let Some(layout) = cached_layout {
+            self.current_layout = Some(layout);
+            self.layout_revision = layout_revision.wrapping_add(1);
+            self.dirty_widget_ids.clear();
+        } else {
+            self.current_layout = None;
+            self.relayout_current_tree();
+            self.layout_revision = self.layout_revision.wrapping_add(1);
+        }
     }
 
     pub fn replace_current_subtree(
