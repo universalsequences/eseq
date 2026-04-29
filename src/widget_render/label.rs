@@ -16,7 +16,12 @@ pub struct LabelWidget;
 
 pub static LABEL_WIDGET: LabelWidget = LabelWidget;
 
-fn resolve_color(props: &HashMap<String, Value>) -> Color {
+fn resolve_color(props: &HashMap<String, Value>, hovered: bool) -> Color {
+    if hovered {
+        if let Some(value) = props.get("hover-color") {
+            return crate::theme::parse_color_value(value).unwrap_or(theme::WIDGET_LABEL_FG());
+        }
+    }
     resolve_named_color(props, "color", theme::WIDGET_LABEL_FG())
 }
 
@@ -26,7 +31,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
         _ => return,
     };
 
-    let fg = resolve_color(props);
+    let fg = resolve_color(props, false);
     let row_u16 = rect.row.round() as u16;
     let col_u16 = rect.col.round() as u16;
     let width_u16 = rect.width.round() as u16;
@@ -110,7 +115,7 @@ impl WidgetDefinition for LabelWidget {
         let Some(Value::String(text)) = node.props.get("text") else {
             return Vec::new();
         };
-        let fg = resolve_color(&node.props);
+        let fg = resolve_color(&node.props, viewport.inherited_hover);
         let bg_transparent = matches!(
             node.props.get("bg"),
             Some(Value::Keyword(k)) if k == "transparent"

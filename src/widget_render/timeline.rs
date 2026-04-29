@@ -63,6 +63,7 @@ struct TimelineView {
     view_duration: f64,
     zoom_min_duration: f64,
     zoom_max_duration: f64,
+    content_length: Option<f64>,
     time_ruler: Option<TimeRuler>,
     playhead_time: Option<f64>,
     lane_scroll: f64,
@@ -527,6 +528,21 @@ fn build_metal_primitives(
         }));
     }
 
+    if let Some((x, y, width, height)) = view.unavailable_rect() {
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x,
+            y,
+            width,
+            height,
+            color: crate::backend::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.36,
+            },
+        }));
+    }
+
     if let Some((x, y, width, height)) = view.metal_selection_rect() {
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x,
@@ -622,6 +638,10 @@ impl TimelineView {
             view_duration,
             zoom_min_duration: get_num(props, "zoom-min-duration", 8.0).max(0.0001),
             zoom_max_duration: get_num(props, "zoom-max-duration", 128.0).max(0.0001),
+            content_length: props
+                .get("content-length")
+                .and_then(as_number)
+                .map(|length| length.max(0.0)),
             time_ruler: props
                 .get("time-ruler")
                 .and_then(get_map)
@@ -665,6 +685,41 @@ impl TimelineView {
 
     fn content_rect(&self) -> Rect {
         self.time_viewport().content_rect()
+    }
+
+    fn unavailable_rect(&self) -> Option<(f32, f32, f32, f32)> {
+        let content_length = self.content_length?;
+        if content_length >= self.view_start + self.view_duration {
+            return None;
+        }
+        let content = self.content_rect();
+        if content.width <= 0.0 || self.rect.width <= 0.0 || self.rect.height <= 0.0 {
+            return None;
+        }
+        let start_time = content_length.max(self.view_start);
+        let x = self.x_for_time(start_time).max(content.col);
+        let width = (self.rect.col + self.rect.width - x).max(0.0);
+        if width <= 0.0 {
+            return None;
+        }
+        Some((x, self.rect.row, width, self.rect.height))
+    }
+
+    fn minimum_duration(&self) -> f64 {
+        self.effective_resize_snap().max(0.0001)
+    }
+
+    fn minimum_end_for(&self, item: &TimelineItem) -> f64 {
+        item.start + self.minimum_duration()
+    }
+
+    fn bounded_span(&self, start_time: f64, current_time: f64) -> (f64, f64) {
+        let min_duration = self.minimum_duration();
+        if current_time >= start_time {
+            (start_time, current_time.max(start_time + min_duration))
+        } else {
+            (current_time, start_time.max(current_time + min_duration))
+        }
     }
 
     fn lane_height(&self) -> f32 {
@@ -1091,7 +1146,10 @@ impl TimelineView {
                     ("type", keyword(":resize-item-absolute")),
                     ("id", id),
                     ("edge", keyword(":end")),
-                    ("time", Value::Number(current_resize_time.max(item.start))),
+                    (
+                        "time",
+                        Value::Number(current_resize_time.max(self.minimum_end_for(item))),
+                    ),
                 ]))
             }
             Some(Value::Keyword(kind)) if kind == "marquee" => {
@@ -1114,11 +1172,12 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "draw" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)?;
+                let (start, end) = self.bounded_span(start_time, current_resize_time);
                 Some(action_map(vec![
                     ("type", keyword(":create-item")),
                     ("lane", Value::Number(start_lane)),
-                    ("start", Value::Number(start_time.min(current_resize_time))),
-                    ("end", Value::Number(start_time.max(current_resize_time))),
+                    ("start", Value::Number(start)),
+                    ("end", Value::Number(end)),
                 ]))
             }
             Some(Value::Keyword(kind)) if kind == "pan" => {
@@ -1294,10 +1353,14 @@ impl TimelineView {
             ]));
         }
 
+        let horizontal_dominant = delta_x.abs() >= delta_y.abs();
         let lane_height = self.lane_height();
-        let delta_time =
-            -(delta_x as f64 / content.width.max(1.0) as f64) * self.view_duration * 0.0625;
-        let delta_lanes = if lane_height > 0.0 {
+        let delta_time = if horizontal_dominant {
+            -(delta_x as f64 / content.width.max(1.0) as f64) * self.view_duration * 0.0625
+        } else {
+            0.0
+        };
+        let delta_lanes = if !horizontal_dominant && lane_height > 0.0 {
             -(delta_y / lane_height) as f64 * 0.0625
         } else {
             0.0
@@ -1332,11 +1395,12 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "draw" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)?;
+                let (start, end) = self.bounded_span(start_time, current_resize_time);
                 Some(action_map(vec![
                     ("type", keyword(":finish-create-item")),
                     ("lane", Value::Number(start_lane)),
-                    ("start", Value::Number(start_time.min(current_resize_time))),
-                    ("end", Value::Number(start_time.max(current_resize_time))),
+                    ("start", Value::Number(start)),
+                    ("end", Value::Number(end)),
                 ]))
             }
             Some(Value::Keyword(kind)) if kind == "marquee" => {
@@ -2001,6 +2065,103 @@ mod tests {
     }
 
     #[test]
+    fn resize_end_clamps_to_minimum_snap_duration() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(10.0)),
+                    ("lane", number_value(0.0)),
+                    ("start", number_value(4.0)),
+                    ("end", number_value(8.0)),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("resize-snap".to_string(), number_value(0.5)),
+            ("resize-snap-mode".to_string(), keyword_value("round")),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let gesture = map_value_raw(vec![
+            ("kind", keyword_value("resize-end")),
+            ("id", number_value(10.0)),
+        ]);
+        let action = view
+            .handle_pointer_drag(7.0, 2.0, Some(&gesture))
+            .expect("resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("time").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.5))
+        );
+    }
+
+    #[test]
+    fn draw_create_clamps_to_minimum_snap_duration() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("draw")),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("resize-snap".to_string(), number_value(0.25)),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+        let gesture = map_value_raw(vec![
+            ("kind", keyword_value("draw")),
+            ("time", number_value(4.0)),
+            ("lane", number_value(0.0)),
+        ]);
+        let action = view
+            .handle_pointer_up(8.0, 2.0, Some(&gesture))
+            .expect("finish action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.0))
+        );
+        assert_eq!(
+            map.get("end").map(|value| value.borrow().clone()),
+            Some(Value::Number(4.25))
+        );
+    }
+
+    #[test]
     fn grid_resize_snap_follows_zoomed_ruler_resolution() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
@@ -2045,6 +2206,26 @@ mod tests {
 
         assert_eq!(view.effective_resize_snap(), 0.5);
         assert_eq!(view.snap_resize_time(3.4), 3.5);
+    }
+
+    #[test]
+    fn content_length_marks_unavailable_region() {
+        let props = HashMap::from([
+            ("view-start".to_string(), number_value(12.0)),
+            ("view-duration".to_string(), number_value(8.0)),
+            ("content-length".to_string(), number_value(16.0)),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 100.0,
+                height: 8.0,
+            },
+        );
+
+        assert_eq!(view.unavailable_rect(), Some((50.0, 0.0, 50.0, 8.0)));
     }
 
     #[test]
@@ -2350,7 +2531,7 @@ mod tests {
     }
 
     #[test]
-    fn touchpad_scroll_emits_fractional_scroll_view_action() {
+    fn touchpad_scroll_locks_to_dominant_axis() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
             ("view-start".to_string(), number_value(4.0)),
@@ -2387,6 +2568,21 @@ mod tests {
             map.get("delta-time").map(|value| value.borrow().clone()),
             Some(Value::Number(delta)) if delta < 0.0 && delta > -16.0
         ));
+        assert_eq!(
+            map.get("delta-lanes").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
+
+        let action = view
+            .handle_touchpad_scroll(10.0, 2.0, 8.0, 12.0)
+            .expect("touchpad scroll action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("delta-time").map(|value| value.borrow().clone()),
+            Some(Value::Number(0.0))
+        );
         assert!(matches!(
             map.get("delta-lanes").map(|value| value.borrow().clone()),
             Some(Value::Number(delta)) if delta < 0.0 && delta > -8.0

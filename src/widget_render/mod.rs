@@ -313,6 +313,8 @@ pub struct WidgetViewport {
     pub scroll_top: f32,
     /// Total horizontal scroll already applied before tile-position offset.
     pub scroll_left: f32,
+    /// True when a parent container is currently hovered.
+    pub inherited_hover: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -649,6 +651,7 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     node.rect.col.to_bits().hash(&mut hasher);
     node.rect.width.to_bits().hash(&mut hasher);
     node.rect.height.to_bits().hash(&mut hasher);
+    widget_state_generation().hash(&mut hasher);
     viewport.cell_w.to_bits().hash(&mut hasher);
     viewport.cell_h.to_bits().hash(&mut hasher);
     viewport.vp_w.to_bits().hash(&mut hasher);
@@ -795,12 +798,18 @@ fn collect_metal_primitives_recursive(
     }
 
     if node.widget_type == "box" && node.props.contains_key("background") {
+        let child_hover =
+            crate::widget_render::sdf_widget::get_sdf_hit_state(node.widget_id).hit_region >= 0;
+        let child_viewport = WidgetViewport {
+            inherited_hover: node_viewport.inherited_hover || child_hover,
+            ..node_viewport
+        };
         primitives.push(MetalPrimitive::PushClipRect(node.rect));
         primitives.extend(widget_primitives_for_node(node, node_viewport));
         for child in &node.children {
             collect_metal_primitives_recursive(
                 child,
-                node_viewport,
+                child_viewport,
                 _scroll_top,
                 _max_rows,
                 primitives,

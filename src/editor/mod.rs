@@ -1555,6 +1555,7 @@ impl Editor {
         let leaf = self.active_leaf_mut();
         leaf.widget_scroll_top = (leaf.widget_scroll_top - delta_cells_y).clamp(0.0, max_v);
         leaf.widget_scroll_left = (leaf.widget_scroll_left - delta_cells_x).clamp(0.0, max_h);
+        crate::widget_render::sdf_widget::clear_sdf_hit_states_except(None);
         self.mark_needs_redraw();
     }
 
@@ -2309,6 +2310,7 @@ impl Editor {
                 if self.active_buffer().view_mode == ViewMode::TextOnly {
                     let leaf = self.active_leaf_mut();
                     leaf.widget_scroll_left = (leaf.widget_scroll_left - 3.0).max(0.0);
+                    crate::widget_render::sdf_widget::clear_sdf_hit_states_except(None);
                     self.mark_needs_redraw();
                     return;
                 }
@@ -2324,6 +2326,7 @@ impl Editor {
                     if widgets_visible {
                         let leaf = self.active_leaf_mut();
                         leaf.widget_scroll_left = (leaf.widget_scroll_left - 3.0).max(0.0);
+                        crate::widget_render::sdf_widget::clear_sdf_hit_states_except(None);
                         self.mark_needs_redraw();
                     }
                 }
@@ -2334,6 +2337,7 @@ impl Editor {
                     let leaf = self.active_leaf_mut();
                     leaf.widget_scroll_left =
                         (leaf.widget_scroll_left + 3.0).min(max_scroll as f32);
+                    crate::widget_render::sdf_widget::clear_sdf_hit_states_except(None);
                     self.mark_needs_redraw();
                     return;
                 }
@@ -2351,6 +2355,7 @@ impl Editor {
                         let leaf = self.active_leaf_mut();
                         leaf.widget_scroll_left =
                             (leaf.widget_scroll_left + 3.0).min(max_scroll as f32);
+                        crate::widget_render::sdf_widget::clear_sdf_hit_states_except(None);
                         self.mark_needs_redraw();
                     }
                 }

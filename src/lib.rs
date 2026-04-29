@@ -224,8 +224,13 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         }
 
         // Process touchpad gestures (Metal-specific, not crossterm events)
+        let mut handled_magnify = false;
         while let Some((delta, (precise_col, precise_row))) = backend.take_pending_magnify() {
             editor.handle_tiled_touchpad_magnify(precise_col, precise_row, 0, delta);
+            handled_magnify = true;
+        }
+        if handled_magnify {
+            while backend.take_pending_scroll().is_some() {}
         }
         while let Some(((delta_x, delta_y), (precise_col, precise_row))) =
             backend.take_pending_scroll()
@@ -1457,6 +1462,7 @@ mod tests {
                 focused_widget_id: None,
                 focused_branch: false,
                 tile_content_rows: 24.0,
+                inherited_hover: false,
             },
         );
 

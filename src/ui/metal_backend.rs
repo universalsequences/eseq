@@ -602,6 +602,7 @@ fragment float4 waveform_frag(
         pending_move: Option<Event>,
         pending_magnify: VecDeque<(f64, (f32, f32))>,
         pending_scroll: VecDeque<((f32, f32), (f32, f32))>,
+        suppress_scroll_until: Option<Instant>,
         modifiers: KeyModifiers,
         pressed_mouse_button: Option<MouseButton>,
         cursor_cell: (u16, u16),
@@ -649,6 +650,7 @@ fragment float4 waveform_frag(
                 pending_move: None,
                 pending_magnify: VecDeque::new(),
                 pending_scroll: VecDeque::new(),
+                suppress_scroll_until: None,
                 modifiers: KeyModifiers::NONE,
                 pressed_mouse_button: None,
                 cursor_cell: (0, 0),
@@ -1181,6 +1183,7 @@ fragment float4 waveform_frag(
                         tile_content_rows: inner_rows as f32,
                         scroll_top: tile.frame.widget_scroll_top,
                         scroll_left: tile.frame.widget_scroll_left,
+                        inherited_hover: false,
                     };
                     let scene_started = Instant::now();
                     let primitives = self.widget_scene_for_layout(
@@ -1907,6 +1910,7 @@ fragment float4 waveform_frag(
             let pending_move = &mut self.pending_move;
             let pending_magnify = &mut self.pending_magnify;
             let pending_scroll = &mut self.pending_scroll;
+            let suppress_scroll_until = &mut self.suppress_scroll_until;
             let modifiers = &mut self.modifiers;
             let pressed_mouse_button = &mut self.pressed_mouse_button;
             let cursor_cell = &mut self.cursor_cell;
@@ -2034,6 +2038,12 @@ fragment float4 waveform_frag(
                         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                             return;
                         }
+                        if let Some(until) = *suppress_scroll_until {
+                            if Instant::now() < until {
+                                return;
+                            }
+                            *suppress_scroll_until = None;
+                        }
                         match delta {
                             MouseScrollDelta::LineDelta(x, y) => {
                                 // Convert line deltas to pixel deltas and route through
@@ -2053,6 +2063,8 @@ fragment float4 waveform_frag(
                         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                             return;
                         }
+                        pending_scroll.clear();
+                        *suppress_scroll_until = Some(Instant::now() + Duration::from_millis(120));
                         pending_magnify.push_back((delta, *cursor_pos));
                     }
                     _ => {}
@@ -2123,6 +2135,7 @@ fragment float4 waveform_frag(
                             tile_content_rows: max_rows as f32,
                             scroll_top: frame.widget_scroll_top,
                             scroll_left: frame.widget_scroll_left,
+                            inherited_hover: false,
                         },
                         frame.widget_scroll_top,
                         max_rows,
