@@ -367,6 +367,13 @@ struct SampleTreeNode {
     children: Vec<SampleTreeNode>,
 }
 
+#[derive(Clone)]
+struct InstrumentTreeNode {
+    label: String,
+    name: Option<String>,
+    children: Vec<InstrumentTreeNode>,
+}
+
 #[derive(Clone, Debug)]
 struct HeldKeyboardNote {
     key: char,
@@ -464,6 +471,137 @@ fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
             })
             .collect(),
     )
+}
+
+fn build_instrument_tree_nodes(dir: &std::path::Path, root: &std::path::Path) -> Vec<InstrumentTreeNode> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut files: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            dirs.push((name, path));
+        } else if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
+            let label = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if let Ok(rel) = path.strip_prefix(root) {
+                let instrument_name = rel.with_extension("").to_string_lossy().replace('\\', "/");
+                files.push((label, instrument_name));
+            }
+        }
+    }
+    dirs.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    files.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+
+    let mut items = Vec::new();
+    for (label, path) in dirs {
+        let children = build_instrument_tree_nodes(&path, root);
+        if !children.is_empty() {
+            items.push(InstrumentTreeNode {
+                label,
+                name: None,
+                children,
+            });
+        }
+    }
+    for (label, name) in files {
+        items.push(InstrumentTreeNode {
+            label,
+            name: Some(name),
+            children: Vec::new(),
+        });
+    }
+    items
+}
+
+fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
+    Value::List(
+        items
+            .iter()
+            .map(|item| {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "label".to_string(),
+                    Rc::new(RefCell::new(Value::String(item.label.clone()))),
+                );
+                if let Some(name) = &item.name {
+                    map.insert(
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String(name.clone()))),
+                    );
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("instrument".to_string()))),
+                    );
+                }
+                if !item.children.is_empty() {
+                    map.insert(
+                        "children".to_string(),
+                        Rc::new(RefCell::new(instrument_tree_nodes_to_value(&item.children))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
+
+fn build_instrument_tree_value() -> Value {
+    let mut top = vec![
+        InstrumentTreeNode {
+            label: "Sampler".to_string(),
+            name: None,
+            children: Vec::new(),
+        },
+        InstrumentTreeNode {
+            label: "+ New Instrument".to_string(),
+            name: None,
+            children: Vec::new(),
+        },
+    ];
+    if let Some(node) = top.get_mut(0) {
+        node.name = Some("Sampler".to_string());
+    }
+    if let Some(node) = top.get_mut(1) {
+        node.name = Some("+ New Instrument".to_string());
+    }
+    let root = std::path::Path::new("instruments");
+    top.extend(build_instrument_tree_nodes(root, root));
+
+    let mut value = instrument_tree_nodes_to_value(&top);
+    if let Value::List(items) = &mut value {
+        if let Some(item) = items.get(0) {
+            if let Value::Map(map) = &mut *item.borrow_mut() {
+                map.insert(
+                    "kind".to_string(),
+                    Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+                );
+            }
+        }
+        if let Some(item) = items.get(1) {
+            if let Value::Map(map) = &mut *item.borrow_mut() {
+                map.insert(
+                    "kind".to_string(),
+                    Rc::new(RefCell::new(Value::String("new-instrument".to_string()))),
+                );
+            }
+        }
+    }
+    value
 }
 
 fn filter_sample_tree_nodes(items: &[SampleTreeNode], query_lower: &str) -> Vec<SampleTreeNode> {
@@ -720,6 +858,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("playhead-page", Value::Number(0.0)),
                 ("sidebar-kind", Value::String("sampler".to_string())),
                 ("sidebar-instrument-name", Value::String(String::new())),
+                (
+                    "sidebar-instrument-display-name",
+                    Value::String(String::new()),
+                ),
                 ("sidebar-loaded-preset", Value::String(String::new())),
                 ("sidebar-selected-sample", Value::String(String::new())),
                 ("sidebar-presets", Value::List(vec![])),
@@ -1597,6 +1739,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|name| Rc::new(RefCell::new(Value::String(name))))
                 .collect(),
         ))
+    });
+    runtime.register_native("seq-saved-instrument-tree", move |_args, _ctx| {
+        Ok(build_instrument_tree_value())
     });
 
     // 4. Create editor with Metal backend
@@ -4114,6 +4259,26 @@ fn piano_roll_transpose_to_lane(transpose: f32) -> usize {
         .clamp(0, PIANO_ROLL_MAX_TRANSPOSE - PIANO_ROLL_MIN_TRANSPOSE) as usize
 }
 
+fn piano_roll_transpose_label(transpose: f32) -> String {
+    let rounded = transpose.round() as i32;
+    let pitch = rounded + 60;
+    let name = match pitch.rem_euclid(12) {
+        0 => "C",
+        1 => "C#",
+        2 => "D",
+        3 => "D#",
+        4 => "E",
+        5 => "F",
+        6 => "F#",
+        7 => "G",
+        8 => "G#",
+        9 => "A",
+        10 => "A#",
+        _ => "B",
+    };
+    format!("{name}{}", 4 + rounded.div_euclid(12))
+}
+
 fn piano_roll_item_id(step: usize, voice_idx: usize) -> u64 {
     (step * PIANO_ROLL_ID_STRIDE + voice_idx.min(PIANO_ROLL_ID_STRIDE - 1)) as u64
 }
@@ -4288,7 +4453,7 @@ fn build_piano_roll_items_value(
                 ("start", Value::Number(step as f64)),
                 ("end", Value::Number((step as f32 + note.duration) as f64)),
                 ("selected", Value::Bool(selected.contains(&id))),
-                ("color", Value::Keyword("cyan".to_string())),
+                ("label", Value::String(piano_roll_transpose_label(note.transpose))),
             ]));
         }
     }
@@ -6036,6 +6201,14 @@ fn current_custom_instrument_name(app: &ui::App, track: usize) -> Option<String>
     }
 }
 
+fn instrument_display_name(name: &str) -> String {
+    Path::new(name)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(name)
+        .to_string()
+}
+
 fn visible_preset_items_for_track(app: &ui::App, track: usize) -> Vec<String> {
     let Some(name) = current_custom_instrument_name(app, track) else {
         return Vec::new();
@@ -6061,6 +6234,11 @@ fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
         rt.set_reactive(
             "SEQ",
             "sidebar-instrument-name",
+            Value::String(String::new()),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "sidebar-instrument-display-name",
             Value::String(String::new()),
         );
         rt.set_reactive("SEQ", "sidebar-loaded-preset", Value::String(String::new()));
@@ -6094,7 +6272,12 @@ fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
     rt.set_reactive(
         "SEQ",
         "sidebar-instrument-name",
-        Value::String(instrument_name),
+        Value::String(instrument_name.clone()),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "sidebar-instrument-display-name",
+        Value::String(instrument_display_name(&instrument_name)),
     );
     rt.set_reactive(
         "SEQ",

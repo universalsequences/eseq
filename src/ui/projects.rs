@@ -288,9 +288,15 @@ impl App {
                         sample_path: path.to_string_lossy().to_string(),
                     })
                 } else {
-                    Ok(ProjectTrack::Custom {
-                        instrument_name: name.clone(),
-                    })
+                    let instrument_name = self
+                        .graph
+                        .track_engine_ids
+                        .get(track_idx)
+                        .and_then(|engine_id| *engine_id)
+                        .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
+                        .map(|engine| engine.name.clone())
+                        .unwrap_or_else(|| name.clone());
+                    Ok(ProjectTrack::Custom { instrument_name })
                 }
             })
             .collect()

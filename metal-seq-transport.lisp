@@ -135,7 +135,7 @@
             (rgba 0 0 0 0)))))))
 
 (defwidget add-track-icon
-  :width 2.5 :height 1.8
+  :width 2.5 :height 2.5
   :paint-margin 0.5
   :state (active)
   :shader
@@ -303,7 +303,7 @@
     
     (box :background "transport-btn-bg" 
       :active (if (sbrowser-create-mode?) 1 0)
-      :padding 0.015 :height 1.4 :width 3.
+      :padding 0.015 :height 1.4 :width 2.9
       (add-track-icon
         :on-click |x y r| (sbrowser-toggle-create-track-mode)
         :active (if (sbrowser-create-mode?) 1 0)))

@@ -3,7 +3,7 @@
 
 (defstate piano-roll-tool :pointer)
 (defstate piano-roll-view-start 0)
-(defstate piano-roll-view-duration 32)
+(defstate piano-roll-view-duration 10.6667)
 (defstate piano-roll-lane-scroll 36)
 (defstate piano-roll-lane-height 1)
 (defstate piano-roll-cursor-time 0)
@@ -95,7 +95,10 @@
     :height 35
     :focusable true
     :sidebar-width 5
+    :header-height 2
     :time-ruler (dict :mode :bars-beats :beats-per-bar 4)
+    :item-color :blue
+    :loop-color :blue
     :tool piano-roll-tool
     :playhead-time SEQ.playhead
     :lanes SEQ.piano-roll-lanes

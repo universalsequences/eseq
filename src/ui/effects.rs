@@ -23,6 +23,14 @@ pub(super) enum OverlayPickerKind {
     Instrument,
 }
 
+fn instrument_display_name(name: &str) -> String {
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .to_string()
+}
+
 impl App {
     fn sync_scratch_runtime_descriptors(&self) {
         self.state.set_scratch_runtime_descriptors(
@@ -167,7 +175,7 @@ impl App {
             },
         );
 
-        self.tracks[track] = name.to_string();
+        self.tracks[track] = instrument_display_name(name);
         if let Some(sound) = self
             .state
             .pattern
@@ -810,7 +818,7 @@ impl App {
                             },
                         );
                     }
-                    self.tracks[self.ui.cursor_track] = name.to_string();
+                    self.tracks[self.ui.cursor_track] = instrument_display_name(name);
                     if let Some(sound) = self
                         .state
                         .pattern
@@ -862,7 +870,7 @@ impl App {
                                 },
                             );
                         }
-                        self.tracks[self.ui.cursor_track] = r.name.clone();
+                        self.tracks[self.ui.cursor_track] = instrument_display_name(&r.name);
                         if let Some(sound) = self
                             .state
                             .pattern

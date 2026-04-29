@@ -1088,12 +1088,54 @@ struct InstrumentPresetBank {
     presets: Vec<InstrumentPreset>,
 }
 
-fn instrument_preset_path(name: &str) -> PathBuf {
-    Path::new(INSTRUMENTS_DIR).join(format!("{name}.presets"))
+fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<PathBuf> {
+    fn collect_matches(dir: &Path, file_name: &str, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_matches(&path, file_name, out);
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(file_name) {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = Path::new(INSTRUMENTS_DIR);
+    let exact = root.join(format!("{name}.{extension}"));
+    if exact.exists() {
+        return Ok(exact);
+    }
+
+    let basename = Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let file_name = format!("{basename}.{extension}");
+    let mut matches = Vec::new();
+    collect_matches(root, &file_name, &mut matches);
+    matches.sort_by_key(|path| path.to_string_lossy().to_lowercase());
+
+    match matches.len() {
+        0 => Ok(exact),
+        1 => Ok(matches.remove(0)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "Ambiguous instrument '{name}': found multiple {file_name} files under {INSTRUMENTS_DIR}"
+            ),
+        )),
+    }
+}
+
+fn instrument_preset_path(name: &str) -> io::Result<PathBuf> {
+    resolve_instrument_storage_path(name, "presets")
 }
 
 pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> {
-    let path = instrument_preset_path(name);
+    let path = instrument_preset_path(name)?;
     match std::fs::read_to_string(&path) {
         Ok(src) => {
             let bank: InstrumentPresetBank = serde_json::from_str(&src).map_err(|e| {
@@ -1110,9 +1152,10 @@ pub fn load_instrument_presets(name: &str) -> io::Result<Vec<InstrumentPreset>> 
 }
 
 pub fn save_instrument_presets(name: &str, presets: &[InstrumentPreset]) -> io::Result<()> {
-    let dir = Path::new(INSTRUMENTS_DIR);
-    std::fs::create_dir_all(dir)?;
-    let path = instrument_preset_path(name);
+    let path = instrument_preset_path(name)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let bank = InstrumentPresetBank {
         version: 1,
         engine_name: name.to_string(),
@@ -1302,36 +1345,40 @@ pub fn build_init_message_for_voice(
 // ── Instrument storage ──
 
 pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
-    let dir = Path::new(INSTRUMENTS_DIR);
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{}.lisp", name));
+    let path = resolve_instrument_storage_path(name, "lisp")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(&path, source)
 }
 
 pub fn list_saved_instruments() -> Vec<String> {
+    fn collect(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect(&path, root, out);
+            } else if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    let without_ext = rel.with_extension("");
+                    out.push(without_ext.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+
     let dir = Path::new(INSTRUMENTS_DIR);
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .ok()
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let path = e.path();
-                    if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
-                        path.file_stem().map(|s| s.to_string_lossy().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
+    let mut names = Vec::new();
+    collect(dir, dir, &mut names);
+    names.sort_by_key(|name| name.to_lowercase());
     names
 }
 
 pub fn load_instrument_source(name: &str) -> io::Result<String> {
-    let path = Path::new(INSTRUMENTS_DIR).join(format!("{}.lisp", name));
+    let path = resolve_instrument_storage_path(name, "lisp")?;
     std::fs::read_to_string(&path)
 }
 

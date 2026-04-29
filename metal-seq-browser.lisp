@@ -183,27 +183,21 @@
 (def sbrowser-instrument-header ()
   (box :padding 0.25
     (v-stack :gap 0.2
-      (h-stack :gap 0.5 :align :center
-        (label (if (= SEQ.sidebar-instrument-name "") "Instrument" SEQ.sidebar-instrument-name)
-          :font-size 12
-          :color :white
-          :bg :transparent)
-        (box :bg :dark-gray :width 8.2 :height 1.5 :align :center
-          (label (sbrowser-mode-label)
+      (label (if (= SEQ.sidebar-instrument-display-name "") "Instrument" SEQ.sidebar-instrument-display-name)
+        :font-size 12
+        :color :white
+        :bg :transparent)
+      ;; Edit button (only for custom instruments, not Sampler)
+      (if (not (= SEQ.sidebar-instrument-name ""))
+        (box :bg :dark-gray :width 5 :height 1.5 :align :center
+          :on-click |x y r|
+            (host-command "enter-edit-instrument"
+              (dict :name SEQ.sidebar-instrument-name))
+          (label "Edit"
             :font-size 9
-            :color :gray
+            :color :white
             :bg :transparent))
-        ;; Edit button (only for custom instruments, not Sampler)
-        (if (not (= SEQ.sidebar-instrument-name ""))
-          (box :bg :dark-gray :width 5 :height 1.5 :align :center
-            :on-click |x y r|
-              (host-command "enter-edit-instrument"
-                (dict :name SEQ.sidebar-instrument-name))
-            (label "Edit"
-              :font-size 9
-              :color :white
-              :bg :transparent))
-          (box)))
+        (box))
       (label
         (str "Current preset: "
           (if (= SEQ.sidebar-loaded-preset "") "none" SEQ.sidebar-loaded-preset))
@@ -269,12 +263,7 @@
               :bg :transparent)))))))
 
 (def sbrowser-create-items ()
-  (append
-    (list (dict :label "Sampler" :kind "sampler")
-          (dict :label "+ New Instrument" :kind "new-instrument"))
-    (map (lambda (name)
-      (dict :label name :kind "instrument"))
-      (seq-saved-instruments))))
+  (seq-saved-instrument-tree))
 
 (def sbrowser-select-create-item (item)
   (if (= (get item :kind) "sampler")
@@ -283,7 +272,9 @@
       (do
         (set! sbrowser-editor-name "")
         (host-command "enter-new-instrument-editor" (dict)))
-      (sbrowser-add-instrument-track (get item :label)))))
+      (if (= (get item :kind) "instrument")
+        (sbrowser-add-instrument-track (get item :name))
+        (status "Open a folder or choose an instrument")))))
 
 (def sbrowser-create-picker ()
   (box :background "browser-panel-bg" :padding 0 :flex 1
@@ -296,19 +287,13 @@
 
 (def sbrowser-presets-panel ()
   (box :background "browser-panel-bg" :padding 0 :flex 1
-    (if (= (len SEQ.sidebar-presets) 0)
-      (box :padding 1
-        (label "No presets found for this instrument."
-          :font-size 10
-          :color :gray
-          :bg :transparent))
-      (scroll :flex 1
-        (tree
-          :items SEQ.sidebar-preset-tree
-          :selected-label SEQ.sidebar-loaded-preset
-          :expand-all false
-          :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
-          :on-activate (lambda (item) (sbrowser-load-preset (get item :label))))))))
+    (scroll :flex 1
+      (tree
+        :items SEQ.sidebar-preset-tree
+        :selected-label SEQ.sidebar-loaded-preset
+        :expand-all false
+        :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
+        :on-activate (lambda (item) (sbrowser-load-preset (get item :label)))))))
 
 (def sbrowser-projects-panel ()
   (let ((items (seq-project-tree sbrowser-filter)))

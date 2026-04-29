@@ -12,6 +12,14 @@ use super::{App, EngineNodeIds, TrackNodeIds};
 
 const DELETE_WITHOUT_SHIFT_ENV: &str = "TINYSEQ_DELETE_TRACK_WITHOUT_SHIFT";
 
+fn instrument_display_name(name: &str) -> String {
+    std::path::Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name)
+        .to_string()
+}
+
 struct TrackShell {
     voice_sum_id: i32,
     voice_sum_r_id: i32,
@@ -118,18 +126,19 @@ impl GraphController<'_> {
             return Err("Maximum number of tracks reached".to_string());
         }
 
-        let shell = self.create_track_shell(name);
+        let track_name = instrument_display_name(name);
+        let shell = self.create_track_shell(&track_name);
         self.ensure_custom_engine_runtime(engine_id, name, manifest, lib)?;
         self.connect_engine_to_track(
             engine_id,
             idx,
-            name,
+            &track_name,
             shell.voice_sum_id,
             shell.voice_sum_r_id,
         )?;
         self.finish_track_registration(TrackRegistration {
             idx,
-            track_name: name.to_string(),
+            track_name,
             shell,
             voice_lids: Vec::new(),
             instrument: InstrumentRegistration::Custom {
