@@ -1133,9 +1133,43 @@ static DGEN_INSTRUMENT_FNS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
     const INIT: AtomicUsize = AtomicUsize::new(0);
     [INIT; INSTRUMENT_REGISTRY_SIZE]
 };
+static DGEN_INSTRUMENT_OUTPUT_COUNTS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = {
+    const INIT: AtomicUsize = AtomicUsize::new(1);
+    [INIT; INSTRUMENT_REGISTRY_SIZE]
+};
+static DGEN_ENGINE_ENABLED_VOICES: [AtomicUsize; MAX_TRACKS] = {
+    const INIT: AtomicUsize = AtomicUsize::new(MAX_VOICES);
+    [INIT; MAX_TRACKS]
+};
 
 pub fn set_dgen_instrument_fn(slot_id: usize, f: DGenProcessFn) {
     DGEN_INSTRUMENT_FNS[slot_id % INSTRUMENT_REGISTRY_SIZE].store(f as usize, Ordering::Release);
+}
+
+pub fn set_dgen_instrument_output_count(slot_id: usize, count: usize) {
+    DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
+        .store(count.max(1), Ordering::Release);
+}
+
+pub fn set_dgen_engine_enabled_voices(engine_id: usize, count: usize) {
+    if engine_id < MAX_TRACKS {
+        DGEN_ENGINE_ENABLED_VOICES[engine_id]
+            .store(count.clamp(1, MAX_VOICES), Ordering::Release);
+    }
+}
+
+pub fn get_dgen_engine_enabled_voices(engine_id: usize) -> usize {
+    if engine_id < MAX_TRACKS {
+        DGEN_ENGINE_ENABLED_VOICES[engine_id]
+            .load(Ordering::Acquire)
+            .clamp(1, MAX_VOICES)
+    } else {
+        MAX_VOICES
+    }
+}
+
+pub fn reset_dgen_engine_enabled_voices(engine_id: usize) {
+    set_dgen_engine_enabled_voices(engine_id, 1);
 }
 
 /// Wrapper process function for instrument nodes — reads from DGEN_INSTRUMENT_FNS.
@@ -1157,6 +1191,30 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
     if (*s.add(2)).to_bits() != HEADER_CANARY.to_bits() {
         return;
     }
+    let engine_id = slot_id / MAX_VOICES;
+    let voice_idx = slot_id % MAX_VOICES;
+    if engine_id < MAX_TRACKS {
+        let enabled = DGEN_ENGINE_ENABLED_VOICES[engine_id]
+            .load(Ordering::Acquire)
+            .clamp(1, MAX_VOICES);
+        if voice_idx >= enabled {
+            let nf = nframes as usize;
+            let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
+                .load(Ordering::Acquire)
+                .max(1);
+            if !out.is_null() {
+                for ch in 0..output_count {
+                    let out_ch = *out.add(ch);
+                    if !out_ch.is_null() {
+                        for i in 0..nf {
+                            *out_ch.add(i) = 0.0;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+    }
     let fn_ptr = DGEN_INSTRUMENT_FNS[slot_id % INSTRUMENT_REGISTRY_SIZE].load(Ordering::Acquire);
     if fn_ptr != 0 {
         let process_fn: DGenProcessFn = std::mem::transmute(fn_ptr);
@@ -1172,9 +1230,18 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
         process_fn(inp, out, nframes, memory_read, memory_write);
     } else {
         let nf = nframes as usize;
-        let out0 = *out.add(0);
-        for i in 0..nf {
-            *out0.add(i) = 0.0;
+        let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
+            .load(Ordering::Acquire)
+            .max(1);
+        if !out.is_null() {
+            for ch in 0..output_count {
+                let out_ch = *out.add(ch);
+                if !out_ch.is_null() {
+                    for i in 0..nf {
+                        *out_ch.add(i) = 0.0;
+                    }
+                }
+            }
         }
     }
 }

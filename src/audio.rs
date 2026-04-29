@@ -163,6 +163,7 @@ struct CustomVoiceAllocation {
 struct CustomEnginePool {
     voices: [CustomVoiceSlot; MAX_VOICES],
     num_voices: usize,
+    enabled_voice_count: usize,
     age_counter: u64,
 }
 
@@ -178,6 +179,7 @@ impl CustomEnginePool {
                 fingerprint: 0,
             }),
             num_voices: 0,
+            enabled_voice_count: 1,
             age_counter: 0,
         }
     }
@@ -198,6 +200,7 @@ impl CustomEnginePool {
 
     fn reset(&mut self) {
         self.num_voices = 0;
+        self.enabled_voice_count = 1;
         self.age_counter = 0;
         for voice in &mut self.voices {
             *voice = CustomVoiceSlot {
@@ -286,6 +289,18 @@ impl CustomEnginePool {
         }
     }
 
+    fn note_voice_allocated(&mut self, engine_id: usize, voice_idx: usize) {
+        let needed = (voice_idx + 1).min(MAX_VOICES).max(1);
+        if needed > self.enabled_voice_count {
+            self.enabled_voice_count = needed;
+            crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, needed);
+        }
+    }
+
+    fn sync_enabled_voice_count(&mut self, engine_id: usize) {
+        self.enabled_voice_count = crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id);
+    }
+
     fn invalidate_sound_cache(&mut self) {
         for i in 0..self.num_voices {
             self.voices[i].fingerprint = 0;
@@ -336,12 +351,15 @@ fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut 
 
     if needs_reset {
         pool.reset();
+        crate::lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
         for v in 0..desired_count {
             let lid = state.runtime.engine_voice_lids[engine_id][v].load(Ordering::Acquire);
             if lid != 0 {
                 pool.add_voice(lid);
             }
         }
+    } else {
+        pool.sync_enabled_voice_count(engine_id);
     }
 }
 
@@ -1075,6 +1093,7 @@ fn fire_resolved(
                     track_polyphonic,
                 );
                 let voice_idx = allocation.voice_idx;
+                data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let lid = allocation.logical_id;
                 let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
                     .load(Ordering::Relaxed);
@@ -1174,6 +1193,7 @@ fn fire_resolved(
                 track_polyphonic,
             );
             let voice_idx = allocation.voice_idx;
+            data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
             let lid = allocation.logical_id;
             let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
                 .load(Ordering::Relaxed);
@@ -1390,6 +1410,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     track_polyphonic,
                 );
                 let voice_idx = allocation.voice_idx;
+                data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
                 let voice_lid = allocation.logical_id;
                 let fingerprint =
                     instrument_sound_fingerprint(&data.state, kt.track, engine_id, None);

@@ -620,6 +620,7 @@ impl GraphController<'_> {
         }
 
         self.app.state.runtime.engine_voice_counts[engine_id].store(0, Ordering::Release);
+        lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
         for voice in 0..MAX_VOICES {
             self.app.state.runtime.engine_voice_lids[engine_id][voice].store(0, Ordering::Release);
             self.app.state.runtime.engine_synth_node_ids[engine_id][voice]
@@ -943,6 +944,7 @@ impl GraphController<'_> {
 
             let slot_id = engine_id * MAX_VOICES + v;
             lisp_effect::set_dgen_instrument_fn(slot_id, lib.process_fn);
+            lisp_effect::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
             let init_msg = lisp_effect::build_init_message_for_voice(slot_id, manifest, v);
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
             let state_size = lisp_effect::dgen_total_state_slots(manifest.total_memory_slots)
@@ -1056,6 +1058,7 @@ impl GraphController<'_> {
         }
         self.app.state.runtime.engine_voice_counts[engine_id]
             .store(MAX_VOICES as u32, Ordering::Release);
+        lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
         if let Some(engine) = &self.app.graph.engine_node_ids[engine_id] {
             for (v, &sid) in engine.synth_ids.iter().enumerate() {
                 self.app.state.runtime.engine_synth_node_ids[engine_id][v]
@@ -1230,6 +1233,7 @@ impl GraphController<'_> {
         let Some(mut engine) = self.app.graph.engine_node_ids[engine_id].take() else {
             return Err("Missing engine runtime".to_string());
         };
+        lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
 
         let mut new_synth_ids = Vec::with_capacity(MAX_VOICES);
         for v in 0..MAX_VOICES {
@@ -1279,6 +1283,7 @@ impl GraphController<'_> {
 
             let slot_id = engine_id * MAX_VOICES + v;
             lisp_effect::set_dgen_instrument_fn(slot_id, lib.process_fn);
+            lisp_effect::set_dgen_instrument_output_count(slot_id, manifest.n_outputs.max(1));
             let init_msg = lisp_effect::build_init_message_for_voice(slot_id, manifest, v);
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
             let state_size = lisp_effect::dgen_total_state_slots(manifest.total_memory_slots)
