@@ -713,7 +713,11 @@ impl Buffer {
         }
 
         let row = self.lines.len().saturating_sub(1);
-        let col = self.lines.get(row).map(|line| Self::line_len(line)).unwrap_or(0);
+        let col = self
+            .lines
+            .get(row)
+            .map(|line| Self::line_len(line))
+            .unwrap_or(0);
         (row, col)
     }
 
@@ -780,8 +784,7 @@ impl CommittedBufferUiSnapshot {
         if !self.subtree_roots.contains_key(&subtree_root_id) {
             return Some("unknown-root");
         }
-        let Some(replacement_root_id) = root_subtree_root_id(replacement_tree)
-        else {
+        let Some(replacement_root_id) = root_subtree_root_id(replacement_tree) else {
             return Some("missing-root-id");
         };
         if replacement_root_id != subtree_root_id {
@@ -817,11 +820,7 @@ impl CommittedBufferUiSnapshot {
             return None;
         }
 
-        let merged_tree = replace_subtree_in_value(
-            &self.tree,
-            subtree_root_id,
-            &replacement_tree,
-        )?;
+        let merged_tree = replace_subtree_in_value(&self.tree, subtree_root_id, &replacement_tree)?;
         let mut dependency_lookup = self.subtree_root_dependencies;
         for root_id in collect_subtree_root_ids(&replacement_tree) {
             dependency_lookup.insert(root_id, reactive_dependencies.clone());
@@ -853,7 +852,8 @@ impl CommittedBufferUiSnapshot {
         let mut merged_tree = self.tree.deep_clone();
         let mut dependency_lookup = self.subtree_root_dependencies;
         for (subtree_root_id, replacement_tree, reactive_dependencies) in replacements {
-            merged_tree = replace_subtree_in_value(&merged_tree, *subtree_root_id, replacement_tree)?;
+            merged_tree =
+                replace_subtree_in_value(&merged_tree, *subtree_root_id, replacement_tree)?;
             for root_id in collect_subtree_root_ids(replacement_tree) {
                 dependency_lookup.insert(root_id, reactive_dependencies.clone());
             }
@@ -1419,10 +1419,7 @@ mod tests {
             "root",
             1,
             1,
-            vec![
-                widget("left", 2, 2, vec![]),
-                widget("right", 3, 3, vec![]),
-            ],
+            vec![widget("left", 2, 2, vec![]), widget("right", 3, 3, vec![])],
         );
         let snapshot = CommittedBufferUiSnapshot::from_tree(
             tree,

@@ -8,19 +8,19 @@ pub mod label;
 pub mod number_picker;
 pub mod scroll;
 pub mod sdf_widget;
-pub mod text_input;
-pub mod tree;
 pub mod tabs;
+pub mod text_input;
 pub mod time_view;
 pub mod timeline;
 pub mod toggle;
+pub mod tree;
 pub mod vslider;
 pub mod vstack;
 pub mod waveform;
 
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -695,7 +695,8 @@ pub fn widget_primitives_for_node(
 ) -> Vec<MetalPrimitive> {
     let cache_key = widget_primitive_cache_key(node, viewport);
     if let Some(cache_key) = cache_key
-        && let Some(cached) = WIDGET_PRIMITIVE_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
+        && let Some(cached) =
+            WIDGET_PRIMITIVE_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
     {
         return cached;
     }
@@ -863,7 +864,9 @@ pub fn map_mouse_event(
     }
     widget_definition(&node.widget_type)
         .map(|definition| {
-            definition.mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers)
+            definition.mouse_event(
+                node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers,
+            )
         })
         .unwrap_or(MouseEventOutcome::Ignore)
 }

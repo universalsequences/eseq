@@ -225,28 +225,60 @@ fn eval_sdf_expr(expr: &Expression, vars: &HashMap<String, f64>) -> f64 {
     }
 }
 
-/// Extract all `sdf/fill` SDF expressions from an `sdf/layer` body.
-/// Returns them in order (region 0, 1, 2, ...).
-fn extract_fill_regions(expr: &Expression) -> Vec<&Expression> {
-    let mut regions = Vec::new();
-    if let Expression::List(items) = expr {
-        if let Some(Expression::Symbol(head)) = items.first() {
-            if head == "sdf/layer" {
-                for child in &items[1..] {
-                    if let Expression::List(child_items) = child {
-                        if matches!(child_items.first(), Some(Expression::Symbol(s)) if s == "sdf/fill")
-                        {
-                            // The SDF distance expression is the first arg of sdf/fill
-                            if child_items.len() >= 2 {
-                                regions.push(&child_items[1]);
-                            }
-                        }
-                    }
+/// Evaluate all `sdf/fill` region distances in paint order.
+///
+/// This intentionally understands the same local `let` scopes that ordinary
+/// SDF evaluation does, because real widgets often bind colors or dimensions
+/// around their top-level `sdf/layer`.
+fn collect_fill_distances(
+    expr: &Expression,
+    vars: &HashMap<String, f64>,
+    distances: &mut Vec<f64>,
+) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    let Some(Expression::Symbol(head)) = items.first() else {
+        return;
+    };
+    let args = &items[1..];
+
+    match head.as_str() {
+        "let" => {
+            if args.len() < 2 {
+                return;
+            }
+            let Expression::List(bindings) = &args[0] else {
+                return;
+            };
+            let mut new_vars = vars.clone();
+            for binding in bindings {
+                let Expression::List(pair) = binding else {
+                    continue;
+                };
+                if pair.len() == 2
+                    && let Expression::Symbol(name) = &pair[0]
+                {
+                    let val = eval_sdf_expr(&pair[1], &new_vars);
+                    new_vars.insert(name.clone(), val);
                 }
             }
+            for body_expr in &args[1..] {
+                collect_fill_distances(body_expr, &new_vars, distances);
+            }
         }
+        "sdf/layer" => {
+            for child in args {
+                collect_fill_distances(child, vars, distances);
+            }
+        }
+        "sdf/fill" => {
+            if let Some(region_sdf) = args.first() {
+                distances.push(eval_sdf_expr(region_sdf, vars));
+            }
+        }
+        _ => {}
     }
-    regions
 }
 
 /// Hit-test an SDF widget at the given normalized coordinates.
@@ -260,11 +292,6 @@ pub fn sdf_hit_test_with_vars(
     y: f64,
     extra_vars: &HashMap<String, f64>,
 ) -> i32 {
-    let regions = extract_fill_regions(sdf_expr);
-    if regions.is_empty() {
-        return -1;
-    }
-
     let mut vars = extra_vars.clone();
     vars.insert("x".to_string(), x);
     vars.insert("y".to_string(), y);
@@ -273,10 +300,15 @@ pub fn sdf_hit_test_with_vars(
     vars.insert("hit/active".to_string(), 0.0);
     vars.insert("hit/region".to_string(), -1.0);
 
+    let mut distances = Vec::new();
+    collect_fill_distances(sdf_expr, &vars, &mut distances);
+    if distances.is_empty() {
+        return -1;
+    }
+
     // Iterate top-to-bottom for early exit — topmost region wins
-    for (i, region_sdf) in regions.iter().enumerate().rev() {
-        let d = eval_sdf_expr(region_sdf, &vars);
-        if d < 0.0 {
+    for (i, distance) in distances.iter().enumerate().rev() {
+        if *distance < 0.0 {
             return i as i32;
         }
     }
@@ -438,6 +470,18 @@ mod tests {
 
         vars.insert("offset".to_string(), -0.5);
         assert_eq!(sdf_hit_test_with_vars(&expr, 0.5, 0.0, &vars), -1);
+    }
+
+    #[test]
+    fn hit_test_collects_regions_inside_top_level_let() {
+        let expr = expand_expr(
+            "(let ((radius 0.4))
+               (sdf/layer
+                 (sdf/fill (sdf/circle radius) :accent)))",
+        );
+
+        assert_eq!(sdf_hit_test(&expr, 0.0, 0.0), 0);
+        assert_eq!(sdf_hit_test(&expr, 0.6, 0.0), -1);
     }
 
     #[test]

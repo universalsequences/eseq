@@ -713,10 +713,22 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
 
             fn parse_spec(val: &Value) -> Result<LayoutSpec, String> {
                 match val {
-                    Value::String(s) => Ok(LayoutSpec::Buffer { name: s.clone(), hide_status: false, borderless: false, min_width: None, min_height: None, max_width: None, max_height: None }),
-                    Value::List(items) if !items.is_empty() && matches!(&*items[0].borrow(), Value::Keyword(k) if k == "buf") => {
+                    Value::String(s) => Ok(LayoutSpec::Buffer {
+                        name: s.clone(),
+                        hide_status: false,
+                        borderless: false,
+                        min_width: None,
+                        min_height: None,
+                        max_width: None,
+                        max_height: None,
+                    }),
+                    Value::List(items)
+                        if !items.is_empty()
+                            && matches!(&*items[0].borrow(), Value::Keyword(k) if k == "buf") =>
+                    {
                         // (:buf "name" :hide-status true :min-width 20 :min-height 10)
-                        let name = items.get(1)
+                        let name = items
+                            .get(1)
                             .and_then(|v| match &*v.borrow() {
                                 Value::String(s) => Some(s.clone()),
                                 _ => None,
@@ -748,17 +760,41 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                                             Value::Symbol(s) if s == "false" => borderless = false,
                                             _ => {}
                                         },
-                                        "min-width" => if let Value::Number(n) = &*v { min_width = Some(*n as f32) },
-                                        "min-height" => if let Value::Number(n) = &*v { min_height = Some(*n as f32) },
-                                        "max-width" => if let Value::Number(n) = &*v { max_width = Some(*n as f32) },
-                                        "max-height" => if let Value::Number(n) = &*v { max_height = Some(*n as f32) },
+                                        "min-width" => {
+                                            if let Value::Number(n) = &*v {
+                                                min_width = Some(*n as f32)
+                                            }
+                                        }
+                                        "min-height" => {
+                                            if let Value::Number(n) = &*v {
+                                                min_height = Some(*n as f32)
+                                            }
+                                        }
+                                        "max-width" => {
+                                            if let Value::Number(n) = &*v {
+                                                max_width = Some(*n as f32)
+                                            }
+                                        }
+                                        "max-height" => {
+                                            if let Value::Number(n) = &*v {
+                                                max_height = Some(*n as f32)
+                                            }
+                                        }
                                         _ => {}
                                     }
                                 }
                             }
                             i += 1;
                         }
-                        Ok(LayoutSpec::Buffer { name, hide_status, borderless, min_width, min_height, max_width, max_height })
+                        Ok(LayoutSpec::Buffer {
+                            name,
+                            hide_status,
+                            borderless,
+                            min_width,
+                            min_height,
+                            max_width,
+                            max_height,
+                        })
                     }
                     Value::List(items) => {
                         if items.is_empty() {
@@ -828,9 +864,7 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             let (Some(Value::String(current)), Some(Value::String(new_name))) =
                 (args.first(), args.get(1))
             else {
-                return Err(
-                    "set-window-buffer-for expects two buffer name strings".to_string(),
-                );
+                return Err("set-window-buffer-for expects two buffer name strings".to_string());
             };
             ctx.set_window_buffer_for(current.clone(), new_name.clone());
             Ok(Value::Bool(true))
@@ -1099,9 +1133,8 @@ fn describe_directory_entry_unix(
         let size = parts.next()?.parse::<u64>().ok()?;
         let modified = parts.next()?.to_string();
         let size_text = format_size(size);
-        let display = format!(
-            "{permissions} {links:>2} {size_text:>6} {modified:>12} {display_name}"
-        );
+        let display =
+            format!("{permissions} {links:>2} {size_text:>6} {modified:>12} {display_name}");
         return Some(DirectoryEntryInfo {
             display,
             permissions,
@@ -1132,9 +1165,7 @@ fn describe_directory_entry_unix(
     let group = metadata.gid().to_string();
     let modified = metadata.mtime().to_string();
     let size_text = format_size(metadata.size());
-    let display = format!(
-        "{permissions} {links:>2} {size_text:>6} {modified:>12} {display_name}",
-    );
+    let display = format!("{permissions} {links:>2} {size_text:>6} {modified:>12} {display_name}",);
     Some(DirectoryEntryInfo {
         display,
         permissions,

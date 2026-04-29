@@ -124,8 +124,9 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         }
     }
 
-    let frame_interval = Duration::from_secs_f64(1.0 / 30.0);
-    let mut last_render_at = Instant::now() - frame_interval;
+    let idle_frame_interval = Duration::from_secs_f64(1.0 / 30.0);
+    let animation_frame_interval = Duration::from_secs_f64(1.0 / 60.0);
+    let mut last_render_at = Instant::now() - idle_frame_interval;
     let mut pending_drag: Option<(Event, (f32, f32))> = None;
     #[allow(unused_mut)]
     let mut scroll_accum_y: f32 = 0.0;
@@ -142,6 +143,57 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         }
         // Update tile rects once per iteration (not per-event)
         editor.update_tile_rects(cols as u16, rows as u16);
+        let now_seconds = backend.time_seconds();
+        if let Some((total, active, remaining)) =
+            crate::widget_render::sdf_widget::sdf_visual_animation_debug_status(now_seconds)
+        {
+            eprintln!(
+                "[anim-check] t={:.3} total={} active={} remaining={:.3}",
+                now_seconds, total, active, remaining
+            );
+        }
+        let sdf_animation_active =
+            crate::widget_render::sdf_widget::sdf_visual_animations_active(now_seconds);
+        if sdf_animation_active {
+            editor.mark_needs_redraw();
+        }
+        let frame_interval = if sdf_animation_active {
+            animation_frame_interval
+        } else {
+            idle_frame_interval
+        };
+
+        if sdf_animation_active {
+            let elapsed = last_render_at.elapsed();
+            eprintln!(
+                "[anim-loop] t={:.3} due_in={:.3}",
+                backend.time_seconds(),
+                frame_interval.saturating_sub(elapsed).as_secs_f32()
+            );
+            if elapsed < frame_interval {
+                std::thread::sleep(frame_interval - elapsed);
+            }
+            eprintln!("[anim-loop] t={:.3} render-start", backend.time_seconds());
+            let (cols, rows) = backend.viewport_size();
+            let build_started = Instant::now();
+            let tiled_frame = frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
+            eprintln!(
+                "[anim-loop] t={:.3} frame-built dt={:.3}",
+                backend.time_seconds(),
+                build_started.elapsed().as_secs_f32()
+            );
+            let render_started = Instant::now();
+            backend.render_tiled(&tiled_frame)?;
+            eprintln!(
+                "[anim-loop] t={:.3} render-done dt={:.3}",
+                backend.time_seconds(),
+                render_started.elapsed().as_secs_f32()
+            );
+            editor.clear_needs_redraw();
+            last_render_at = Instant::now();
+            continue;
+        }
+
         let timeout = frame_interval.saturating_sub(last_render_at.elapsed());
         match backend.poll_event(timeout) {
             Some(Event::Key(key)) => editor.handle_key(key),
@@ -1408,9 +1460,18 @@ mod tests {
             },
         );
 
-        assert!(matches!(primitives.first(), Some(MetalPrimitive::PushClipRect(_))));
-        assert!(matches!(primitives.get(1), Some(MetalPrimitive::ProportionalText(_))));
-        assert!(matches!(primitives.get(2), Some(MetalPrimitive::PopClipRect)));
+        assert!(matches!(
+            primitives.first(),
+            Some(MetalPrimitive::PushClipRect(_))
+        ));
+        assert!(matches!(
+            primitives.get(1),
+            Some(MetalPrimitive::ProportionalText(_))
+        ));
+        assert!(matches!(
+            primitives.get(2),
+            Some(MetalPrimitive::PopClipRect)
+        ));
     }
 
     #[test]
@@ -1840,7 +1901,10 @@ mod tests {
         let crate::vm::PendingUiUpdate::FullTree(tree) = &pending[0] else {
             panic!("expected initial full tree update");
         };
-        assert_eq!(first_child_texts(&tree.tree), vec!["item-0", "item-1", "item-2"]);
+        assert_eq!(
+            first_child_texts(&tree.tree),
+            vec!["item-0", "item-1", "item-2"]
+        );
     }
 
     #[test]
@@ -1864,7 +1928,11 @@ mod tests {
         runtime.run_reactive_cycle();
 
         let pending = runtime.take_pending_buffer_widget_trees();
-        assert_eq!(pending.len(), 3, "expected one subtree replacement per loop child");
+        assert_eq!(
+            pending.len(),
+            3,
+            "expected one subtree replacement per loop child"
+        );
         for update in pending {
             let crate::vm::PendingUiUpdate::ReplaceSubtree {
                 tree,
@@ -1929,14 +1997,19 @@ mod tests {
             .expect("eval grid subtree effect");
 
         let pending = runtime.take_pending_buffer_widget_trees();
-        assert_eq!(pending.len(), 1, "expected a single initial full-tree update");
+        assert_eq!(
+            pending.len(),
+            1,
+            "expected a single initial full-tree update"
+        );
         let crate::vm::PendingUiUpdate::FullTree(tree) = &pending[0] else {
             panic!("expected full tree update");
         };
         let Value::Map(map) = &tree.tree else {
             panic!("expected widget tree map, got {:?}", tree.tree);
         };
-        let Some(Value::Keyword(widget_type)) = map.get("type").map(|value| value.borrow().clone()) else {
+        let Some(Value::Keyword(widget_type)) = map.get("type").map(|value| value.borrow().clone())
+        else {
             panic!("expected root widget type");
         };
         assert_eq!(widget_type, "grid");
@@ -2160,6 +2233,10 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(result, Value::Number(2.0), "function should receive exactly 2 args");
+        assert_eq!(
+            result,
+            Value::Number(2.0),
+            "function should receive exactly 2 args"
+        );
     }
 }

@@ -2,9 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use super::{WidgetDefinition, WidgetEvent};
-use crate::layout::{
-    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
@@ -71,8 +69,7 @@ fn sync_selected_child_into_view(node: &LayoutNode, state: &mut ScrollState) {
     let Some(child) = node.children.first() else {
         return;
     };
-    let Some((selection_key, selected_row, row_height)) =
-        super::tree::selection_view_hint(child)
+    let Some((selection_key, selected_row, row_height)) = super::tree::selection_view_hint(child)
     else {
         state.synced_selection = None;
         return;
@@ -96,7 +93,13 @@ pub(crate) fn sync_node_state(node: &LayoutNode) -> ScrollState {
     let content_height = node
         .props
         .get("_content_height")
-        .and_then(|v| if let Value::Number(n) = v { Some(*n as f32) } else { None })
+        .and_then(|v| {
+            if let Value::Number(n) = v {
+                Some(*n as f32)
+            } else {
+                None
+            }
+        })
         .unwrap_or(0.0);
     let viewport_height = node.rect.height;
 
@@ -149,13 +152,15 @@ impl WidgetDefinition for ScrollWidget {
         });
         // Width: use explicit :width, or fill available space (like a block element).
         // Falls back to child width only if max_width is unbounded.
-        let width = get_prop_num(node, "width").map(f64_to_f32).unwrap_or_else(|| {
-            if constraints.max_width < f32::MAX {
-                constraints.max_width
-            } else {
-                child_size.map(|s| s.width).unwrap_or(0.0)
-            }
-        });
+        let width = get_prop_num(node, "width")
+            .map(f64_to_f32)
+            .unwrap_or_else(|| {
+                if constraints.max_width < f32::MAX {
+                    constraints.max_width
+                } else {
+                    child_size.map(|s| s.width).unwrap_or(0.0)
+                }
+            });
         Some(Size {
             width,
             height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(0.0),
@@ -221,12 +226,24 @@ impl WidgetDefinition for ScrollWidget {
         state.content_height = node
             .props
             .get("_content_height")
-            .and_then(|v| if let Value::Number(n) = v { Some(*n as f32) } else { None })
+            .and_then(|v| {
+                if let Value::Number(n) = v {
+                    Some(*n as f32)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(state.content_height);
         state.viewport_height = node
             .props
             .get("_viewport_height")
-            .and_then(|v| if let Value::Number(n) = v { Some(*n as f32) } else { None })
+            .and_then(|v| {
+                if let Value::Number(n) = v {
+                    Some(*n as f32)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(state.viewport_height);
 
         // Trackpad delta_y: negative = scroll content up (reveal below), positive = scroll down

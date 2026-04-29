@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
+#[cfg(target_os = "macos")]
+use super::sdf_widget;
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
     get_f32_prop, metal_widget_instance, ndc_bounds, resolve_named_color,
     should_trigger_integer_haptic, styled_cell, trigger_level_change_haptic,
 };
-#[cfg(target_os = "macos")]
-use super::sdf_widget;
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
@@ -221,7 +221,13 @@ impl WidgetDefinition for HorizontalSliderWidget {
                     },
                 );
                 // Layer 2: material overlay
-                prims.push(sdf_widget::build_material_overlay(node, &def, shader_type, viewport, t));
+                prims.push(sdf_widget::build_material_overlay(
+                    node,
+                    &def,
+                    shader_type,
+                    viewport,
+                    t,
+                ));
                 return prims;
             }
         }

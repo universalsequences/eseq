@@ -10,8 +10,16 @@ impl Editor {
             (KeyCode::Char(' '), KeyModifiers::CONTROL, "set-mark"),
             (KeyCode::Char('a'), KeyModifiers::CONTROL, "move-line-start"),
             (KeyCode::Char('e'), KeyModifiers::CONTROL, "move-line-end"),
-            (KeyCode::Char('f'), KeyModifiers::CONTROL, "move-page-forward"),
-            (KeyCode::Char('b'), KeyModifiers::CONTROL, "move-page-backward"),
+            (
+                KeyCode::Char('f'),
+                KeyModifiers::CONTROL,
+                "move-page-forward",
+            ),
+            (
+                KeyCode::Char('b'),
+                KeyModifiers::CONTROL,
+                "move-page-backward",
+            ),
             (KeyCode::Char('l'), KeyModifiers::CONTROL, "recenter-cursor"),
             (
                 KeyCode::Char('w'),
@@ -42,16 +50,8 @@ impl Editor {
                 KeyModifiers::ALT,
                 "execute-extended-command",
             ),
-            (
-                KeyCode::Char('s'),
-                KeyModifiers::CONTROL,
-                "search-forward",
-            ),
-            (
-                KeyCode::Char('r'),
-                KeyModifiers::CONTROL,
-                "search-backward",
-            ),
+            (KeyCode::Char('s'), KeyModifiers::CONTROL, "search-forward"),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL, "search-backward"),
             (KeyCode::Char('.'), KeyModifiers::ALT, "goto-definition"),
             (KeyCode::Char(','), KeyModifiers::ALT, "pop-definition-mark"),
         ];

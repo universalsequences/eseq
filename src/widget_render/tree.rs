@@ -14,8 +14,7 @@ use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds,
+    MetalPrimitive, MetalProportionalTextPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
 };
 #[cfg(target_os = "macos")]
 use crate::backend::Color;
@@ -177,10 +176,7 @@ fn item_to_map(item: &Value) -> Value {
                 let k = list[i].borrow().clone();
                 let v = list[i + 1].borrow().clone();
                 if let Value::Keyword(key) = k {
-                    map.insert(
-                        key,
-                        std::rc::Rc::new(RefCell::new(v)),
-                    );
+                    map.insert(key, std::rc::Rc::new(RefCell::new(v)));
                 }
                 i += 2;
             }
@@ -213,7 +209,9 @@ fn find_item_path_by_field(
     needle: &str,
     parent_path: &[usize],
 ) -> Option<Vec<usize>> {
-    let Value::List(list) = items else { return None };
+    let Value::List(list) = items else {
+        return None;
+    };
     for (i, item_rc) in list.iter().enumerate() {
         let item = item_rc.borrow();
         let mut path = parent_path.to_vec();
@@ -249,7 +247,9 @@ fn ancestor_paths(path: &[usize]) -> HashSet<Vec<usize>> {
     expanded
 }
 
-fn external_selection_key(props: &HashMap<String, Value>) -> Option<(String, &'static str, String)> {
+fn external_selection_key(
+    props: &HashMap<String, Value>,
+) -> Option<(String, &'static str, String)> {
     if let Some(path) = get_string_prop(props, "selected-path") {
         return Some((format!("path:{path}"), "path", path));
     }
@@ -350,7 +350,14 @@ impl WidgetDefinition for TreeWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["items", "width", "height", "font-size", "selected-path", "selected-label"]
+        &[
+            "items",
+            "width",
+            "height",
+            "font-size",
+            "selected-path",
+            "selected-label",
+        ]
     }
 
     fn measure(
@@ -463,7 +470,13 @@ impl WidgetDefinition for TreeWidget {
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);
         let mut state = get_tree_state(node.widget_id);
-        sync_state_with_external_selection(node.widget_id, &items, &node.props, expand_all, &mut state);
+        sync_state_with_external_selection(
+            node.widget_id,
+            &items,
+            &node.props,
+            expand_all,
+            &mut state,
+        );
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
 
@@ -481,15 +494,17 @@ impl WidgetDefinition for TreeWidget {
         if row.has_children {
             toggle_expand(&mut state, &row.path);
             set_tree_state(node.widget_id, state);
-            MouseEventOutcome::Dispatch(WidgetEvent::Custom(
-                make_action_value("toggle", &row.item_value),
-            ))
+            MouseEventOutcome::Dispatch(WidgetEvent::Custom(make_action_value(
+                "toggle",
+                &row.item_value,
+            )))
         } else {
             state.selected_row = row_idx;
             set_tree_state(node.widget_id, state);
-            MouseEventOutcome::Dispatch(WidgetEvent::Custom(
-                make_action_value("select", &row.item_value),
-            ))
+            MouseEventOutcome::Dispatch(WidgetEvent::Custom(make_action_value(
+                "select",
+                &row.item_value,
+            )))
         }
     }
 
@@ -497,7 +512,13 @@ impl WidgetDefinition for TreeWidget {
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);
         let mut state = get_tree_state(node.widget_id);
-        sync_state_with_external_selection(node.widget_id, &items, &node.props, expand_all, &mut state);
+        sync_state_with_external_selection(
+            node.widget_id,
+            &items,
+            &node.props,
+            expand_all,
+            &mut state,
+        );
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
         if rows.is_empty() {
@@ -538,11 +559,8 @@ impl WidgetDefinition for TreeWidget {
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else if row.depth > 0 {
                     // Move to parent
-                    let parent_path: Vec<usize> =
-                        row.path[..row.path.len() - 1].to_vec();
-                    if let Some(parent_idx) =
-                        rows.iter().position(|r| r.path == parent_path)
-                    {
+                    let parent_path: Vec<usize> = row.path[..row.path.len() - 1].to_vec();
+                    if let Some(parent_idx) = rows.iter().position(|r| r.path == parent_path) {
                         state.selected_row = parent_idx;
                         set_tree_state(node.widget_id, state);
                         Some(WidgetEvent::Custom(Value::Nil))
@@ -558,14 +576,16 @@ impl WidgetDefinition for TreeWidget {
                 if row.has_children {
                     toggle_expand(&mut state, &row.path);
                     set_tree_state(node.widget_id, state);
-                    Some(WidgetEvent::Custom(
-                        make_action_value("toggle", &row.item_value),
-                    ))
+                    Some(WidgetEvent::Custom(make_action_value(
+                        "toggle",
+                        &row.item_value,
+                    )))
                 } else {
                     set_tree_state(node.widget_id, state);
-                    Some(WidgetEvent::Custom(
-                        make_action_value("activate", &row.item_value),
-                    ))
+                    Some(WidgetEvent::Custom(make_action_value(
+                        "activate",
+                        &row.item_value,
+                    )))
                 }
             }
             _ => None,
@@ -629,7 +649,13 @@ impl WidgetDefinition for TreeWidget {
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);
         let mut state = get_tree_state(node.widget_id);
-        sync_state_with_external_selection(node.widget_id, &items, &node.props, expand_all, &mut state);
+        sync_state_with_external_selection(
+            node.widget_id,
+            &items,
+            &node.props,
+            expand_all,
+            &mut state,
+        );
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
 
@@ -648,15 +674,30 @@ impl WidgetDefinition for TreeWidget {
         let rh = ROW_HEIGHT;
 
         let bg = theme::BG();
-        let default_odd = Color { r: bg.r + 0.04, g: bg.g + 0.04, b: bg.b + 0.04, a: 1.0 };
+        let default_odd = Color {
+            r: bg.r + 0.04,
+            g: bg.g + 0.04,
+            b: bg.b + 0.04,
+            a: 1.0,
+        };
         let bg_odd = resolve_named_color(&node.props, "row-bg-odd", default_odd);
         let selected_bg = resolve_named_color(&node.props, "selected-bg", theme::WIDGET_FOCUS_BG());
         let folder_fg = resolve_named_color(&node.props, "folder-color", theme::FG());
         let fg = theme::FG();
-        let default_file = Color { r: fg.r * 0.72, g: fg.g * 0.72, b: fg.b * 0.72, a: 1.0 };
+        let default_file = Color {
+            r: fg.r * 0.72,
+            g: fg.g * 0.72,
+            b: fg.b * 0.72,
+            a: 1.0,
+        };
         let file_fg = resolve_named_color(&node.props, "file-color", default_file);
         let chevron_fg = theme::FG_MUTED();
-        let default_chevron = Color { r: (chevron_fg.r + fg.r) * 0.5, g: (chevron_fg.g + fg.g) * 0.5, b: (chevron_fg.b + fg.b) * 0.5, a: 1.0 };
+        let default_chevron = Color {
+            r: (chevron_fg.r + fg.r) * 0.5,
+            g: (chevron_fg.g + fg.g) * 0.5,
+            b: (chevron_fg.b + fg.b) * 0.5,
+            a: 1.0,
+        };
         let triangle_fg = resolve_named_color(&node.props, "chevron-color", default_chevron);
 
         let mut prims = Vec::new();
@@ -743,7 +784,12 @@ impl WidgetDefinition for TreeWidget {
             let text_y = y + (rh - 1.0) * 0.5;
             let label_x = x + 2.2;
             let fg = if row.has_children { folder_fg } else { file_fg };
-            let transparent = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+            let transparent = Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            };
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
                     row: text_y,
@@ -771,9 +817,7 @@ thread_local! {
 }
 
 fn get_last_known_expanded(_items: &Value) -> HashSet<Vec<usize>> {
-    LAST_EXPANDED.with(|cell| {
-        cell.borrow().clone().unwrap_or_default()
-    })
+    LAST_EXPANDED.with(|cell| cell.borrow().clone().unwrap_or_default())
 }
 
 fn update_last_known_expanded(expanded: &HashSet<Vec<usize>>) {

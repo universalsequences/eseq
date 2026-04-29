@@ -88,7 +88,6 @@ fn cursor_x_from_char_cache(text: &str, font_size: f32, cursor_pos: usize, cell_
     })
 }
 
-
 // ── Widget definition ───────────────────────────────────────────────────────
 
 pub struct TextInputWidget;
@@ -125,9 +124,7 @@ impl WidgetDefinition for TextInputWidget {
                 }
             });
 
-        let height = get_prop_num(node, "height")
-            .map(f64_to_f32)
-            .unwrap_or(1.5);
+        let height = get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.5);
 
         // Cache per-character widths for cursor positioning (O(n) measurements)
         if let Some(measurer) = ctx.text_measurer {
@@ -173,11 +170,10 @@ impl WidgetDefinition for TextInputWidget {
             max_height: area.height,
             aspect: 1.0,
         };
-        let child_size = measure_child(child, child_constraints)
-            .unwrap_or(Size {
-                width: 1.0,
-                height: 1.0,
-            });
+        let child_size = measure_child(child, child_constraints).unwrap_or(Size {
+            width: 1.0,
+            height: 1.0,
+        });
         let child_rect = Rect {
             row: area.row + (area.height - child_size.height) * 0.5,
             col: area.col + TEXT_PADDING_H,
@@ -367,26 +363,11 @@ impl WidgetDefinition for TextInputWidget {
                 a: 1.0,
             },
         );
-        let text_color = resolve_named_color(
-            &node.props,
-            "text-color",
-            crate::theme::FG(),
-        );
-        let placeholder_color = resolve_named_color(
-            &node.props,
-            "placeholder-color",
-            crate::theme::FG_MUTED(),
-        );
-        let ring_color = resolve_named_color(
-            &node.props,
-            "ring-color",
-            crate::theme::ACCENT(),
-        );
-        let cursor_color = resolve_named_color(
-            &node.props,
-            "cursor-color",
-            crate::theme::CURSOR(),
-        );
+        let text_color = resolve_named_color(&node.props, "text-color", crate::theme::FG());
+        let placeholder_color =
+            resolve_named_color(&node.props, "placeholder-color", crate::theme::FG_MUTED());
+        let ring_color = resolve_named_color(&node.props, "ring-color", crate::theme::ACCENT());
+        let cursor_color = resolve_named_color(&node.props, "cursor-color", crate::theme::CURSOR());
 
         let mut prims = Vec::new();
 
@@ -490,9 +471,8 @@ impl WidgetDefinition for TextInputWidget {
         // ── Cursor ──
         if is_focused {
             let cursor_pos = state.cursor_pos.min(text.chars().count());
-            let cursor_x_offset = cursor_x_from_char_cache(
-                &text, font_size, cursor_pos, viewport.cell_w,
-            );
+            let cursor_x_offset =
+                cursor_x_from_char_cache(&text, font_size, cursor_pos, viewport.cell_w);
 
             let cursor_col = text_col + cursor_x_offset;
             let cursor_rect = Rect {
@@ -510,4 +490,3 @@ impl WidgetDefinition for TextInputWidget {
         prims
     }
 }
-

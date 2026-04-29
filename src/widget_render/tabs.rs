@@ -30,7 +30,8 @@ fn header_height(props: &HashMap<String, Value>, _aspect: f32) -> f32 {
 
 fn compact_tab_widths(props: &HashMap<String, Value>, items: &[String]) -> Vec<f32> {
     let tab_pad = get_f32_prop(props, "tab-padding", 0.75);
-    items.iter()
+    items
+        .iter()
         .map(|label| label.chars().count() as f32 + tab_pad * 2.0)
         .collect()
 }
@@ -104,7 +105,8 @@ fn tui_render_header(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellB
         let gap = compact_gap(props).round() as u16;
         let tab_pad = get_f32_prop(props, "tab-padding", 0.75).round() as u16;
         let mut cursor = col_u16 + pad;
-        items.iter()
+        items
+            .iter()
             .map(|label| {
                 let width = label.chars().count() as u16 + tab_pad * 2;
                 let span = (cursor, width);
@@ -115,7 +117,8 @@ fn tui_render_header(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellB
     } else {
         let width_u16 = (rect.width.round() as u16).saturating_sub(pad * 2);
         let tab_width = width_u16 / items.len().max(1) as u16;
-        items.iter()
+        items
+            .iter()
             .enumerate()
             .map(|(i, _)| (col_u16 + pad + (i as u16) * tab_width, tab_width))
             .collect()
@@ -343,12 +346,8 @@ impl WidgetDefinition for TabsWidget {
         for (i, label) in items.iter().enumerate() {
             let is_selected = i == selected;
             let (tab_col, tab_width) = if compact {
-                let tab_col = tab_col_start
-                    + compact_widths
-                        .iter()
-                        .take(i)
-                        .sum::<f32>()
-                    + gap * i as f32;
+                let tab_col =
+                    tab_col_start + compact_widths.iter().take(i).sum::<f32>() + gap * i as f32;
                 (tab_col, compact_widths[i])
             } else {
                 let tab_width = inner_width / items.len() as f32;

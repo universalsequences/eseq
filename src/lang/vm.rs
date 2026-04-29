@@ -2,8 +2,8 @@ use crate::compiler::{Chunk, Compiler, MacroDef, OpCode};
 use crate::host::BufferId;
 use crate::parser::{ASTParser, Parser};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -332,7 +332,9 @@ fn parse_fmt_placeholder(template: &str, start: usize) -> Option<(usize, FmtSpec
     } else if bytes.get(pos) == Some(&b'<') {
         align = FmtAlign::Left;
         pos += 1;
-    } else if bytes.get(pos) == Some(&b'0') && bytes.get(pos + 1).is_some_and(|b| b.is_ascii_digit()) {
+    } else if bytes.get(pos) == Some(&b'0')
+        && bytes.get(pos + 1).is_some_and(|b| b.is_ascii_digit())
+    {
         // Zero-pad: {:02}, {:04} etc.
         fill = '0';
         // don't advance pos — the digits are the width
@@ -371,7 +373,15 @@ fn parse_fmt_placeholder(template: &str, start: usize) -> Option<(usize, FmtSpec
     }
 
     let total_len = 2 + pos + 1; // "{:" + spec + "}"
-    Some((total_len, FmtSpec { precision, width, align, fill }))
+    Some((
+        total_len,
+        FmtSpec {
+            precision,
+            width,
+            align,
+            fill,
+        },
+    ))
 }
 
 fn is_falsey(value: &Value) -> bool {
@@ -603,7 +613,10 @@ fn annotate_explicit_subtree_root(
             };
             annotated.insert(name.clone(), Rc::new(RefCell::new(annotated_children)));
         } else {
-            annotated.insert(name.clone(), Rc::new(RefCell::new(child.borrow().deep_clone())));
+            annotated.insert(
+                name.clone(),
+                Rc::new(RefCell::new(child.borrow().deep_clone())),
+            );
         }
     }
 
@@ -646,13 +659,8 @@ fn annotate_widget_tree_stable_ids(
     };
 
     let key = prop_string_rc(map, STABLE_KEY_PROP).or_else(|| stable_key_value(map));
-    let stable_id = stable_widget_hash(
-        source_buffer_id,
-        target,
-        &widget_type,
-        path,
-        key.as_deref(),
-    );
+    let stable_id =
+        stable_widget_hash(source_buffer_id, target, &widget_type, path, key.as_deref());
     let mut annotated = HashMap::new();
 
     for (name, child) in map {
@@ -680,7 +688,10 @@ fn annotate_widget_tree_stable_ids(
             };
             annotated.insert(name.clone(), Rc::new(RefCell::new(annotated_children)));
         } else {
-            annotated.insert(name.clone(), Rc::new(RefCell::new(child.borrow().deep_clone())));
+            annotated.insert(
+                name.clone(),
+                Rc::new(RefCell::new(child.borrow().deep_clone())),
+            );
         }
     }
 
@@ -754,6 +765,21 @@ pub fn register_core_natives(vm: &mut VM) {
         Value::Map(map)
     });
 
+    // (ui/style :pressed (dict ...) :hover (dict ...)) → Map.
+    // This is intentionally a thin constructor over dict so style values stay
+    // ordinary Lisp data that can be shared, merged, or inspected.
+    vm.register_native("ui/style", |args| {
+        let mut map = HashMap::new();
+        let mut i = 0;
+        while i + 1 < args.len() {
+            if let Value::Keyword(k) = &args[i] {
+                map.insert(k.clone(), Rc::new(RefCell::new(args[i + 1].clone())));
+            }
+            i += 2;
+        }
+        Value::Map(map)
+    });
+
     // (get collection :key) → value, or nil if missing.
     // Works on both Maps and keyword-value lists like (:label "foo" :children (...)).
     vm.register_native("get", |args| {
@@ -761,9 +787,7 @@ pub fn register_core_natives(vm: &mut VM) {
             return Value::Nil;
         };
         match args.first() {
-            Some(Value::Map(m)) => {
-                m.get(k).map(|v| v.borrow().clone()).unwrap_or(Value::Nil)
-            }
+            Some(Value::Map(m)) => m.get(k).map(|v| v.borrow().clone()).unwrap_or(Value::Nil),
             Some(Value::List(list)) => {
                 let mut i = 0;
                 while i + 1 < list.len() {
@@ -779,7 +803,8 @@ pub fn register_core_natives(vm: &mut VM) {
     });
 
     vm.register_native_with_vm("reactive-get", |args, vm| {
-        let (Some(Value::String(namespace)), Some(Value::String(field))) = (args.first(), args.get(1))
+        let (Some(Value::String(namespace)), Some(Value::String(field))) =
+            (args.first(), args.get(1))
         else {
             return Value::Nil;
         };
@@ -1855,11 +1880,12 @@ impl VM {
         self.dag.clear_dependencies_of(owner.node_id);
         self.current_subtree_reactive_reads
             .insert(owner.root_id, HashSet::new());
-        self.current_subtree_capture_stack.push(SubtreeCaptureContext {
-            root_id: owner.root_id,
-            parent_root_id: owner.parent_root_id,
-            stable_key: owner.stable_key.clone(),
-        });
+        self.current_subtree_capture_stack
+            .push(SubtreeCaptureContext {
+                root_id: owner.root_id,
+                parent_root_id: owner.parent_root_id,
+                stable_key: owner.stable_key.clone(),
+            });
         self.tracking_stack.push(owner.node_id);
         let result = self.invoke(owner.callable.clone(), vec![]);
         let _ = self.tracking_stack.pop();
@@ -1880,18 +1906,17 @@ impl VM {
         stable_key: &str,
         callable: Value,
     ) -> Result<Value, VMError> {
-        let parent_root_id = self.current_subtree_capture_stack.last().map(|ctx| ctx.root_id);
+        let parent_root_id = self
+            .current_subtree_capture_stack
+            .last()
+            .map(|ctx| ctx.root_id);
         let root_id = explicit_subtree_root_hash(
             self.current_effect_source_buffer_id,
             &self.current_effect_target,
             stable_key,
         );
-        let owner = self.sync_subtree_owner_node(
-            root_id,
-            parent_root_id,
-            stable_key.to_string(),
-            callable,
-        );
+        let owner =
+            self.sync_subtree_owner_node(root_id, parent_root_id, stable_key.to_string(), callable);
         self.render_registered_subtree_owner(&owner)
     }
 
@@ -2146,8 +2171,7 @@ impl VM {
                             let Some(owner) = self.registered_subtree_owner(root_id) else {
                                 continue;
                             };
-                            let previous_reactive_reads =
-                                self.current_effect_reactive_reads.take();
+                            let previous_reactive_reads = self.current_effect_reactive_reads.take();
                             let previous_subtree_capture_stack =
                                 std::mem::take(&mut self.current_subtree_capture_stack);
                             let previous_subtree_reactive_reads =
@@ -2170,13 +2194,14 @@ impl VM {
                                 .map(|reads| reads.iter().cloned().collect::<Vec<_>>())
                                 .unwrap_or_default();
                             reactive_dependencies.sort();
-                            self.pending_widget_trees.push(PendingUiUpdate::ReplaceSubtree {
-                                source_buffer_id: self.current_effect_source_buffer_id,
-                                target: self.current_effect_target.clone(),
-                                subtree_root_id: root_id,
-                                tree: annotated_tree,
-                                reactive_dependencies,
-                            });
+                            self.pending_widget_trees
+                                .push(PendingUiUpdate::ReplaceSubtree {
+                                    source_buffer_id: self.current_effect_source_buffer_id,
+                                    target: self.current_effect_target.clone(),
+                                    subtree_root_id: root_id,
+                                    tree: annotated_tree,
+                                    reactive_dependencies,
+                                });
                             self.dag.clear_dirty(node_id);
                             if let Some(label) = label {
                                 self.reactive_exec_timings.push(ReactiveExecTiming {
@@ -2201,8 +2226,10 @@ impl VM {
                         std::mem::take(&mut self.current_subtree_capture_stack);
                     let previous_subtree_reactive_reads =
                         std::mem::take(&mut self.current_subtree_reactive_reads);
-                    let capturing_effect_reads =
-                        matches!(self.dag.nodes.get(&node_id), Some(ReactiveNode::Effect { .. }));
+                    let capturing_effect_reads = matches!(
+                        self.dag.nodes.get(&node_id),
+                        Some(ReactiveNode::Effect { .. })
+                    );
                     let is_top_level_effect = matches!(
                         self.dag.nodes.get(&node_id),
                         Some(ReactiveNode::Effect {
@@ -2225,11 +2252,14 @@ impl VM {
                         Vec::new()
                     };
                     if capturing_effect_reads {
-                        for pending in self.pending_widget_trees.iter_mut().skip(pending_trees_start) {
+                        for pending in self
+                            .pending_widget_trees
+                            .iter_mut()
+                            .skip(pending_trees_start)
+                        {
                             match pending {
                                 PendingUiUpdate::FullTree(pending) => {
-                                    pending.reactive_dependencies =
-                                        captured_reactive_reads.clone();
+                                    pending.reactive_dependencies = captured_reactive_reads.clone();
                                 }
                                 PendingUiUpdate::ReplaceSubtree {
                                     reactive_dependencies,
@@ -2246,10 +2276,14 @@ impl VM {
                             elapsed: started.elapsed(),
                             source_buffer_id: self.current_effect_source_buffer_id,
                             target: self.current_effect_target.clone(),
-                            subtree_root_id: self.dag.nodes.get(&node_id).and_then(|node| match node {
-                                ReactiveNode::Effect { subtree_root_id, .. } => *subtree_root_id,
-                                _ => None,
-                            }),
+                            subtree_root_id: self.dag.nodes.get(&node_id).and_then(
+                                |node| match node {
+                                    ReactiveNode::Effect {
+                                        subtree_root_id, ..
+                                    } => *subtree_root_id,
+                                    _ => None,
+                                },
+                            ),
                         });
                     }
                     self.current_effect_reactive_reads = previous_reactive_reads;
@@ -2745,9 +2779,7 @@ impl VM {
                     let mut should_clear_dirty = false;
 
                     if let Some(ReactiveNode::Derived {
-                        value,
-                        dependents,
-                        ..
+                        value, dependents, ..
                     }) = self.dag.nodes.get_mut(&node_id)
                     {
                         let changed = *value != new_value;
@@ -2786,18 +2818,21 @@ impl VM {
                     let Some(stable_key) = subtree_key_string(&key_value.borrow()) else {
                         return Err(VMError::IncorrectType);
                     };
-                    let parent_root_id =
-                        self.current_subtree_capture_stack.last().map(|ctx| ctx.root_id);
+                    let parent_root_id = self
+                        .current_subtree_capture_stack
+                        .last()
+                        .map(|ctx| ctx.root_id);
                     let root_id = explicit_subtree_root_hash(
                         self.current_effect_source_buffer_id,
                         &self.current_effect_target,
                         &stable_key,
                     );
-                    self.current_subtree_capture_stack.push(SubtreeCaptureContext {
-                        root_id,
-                        parent_root_id,
-                        stable_key,
-                    });
+                    self.current_subtree_capture_stack
+                        .push(SubtreeCaptureContext {
+                            root_id,
+                            parent_root_id,
+                            stable_key,
+                        });
                     self.current_subtree_reactive_reads
                         .entry(root_id)
                         .or_default();
@@ -2984,13 +3019,14 @@ impl VM {
                                 .map(|reads| reads.iter().cloned().collect::<Vec<_>>())
                                 .unwrap_or_default();
                             reactive_dependencies.sort();
-                            self.pending_widget_trees.push(PendingUiUpdate::ReplaceSubtree {
-                                source_buffer_id: self.current_effect_source_buffer_id,
-                                target: self.current_effect_target.clone(),
-                                subtree_root_id,
-                                tree: annotated_tree,
-                                reactive_dependencies,
-                            });
+                            self.pending_widget_trees
+                                .push(PendingUiUpdate::ReplaceSubtree {
+                                    source_buffer_id: self.current_effect_source_buffer_id,
+                                    target: self.current_effect_target.clone(),
+                                    subtree_root_id,
+                                    tree: annotated_tree,
+                                    reactive_dependencies,
+                                });
                         } else {
                             self.pending_widget_trees.push(PendingUiUpdate::FullTree(
                                 PendingWidgetTree {

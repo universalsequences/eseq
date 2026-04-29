@@ -39,9 +39,7 @@ impl Editor {
                     let Some(layout) = self.runtime.current_layout.clone() else {
                         return false;
                     };
-                    if let Some(node) =
-                        super::widget_focus::find_node_by_id(&layout, overlay_id)
-                    {
+                    if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id) {
                         let widget_event = map_mouse_event(
                             &node,
                             mouse.kind,
@@ -53,7 +51,9 @@ impl Editor {
                         );
                         let output = match widget_event {
                             MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
-                            MouseEventOutcome::Dispatch(widget_event) => handle_event(&node, widget_event),
+                            MouseEventOutcome::Dispatch(widget_event) => {
+                                handle_event(&node, widget_event)
+                            }
                         };
                         let _ = self.apply_widget_output(output);
                         return true;
@@ -122,13 +122,38 @@ impl Editor {
         let Some((local_col, local_row)) =
             hit::to_local(precise_col, precise_row, content_col, content_row)
         else {
+            if sdf_widget::clear_sdf_hit_states_except(None) {
+                self.mark_needs_redraw();
+            }
             return;
         };
         let Some(node) = self.widget_node_at_local(local_col, local_row) else {
+            if sdf_widget::clear_sdf_hit_states_except(None) {
+                self.mark_needs_redraw();
+            }
             return;
         };
-        if sdf_widget::sdf_widget_def(&node.widget_type).is_none() {
+        let background_sdf = if node.widget_type == "box" {
+            node.props
+                .get("background")
+                .and_then(|value| match value {
+                    Value::String(name) => Some(name.as_str()),
+                    _ => None,
+                })
+                .filter(|name| sdf_widget::sdf_widget_def(name).is_some())
+                .is_some()
+        } else {
+            false
+        };
+        let direct_sdf = sdf_widget::sdf_widget_def(&node.widget_type).is_some();
+        if !direct_sdf && !background_sdf {
+            if sdf_widget::clear_sdf_hit_states_except(None) {
+                self.mark_needs_redraw();
+            }
             return;
+        }
+        if sdf_widget::clear_sdf_hit_states_except(Some(node.widget_id)) {
+            self.mark_needs_redraw();
         }
 
         let widget_col = local_col + self.active_leaf().widget_scroll_left - node.rect.col;
@@ -138,7 +163,11 @@ impl Editor {
         let px_h = node.rect.height * cell_h;
         let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
 
-        let region = sdf_widget::sdf_widget_hit_test(&node, widget_col, widget_row, pixel_aspect);
+        let region = if direct_sdf {
+            sdf_widget::sdf_widget_hit_test(&node, widget_col, widget_row, pixel_aspect)
+        } else {
+            0
+        };
 
         let old = sdf_widget::get_sdf_hit_state(node.widget_id);
         if old.hit_region != region || old.hit_pressed != pressed {
@@ -378,10 +407,14 @@ impl Editor {
         if self.active_buffer().read_only {
             return; // keep widget focus in read-only buffers
         }
+        let previous_cursor = self.active_buffer().cursor;
         let buffer_id = self.active_buffer().id;
         self.clear_mark();
         self.active_text_drag_anchor = Some(crate::editor::Mark { buffer_id, cursor });
         self.active_buffer_mut().cursor = cursor;
+        if cursor != previous_cursor {
+            self.exit_search_mode_if_active();
+        }
         let leaf = self.active_leaf_mut();
         leaf.focused_widget_id = None;
         leaf.active_widget_gesture = None;
@@ -416,7 +449,11 @@ impl Editor {
             return;
         };
 
+        let previous_cursor = self.active_buffer().cursor;
         self.active_buffer_mut().cursor = cursor;
+        if cursor != previous_cursor {
+            self.exit_search_mode_if_active();
+        }
         self.mark = Some(anchor);
         self.completion = None;
         self.minibuffer = None;
@@ -492,7 +529,9 @@ impl Editor {
             .current_layout
             .as_ref()
             .and_then(|layout| find_scroll_ancestor(layout, node.widget_id))
-            .map(|scroll_node| crate::widget_render::scroll::get_scroll_state(scroll_node.widget_id).offset_y);
+            .map(|scroll_node| {
+                crate::widget_render::scroll::get_scroll_state(scroll_node.widget_id).offset_y
+            });
         let drag_start = drag_start.map(|(start_col, start_row)| {
             (
                 start_col - content_col as f32 + total_scroll_left,
@@ -507,8 +546,9 @@ impl Editor {
             .and_then(|gesture| gesture.gesture_data.as_ref())
             .or(explicit_gesture);
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
-        let outcome =
-            map_mouse_event(node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers);
+        let outcome = map_mouse_event(
+            node, mouse_kind, local_col, local_row, drag_start, gesture, modifiers,
+        );
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
         match outcome {
             MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
@@ -612,9 +652,7 @@ impl Editor {
 
         // Leaf doesn't capture scroll — walk up to find a scroll container ancestor
         if let Some(layout) = self.runtime.current_layout.as_ref() {
-            if let Some(scroll_node) =
-                find_scroll_ancestor(layout, node.widget_id)
-            {
+            if let Some(scroll_node) = find_scroll_ancestor(layout, node.widget_id) {
                 if let Some(widget_event) = map_scroll_gesture_event(
                     &scroll_node,
                     scrolled_col,

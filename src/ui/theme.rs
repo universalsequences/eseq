@@ -360,8 +360,7 @@ pub fn set_current(theme: Theme) {
 pub fn parse_color_value(value: &Value) -> Option<Color> {
     match value {
         Value::String(text) | Value::Keyword(text) => parse_color_string(text),
-        Value::List(items) => parse_color_list(items)
-            .or_else(|| parse_color_func_call(items)),
+        Value::List(items) => parse_color_list(items).or_else(|| parse_color_func_call(items)),
         _ => None,
     }
 }

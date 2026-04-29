@@ -424,7 +424,11 @@ impl Editor {
         self.save_current_widget_tree();
         self.active_tile = new_tile;
         self.sync_runtime_context();
-        self.restore_buffer_widget_tree_with_cached_layout(cached_layout, viewport, layout_revision);
+        self.restore_buffer_widget_tree_with_cached_layout(
+            cached_layout,
+            viewport,
+            layout_revision,
+        );
         self.mark_needs_redraw();
     }
 
@@ -494,7 +498,15 @@ impl Editor {
             next_id: &mut TileId,
         ) -> TileNode {
             match spec {
-                LayoutSpec::Buffer { name, hide_status, borderless, min_width, min_height, max_width, max_height } => {
+                LayoutSpec::Buffer {
+                    name,
+                    hide_status,
+                    borderless,
+                    min_width,
+                    min_height,
+                    max_width,
+                    max_height,
+                } => {
                     let buf_idx = bufs.iter().position(|b| b.name == name).unwrap_or(fallback);
                     let id = *next_id;
                     *next_id += 1;
@@ -1185,6 +1197,16 @@ impl Editor {
         &mut self.buffers[idx]
     }
 
+    pub(super) fn exit_search_mode_if_active(&mut self) -> bool {
+        if !matches!(self.minibuffer_input, Some(MinibufferMode::Search { .. })) {
+            return false;
+        }
+        self.minibuffer_input = None;
+        self.minibuffer = None;
+        self.mark_needs_redraw();
+        true
+    }
+
     fn start_search(&mut self, direction: SearchDirection) {
         self.completion = None;
         self.minibuffer = None;
@@ -1276,7 +1298,10 @@ impl Editor {
         let buffer = self.active_buffer_mut();
         let max_row = buffer.lines.len().saturating_sub(1);
         buffer.cursor.0 = (buffer.cursor.0 + page_height).min(max_row);
-        buffer.cursor.1 = buffer.cursor.1.min(buffer.lines[buffer.cursor.0].chars().count());
+        buffer.cursor.1 = buffer
+            .cursor
+            .1
+            .min(buffer.lines[buffer.cursor.0].chars().count());
         let max_scroll = buffer.lines.len().saturating_sub(page_height);
         buffer.scroll_top = (buffer.scroll_top + page_height).min(max_scroll);
         buffer.adjust_scroll(page_height);
@@ -1286,7 +1311,10 @@ impl Editor {
         let page_height = self.text_page_height();
         let buffer = self.active_buffer_mut();
         buffer.cursor.0 = buffer.cursor.0.saturating_sub(page_height);
-        buffer.cursor.1 = buffer.cursor.1.min(buffer.lines[buffer.cursor.0].chars().count());
+        buffer.cursor.1 = buffer
+            .cursor
+            .1
+            .min(buffer.lines[buffer.cursor.0].chars().count());
         buffer.scroll_top = buffer.scroll_top.saturating_sub(page_height);
         buffer.adjust_scroll(page_height);
     }
@@ -1749,7 +1777,7 @@ impl Editor {
                 leaf.highlight_cache = None;
                 leaf.widget_scroll_top = 0.0;
                 leaf.widget_scroll_left = 0.0;
-                self.mark_needs_redraw();
+                self.refresh_inactive_tile_layouts_for_buffer(new);
                 return true;
             }
         }
@@ -2208,6 +2236,7 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollUp => {
+                self.exit_search_mode_if_active();
                 if widgets_visible
                     && self.try_handle_widget_mouse_precise(
                         mouse,
@@ -2239,6 +2268,7 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollDown => {
+                self.exit_search_mode_if_active();
                 if widgets_visible
                     && self.try_handle_widget_mouse_precise(
                         mouse,
@@ -2256,15 +2286,11 @@ impl Editor {
                         .runtime
                         .current_layout
                         .as_ref()
-                        .map(|l| {
-                            ((l.rect.row + l.rect.height).ceil())
-                                - content_height as f32
-                        })
+                        .map(|l| ((l.rect.row + l.rect.height).ceil()) - content_height as f32)
                         .unwrap_or(0.0)
                         .max(0.0);
                     let leaf = self.active_leaf_mut();
-                    leaf.widget_scroll_top =
-                        (leaf.widget_scroll_top + 3.0).min(max_scroll);
+                    leaf.widget_scroll_top = (leaf.widget_scroll_top + 3.0).min(max_scroll);
                     self.mark_needs_redraw();
                 } else if self.active_buffer().read_only && self.has_focusable_widgets() {
                     self.navigate_focus(KeyCode::Down);
@@ -2279,6 +2305,7 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollLeft => {
+                self.exit_search_mode_if_active();
                 if self.active_buffer().view_mode == ViewMode::TextOnly {
                     let leaf = self.active_leaf_mut();
                     leaf.widget_scroll_left = (leaf.widget_scroll_left - 3.0).max(0.0);
@@ -2302,6 +2329,7 @@ impl Editor {
                 }
             }
             MouseEventKind::ScrollRight => {
+                self.exit_search_mode_if_active();
                 if let Some(max_scroll) = self.max_text_horizontal_scroll(content_width) {
                     let leaf = self.active_leaf_mut();
                     leaf.widget_scroll_left =
@@ -2709,11 +2737,12 @@ impl Editor {
                     (Some(layout), dirty_widget_ids)
                 } else {
                     let layout = tree.as_ref().and_then(|tree| {
-                        self.runtime.layout_snapshot_for_tree_with_viewport_and_offset(
-                            tree,
-                            Some((cols, rows)),
-                            buffer_id * 100_000,
-                        )
+                        self.runtime
+                            .layout_snapshot_for_tree_with_viewport_and_offset(
+                                tree,
+                                Some((cols, rows)),
+                                buffer_id * 100_000,
+                            )
                     });
                     (layout, Vec::new())
                 };
@@ -2800,11 +2829,13 @@ impl Editor {
             let (layout, dirty_widget_ids) = if targeted {
                 (layout, dirty_widget_ids)
             } else {
-                let layout = self.runtime.layout_snapshot_for_tree_with_viewport_and_offset(
-                    tree,
-                    Some((cols, rows)),
-                    buffer_id * 100_000,
-                );
+                let layout = self
+                    .runtime
+                    .layout_snapshot_for_tree_with_viewport_and_offset(
+                        tree,
+                        Some((cols, rows)),
+                        buffer_id * 100_000,
+                    );
                 (layout, Vec::new())
             };
             if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
@@ -3166,7 +3197,8 @@ impl Editor {
                 }
                 tree => {
                     let source_id = self.active_buffer().id;
-                    self.runtime.set_widget_id_offset(source_id as u64 * 100_000);
+                    self.runtime
+                        .set_widget_id_offset(source_id as u64 * 100_000);
                     let buffer = self.active_buffer_mut();
                     buffer.set_widget_tree(Some(tree.deep_clone()), Some(source_id));
                     buffer.view_mode = ViewMode::UiOnly;
@@ -3182,8 +3214,7 @@ impl Editor {
                 PendingUiUpdate::FullTree(pending) => {
                     let buffer_idx = match pending.target {
                         EffectTarget::BufferId(Some(id)) => {
-                            let Some(idx) =
-                                self.buffers.iter().position(|buffer| buffer.id == id)
+                            let Some(idx) = self.buffers.iter().position(|buffer| buffer.id == id)
                             else {
                                 continue;
                             };
@@ -3195,15 +3226,15 @@ impl Editor {
                         }
                     };
                     let buffer_name = self.buffers[buffer_idx].name.clone();
-                    self.trace_ui_tree_event_with(
-                        &buffer_name,
-                        "pending-full",
-                        || format!(
+                    self.trace_ui_tree_event_with(&buffer_name, "pending-full", || {
+                        format!(
                             "incoming={} before={}",
                             debug_widget_tree_summary(Some(&pending.tree)),
-                            debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref()),
-                        ),
-                    );
+                            debug_widget_tree_summary(
+                                self.buffers[buffer_idx].widget_tree.as_ref()
+                            ),
+                        )
+                    });
                     let is_active = self.active_buffer_idx() == buffer_idx;
                     let upgraded_subtree_root = self.buffers[buffer_idx]
                         .committed_ui_snapshot
@@ -3213,11 +3244,11 @@ impl Editor {
                         });
                     let upgraded_subtree = upgraded_subtree_root.is_some_and(|subtree_root_id| {
                         self.buffers[buffer_idx].replace_widget_subtree(
-                                subtree_root_id,
-                                pending.tree.deep_clone(),
-                                pending.source_buffer_id,
-                                pending.reactive_dependencies.clone(),
-                            )
+                            subtree_root_id,
+                            pending.tree.deep_clone(),
+                            pending.source_buffer_id,
+                            pending.reactive_dependencies.clone(),
+                        )
                     });
                     if upgraded_subtree {
                         self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
@@ -3242,22 +3273,19 @@ impl Editor {
                     } else {
                         {
                             let buffer = &mut self.buffers[buffer_idx];
-                            buffer.set_widget_tree(
-                                Some(pending.tree),
-                                pending.source_buffer_id,
-                            );
+                            buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
                             buffer.view_mode = ViewMode::UiOnly;
                         }
                         inactive_buffers_to_refresh.insert(buffer_idx, None);
                     }
-                    self.trace_ui_tree_event_with(
-                        &buffer_name,
-                        "applied-full",
-                        || format!(
+                    self.trace_ui_tree_event_with(&buffer_name, "applied-full", || {
+                        format!(
                             "after={}",
-                            debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref())
-                        ),
-                    );
+                            debug_widget_tree_summary(
+                                self.buffers[buffer_idx].widget_tree.as_ref()
+                            )
+                        )
+                    });
                 }
                 PendingUiUpdate::ReplaceSubtree {
                     source_buffer_id,
@@ -3278,15 +3306,15 @@ impl Editor {
                         EffectTarget::BufferName(name) => self.ensure_scratch_buffer_named(&name),
                     };
                     let buffer_name = self.buffers[buffer_idx].name.clone();
-                    self.trace_ui_tree_event_with(
-                        &buffer_name,
-                        "pending-subtree",
-                        || format!(
+                    self.trace_ui_tree_event_with(&buffer_name, "pending-subtree", || {
+                        format!(
                             "root={subtree_root_id} incoming={} before={}",
                             debug_widget_tree_summary(Some(&tree)),
-                            debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref()),
-                        ),
-                    );
+                            debug_widget_tree_summary(
+                                self.buffers[buffer_idx].widget_tree.as_ref()
+                            ),
+                        )
+                    });
                     let is_active = self.active_buffer_idx() == buffer_idx;
                     let replaced = {
                         let buffer = &mut self.buffers[buffer_idx];
@@ -3320,11 +3348,19 @@ impl Editor {
                     }
                     self.trace_ui_tree_event_with(
                         &buffer_name,
-                        if replaced { "applied-subtree" } else { "missed-subtree" },
-                        || format!(
-                            "root={subtree_root_id} after={}",
-                            debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref())
-                        ),
+                        if replaced {
+                            "applied-subtree"
+                        } else {
+                            "missed-subtree"
+                        },
+                        || {
+                            format!(
+                                "root={subtree_root_id} after={}",
+                                debug_widget_tree_summary(
+                                    self.buffers[buffer_idx].widget_tree.as_ref()
+                                )
+                            )
+                        },
                     );
                 }
             }
@@ -3434,9 +3470,8 @@ impl Editor {
                 }
                 crate::runtime::TileOp::SetWindowBufferFor { current, new_name } => {
                     if !self.swap_buffer_in_tile_showing(&current, &new_name) {
-                        self.minibuffer = Some(format!(
-                            "Could not swap '{current}' → '{new_name}'"
-                        ));
+                        self.minibuffer =
+                            Some(format!("Could not swap '{current}' → '{new_name}'"));
                     }
                 }
             }

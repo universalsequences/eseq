@@ -50,7 +50,16 @@ pub struct TileLeaf {
     /// Key is (buffer_id, buffer_revision, widget_tree_revision, layout_revision, scroll_top,
     /// viewport_width, viewport_height, view_mode).
     pub cached_inactive_frame: Option<(
-        (BufferId, u64, u64, u64, usize, usize, usize, crate::editor::ViewMode),
+        (
+            BufferId,
+            u64,
+            u64,
+            u64,
+            usize,
+            usize,
+            usize,
+            crate::editor::ViewMode,
+        ),
         crate::backend::RenderFrame,
     )>,
 }
@@ -196,10 +205,10 @@ impl TileNode {
         match self {
             TileNode::Leaf(leaf) if leaf.buffer_idx == buffer_idx => Some(leaf),
             TileNode::Leaf(_) => None,
-            TileNode::Split(s) => s
-                .a
-                .find_leaf_by_buffer_idx_mut(buffer_idx)
-                .or_else(|| s.b.find_leaf_by_buffer_idx_mut(buffer_idx)),
+            TileNode::Split(s) => {
+                s.a.find_leaf_by_buffer_idx_mut(buffer_idx)
+                    .or_else(|| s.b.find_leaf_by_buffer_idx_mut(buffer_idx))
+            }
         }
     }
 

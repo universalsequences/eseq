@@ -506,6 +506,55 @@
     }
 
     #[test]
+    fn search_mouse_click_that_moves_cursor_exits_search_mode() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "alpha beta\ngamma delta");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        for c in "delta".chars() {
+            editor.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(editor.active_buffer().cursor, (1, 6));
+        assert!(editor.minibuffer_prompt().is_some());
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1),
+            1,
+            1,
+            20,
+            10,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (0, 2));
+        assert_eq!(editor.minibuffer_prompt(), None);
+    }
+
+    #[test]
+    fn search_mouse_scroll_exits_search_mode() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "one\ntwo\nthree\nfour\nfive");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        for c in "five".chars() {
+            editor.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(editor.active_buffer().cursor, (4, 0));
+        assert!(editor.minibuffer_prompt().is_some());
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollDown, 1, 1),
+            1,
+            1,
+            20,
+            3,
+        );
+
+        assert_eq!(editor.minibuffer_prompt(), None);
+    }
+
+    #[test]
     fn meta_period_jumps_to_definition_and_meta_comma_returns() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -2746,14 +2795,14 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
         editor.set_layout_viewport(30, 8);
 
         editor.handle_mouse(
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 8, 2),
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 16, 2),
             1,
             1,
             30,
             8,
         );
         editor.handle_mouse(
-            mouse_event(MouseEventKind::Drag(MouseButton::Left), 6, 2),
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 18, 2),
             1,
             1,
             30,
@@ -2765,7 +2814,7 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
             super::get_map_field_keyword(&action, "type"),
             Some("resize-item-absolute".to_string())
         );
-        assert_eq!(super::get_map_field_keyword(&action, "edge"), Some("start".to_string()));
+        assert_eq!(super::get_map_field_keyword(&action, "edge"), Some("end".to_string()));
         assert_eq!(super::get_map_field_number(&action, "id"), Some(10.0));
     }
 

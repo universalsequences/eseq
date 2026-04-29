@@ -5,8 +5,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    get_bool_prop, get_f32_prop, resolve_named_color, should_trigger_integer_haptic,
-    styled_cell, trigger_level_change_haptic,
+    get_bool_prop, get_f32_prop, resolve_named_color, should_trigger_integer_haptic, styled_cell,
+    trigger_level_change_haptic,
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
@@ -131,12 +131,7 @@ impl WidgetDefinition for NumberPickerWidget {
         true
     }
 
-    fn begin_gesture(
-        &self,
-        node: &LayoutNode,
-        _local_col: f32,
-        local_row: f32,
-    ) -> Option<Value> {
+    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, local_row: f32) -> Option<Value> {
         // Store start value and start row (layout-space).
         // local_row ≈ screen_row_from_content_top + scroll, so for non-scrolled
         // views it equals the screen distance from the content area top.
@@ -249,8 +244,7 @@ impl WidgetDefinition for NumberPickerWidget {
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Right if state.editing => {
-                state.cursor_pos =
-                    (state.cursor_pos + 1).min(state.edit_text.len());
+                state.cursor_pos = (state.cursor_pos + 1).min(state.edit_text.len());
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
@@ -370,17 +364,32 @@ impl WidgetDefinition for NumberPickerWidget {
         let text_color = resolve_named_color(
             &node.props,
             "text-color",
-            Color { r: 0.90, g: 0.90, b: 0.92, a: 1.0 },
+            Color {
+                r: 0.90,
+                g: 0.90,
+                b: 0.92,
+                a: 1.0,
+            },
         );
         let edit_color = resolve_named_color(
             &node.props,
             "edit-color",
-            Color { r: 1.0, g: 0.95, b: 0.25, a: 1.0 },
+            Color {
+                r: 1.0,
+                g: 0.95,
+                b: 0.25,
+                a: 1.0,
+            },
         );
         let cursor_color = resolve_named_color(
             &node.props,
             "cursor-color",
-            Color { r: 1.0, g: 0.95, b: 0.25, a: 1.0 },
+            Color {
+                r: 1.0,
+                g: 0.95,
+                b: 0.25,
+                a: 1.0,
+            },
         );
 
         let mut prims = Vec::new();
@@ -389,17 +398,32 @@ impl WidgetDefinition for NumberPickerWidget {
             let bg_color = resolve_named_color(
                 &node.props,
                 "bg-color",
-                Color { r: 0.14, g: 0.14, b: 0.16, a: 1.0 },
+                Color {
+                    r: 0.14,
+                    g: 0.14,
+                    b: 0.16,
+                    a: 1.0,
+                },
             );
             let ring_color = resolve_named_color(
                 &node.props,
                 "ring-color",
-                Color { r: 0.25, g: 0.52, b: 0.96, a: 1.0 },
+                Color {
+                    r: 0.25,
+                    g: 0.52,
+                    b: 0.96,
+                    a: 1.0,
+                },
             );
             let tri_color = resolve_named_color(
                 &node.props,
                 "tri-color",
-                Color { r: 0.60, g: 0.60, b: 0.65, a: 1.0 },
+                Color {
+                    r: 0.60,
+                    g: 0.60,
+                    b: 0.65,
+                    a: 1.0,
+                },
             );
 
             // ── Focus ring ──
@@ -504,7 +528,12 @@ impl WidgetDefinition for NumberPickerWidget {
             node.rect.col + TEXT_PADDING_H + TRIANGLE_WIDTH
         };
         let text_row = node.rect.row + (node.rect.height - 1.0) * 0.5;
-        let transparent = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        let transparent = Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
 
         let (display_text, fg) = if state.editing {
             (state.edit_text.clone(), edit_color)
@@ -529,12 +558,8 @@ impl WidgetDefinition for NumberPickerWidget {
 
         // ── Cursor (when editing) ──
         if is_focused && state.editing {
-            let cursor_x = cursor_x_from_cache(
-                &display_text,
-                state.cursor_pos,
-                font_size,
-                viewport.cell_w,
-            );
+            let cursor_x =
+                cursor_x_from_cache(&display_text, state.cursor_pos, font_size, viewport.cell_w);
             let cursor_col = text_col + cursor_x;
             let cursor_rect = Rect {
                 row: node.rect.row + 0.15,
@@ -553,7 +578,6 @@ impl WidgetDefinition for NumberPickerWidget {
 }
 
 // ── Metal shaders ────────────────────────────────────────────────────────────
-
 
 #[cfg(target_os = "macos")]
 const NUMBER_PICKER_TRI_SHADER: &str = r#"

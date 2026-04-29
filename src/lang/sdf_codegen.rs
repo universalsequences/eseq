@@ -670,10 +670,8 @@ impl MetalEmitter {
         if let Some(light_expr) = lighting.light_expr {
             let light = self.emit_expr(light_expr)?;
             let light_var = self.fresh_var();
-            self.statements.push(format!(
-                "float3 {} = normalize({});",
-                light_var, light
-            ));
+            self.statements
+                .push(format!("float3 {} = normalize({});", light_var, light));
 
             // Diffuse: max(0, dot(normal, light))
             let diffuse = self.fresh_var();
@@ -1232,6 +1230,12 @@ pub fn compile_sdf_to_metal_with_state(
 
     if returns_color {
         writeln!(shader, "    float4 result = {};", result_expr).unwrap();
+        writeln!(
+            shader,
+            "    float style_brightness = in.color_b.w <= 0.0 ? 1.0 : in.color_b.w;"
+        )
+        .unwrap();
+        writeln!(shader, "    result.rgb *= style_brightness;").unwrap();
         writeln!(shader, "    if (result.a < 0.001) discard_fragment();").unwrap();
         writeln!(shader, "    return result;").unwrap();
     } else {
@@ -1240,6 +1244,12 @@ pub fn compile_sdf_to_metal_with_state(
         writeln!(shader, "    float mask = smoothstep(aa, -aa, d);").unwrap();
         writeln!(shader, "    if (mask < 0.001) discard_fragment();").unwrap();
         writeln!(shader, "    float4 fill_color = in.color_a;").unwrap();
+        writeln!(
+            shader,
+            "    float style_brightness = in.color_b.w <= 0.0 ? 1.0 : in.color_b.w;"
+        )
+        .unwrap();
+        writeln!(shader, "    fill_color.rgb *= style_brightness;").unwrap();
         writeln!(
             shader,
             "    return float4(fill_color.rgb, fill_color.a * mask);"

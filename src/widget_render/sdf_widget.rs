@@ -49,16 +49,41 @@ thread_local! {
     static SDF_WIDGETS: RefCell<HashMap<String, Rc<SdfWidgetDef>>> = RefCell::new(HashMap::new());
     /// Hit state keyed by widget_id (from LayoutNode).
     static SDF_HIT_STATES: RefCell<HashMap<u64, SdfHitState>> = RefCell::new(HashMap::new());
+    static SDF_VISUAL_SCALE_ANIMS: RefCell<HashMap<u64, VisualScaleAnim>> = RefCell::new(HashMap::new());
     static SDF_TIME_ORIGIN: Instant = Instant::now();
     static SDF_TIME_SECONDS: RefCell<f32> = const { RefCell::new(0.0) };
+    static SDF_LAST_PRESENTED_TIME_SECONDS: RefCell<Option<f32>> = const { RefCell::new(None) };
+    static SDF_VISUAL_ANIMATION_UNTIL_SECONDS: RefCell<f32> = const { RefCell::new(0.0) };
 }
 
 pub fn set_sdf_hit_state(widget_id: u64, state: SdfHitState) {
     SDF_HIT_STATES.with(|s| s.borrow_mut().insert(widget_id, state));
+    super::bump_widget_state_generation();
 }
 
 pub fn get_sdf_hit_state(widget_id: u64) -> SdfHitState {
     SDF_HIT_STATES.with(|s| s.borrow().get(&widget_id).cloned().unwrap_or_default())
+}
+
+pub fn clear_sdf_hit_states_except(keep_widget_id: Option<u64>) -> bool {
+    let changed = SDF_HIT_STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        let mut changed = false;
+        for (widget_id, state) in states.iter_mut() {
+            if Some(*widget_id) == keep_widget_id {
+                continue;
+            }
+            if state.hit_region != -1 || state.hit_pressed {
+                *state = SdfHitState::default();
+                changed = true;
+            }
+        }
+        changed
+    });
+    if changed {
+        super::bump_widget_state_generation();
+    }
+    changed
 }
 
 pub fn set_sdf_time_seconds(time_seconds: f32) {
@@ -73,6 +98,239 @@ pub fn current_sdf_time_seconds() -> f32 {
 
 pub fn current_sdf_time_fallback_seconds() -> f32 {
     SDF_TIME_ORIGIN.with(|origin| origin.elapsed().as_secs_f32())
+}
+
+#[cfg(target_os = "macos")]
+pub fn note_sdf_frame_presented(time_seconds: f32) {
+    SDF_LAST_PRESENTED_TIME_SECONDS.with(|slot| {
+        *slot.borrow_mut() = Some(time_seconds.max(0.0));
+    });
+}
+
+#[cfg(target_os = "macos")]
+pub fn sdf_visual_animations_active(time_seconds: f32) -> bool {
+    let deadline_active =
+        SDF_VISUAL_ANIMATION_UNTIL_SECONDS.with(|deadline| time_seconds < *deadline.borrow());
+    if deadline_active {
+        return true;
+    }
+    SDF_VISUAL_SCALE_ANIMS.with(|anims| {
+        anims.borrow().values().any(|anim| {
+            anim.duration > 0.0
+                && (time_seconds - anim.start_time) < anim.duration
+                && (anim.start_scale - anim.target_scale).abs() > 0.0001
+        })
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub fn sdf_visual_animation_debug_status(time_seconds: f32) -> Option<(usize, usize, f32)> {
+    let deadline_remaining =
+        SDF_VISUAL_ANIMATION_UNTIL_SECONDS.with(|deadline| *deadline.borrow() - time_seconds);
+    SDF_VISUAL_SCALE_ANIMS.with(|anims| {
+        let anims = anims.borrow();
+        let mut total = 0;
+        let mut active = 0;
+        let mut max_remaining = deadline_remaining;
+        for anim in anims.values() {
+            if anim.duration <= 0.0 || (anim.start_scale - anim.target_scale).abs() <= 0.0001 {
+                continue;
+            }
+            total += 1;
+            let remaining = anim.start_time + anim.duration - time_seconds;
+            max_remaining = max_remaining.max(remaining);
+            if remaining > 0.0 {
+                active += 1;
+            }
+        }
+        if total > 0 || deadline_remaining > 0.0 {
+            Some((total, active, max_remaining))
+        } else {
+            None
+        }
+    })
+}
+
+fn last_sdf_frame_presented_seconds() -> Option<f32> {
+    SDF_LAST_PRESENTED_TIME_SECONDS.with(|slot| *slot.borrow())
+}
+
+#[derive(Clone, Copy)]
+struct VisualScaleAnim {
+    start_scale: f32,
+    target_scale: f32,
+    start_time: f32,
+    duration: f32,
+    ease: f32,
+}
+
+impl Default for VisualScaleAnim {
+    fn default() -> Self {
+        Self {
+            start_scale: 1.0,
+            target_scale: 1.0,
+            start_time: 0.0,
+            duration: 0.0,
+            ease: 1.0,
+        }
+    }
+}
+
+fn ease_value(ease: f32, t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    if (ease - 2.0).abs() < 0.5 {
+        return t * t * (3.0 - 2.0 * t);
+    }
+    if (ease - 3.0).abs() < 0.5 {
+        return t;
+    }
+    let inv = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - inv * inv * inv
+}
+
+fn visual_scale_at(anim: VisualScaleAnim, now: f32) -> f32 {
+    if anim.duration <= 0.0 {
+        return anim.target_scale;
+    }
+    let t = ((now - anim.start_time) / anim.duration).clamp(0.0, 1.0);
+    anim.start_scale + (anim.target_scale - anim.start_scale) * ease_value(anim.ease, t)
+}
+
+fn map_number(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<f32> {
+    match map.get(key).map(|value| value.borrow().clone()) {
+        Some(Value::Number(n)) => Some(n as f32),
+        Some(Value::Bool(true)) => Some(1.0),
+        Some(Value::Bool(false)) => Some(0.0),
+        _ => None,
+    }
+}
+
+fn map_ease(map: &HashMap<String, Rc<RefCell<Value>>>, key: &str) -> f32 {
+    match map.get(key).map(|value| value.borrow().clone()) {
+        Some(Value::Keyword(name)) | Some(Value::Symbol(name)) | Some(Value::String(name)) => {
+            match name.as_str() {
+                "smoothstep" | "ease-in-out" | "in-out" => 2.0,
+                "linear" => 3.0,
+                _ => 1.0,
+            }
+        }
+        _ => 1.0,
+    }
+}
+
+fn style_state_map<'a>(
+    style: &'a HashMap<String, Rc<RefCell<Value>>>,
+    state: &str,
+) -> Option<std::cell::Ref<'a, HashMap<String, Rc<RefCell<Value>>>>> {
+    let value = style.get(state)?.borrow();
+    if !matches!(&*value, Value::Map(_)) {
+        return None;
+    }
+    Some(std::cell::Ref::map(value, |value| match value {
+        Value::Map(map) => map,
+        _ => unreachable!(),
+    }))
+}
+
+fn visual_style_target_scale(props: &HashMap<String, Value>, hit: &SdfHitState) -> (f32, f32, f32) {
+    let Some(Value::Map(style)) = props.get("style") else {
+        return (1.0, 0.0, 1.0);
+    };
+
+    let active_state = if hit.hit_pressed && hit.hit_region >= 0 {
+        "pressed"
+    } else if hit.hit_region >= 0 {
+        "hover"
+    } else {
+        ""
+    };
+
+    if active_state.is_empty() {
+        return (1.0, 0.0, 1.0);
+    }
+
+    let Some(state_style) = style_state_map(style, active_state) else {
+        return (1.0, 0.0, 1.0);
+    };
+    let scale = map_number(&state_style, "scale").unwrap_or(1.0);
+    let (duration, ease) = match state_style
+        .get("transition")
+        .map(|value| value.borrow().clone())
+    {
+        Some(Value::Map(transition)) => (
+            map_number(&transition, "scale").unwrap_or(0.0),
+            map_ease(&transition, "ease"),
+        ),
+        _ => (0.0, 1.0),
+    };
+    (scale.max(0.01), duration.max(0.0), ease)
+}
+
+fn visual_style_target_brightness(props: &HashMap<String, Value>, hit: &SdfHitState) -> f32 {
+    let Some(Value::Map(style)) = props.get("style") else {
+        return 1.0;
+    };
+
+    let active_state = if hit.hit_pressed && hit.hit_region >= 0 {
+        "pressed"
+    } else if hit.hit_region >= 0 {
+        "hover"
+    } else {
+        ""
+    };
+
+    if active_state.is_empty() {
+        return 1.0;
+    }
+
+    let Some(state_style) = style_state_map(style, active_state) else {
+        return 1.0;
+    };
+    map_number(&state_style, "brightness")
+        .unwrap_or(1.0)
+        .max(0.0)
+}
+
+fn visual_scale_anim_uniforms(
+    widget_id: u64,
+    props: &HashMap<String, Value>,
+    hit: &SdfHitState,
+    now: f32,
+) -> ([f32; 4], f32) {
+    let (target_scale, duration, ease) = visual_style_target_scale(props, hit);
+    SDF_VISUAL_SCALE_ANIMS.with(|anims| {
+        let mut anims = anims.borrow_mut();
+        let anim = anims.entry(widget_id).or_default();
+        if (anim.target_scale - target_scale).abs() > 0.0001 {
+            let last_visible_time = last_sdf_frame_presented_seconds().unwrap_or(now);
+            let current = visual_scale_at(*anim, last_visible_time);
+            let start_scale = if duration <= 0.0 {
+                target_scale
+            } else {
+                current
+            };
+            *anim = VisualScaleAnim {
+                start_scale,
+                target_scale,
+                start_time: now,
+                duration,
+                ease,
+            };
+            SDF_VISUAL_ANIMATION_UNTIL_SECONDS.with(|deadline| {
+                let mut deadline = deadline.borrow_mut();
+                *deadline = (*deadline).max(now + duration);
+            });
+        }
+        (
+            [
+                anim.start_scale,
+                anim.target_scale,
+                anim.start_time,
+                -anim.duration.max(0.0001),
+            ],
+            anim.ease,
+        )
+    })
 }
 
 /// Resolve a state prop value by name — tries direct name, then prefixed.
@@ -129,12 +387,10 @@ pub fn sdf_widget_hit_test(
         pixel_aspect,
     );
     let mut vars = hit_test_uniform_vars(&node.props, &def.state_uniforms);
-    let aspect = if node.rect.height > 0.0 {
-        (node.rect.width / node.rect.height) as f64
-    } else {
-        1.0
-    };
+    let aspect = pixel_aspect as f64;
     vars.insert("aspect".to_string(), aspect);
+    vars.insert("width".to_string(), aspect.max(1.0));
+    vars.insert("height".to_string(), (1.0 / aspect.max(0.0001)).max(1.0));
     crate::lang::sdf_hit::sdf_hit_test_with_vars(&def.sdf_expr, x, y, &vars)
 }
 
@@ -287,9 +543,18 @@ pub fn build_material_overlay(
 
     let mut uniform_a = [0.0; 4];
     let mut uniform_b = [0.0; 4];
-    for (idx, name) in def.state_uniforms.iter().take(MAX_SDF_STATE_UNIFORMS).enumerate() {
+    for (idx, name) in def
+        .state_uniforms
+        .iter()
+        .take(MAX_SDF_STATE_UNIFORMS)
+        .enumerate()
+    {
         let val = super::get_f32_prop(&node.props, &shader_state_prop_name(name), 0.0);
-        if idx < 4 { uniform_a[idx] = val; } else { uniform_b[idx - 4] = val; }
+        if idx < 4 {
+            uniform_a[idx] = val;
+        } else {
+            uniform_b[idx - 4] = val;
+        }
     }
 
     let px_w = node.rect.width * viewport.cell_w;
@@ -307,7 +572,12 @@ pub fn build_material_overlay(
             uniform_a,
             uniform_b,
             color_a: [0.0; 4],
-            color_b: [hit.hit_region as f32, if hit.hit_pressed { 1.0 } else { 0.0 }, 0.0, 0.0],
+            color_b: [
+                hit.hit_region as f32,
+                if hit.hit_pressed { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
             color_c: logical_uv,
             color_d: [0.0; 4],
             corner_radius: 0.0,
@@ -473,6 +743,9 @@ pub fn sdf_widget_metal_primitives(
 
     let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
     let hit = get_sdf_hit_state(node.widget_id);
+    let visual_brightness = visual_style_target_brightness(&node.props, &hit);
+    let (visual_scale, visual_ease) =
+        visual_scale_anim_uniforms(node.widget_id, &node.props, &hit, viewport.time_seconds);
     let mut uniform_a = [0.0; 4];
     let mut uniform_b = [0.0; 4];
     for (idx, name) in def
@@ -503,11 +776,11 @@ pub fn sdf_widget_metal_primitives(
             color_b: [
                 hit.hit_region as f32,
                 if hit.hit_pressed { 1.0 } else { 0.0 },
-                0.0,
-                0.0,
+                visual_ease,
+                visual_brightness,
             ],
             color_c: logical_uv_bounds,
-            color_d: [0.0; 4],
+            color_d: visual_scale,
             corner_radius: 0.0,
             pixel_aspect,
         },
@@ -520,6 +793,7 @@ pub fn sdf_widget_metal_primitives(
 #[cfg(target_os = "macos")]
 pub fn sdf_widget_background_primitives(
     widget_type: &str,
+    widget_id: u64,
     rect: Rect,
     viewport: WidgetViewport,
     props: &HashMap<String, Value>,
@@ -535,7 +809,10 @@ pub fn sdf_widget_background_primitives(
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
     let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
-    const NO_HIT_REGION: f32 = -1.0;
+    let hit = get_sdf_hit_state(widget_id);
+    let visual_brightness = visual_style_target_brightness(props, &hit);
+    let (visual_scale, visual_ease) =
+        visual_scale_anim_uniforms(widget_id, props, &hit, viewport.time_seconds);
 
     // Resolve state uniforms from the box's props
     let mut uniform_a = [0.0; 4];
@@ -565,9 +842,14 @@ pub fn sdf_widget_background_primitives(
             uniform_a,
             uniform_b,
             color_a: [0.0; 4],
-            color_b: [NO_HIT_REGION, 0.0, 0.0, 0.0],
+            color_b: [
+                hit.hit_region as f32,
+                if hit.hit_pressed { 1.0 } else { 0.0 },
+                visual_ease,
+                visual_brightness,
+            ],
             color_c: [0.0, 0.0, 1.0, 1.0],
-            color_d: [0.0; 4],
+            color_d: visual_scale,
             corner_radius: 0.0,
             pixel_aspect,
         },
@@ -590,6 +872,19 @@ pub fn sdf_widget_shader_sources() -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use crate::parser::Expression;
+
+    fn number_cell(n: f64) -> Rc<RefCell<Value>> {
+        Rc::new(RefCell::new(Value::Number(n)))
+    }
+
+    fn map_value(entries: &[(&str, Value)]) -> Value {
+        Value::Map(
+            entries
+                .iter()
+                .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value.clone()))))
+                .collect(),
+        )
+    }
 
     #[test]
     fn paint_rect_expands_uniformly() {
@@ -620,6 +915,109 @@ mod tests {
             height: 4.0,
         };
         assert_eq!(sdf_widget_paint_rect(rect, 0.0), rect);
+    }
+
+    #[test]
+    fn visual_style_prefers_pressed_scale_over_hover() {
+        let style = map_value(&[
+            (
+                "pressed",
+                map_value(&[
+                    ("scale", Value::Number(1.10)),
+                    ("transition", map_value(&[("scale", Value::Number(0.08))])),
+                ]),
+            ),
+            (
+                "hover",
+                map_value(&[
+                    ("scale", Value::Number(1.04)),
+                    ("transition", map_value(&[("scale", Value::Number(0.12))])),
+                ]),
+            ),
+        ]);
+        let props = HashMap::from([("style".to_string(), style)]);
+
+        let (scale, duration, ease) = visual_style_target_scale(
+            &props,
+            &SdfHitState {
+                hit_region: 0,
+                hit_pressed: true,
+            },
+        );
+
+        assert!((scale - 1.10).abs() < 0.0001);
+        assert!((duration - 0.08).abs() < 0.0001);
+        assert!((ease - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn visual_style_uses_identity_scale_without_hit() {
+        let style = Value::Map(HashMap::from([(
+            "hover".to_string(),
+            Rc::new(RefCell::new(Value::Map(HashMap::from([(
+                "scale".to_string(),
+                number_cell(1.04),
+            )])))),
+        )]));
+        let props = HashMap::from([("style".to_string(), style)]);
+
+        let (scale, duration, _ease) = visual_style_target_scale(
+            &props,
+            &SdfHitState {
+                hit_region: -1,
+                hit_pressed: false,
+            },
+        );
+
+        assert_eq!(scale, 1.0);
+        assert_eq!(duration, 0.0);
+    }
+
+    #[test]
+    fn sdf_hit_test_injects_width_and_height_vars() {
+        let node = LayoutNode {
+            widget_id: 42,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "sdf-hit-width-height".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 2.8,
+                height: 1.4,
+            },
+            props: HashMap::new(),
+            children: Vec::new(),
+            focusable: false,
+        };
+        register_sdf_widget(SdfWidgetDef {
+            name: "sdf-hit-width-height".to_string(),
+            shader_source: String::new(),
+            sdf_expr: Expression::List(vec![
+                Expression::Symbol("sdf/layer".to_string()),
+                Expression::List(vec![
+                    Expression::Symbol("sdf/fill".to_string()),
+                    Expression::List(vec![
+                        Expression::Symbol("-".to_string()),
+                        Expression::List(vec![
+                            Expression::Symbol("abs".to_string()),
+                            Expression::Symbol("x".to_string()),
+                        ]),
+                        Expression::Symbol("height".to_string()),
+                    ]),
+                    Expression::Keyword("accent".to_string()),
+                ]),
+            ]),
+            state_uniforms: Vec::new(),
+            region_count: 1,
+            width: 2.8,
+            height: 1.4,
+            paint_margin: 0.0,
+        });
+
+        assert_eq!(sdf_widget_hit_test(&node, 1.4, 0.7, 1.0), 0);
     }
 
     #[test]

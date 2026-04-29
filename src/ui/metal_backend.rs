@@ -1,8 +1,8 @@
 /// Metal GPU backend for eseqlisp.
 #[cfg(target_os = "macos")]
 mod inner {
-    use std::collections::{HashMap, VecDeque};
     use std::collections::hash_map::DefaultHasher;
+    use std::collections::{HashMap, VecDeque};
     use std::hash::{Hash, Hasher};
     use std::ptr::NonNull;
     use std::time::{Duration, Instant};
@@ -664,6 +664,10 @@ fragment float4 waveform_frag(
             self.start_time.elapsed().as_secs_f32()
         }
 
+        pub fn time_seconds(&self) -> f32 {
+            self.elapsed_time_seconds()
+        }
+
         fn widget_scene_cache_key(
             &self,
             owner_frame_key: u64,
@@ -697,8 +701,55 @@ fragment float4 waveform_frag(
             time_seconds: f32,
         ) {
             for primitive in primitives {
-                if let widget_render::MetalPrimitive::WidgetInstance { instance, .. } = primitive {
+                if let widget_render::MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } = primitive
+                {
                     instance.itime = time_seconds;
+                    if instance.color_d[3] < 0.0 {
+                        let duration = -instance.color_d[3];
+                        let scale = if duration <= 0.0001 {
+                            instance.color_d[1]
+                        } else {
+                            let t =
+                                ((time_seconds - instance.color_d[2]) / duration).clamp(0.0, 1.0);
+                            let ease = instance.color_b[2];
+                            let eased = if (ease - 2.0).abs() < 0.5 {
+                                t * t * (3.0 - 2.0 * t)
+                            } else if (ease - 3.0).abs() < 0.5 {
+                                t
+                            } else {
+                                1.0 - (1.0 - t).powi(3)
+                            };
+                            instance.color_d[0]
+                                + (instance.color_d[1] - instance.color_d[0]) * eased
+                        };
+                        if widget_type == "save-icon" && duration > 0.0001 {
+                            let elapsed = time_seconds - instance.color_d[2];
+                            let phase = if elapsed < 0.0 {
+                                "before"
+                            } else if elapsed < duration {
+                                "active"
+                            } else {
+                                "done"
+                            };
+                            eprintln!(
+                                "[anim-draw] t={:.3} widget={} phase={} elapsed={:.3}/{:.3} scale={:.3}",
+                                time_seconds, widget_type, phase, elapsed, duration, scale
+                            );
+                        }
+                        let center = [
+                            (instance.ndc_min[0] + instance.ndc_max[0]) * 0.5,
+                            (instance.ndc_min[1] + instance.ndc_max[1]) * 0.5,
+                        ];
+                        instance.ndc_min[0] = center[0] + (instance.ndc_min[0] - center[0]) * scale;
+                        instance.ndc_max[0] = center[0] + (instance.ndc_max[0] - center[0]) * scale;
+                        instance.ndc_min[1] = center[1] + (instance.ndc_min[1] - center[1]) * scale;
+                        instance.ndc_max[1] = center[1] + (instance.ndc_max[1] - center[1]) * scale;
+                        instance.color_d = [0.0; 4];
+                    }
                 }
             }
         }
@@ -738,7 +789,6 @@ fragment float4 waveform_frag(
 
             let (mut primitives, _overlay) =
                 widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
-            Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
             if self.cached_widget_scenes.len() >= 128 {
                 self.cached_widget_scenes.clear();
             }
@@ -748,6 +798,7 @@ fragment float4 waveform_frag(
                     primitives: primitives.clone(),
                 },
             );
+            Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
             primitives
         }
 
@@ -985,6 +1036,10 @@ fragment float4 waveform_frag(
         /// Render a tiled frame with per-tile scissor clipping.
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
+            let render_time_seconds = self.elapsed_time_seconds();
+            let log_anim_render =
+                crate::widget_render::sdf_widget::sdf_visual_animations_active(render_time_seconds);
+            let render_started = Instant::now();
             self.sync_window_theme();
             let mut widget_scene_build_time = Duration::ZERO;
             let mut metal_prep_time = Duration::ZERO;
@@ -1001,9 +1056,17 @@ fragment float4 waveform_frag(
             }) else {
                 return Ok(());
             };
+            let drawable_started = Instant::now();
             let Some(drawable) = self.layer.nextDrawable() else {
                 return Ok(());
             };
+            if log_anim_render {
+                eprintln!(
+                    "[anim-render] t={:.3} next-drawable dt={:.3}",
+                    render_time_seconds,
+                    drawable_started.elapsed().as_secs_f32()
+                );
+            }
             let texture = drawable.texture();
             let vp_w = texture.width() as f32;
             let vp_h = texture.height() as f32;
@@ -1176,18 +1239,28 @@ fragment float4 waveform_frag(
                             let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                                 continue;
                             };
-                            if instances.is_empty() { continue; }
+                            if instances.is_empty() {
+                                continue;
+                            }
                             let byte_len = std::mem::size_of_val(instances.as_slice());
                             let Some(wbuf) = (unsafe {
                                 self.device.newBufferWithBytes_length_options(
                                     NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                    byte_len, MTLResourceOptions(0))
-                            }) else { continue; };
+                                    byte_len,
+                                    MTLResourceOptions(0),
+                                )
+                            }) else {
+                                continue;
+                            };
                             enc.setRenderPipelineState(wpipe);
                             unsafe {
                                 enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
                                 enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                    MTLPrimitiveType::Triangle, 0, 6, instances.len() as _);
+                                    MTLPrimitiveType::Triangle,
+                                    0,
+                                    6,
+                                    instances.len() as _,
+                                );
                             }
                         }
 
@@ -1203,12 +1276,7 @@ fragment float4 waveform_frag(
                         {
                             let prop_started = Instant::now();
                             let prop_verts = build_proportional_text_quads(
-                                seg_prims,
-                                prop_atlas,
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
+                                seg_prims, prop_atlas, cell_w, cell_h, vp_w, vp_h,
                             );
                             metal_prep_time += prop_started.elapsed();
                             let prop_tex = prop_atlas.texture.clone();
@@ -1232,18 +1300,28 @@ fragment float4 waveform_frag(
                             let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                                 continue;
                             };
-                            if instances.is_empty() { continue; }
+                            if instances.is_empty() {
+                                continue;
+                            }
                             let byte_len = std::mem::size_of_val(instances.as_slice());
                             let Some(wbuf) = (unsafe {
                                 self.device.newBufferWithBytes_length_options(
                                     NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                    byte_len, MTLResourceOptions(0))
-                            }) else { continue; };
+                                    byte_len,
+                                    MTLResourceOptions(0),
+                                )
+                            }) else {
+                                continue;
+                            };
                             enc.setRenderPipelineState(wpipe);
                             unsafe {
                                 enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
                                 enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                    MTLPrimitiveType::Triangle, 0, 6, instances.len() as _);
+                                    MTLPrimitiveType::Triangle,
+                                    0,
+                                    6,
+                                    instances.len() as _,
+                                );
                             }
                         }
                     }
@@ -1274,38 +1352,27 @@ fragment float4 waveform_frag(
                             })
                             .collect();
 
-                        let (bg_runs, fg_runs) =
-                            partition_widget_instance_runs(&offset_overlay);
+                        let (bg_runs, fg_runs) = partition_widget_instance_runs(&offset_overlay);
                         for (widget_type, instances) in &bg_runs {
-                            let Some(wpipe) = self.widget_pipelines.get(widget_type)
-                            else {
+                            let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                                 continue;
                             };
                             if instances.is_empty() {
                                 continue;
                             }
-                            let byte_len =
-                                std::mem::size_of_val(instances.as_slice());
+                            let byte_len = std::mem::size_of_val(instances.as_slice());
                             let Some(wbuf) = (unsafe {
-                                self.device
-                                    .newBufferWithBytes_length_options(
-                                        NonNull::new(
-                                            instances.as_ptr() as *mut _,
-                                        )
-                                        .unwrap(),
-                                        byte_len,
-                                        MTLResourceOptions(0),
-                                    )
+                                self.device.newBufferWithBytes_length_options(
+                                    NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                                    byte_len,
+                                    MTLResourceOptions(0),
+                                )
                             }) else {
                                 continue;
                             };
                             enc.setRenderPipelineState(wpipe);
                             unsafe {
-                                enc.setVertexBuffer_offset_atIndex(
-                                    Some(&wbuf),
-                                    0,
-                                    0,
-                                );
+                                enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
                                 enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
                                     MTLPrimitiveType::Triangle,
                                     0,
@@ -1316,24 +1383,10 @@ fragment float4 waveform_frag(
                         }
 
                         let prim_quads = {
-                            let atlas = self
-                                .atlas
-                                .as_mut()
-                                .ok_or(BackendError::MetalError)?;
-                            build_widget_primitive_quads(
-                                &offset_overlay,
-                                atlas,
-                                vp_w,
-                                vp_h,
-                            )
+                            let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                            build_widget_primitive_quads(&offset_overlay, atlas, vp_w, vp_h)
                         };
-                        draw_text_verts(
-                            &enc,
-                            &self.device,
-                            &pipeline,
-                            &atlas_texture,
-                            &prim_quads,
-                        );
+                        draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
 
                         if let (Some(prop_atlas), Some(prop_pipe)) =
                             (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
@@ -1347,45 +1400,29 @@ fragment float4 waveform_frag(
                                 vp_h,
                             );
                             let prop_tex = prop_atlas.texture.clone();
-                            draw_text_verts(
-                                &enc,
-                                &self.device,
-                                prop_pipe,
-                                &prop_tex,
-                                &prop_verts,
-                            );
+                            draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
                         }
 
                         for (widget_type, instances) in &fg_runs {
-                            let Some(wpipe) = self.widget_pipelines.get(widget_type)
-                            else {
+                            let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
                                 continue;
                             };
                             if instances.is_empty() {
                                 continue;
                             }
-                            let byte_len =
-                                std::mem::size_of_val(instances.as_slice());
+                            let byte_len = std::mem::size_of_val(instances.as_slice());
                             let Some(wbuf) = (unsafe {
-                                self.device
-                                    .newBufferWithBytes_length_options(
-                                        NonNull::new(
-                                            instances.as_ptr() as *mut _,
-                                        )
-                                        .unwrap(),
-                                        byte_len,
-                                        MTLResourceOptions(0),
-                                    )
+                                self.device.newBufferWithBytes_length_options(
+                                    NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                                    byte_len,
+                                    MTLResourceOptions(0),
+                                )
                             }) else {
                                 continue;
                             };
                             enc.setRenderPipelineState(wpipe);
                             unsafe {
-                                enc.setVertexBuffer_offset_atIndex(
-                                    Some(&wbuf),
-                                    0,
-                                    0,
-                                );
+                                enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
                                 enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
                                     MTLPrimitiveType::Triangle,
                                     0,
@@ -1621,8 +1658,18 @@ fragment float4 waveform_frag(
 
             enc.endEncoding();
             cmdbuf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
+            let commit_started = Instant::now();
             cmdbuf.commit();
-            self.stats.note_frame(0, 0, 0, widget_scene_build_time, metal_prep_time);
+            if log_anim_render {
+                eprintln!(
+                    "[anim-render] t={:.3} commit dt={:.3} total dt={:.3}",
+                    render_time_seconds,
+                    commit_started.elapsed().as_secs_f32(),
+                    render_started.elapsed().as_secs_f32()
+                );
+            }
+            self.stats
+                .note_frame(0, 0, 0, widget_scene_build_time, metal_prep_time);
             Ok(())
         }
     }
@@ -1686,6 +1733,11 @@ fragment float4 waveform_frag(
             desc.setFragmentFunction(Some(&frag_fn));
             let attach = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
             attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            attach.setBlendingEnabled(true);
+            attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+            attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+            attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+            attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
 
             self.pipeline = Some(
                 self.device
@@ -1866,8 +1918,13 @@ fragment float4 waveform_frag(
                 .as_ref()
                 .map(|a| (a.cell_w.max(1) as f64, a.cell_h.max(1) as f64))
                 .unwrap_or((8.0, 16.0));
+            let wake_at = Instant::now() + timeout;
             event_loop.pump_events(Some(timeout), |event, elwt| {
-                elwt.set_control_flow(ControlFlow::Wait);
+                elwt.set_control_flow(if timeout.is_zero() {
+                    ControlFlow::Poll
+                } else {
+                    ControlFlow::WaitUntil(wake_at)
+                });
                 let WEvent::WindowEvent { event, .. } = event else {
                     return;
                 };
@@ -1909,9 +1966,12 @@ fragment float4 waveform_frag(
                             }
                             ElementState::Released => {
                                 // Emit Release events for note-off handling in sequencer
-                                if let Some(ev) =
-                                    translate_key_with_state(&kev.logical_key, &kev.physical_key, *modifiers, kev.state)
-                                {
+                                if let Some(ev) = translate_key_with_state(
+                                    &kev.logical_key,
+                                    &kev.physical_key,
+                                    *modifiers,
+                                    kev.state,
+                                ) {
                                     pending.push_back(ev);
                                 }
                             }
@@ -1981,10 +2041,7 @@ fragment float4 waveform_frag(
                                 // apply smooth sub-cell scrolling in UI mode, while still
                                 // quantizing to cell steps in text mode.
                                 let line_h = (cell_size.1 as f32).max(20.0);
-                                pending_scroll.push_back((
-                                    (x * line_h, y * line_h),
-                                    *cursor_pos,
-                                ));
+                                pending_scroll.push_back(((x * line_h, y * line_h), *cursor_pos));
                             }
                             MouseScrollDelta::PixelDelta(delta) => {
                                 pending_scroll
@@ -2139,19 +2196,31 @@ fragment float4 waveform_frag(
 
             // Background SDF widgets (behind text)
             for (widget_type, instances) in &primitive_bg_runs {
-                let Some(wpipe) = self.widget_pipelines.get(widget_type) else { continue; };
-                if instances.is_empty() { continue; }
+                let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                    continue;
+                };
+                if instances.is_empty() {
+                    continue;
+                }
                 let byte_len = std::mem::size_of_val(instances.as_slice());
                 let Some(wbuf) = (unsafe {
                     self.device.newBufferWithBytes_length_options(
                         NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                        byte_len, MTLResourceOptions(0))
-                }) else { continue; };
+                        byte_len,
+                        MTLResourceOptions(0),
+                    )
+                }) else {
+                    continue;
+                };
                 enc.setRenderPipelineState(wpipe);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
                     enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                        MTLPrimitiveType::Triangle, 0, 6, instances.len() as _);
+                        MTLPrimitiveType::Triangle,
+                        0,
+                        6,
+                        instances.len() as _,
+                    );
                 }
             }
 
@@ -2269,6 +2338,12 @@ fragment float4 waveform_frag(
             enc.endEncoding();
             buf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
             buf.commit();
+            crate::widget_render::sdf_widget::note_sdf_frame_presented(time_seconds);
+            if crate::widget_render::sdf_widget::sdf_visual_animations_active(time_seconds)
+                && let Some(window) = self.window.as_ref()
+            {
+                window.request_redraw();
+            }
             self.stats.note_frame(
                 text_bytes,
                 label_bytes,
@@ -3037,7 +3112,11 @@ fragment float4 waveform_frag(
                 is_background,
             } = primitive
             {
-                let runs = if *is_background { &mut bg_runs } else { &mut fg_runs };
+                let runs = if *is_background {
+                    &mut bg_runs
+                } else {
+                    &mut fg_runs
+                };
                 if let Some((run_type, instances)) = runs.last_mut()
                     && run_type == widget_type
                 {
@@ -3111,7 +3190,9 @@ fragment float4 waveform_frag(
                 r.row += row_off;
                 widget_render::MetalPrimitive::PushClipRect(r)
             }
-            widget_render::MetalPrimitive::PopClipRect => widget_render::MetalPrimitive::PopClipRect,
+            widget_render::MetalPrimitive::PopClipRect => {
+                widget_render::MetalPrimitive::PopClipRect
+            }
         }
     }
 
@@ -3135,7 +3216,9 @@ fragment float4 waveform_frag(
     }
 
     fn translate_key(key: &Key, physical_key: &PhysicalKey, mods: KeyModifiers) -> Option<Event> {
-        let code = if mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER) {
+        let code = if mods
+            .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER)
+        {
             translate_physical_shortcut_key(physical_key).or_else(|| translate_logical_key(key))?
         } else {
             translate_logical_key(key)?
@@ -3149,7 +3232,9 @@ fragment float4 waveform_frag(
         mods: KeyModifiers,
         state: ElementState,
     ) -> Option<Event> {
-        let code = if mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER) {
+        let code = if mods
+            .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER)
+        {
             translate_physical_shortcut_key(physical_key).or_else(|| translate_logical_key(key))?
         } else {
             translate_logical_key(key)?

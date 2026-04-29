@@ -4,10 +4,10 @@ use std::rc::Rc;
 use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
 #[cfg(target_os = "macos")]
 use super::{MetalPrimitive, WidgetViewport};
+use crate::layout::Rect;
 use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num, shrink_constraints_xy,
 };
-use crate::layout::Rect;
 use crate::vm::Value;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
@@ -201,9 +201,24 @@ impl WidgetDefinition for BoxWidget {
         };
         let callback = node.props.get("on-click")?.clone();
         let mut info = std::collections::HashMap::new();
-        info.insert("shift".to_string(), Rc::new(RefCell::new(Value::Bool(modifiers.contains(KeyModifiers::SHIFT)))));
-        info.insert("ctrl".to_string(), Rc::new(RefCell::new(Value::Bool(modifiers.contains(KeyModifiers::CONTROL)))));
-        info.insert("alt".to_string(), Rc::new(RefCell::new(Value::Bool(modifiers.contains(KeyModifiers::ALT)))));
+        info.insert(
+            "shift".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::SHIFT),
+            ))),
+        );
+        info.insert(
+            "ctrl".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::CONTROL),
+            ))),
+        );
+        info.insert(
+            "alt".to_string(),
+            Rc::new(RefCell::new(Value::Bool(
+                modifiers.contains(KeyModifiers::ALT),
+            ))),
+        );
         Some(EventOutput {
             callback,
             args: vec![Value::Map(info)],
@@ -227,7 +242,13 @@ impl WidgetDefinition for BoxWidget {
             } else {
                 content_extent(node)
             };
-            return super::sdf_widget::sdf_widget_background_primitives(bg_type, bg_rect, viewport, &node.props);
+            return super::sdf_widget::sdf_widget_background_primitives(
+                bg_type,
+                node.widget_id,
+                bg_rect,
+                viewport,
+                &node.props,
+            );
         }
         Vec::new()
     }

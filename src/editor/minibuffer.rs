@@ -155,7 +155,8 @@ impl Editor {
                         input.clone()
                     };
                     if !path_input.is_empty() {
-                        match self.open_or_create_file_buffer(self.resolve_file_input(&path_input)) {
+                        match self.open_or_create_file_buffer(self.resolve_file_input(&path_input))
+                        {
                             Ok(_) => {
                                 self.minibuffer = Some(format!("Opened {path_input}"));
                             }

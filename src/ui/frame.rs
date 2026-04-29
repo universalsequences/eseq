@@ -246,9 +246,8 @@ pub fn build_render_frame(
     editor.set_layout_viewport(viewport_width as u16, viewport_height as u16);
     if let Some(layout) = editor.widget_layout() {
         let aspect = editor.layout_aspect();
-        let max_h = (crate::ui::hit::max_extent(&layout, aspect).0 as f32
-            - viewport_width as f32)
-            .max(0.0);
+        let max_h =
+            (crate::ui::hit::max_extent(&layout, aspect).0 as f32 - viewport_width as f32).max(0.0);
         let leaf = editor.active_leaf_mut();
         if leaf.widget_scroll_left > max_h {
             leaf.widget_scroll_left = max_h;

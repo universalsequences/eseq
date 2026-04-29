@@ -275,7 +275,9 @@ impl RuntimePerfStats {
         let summary = entries
             .into_iter()
             .take(3)
-            .map(|(label, count, total)| format!("{label}:{:.1}ms/{count}", total.as_secs_f64() * 1000.0))
+            .map(|(label, count, total)| {
+                format!("{label}:{:.1}ms/{count}", total.as_secs_f64() * 1000.0)
+            })
             .collect::<Vec<_>>()
             .join(",");
         if summary.is_empty() {
@@ -417,7 +419,11 @@ fn expr_to_source(expr: &crate::parser::Expression) -> String {
         Expression::String(s) => format!("{s:?}"),
         Expression::QuoteSymbol(s) => format!("'{s}"),
         Expression::QuoteList(items) => {
-            let inner = items.iter().map(expr_to_source).collect::<Vec<_>>().join(" ");
+            let inner = items
+                .iter()
+                .map(expr_to_source)
+                .collect::<Vec<_>>()
+                .join(" ");
             format!("'({inner})")
         }
         Expression::Number(n) => {
@@ -428,7 +434,11 @@ fn expr_to_source(expr: &crate::parser::Expression) -> String {
             }
         }
         Expression::List(items) => {
-            let inner = items.iter().map(expr_to_source).collect::<Vec<_>>().join(" ");
+            let inner = items
+                .iter()
+                .map(expr_to_source)
+                .collect::<Vec<_>>()
+                .join(" ");
             format!("({inner})")
         }
         Expression::Quasiquote(inner) => format!("`{}", expr_to_source(inner)),
@@ -489,7 +499,11 @@ fn build_material_shader_expr(
                   (sdf/paint (sdf/rect 0.0 0.0) (rgba 0.0 0.0 0.0 0.0)))))
             "#
         ),
-        _ => return Err(format!("widget type '{widget_type}' does not support :material")),
+        _ => {
+            return Err(format!(
+                "widget type '{widget_type}' does not support :material"
+            ));
+        }
     };
     parse_one_expr(&src)
 }
@@ -529,9 +543,8 @@ fn compile_widget_material(
         crate::lang::sdf_codegen::compile_sdf_to_metal_with_state(&expanded, &state_symbols)
             .map_err(|e| e.to_string())?;
 
-    let paint_margin = crate::widget_render::sdf_widget::estimate_shadow_paint_margin(
-        &expanded, 16.0, 8.0,
-    );
+    let paint_margin =
+        crate::widget_render::sdf_widget::estimate_shadow_paint_margin(&expanded, 16.0, 8.0);
 
     let shader_name = format!("{}__mat_{:x}", widget_type, cache_key);
     crate::widget_render::sdf_widget::register_inline_shader(
@@ -555,7 +568,10 @@ pub enum TileOp {
     OtherWindow,
     SetWindowBuffer(String),
     /// Switch the buffer in the tile currently showing `current` to `new_name`.
-    SetWindowBufferFor { current: String, new_name: String },
+    SetWindowBufferFor {
+        current: String,
+        new_name: String,
+    },
     SetLayout(LayoutSpec),
 }
 
@@ -947,22 +963,20 @@ impl Runtime {
         crate::theme::set_current(crate::theme::default_theme());
         register_audio_natives(&mut runtime);
         // (load path) — read and evaluate a Lisp file; relative paths resolve from CWD.
-        runtime
-            .vm
-            .register_native_with_vm("load", |args, vm| {
-                let Some(Value::String(path_str)) = args.first() else {
-                    return Value::String("load: expects a string path".into());
-                };
-                let path = std::path::Path::new(path_str.as_str());
-                let source = match std::fs::read_to_string(path) {
-                    Ok(s) => s,
-                    Err(e) => return Value::String(format!("load: {e}")),
-                };
-                match vm.eval_str(&source) {
-                    Ok(v) => v.unwrap_or(Value::Bool(true)),
-                    Err(e) => Value::String(format!("load: eval error: {e:?}")),
-                }
-            });
+        runtime.vm.register_native_with_vm("load", |args, vm| {
+            let Some(Value::String(path_str)) = args.first() else {
+                return Value::String("load: expects a string path".into());
+            };
+            let path = std::path::Path::new(path_str.as_str());
+            let source = match std::fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(e) => return Value::String(format!("load: {e}")),
+            };
+            match vm.eval_str(&source) {
+                Ok(v) => v.unwrap_or(Value::Bool(true)),
+                Err(e) => Value::String(format!("load: eval error: {e:?}")),
+            }
+        });
         // Register SDF constructor functions that return self-quoting tagged lists.
         // These are compiled to Metal by the SDF codegen; at the Lisp level they
         // preserve their structure for later compilation.
@@ -1737,8 +1751,11 @@ impl Runtime {
         // both relayout work and profiling noise.
         self.current_layout = None;
         self.current_widget_tree = Some(tree.deep_clone());
-        self.current_committed_ui_snapshot =
-            Some(CommittedBufferUiSnapshot::from_tree(tree.deep_clone(), None, Vec::new()));
+        self.current_committed_ui_snapshot = Some(CommittedBufferUiSnapshot::from_tree(
+            tree.deep_clone(),
+            None,
+            Vec::new(),
+        ));
         self.relayout_current_tree();
         let snapshot = self.current_layout.clone();
 
@@ -1783,12 +1800,11 @@ impl Runtime {
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
         self.current_widget_tree = Some(tree.deep_clone());
-        self.current_committed_ui_snapshot =
-            Some(CommittedBufferUiSnapshot::from_tree(
-                tree.deep_clone(),
-                self.shared.borrow().current_buffer_id,
-                Vec::new(),
-            ));
+        self.current_committed_ui_snapshot = Some(CommittedBufferUiSnapshot::from_tree(
+            tree.deep_clone(),
+            self.shared.borrow().current_buffer_id,
+            Vec::new(),
+        ));
         self.relayout_current_tree();
     }
 
@@ -1796,12 +1812,11 @@ impl Runtime {
     /// without clearing reactive effects.
     pub fn restore_widget_tree(&mut self, tree: Value) {
         self.current_widget_tree = Some(tree.deep_clone());
-        self.current_committed_ui_snapshot =
-            Some(CommittedBufferUiSnapshot::from_tree(
-                tree.deep_clone(),
-                self.shared.borrow().current_buffer_id,
-                Vec::new(),
-            ));
+        self.current_committed_ui_snapshot = Some(CommittedBufferUiSnapshot::from_tree(
+            tree.deep_clone(),
+            self.shared.borrow().current_buffer_id,
+            Vec::new(),
+        ));
         self.relayout_current_tree();
         // Force layout revision bump so GPU caches rebuild
         self.layout_revision = self.layout_revision.wrapping_add(1);
@@ -1848,8 +1863,11 @@ impl Runtime {
         tree: Value,
         reactive_dependencies: Vec<ReactiveFieldKey>,
     ) -> bool {
-        let replaced =
-            self.replace_current_subtree_without_relayout(subtree_root_id, tree, reactive_dependencies);
+        let replaced = self.replace_current_subtree_without_relayout(
+            subtree_root_id,
+            tree,
+            reactive_dependencies,
+        );
         if replaced {
             self.relayout_current_tree();
             self.layout_revision = self.layout_revision.wrapping_add(1);
@@ -1951,7 +1969,8 @@ impl Runtime {
         let Some(snapshot) = self.current_committed_ui_snapshot.as_ref() else {
             return None;
         };
-        let Some(subtree_root_id) = snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
+        let Some(subtree_root_id) =
+            snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
         else {
             return Some(false);
         };
@@ -1995,17 +2014,18 @@ impl Runtime {
         let mut active_tree_changed = false;
         let mut active_subtree_replacements: Vec<(u64, Value, Vec<ReactiveFieldKey>)> = Vec::new();
         let mut inactive_pending = Vec::new();
-        let flush_active_subtree_replacements = |runtime: &mut Self,
-                                                replacements: &mut Vec<(u64, Value, Vec<ReactiveFieldKey>)>,
-                                                active_tree_changed: &mut bool| {
-            if replacements.is_empty() {
-                return;
-            }
-            if runtime.replace_current_subtrees_without_relayout(replacements) {
-                *active_tree_changed = true;
-            }
-            replacements.clear();
-        };
+        let flush_active_subtree_replacements =
+            |runtime: &mut Self,
+             replacements: &mut Vec<(u64, Value, Vec<ReactiveFieldKey>)>,
+             active_tree_changed: &mut bool| {
+                if replacements.is_empty() {
+                    return;
+                }
+                if runtime.replace_current_subtrees_without_relayout(replacements) {
+                    *active_tree_changed = true;
+                }
+                replacements.clear();
+            };
         for pending in trees {
             affected_buffers.insert(effect_target_label(pending.target()));
             let targets_active_buffer = match pending.target() {
@@ -2016,21 +2036,21 @@ impl Runtime {
                 active_buffer_targets += 1;
                 match &pending {
                     PendingUiUpdate::FullTree(pending) => {
-                        if let Some(true) = self
-                            .current_committed_ui_snapshot
-                            .as_ref()
-                            .and_then(|snapshot| {
-                                snapshot
-                                    .matching_non_root_subtree_root_id_for_tree(&pending.tree)
-                                    .map(|subtree_root_id| {
-                                        active_subtree_replacements.push((
-                                            subtree_root_id,
-                                            pending.tree.deep_clone(),
-                                            pending.reactive_dependencies.clone(),
-                                        ));
-                                        true
-                                    })
-                            })
+                        if let Some(true) =
+                            self.current_committed_ui_snapshot
+                                .as_ref()
+                                .and_then(|snapshot| {
+                                    snapshot
+                                        .matching_non_root_subtree_root_id_for_tree(&pending.tree)
+                                        .map(|subtree_root_id| {
+                                            active_subtree_replacements.push((
+                                                subtree_root_id,
+                                                pending.tree.deep_clone(),
+                                                pending.reactive_dependencies.clone(),
+                                            ));
+                                            true
+                                        })
+                                })
                         {
                             subtree_reruns += 1;
                             reevaluated_subtree_roots += 1;

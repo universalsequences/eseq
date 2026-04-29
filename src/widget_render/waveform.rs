@@ -405,11 +405,8 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
     let ruler_font_size = get_num(&node.props, "ruler-font-size", 10.0) as f32;
     let ruler_fg = super::resolve_named_color(&node.props, "ruler-color", theme::FG());
     let ruler_bg = super::resolve_named_color(&node.props, "ruler-bg", theme::STATUS_BG());
-    let grid_major_color = super::resolve_named_color(
-        &node.props,
-        "grid-major-color",
-        theme::FG_MUTED(),
-    );
+    let grid_major_color =
+        super::resolve_named_color(&node.props, "grid-major-color", theme::FG_MUTED());
     let grid_minor_color = super::resolve_named_color(
         &node.props,
         "grid-minor-color",

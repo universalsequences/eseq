@@ -231,10 +231,7 @@ impl<'a> LayoutEngine<'a> {
         // For scroll containers, inject content/viewport dimensions so the
         // scroll event handler and renderer can compute scroll bounds.
         if widget_type == "scroll" {
-            let content_height = children
-                .first()
-                .map(|c| c.rect.height)
-                .unwrap_or(0.0);
+            let content_height = children.first().map(|c| c.rect.height).unwrap_or(0.0);
             props.insert(
                 "_content_height".to_string(),
                 Value::Number(content_height as f64),
@@ -344,7 +341,8 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
         if !widget_render::is_layout_widget_type(&node.widget_type) {
             return Some(node);
         }
-        if node.props.contains_key("on-change") || node.props.contains_key("bind")
+        if node.props.contains_key("on-change")
+            || node.props.contains_key("bind")
             || node.props.contains_key("on-click")
         {
             return Some(node);
@@ -375,10 +373,10 @@ fn reuse_layout_node_impl(
     };
     let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
     if widget_type != existing.widget_type {
-        return Err(format_reason(format!(
-            "widget-type:{}->{}",
-            existing.widget_type, widget_type
-        ), path));
+        return Err(format_reason(
+            format!("widget-type:{}->{}", existing.widget_type, widget_type),
+            path,
+        ));
     }
     let new_stable_widget_id = get_prop_u64(tree, "__stable-widget-id");
     let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
@@ -437,14 +435,17 @@ fn reuse_layout_node_impl(
             .map(|child| get_widget_type(child).unwrap_or_else(|| "non-widget".to_string()))
             .collect::<Vec<_>>()
             .join(",");
-        return Err(format_reason(format!(
-            "children-len:{}:{}->{}:[{}]->[{}]",
-            widget_type,
-            existing.children.len(),
-            effective_children_values.len(),
-            old_children,
-            new_children
-        ), path));
+        return Err(format_reason(
+            format!(
+                "children-len:{}:{}->{}:[{}]->[{}]",
+                widget_type,
+                existing.children.len(),
+                effective_children_values.len(),
+                old_children,
+                new_children
+            ),
+            path,
+        ));
     }
 
     let new_props = collect_props(tree);
@@ -533,7 +534,14 @@ pub fn reuse_layout_node_for_subtree_path(
     dirty_widget_ids: &mut Vec<u64>,
 ) -> Option<LayoutNode> {
     let mut trace_path = Vec::new();
-    reuse_layout_node_at_path(existing, tree, &child_path, dirty_widget_ids, &mut trace_path).ok()
+    reuse_layout_node_at_path(
+        existing,
+        tree,
+        &child_path,
+        dirty_widget_ids,
+        &mut trace_path,
+    )
+    .ok()
 }
 
 fn find_subtree_path(node: &LayoutNode, subtree_root_id: u64, path: &mut Vec<usize>) -> Option<()> {
@@ -563,7 +571,10 @@ fn reuse_layout_node_at_path(
 
     let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
     if widget_type != existing.widget_type {
-        return Err(format!("widget-type:{}->{}", existing.widget_type, widget_type));
+        return Err(format!(
+            "widget-type:{}->{}",
+            existing.widget_type, widget_type
+        ));
     }
 
     let new_stable_widget_id = get_prop_u64(tree, "__stable-widget-id");
@@ -813,7 +824,8 @@ fn clamp_size_for_node(node: &Value, size: Size, constraints: Constraints) -> Si
         width: if unclamped_width {
             size.width.max(constraints.min_width)
         } else {
-            size.width.clamp(constraints.min_width, constraints.max_width)
+            size.width
+                .clamp(constraints.min_width, constraints.max_width)
         },
         height: size
             .height
@@ -822,7 +834,11 @@ fn clamp_size_for_node(node: &Value, size: Size, constraints: Constraints) -> Si
 }
 
 /// Shrink constraints by separate x and y padding (for aspect-corrected padding).
-pub(crate) fn shrink_constraints_xy(constraints: Constraints, pad_x: f32, pad_y: f32) -> Constraints {
+pub(crate) fn shrink_constraints_xy(
+    constraints: Constraints,
+    pad_x: f32,
+    pad_y: f32,
+) -> Constraints {
     Constraints {
         min_width: 0.0,
         max_width: (constraints.max_width - pad_x * 2.0).max(0.0),
@@ -957,8 +973,8 @@ fn measure_builtin_leaf(node: &Value, widget_type: &str, aspect: f32) -> Size {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::build_widget;
     use crate::vm::Value;
+    use crate::widgets::build_widget;
 
     /// Helper: keyword value
     fn kw(s: &str) -> Value {
@@ -987,7 +1003,17 @@ mod tests {
 
     /// Build a hslider: (hslider :min 0 :max 1 :value 0.5)
     fn hslider() -> Value {
-        build_widget("hslider", vec![kw("min"), num(0.0), kw("max"), num(1.0), kw("value"), num(0.5)])
+        build_widget(
+            "hslider",
+            vec![
+                kw("min"),
+                num(0.0),
+                kw("max"),
+                num(1.0),
+                kw("value"),
+                num(0.5),
+            ],
+        )
     }
 
     /// Build a vslider: (vslider :height h)
@@ -1044,10 +1070,7 @@ mod tests {
     #[test]
     fn natural_width_simple_vstack_fits_viewport() {
         // A v-stack with children narrower than the 80-col viewport.
-        let tree = vstack(1.0, 1.0, vec![
-            label("hello", Some(10.0)),
-            hslider(),
-        ]);
+        let tree = vstack(1.0, 1.0, vec![label("hello", Some(10.0)), hslider()]);
         let engine = LayoutEngine::new(80, 24, 1.0);
         let natural = engine.natural_content_width(&tree);
         // hslider default width=16, plus vstack padding 1*2 = 18
@@ -1060,15 +1083,19 @@ mod tests {
     fn natural_width_grid_16_cols() {
         // Grid with 16 columns, col-width 3 — mirrors the step sequencer grid
         let children: Vec<Value> = (0..16)
-            .map(|i| vstack(0.0, 0.5, vec![
-                vslider(4.0),
-                bx(Some(3.0), Some(1.5), vec![]),
-                label(&format!("{}", i + 1), None),
-            ]))
+            .map(|i| {
+                vstack(
+                    0.0,
+                    0.5,
+                    vec![
+                        vslider(4.0),
+                        bx(Some(3.0), Some(1.5), vec![]),
+                        label(&format!("{}", i + 1), None),
+                    ],
+                )
+            })
             .collect();
-        let tree = vstack(1.0, 1.0, vec![
-            grid(16.0, 3.0, children),
-        ]);
+        let tree = vstack(1.0, 1.0, vec![grid(16.0, 3.0, children)]);
         let engine = LayoutEngine::new(80, 24, 1.0);
         let natural = engine.natural_content_width(&tree);
         // grid: 16 * 3 = 48, + vstack padding 2 = 50
@@ -1079,51 +1106,106 @@ mod tests {
     fn natural_width_sequencer_layout_fits_wide_viewport() {
         // Mirrors the full sequencer layout from metal-seq-grid.lisp
         // at a wide viewport (content should fit → no scroll needed)
-        let transport = hstack(1.0, vec![
-            bx(Some(4.0), Some(3.0), vec![]),  // play button
-            bx(Some(40.0), Some(3.0), vec![    // LED panel
-                label("1 | 4 | 4  BPM 120", Some(32.0)),
-            ]),
-        ]);
-        let param_tabs = hstack(0.5, vec![
-            bx(Some(8.0), Some(2.0), vec![label("vel", None)]),
-            bx(Some(8.0), Some(2.0), vec![label("dur", None)]),
-            bx(Some(8.0), Some(2.0), vec![label("xpose", None)]),
-            bx(Some(8.0), Some(2.0), vec![label("pan", None)]),
-        ]);
-        let step_grid = grid(16.0, 3.0, (0..16).map(|i| {
-            vstack(0.0, 0.5, vec![
-                vslider(4.0),
-                bx(Some(3.0), Some(1.5), vec![]),
-                label(&format!("{}", i + 1), None),
-            ])
-        }).collect());
+        let transport = hstack(
+            1.0,
+            vec![
+                bx(Some(4.0), Some(3.0), vec![]), // play button
+                bx(
+                    Some(40.0),
+                    Some(3.0),
+                    vec![
+                        // LED panel
+                        label("1 | 4 | 4  BPM 120", Some(32.0)),
+                    ],
+                ),
+            ],
+        );
+        let param_tabs = hstack(
+            0.5,
+            vec![
+                bx(Some(8.0), Some(2.0), vec![label("vel", None)]),
+                bx(Some(8.0), Some(2.0), vec![label("dur", None)]),
+                bx(Some(8.0), Some(2.0), vec![label("xpose", None)]),
+                bx(Some(8.0), Some(2.0), vec![label("pan", None)]),
+            ],
+        );
+        let step_grid = grid(
+            16.0,
+            3.0,
+            (0..16)
+                .map(|i| {
+                    vstack(
+                        0.0,
+                        0.5,
+                        vec![
+                            vslider(4.0),
+                            bx(Some(3.0), Some(1.5), vec![]),
+                            label(&format!("{}", i + 1), None),
+                        ],
+                    )
+                })
+                .collect(),
+        );
         let mixer_rows: Vec<Value> = ["Kick", "Snare", "Hat"]
             .iter()
-            .map(|name| hstack(1.0, vec![
-                bx(Some(14.0), Some(1.0), vec![label(name, None)]),
-                bx(None, None, vec![hslider()]),  // flex=1 in real code, natural = hslider width
-            ]))
+            .map(|name| {
+                hstack(
+                    1.0,
+                    vec![
+                        bx(Some(14.0), Some(1.0), vec![label(name, None)]),
+                        bx(None, None, vec![hslider()]), // flex=1 in real code, natural = hslider width
+                    ],
+                )
+            })
             .collect();
         let mixer = vstack(0.0, 0.5, mixer_rows);
-        let effects = hstack(1.0, vec![
-            bx(Some(20.0), None, vec![
-                vstack(0.0, 0.5, vec![
-                    label("Filter", None),
-                    hstack(0.5, vec![label("cutoff", Some(8.0)), bx(Some(10.0), None, vec![hslider()])]),
-                ]),
-            ]),
-            bx(Some(20.0), None, vec![
-                vstack(0.0, 0.5, vec![
-                    label("Delay", None),
-                    hstack(0.5, vec![label("wet", Some(8.0)), bx(Some(10.0), None, vec![hslider()])]),
-                ]),
-            ]),
-        ]);
+        let effects = hstack(
+            1.0,
+            vec![
+                bx(
+                    Some(20.0),
+                    None,
+                    vec![vstack(
+                        0.0,
+                        0.5,
+                        vec![
+                            label("Filter", None),
+                            hstack(
+                                0.5,
+                                vec![
+                                    label("cutoff", Some(8.0)),
+                                    bx(Some(10.0), None, vec![hslider()]),
+                                ],
+                            ),
+                        ],
+                    )],
+                ),
+                bx(
+                    Some(20.0),
+                    None,
+                    vec![vstack(
+                        0.0,
+                        0.5,
+                        vec![
+                            label("Delay", None),
+                            hstack(
+                                0.5,
+                                vec![
+                                    label("wet", Some(8.0)),
+                                    bx(Some(10.0), None, vec![hslider()]),
+                                ],
+                            ),
+                        ],
+                    )],
+                ),
+            ],
+        );
 
-        let tree = vstack(1.0, 1.0, vec![
-            transport, param_tabs, step_grid, mixer, effects,
-        ]);
+        let tree = vstack(
+            1.0,
+            1.0,
+            vec![transport, param_tabs, step_grid, mixer, effects],
+        );
 
         let engine = LayoutEngine::new(80, 60, 1.0);
         let natural = engine.natural_content_width(&tree);
@@ -1141,13 +1223,23 @@ mod tests {
     #[test]
     fn natural_width_exceeds_narrow_viewport() {
         // Same layout but in a narrow viewport — natural width > viewport → scroll needed
-        let step_grid = grid(16.0, 3.0, (0..16).map(|i| {
-            vstack(0.0, 0.5, vec![
-                vslider(4.0),
-                bx(Some(3.0), Some(1.5), vec![]),
-                label(&format!("{}", i + 1), None),
-            ])
-        }).collect());
+        let step_grid = grid(
+            16.0,
+            3.0,
+            (0..16)
+                .map(|i| {
+                    vstack(
+                        0.0,
+                        0.5,
+                        vec![
+                            vslider(4.0),
+                            bx(Some(3.0), Some(1.5), vec![]),
+                            label(&format!("{}", i + 1), None),
+                        ],
+                    )
+                })
+                .collect(),
+        );
         let tree = vstack(1.0, 1.0, vec![step_grid]);
 
         let engine = LayoutEngine::new(40, 24, 1.0);
@@ -1155,7 +1247,10 @@ mod tests {
 
         // grid: 48 + padding 2 = 50, viewport 40
         assert_eq!(natural, 50.0, "natural width same regardless of viewport");
-        assert!(natural > 40.0, "content should exceed narrow viewport → scroll needed");
+        assert!(
+            natural > 40.0,
+            "content should exceed narrow viewport → scroll needed"
+        );
     }
 
     #[test]
@@ -1166,12 +1261,18 @@ mod tests {
         let mixer_rows: Vec<Value> = [
             "LS301-808ii-FC-Maraca-3-Extended-Name-Very-Long",
             "_12'' Augustus Pablo - King Tubby Meets",
-        ].iter().map(|name| {
-            hstack(1.0, vec![
-                bx(Some(14.0), Some(1.0), vec![label(name, None)]),
-                bx(Some(20.0), None, vec![hslider()]),
-            ])
-        }).collect();
+        ]
+        .iter()
+        .map(|name| {
+            hstack(
+                1.0,
+                vec![
+                    bx(Some(14.0), Some(1.0), vec![label(name, None)]),
+                    bx(Some(20.0), None, vec![hslider()]),
+                ],
+            )
+        })
+        .collect();
         let tree = vstack(1.0, 0.5, mixer_rows);
 
         let engine = LayoutEngine::new(80, 24, 1.0);
@@ -1179,20 +1280,30 @@ mod tests {
 
         // box widths: 14 + 20 + 1 gap = 35, + padding 2 = 37
         // The long label text should NOT push beyond 37 because its box is fixed at 14
-        assert_eq!(natural, 37.0, "fixed-width boxes should contain long labels");
+        assert_eq!(
+            natural, 37.0,
+            "fixed-width boxes should contain long labels"
+        );
     }
 
     #[test]
     fn natural_width_label_without_box_uses_text_width() {
         // A bare label (not in a fixed-width box) SHOULD use its text width
-        let tree = vstack(0.0, 0.0, vec![
-            label("short", None),
-            label("a much longer label text here", None),
-        ]);
+        let tree = vstack(
+            0.0,
+            0.0,
+            vec![
+                label("short", None),
+                label("a much longer label text here", None),
+            ],
+        );
         let engine = LayoutEngine::new(80, 24, 1.0);
         let natural = engine.natural_content_width(&tree);
         // In TUI mode (no TextMeasurer), label width = char count
         // "a much longer label text here" = 29 chars
-        assert_eq!(natural, 29.0, "bare label should use text char count as width");
+        assert_eq!(
+            natural, 29.0,
+            "bare label should use text char count as width"
+        );
     }
 }

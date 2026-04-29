@@ -142,6 +142,33 @@ impl TimeViewport {
         lines
     }
 
+    pub fn metal_time_ruler_labels(&self, ruler: Option<&TimeRuler>) -> Vec<(f32, String)> {
+        let Some(ruler) = ruler else {
+            return Vec::new();
+        };
+        let mut labels = Vec::new();
+        let mut last_end = None;
+        let content = self.content_rect();
+        let max_x = self.rect.col + self.rect.width;
+        for (mark, _, is_major) in self.visible_grid_marks(Some(ruler)) {
+            let Some(label) = ruler.label_for_mark(mark, is_major) else {
+                continue;
+            };
+            let x = self.x_for_time(mark).max(content.col);
+            let label_width = label.chars().count() as f32 * 0.58 + 0.28;
+            let end_x = x + label_width;
+            if end_x > max_x {
+                continue;
+            }
+            if last_end.is_some_and(|prev| x <= prev) {
+                continue;
+            }
+            labels.push((x, label));
+            last_end = Some(end_x);
+        }
+        labels
+    }
+
     pub fn zoom_action(&self, anchor_time: f64, factor: f64) -> Option<TimeZoom> {
         let min_duration = self.zoom_min_duration.min(self.zoom_max_duration);
         let max_duration = self.zoom_max_duration.max(self.zoom_min_duration);
@@ -155,27 +182,42 @@ impl TimeViewport {
         })
     }
 
-    fn visible_grid_marks(&self, ruler: Option<&TimeRuler>) -> Vec<(f64, u16, bool)> {
-        let content = self.content_rect();
-        if content.width == 0.0 {
-            return Vec::new();
-        }
+    pub fn grid_step(&self, ruler: Option<&TimeRuler>) -> f64 {
+        self.grid_step_and_major_every(ruler).0
+    }
 
-        let (step, major_every) = match ruler.map(|r| &r.mode) {
+    fn grid_step_and_major_every(&self, ruler: Option<&TimeRuler>) -> (f64, f64) {
+        let content = self.content_rect();
+        match ruler.map(|r| &r.mode) {
             Some(TimeRulerMode::BarsBeats { .. }) => {
-                let pixels_per_step = content.width as f64 / self.view_duration.max(0.0001);
-                let step = if pixels_per_step >= 6.0 {
+                let pixels_per_beat = content.width as f64 / self.view_duration.max(0.0001);
+                let step = if pixels_per_beat >= 384.0 {
+                    0.03125
+                } else if pixels_per_beat >= 192.0 {
+                    0.0625
+                } else if pixels_per_beat >= 96.0 {
+                    0.125
+                } else if pixels_per_beat >= 48.0 {
+                    0.25
+                } else if pixels_per_beat >= 24.0 {
+                    0.5
+                } else if pixels_per_beat >= 8.0 {
                     1.0
-                } else if pixels_per_step >= 3.0 {
+                } else if pixels_per_beat >= 4.0 {
                     2.0
-                } else if pixels_per_step >= 1.5 {
+                } else if pixels_per_beat >= 2.0 {
                     4.0
-                } else if pixels_per_step >= 0.75 {
+                } else if pixels_per_beat >= 1.0 {
                     8.0
                 } else {
                     16.0
                 };
-                (step, 4.0)
+                let major_every = if step < 1.0 {
+                    (1.0_f64 / step).round()
+                } else {
+                    (4.0_f64 / step).max(1.0)
+                };
+                (step, major_every)
             }
             _ => {
                 let pixels_per_second = content.width as f64 / self.view_duration.max(0.0001);
@@ -209,7 +251,16 @@ impl TimeViewport {
                 };
                 (step, major_every)
             }
-        };
+        }
+    }
+
+    fn visible_grid_marks(&self, ruler: Option<&TimeRuler>) -> Vec<(f64, u16, bool)> {
+        let content = self.content_rect();
+        if content.width == 0.0 {
+            return Vec::new();
+        }
+
+        let (step, major_every) = self.grid_step_and_major_every(ruler);
 
         let start = (self.view_start / step).floor() as i64;
         let end = ((self.view_start + self.view_duration) / step).ceil() as i64;
@@ -238,6 +289,9 @@ impl TimeRuler {
     pub fn label_for_mark(&self, mark: f64, is_major: bool) -> Option<String> {
         match self.mode {
             TimeRulerMode::BarsBeats { beats_per_bar } => {
+                if (mark - mark.round()).abs() > 1e-6 {
+                    return None;
+                }
                 let beat = mark.round() as i64;
                 let beats_per_bar = beats_per_bar.max(1);
                 let bar = beat.div_euclid(beats_per_bar) + 1;
@@ -293,6 +347,34 @@ mod tests {
         assert!(labels.iter().any(|label| label == "1"));
         assert!(labels.iter().any(|label| label == "1.2"));
         assert!(labels.iter().any(|label| label == "2"));
+    }
+
+    #[test]
+    fn bars_beats_grid_gets_finer_when_zoomed_in() {
+        let ruler = TimeRuler {
+            mode: TimeRulerMode::BarsBeats { beats_per_bar: 4 },
+        };
+        let wide = TimeViewport {
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 128.0,
+                height: 8.0,
+            },
+            header_height: 1.0,
+            sidebar_width: 0.0,
+            view_start: 0.0,
+            view_duration: 4.0,
+            zoom_min_duration: 0.25,
+            zoom_max_duration: 128.0,
+        };
+        let closer = TimeViewport {
+            view_duration: 1.0,
+            ..wide
+        };
+
+        assert_eq!(wide.grid_step(Some(&ruler)), 0.5);
+        assert_eq!(closer.grid_step(Some(&ruler)), 0.125);
     }
 
     #[test]

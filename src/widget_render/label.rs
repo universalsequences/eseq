@@ -135,14 +135,16 @@ impl WidgetDefinition for LabelWidget {
                 color: bg,
             }));
         }
-        prims.push(MetalPrimitive::ProportionalText(MetalProportionalTextPrimitive {
-            row: node.rect.row,
-            col: node.rect.col,
-            text: text.clone(),
-            font_size,
-            fg,
-            bg,
-        }));
+        prims.push(MetalPrimitive::ProportionalText(
+            MetalProportionalTextPrimitive {
+                row: node.rect.row,
+                col: node.rect.col,
+                text: text.clone(),
+                font_size,
+                fg,
+                bg,
+            },
+        ));
         prims
     }
 }

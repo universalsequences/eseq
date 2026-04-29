@@ -8,15 +8,14 @@ use super::{
     get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::layout::{
-    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-    get_map,
+    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_map,
+    get_prop_num,
 };
 use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
 use super::{
-    MetalPrimitive, MetalProportionalTextPrimitive, WidgetInstance,
-    WidgetViewport, ndc_bounds,
+    MetalPrimitive, MetalProportionalTextPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
 };
 #[cfg(target_os = "macos")]
 use crate::backend::Color;
@@ -98,8 +97,12 @@ pub fn close_dropdown(widget_id: u64) {
 pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
     STATES.with(|s| {
         let mut states = s.borrow_mut();
-        let Some(state) = states.get_mut(&widget_id) else { return false };
-        if !state.open { return false; }
+        let Some(state) = states.get_mut(&widget_id) else {
+            return false;
+        };
+        if !state.open {
+            return false;
+        }
 
         let overlay_rect = super::get_overlay_rect();
         let menu_row = if let Some(rect) = overlay_rect {
@@ -113,7 +116,8 @@ pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
             let content_row = menu_row + state.scroll_offset;
             let idx = ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as isize;
             // Derive option count from content_height
-            let option_count = ((state.content_height - MENU_PADDING_V * 2.0) / MENU_ROW_HEIGHT).round() as usize;
+            let option_count =
+                ((state.content_height - MENU_PADDING_V * 2.0) / MENU_ROW_HEIGHT).round() as usize;
             if idx >= 0 && (idx as usize) < option_count {
                 Some(idx as usize)
             } else {
@@ -138,8 +142,12 @@ pub fn hover_overlay(widget_id: u64, local_row: f32) -> bool {
 pub fn scroll_overlay(widget_id: u64, delta_y: f32) -> bool {
     STATES.with(|s| {
         let mut states = s.borrow_mut();
-        let Some(state) = states.get_mut(&widget_id) else { return false };
-        if !state.open || state.content_height <= state.visible_height { return false; }
+        let Some(state) = states.get_mut(&widget_id) else {
+            return false;
+        };
+        if !state.open || state.content_height <= state.visible_height {
+            return false;
+        }
 
         let max_scroll = (state.content_height - state.visible_height).max(0.0);
         let scroll_speed = 0.05;
@@ -199,7 +207,8 @@ fn cache_text_widths(text: &str, font_size: f32, ctx: &MeasureCtx<'_>) {
 fn text_width_cells(text: &str, font_size: f32) -> f32 {
     let key = (font_size.to_bits(), text.to_string());
     CHAR_WIDTH_CACHE.with(|cache| {
-        cache.borrow()
+        cache
+            .borrow()
             .get(&key)
             .map(|widths| widths.iter().sum())
             .unwrap_or_else(|| text.chars().count() as f32 * APPROX_CHAR_WIDTH)
@@ -305,13 +314,20 @@ fn compute_menu_geometry(
 
     let max_scroll = (content_height - visible_height).max(0.0);
 
-    MenuGeometry { menu_top, content_height, visible_height, max_scroll }
+    MenuGeometry {
+        menu_top,
+        content_height,
+        visible_height,
+        max_scroll,
+    }
 }
 
 /// Ensure scroll offset keeps `hovered_idx` visible within the menu viewport.
 fn ensure_visible(state: &mut DropdownState, option_count: usize) {
     let Some(idx) = state.hovered_idx else { return };
-    if state.visible_height <= 0.0 { return; }
+    if state.visible_height <= 0.0 {
+        return;
+    }
     let content_height = option_count as f32 * MENU_ROW_HEIGHT + MENU_PADDING_V * 2.0;
     let max_scroll = (content_height - state.visible_height).max(0.0);
     let item_top = MENU_PADDING_V + idx as f32 * MENU_ROW_HEIGHT;
@@ -402,17 +418,16 @@ impl WidgetDefinition for DropdownWidget {
             if menu_row >= 0.0 {
                 // Account for scroll offset: the visible window starts at scroll_offset
                 let content_row = menu_row + state.scroll_offset;
-                let item_idx =
-                    ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as usize;
+                let item_idx = ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as usize;
                 if item_idx < options.len() {
                     state.open = false;
                     state.hovered_idx = None;
                     state.scroll_offset = 0.0;
                     set_state(node.widget_id, state);
                     super::clear_overlay();
-                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(
-                        Value::String(options[item_idx].clone()),
-                    ));
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::String(
+                        options[item_idx].clone(),
+                    )));
                 }
             }
 
@@ -471,10 +486,7 @@ impl WidgetDefinition for DropdownWidget {
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Up => {
-                let prev = state
-                    .hovered_idx
-                    .map(|i| i.saturating_sub(1))
-                    .unwrap_or(0);
+                let prev = state.hovered_idx.map(|i| i.saturating_sub(1)).unwrap_or(0);
                 state.hovered_idx = Some(prev);
                 ensure_visible(&mut state, options.len());
                 set_state(node.widget_id, state);
@@ -577,40 +589,80 @@ impl WidgetDefinition for DropdownWidget {
         let bg_color = resolve_named_color(
             &node.props,
             "bg-color",
-            Color { r: 0.22, g: 0.22, b: 0.24, a: 1.0 },
+            Color {
+                r: 0.22,
+                g: 0.22,
+                b: 0.24,
+                a: 1.0,
+            },
         );
         let text_color = resolve_named_color(
             &node.props,
             "text-color",
-            Color { r: 0.90, g: 0.90, b: 0.92, a: 1.0 },
+            Color {
+                r: 0.90,
+                g: 0.90,
+                b: 0.92,
+                a: 1.0,
+            },
         );
         let ring_color = resolve_named_color(
             &node.props,
             "ring-color",
-            Color { r: 0.25, g: 0.52, b: 0.96, a: 1.0 },
+            Color {
+                r: 0.25,
+                g: 0.52,
+                b: 0.96,
+                a: 1.0,
+            },
         );
         let chevron_color = resolve_named_color(
             &node.props,
             "chevron-color",
-            Color { r: 0.95, g: 0.95, b: 0.97, a: 1.0 },
+            Color {
+                r: 0.95,
+                g: 0.95,
+                b: 0.97,
+                a: 1.0,
+            },
         );
         let menu_bg = resolve_named_color(
             &node.props,
             "menu-bg",
-            Color { r: 0.12, g: 0.12, b: 0.14, a: 1.0 },
+            Color {
+                r: 0.12,
+                g: 0.12,
+                b: 0.14,
+                a: 1.0,
+            },
         );
         let hover_bg = resolve_named_color(
             &node.props,
             "hover-bg",
-            Color { r: 0.00, g: 0.35, b: 0.82, a: 1.0 },
+            Color {
+                r: 0.00,
+                g: 0.35,
+                b: 0.82,
+                a: 1.0,
+            },
         );
         let check_color = resolve_named_color(
             &node.props,
             "check-color",
-            Color { r: 0.90, g: 0.90, b: 0.92, a: 1.0 },
+            Color {
+                r: 0.90,
+                g: 0.90,
+                b: 0.92,
+                a: 1.0,
+            },
         );
 
-        let transparent = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+        let transparent = Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        };
         let mut prims = Vec::new();
 
         // ── Focus ring ──
@@ -671,7 +723,12 @@ impl WidgetDefinition for DropdownWidget {
             let badge_color = resolve_named_color(
                 &node.props,
                 "badge-color",
-                Color { r: 0.00, g: 0.35, b: 0.82, a: 1.0 },
+                Color {
+                    r: 0.00,
+                    g: 0.35,
+                    b: 0.82,
+                    a: 1.0,
+                },
             );
             let badge_pad = 0.1;
             let badge_rect = Rect {
@@ -688,12 +745,17 @@ impl WidgetDefinition for DropdownWidget {
                 prims.push(MetalPrimitive::WidgetInstance {
                     widget_type: "dropdown".to_string(),
                     instance: WidgetInstance {
-                        ndc_min, ndc_max,
-                        value_t: 0.0, orientation: 0.0,
+                        ndc_min,
+                        ndc_max,
+                        value_t: 0.0,
+                        orientation: 0.0,
                         itime: viewport.time_seconds,
-                        uniform_a: [0.0; 4], uniform_b: [0.0; 4],
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
                         color_a: [badge_color.r, badge_color.g, badge_color.b, badge_color.a],
-                        color_b: [0.0; 4], color_c: [0.0; 4], color_d: [0.0; 4],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
                         corner_radius: 0.4,
                         pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
                     },
@@ -713,7 +775,12 @@ impl WidgetDefinition for DropdownWidget {
                     itime: viewport.time_seconds,
                     uniform_a: [0.0; 4],
                     uniform_b: [0.0; 4],
-                    color_a: [chevron_color.r, chevron_color.g, chevron_color.b, chevron_color.a],
+                    color_a: [
+                        chevron_color.r,
+                        chevron_color.g,
+                        chevron_color.b,
+                        chevron_color.a,
+                    ],
                     color_b: [0.0; 4],
                     color_c: [0.0; 4],
                     color_d: [0.0; 4],
@@ -730,12 +797,8 @@ impl WidgetDefinition for DropdownWidget {
             let screen_row = node.rect.row - viewport.scroll_top;
             let viewport_rows = viewport.tile_content_rows;
 
-            let geo = compute_menu_geometry(
-                screen_row,
-                node.rect.height,
-                options.len(),
-                viewport_rows,
-            );
+            let geo =
+                compute_menu_geometry(screen_row, node.rect.height, options.len(), viewport_rows);
 
             // Persist geometry so key_event/scroll can operate correctly
             state.visible_height = geo.visible_height;
@@ -749,8 +812,13 @@ impl WidgetDefinition for DropdownWidget {
             let needs_scrollbar = geo.content_height > geo.visible_height;
             let check_col_width = 1.5; // space for ✓ mark
             let text_left_pad = PADDING_H + check_col_width;
-            let scrollbar_pad = if needs_scrollbar { SCROLLBAR_WIDTH + SCROLLBAR_MARGIN * 2.0 } else { 0.0 };
-            let max_option_width = options.iter()
+            let scrollbar_pad = if needs_scrollbar {
+                SCROLLBAR_WIDTH + SCROLLBAR_MARGIN * 2.0
+            } else {
+                0.0
+            };
+            let max_option_width = options
+                .iter()
                 .map(|o| text_width_cells(o, font_size))
                 .fold(0.0_f32, f32::max);
             let content_width = text_left_pad + max_option_width + PADDING_H + scrollbar_pad;
@@ -774,7 +842,12 @@ impl WidgetDefinition for DropdownWidget {
                 width: menu_rect.width + border_width * 2.0,
                 height: menu_rect.height + border_width * 2.0,
             };
-            let border_color = Color { r: 0.45, g: 0.45, b: 0.48, a: 1.0 };
+            let border_color = Color {
+                r: 0.45,
+                g: 0.45,
+                b: 0.48,
+                a: 1.0,
+            };
             emit_rounded_rect_overlay(border_rect, border_color, 0.2, viewport);
 
             // Menu background (slightly inset so the border is visible)
@@ -872,7 +945,12 @@ impl WidgetDefinition for DropdownWidget {
                     width: SCROLLBAR_WIDTH,
                     height: thumb_height,
                 };
-                let thumb_color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.25 };
+                let thumb_color = Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 0.25,
+                };
                 emit_rounded_rect_overlay(thumb_rect, thumb_color, 0.15, viewport);
             }
         } else if !state.open {
