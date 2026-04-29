@@ -1863,7 +1863,7 @@ impl Runtime {
         tree: Value,
         reactive_dependencies: Vec<ReactiveFieldKey>,
     ) -> bool {
-        let Some(snapshot) = self.current_committed_ui_snapshot.clone() else {
+        let Some(snapshot) = self.current_committed_ui_snapshot.take() else {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some("missing-snapshot".to_string());
             }
@@ -1873,6 +1873,7 @@ impl Runtime {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some(reason.to_string());
             }
+            self.current_committed_ui_snapshot = Some(snapshot);
             return false;
         }
         let Some(merged) = snapshot.replacing_subtree(subtree_root_id, tree, reactive_dependencies)
@@ -1882,7 +1883,7 @@ impl Runtime {
             }
             return false;
         };
-        self.current_widget_tree = Some(merged.tree.deep_clone());
+        self.current_widget_tree = Some(merged.tree.clone());
         self.current_committed_ui_snapshot = Some(merged);
         if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
             trace.subtree_failure_reason = None;
@@ -1897,19 +1898,31 @@ impl Runtime {
         if replacements.is_empty() {
             return false;
         }
-        let Some(snapshot) = self.current_committed_ui_snapshot.clone() else {
+        let Some(snapshot) = self.current_committed_ui_snapshot.as_ref() else {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some("missing-snapshot".to_string());
             }
             return false;
         };
+        for (subtree_root_id, tree, _) in replacements {
+            if let Some(reason) = snapshot.subtree_replace_failure_reason(*subtree_root_id, tree) {
+                if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                    trace.subtree_failure_reason = Some(reason.to_string());
+                }
+                return false;
+            }
+        }
+        let snapshot = self
+            .current_committed_ui_snapshot
+            .take()
+            .expect("snapshot was validated before subtree replacement");
         let Some(merged) = snapshot.replacing_subtrees(replacements) else {
             if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
                 trace.subtree_failure_reason = Some("replace-batch-missed".to_string());
             }
             return false;
         };
-        self.current_widget_tree = Some(merged.tree.deep_clone());
+        self.current_widget_tree = Some(merged.tree.clone());
         self.current_committed_ui_snapshot = Some(merged);
         if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
             trace.subtree_failure_reason = None;

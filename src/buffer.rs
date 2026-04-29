@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::backend::Color;
 use crate::editor::ViewMode;
@@ -30,7 +31,7 @@ pub struct CommittedSubtreeSnapshot {
     pub widget_type: Option<String>,
     pub reactive_dependencies: Vec<ReactiveFieldKey>,
     pub tree: Value,
-    pub children: Vec<CommittedSubtreeSnapshot>,
+    pub children: Vec<Arc<CommittedSubtreeSnapshot>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,8 +42,8 @@ pub struct CommittedBufferUiSnapshot {
     pub root_subtree_root_id: Option<u64>,
     pub field_to_subtree_roots: HashMap<ReactiveFieldKey, Vec<u64>>,
     pub subtree_root_dependencies: HashMap<u64, Vec<ReactiveFieldKey>>,
-    pub subtree_roots: HashMap<u64, CommittedSubtreeSnapshot>,
-    pub widgets: HashMap<u64, CommittedSubtreeSnapshot>,
+    pub subtree_roots: HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
+    pub widgets: HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
 }
 
 pub struct Buffer {
@@ -229,7 +230,13 @@ impl Buffer {
     }
 
     pub fn set_committed_ui_snapshot(&mut self, snapshot: Option<CommittedBufferUiSnapshot>) {
-        if self.committed_ui_snapshot == snapshot {
+        let unchanged = self
+            .committed_ui_snapshot
+            .as_ref()
+            .zip(snapshot.as_ref())
+            .is_some_and(|(current, next)| current == next)
+            || (self.committed_ui_snapshot.is_none() && snapshot.is_none());
+        if unchanged {
             return;
         }
         self.committed_ui_snapshot = snapshot;
@@ -247,17 +254,19 @@ impl Buffer {
         source: Option<BufferId>,
         reactive_dependencies: Vec<ReactiveFieldKey>,
     ) -> bool {
-        let Some(snapshot) = self.committed_ui_snapshot.clone() else {
+        let Some(snapshot) = self.committed_ui_snapshot.take() else {
             return false;
         };
-        let Some(merged) = snapshot.replacing_subtree(
-            subtree_root_id,
-            tree,
-            reactive_dependencies,
-        ) else {
+        if let Some(reason) = snapshot.subtree_replace_failure_reason(subtree_root_id, &tree) {
+            let _ = reason;
+            self.committed_ui_snapshot = Some(snapshot);
+            return false;
+        }
+        let Some(merged) = snapshot.replacing_subtree(subtree_root_id, tree, reactive_dependencies)
+        else {
             return false;
         };
-        self.widget_tree = Some(merged.tree.deep_clone());
+        self.widget_tree = Some(merged.tree.clone());
         self.widget_tree_source = source.or(merged.source_buffer_id);
         self.widget_tree_revision = self.widget_tree_revision.wrapping_add(1);
         self.set_committed_ui_snapshot(Some(merged));
@@ -733,7 +742,7 @@ impl CommittedBufferUiSnapshot {
         source_buffer_id: Option<BufferId>,
         reactive_dependencies: Vec<ReactiveFieldKey>,
     ) -> Self {
-        let root = CommittedSubtreeSnapshot::from_tree(tree.deep_clone(), &reactive_dependencies);
+        let root = CommittedSubtreeSnapshot::from_tree(tree.clone(), &reactive_dependencies);
         let mut subtree_roots = HashMap::new();
         let mut widgets = HashMap::new();
         let mut field_to_subtree_roots = HashMap::new();
@@ -771,9 +780,7 @@ impl CommittedBufferUiSnapshot {
         if !self.subtree_roots.contains_key(&subtree_root_id) {
             return Some("unknown-root");
         }
-        let Some(replacement_root_id) = value_map(replacement_tree)
-            .as_ref()
-            .and_then(|map| prop_u64(map, "__subtree-root-id"))
+        let Some(replacement_root_id) = root_subtree_root_id(replacement_tree)
         else {
             return Some("missing-root-id");
         };
@@ -798,7 +805,7 @@ impl CommittedBufferUiSnapshot {
     }
 
     pub fn replacing_subtree(
-        &self,
+        self,
         subtree_root_id: u64,
         replacement_tree: Value,
         reactive_dependencies: Vec<ReactiveFieldKey>,
@@ -815,7 +822,7 @@ impl CommittedBufferUiSnapshot {
             subtree_root_id,
             &replacement_tree,
         )?;
-        let mut dependency_lookup = self.subtree_root_dependencies.clone();
+        let mut dependency_lookup = self.subtree_root_dependencies;
         for root_id in collect_subtree_root_ids(&replacement_tree) {
             dependency_lookup.insert(root_id, reactive_dependencies.clone());
         }
@@ -827,22 +834,25 @@ impl CommittedBufferUiSnapshot {
     }
 
     pub fn replacing_subtrees(
-        &self,
+        self,
         replacements: &[(u64, Value, Vec<ReactiveFieldKey>)],
     ) -> Option<Self> {
         if replacements.is_empty() {
-            return Some(self.clone());
+            return Some(self);
         }
 
-        let mut merged_tree = self.tree.deep_clone();
-        let mut dependency_lookup = self.subtree_root_dependencies.clone();
-        for (subtree_root_id, replacement_tree, reactive_dependencies) in replacements {
+        for (subtree_root_id, replacement_tree, _) in replacements {
             if self
                 .subtree_replace_failure_reason(*subtree_root_id, replacement_tree)
                 .is_some()
             {
                 return None;
             }
+        }
+
+        let mut merged_tree = self.tree.deep_clone();
+        let mut dependency_lookup = self.subtree_root_dependencies;
+        for (subtree_root_id, replacement_tree, reactive_dependencies) in replacements {
             merged_tree = replace_subtree_in_value(&merged_tree, *subtree_root_id, replacement_tree)?;
             for root_id in collect_subtree_root_ids(replacement_tree) {
                 dependency_lookup.insert(root_id, reactive_dependencies.clone());
@@ -862,7 +872,7 @@ impl CommittedBufferUiSnapshot {
         dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
     ) -> Self {
         let root = CommittedSubtreeSnapshot::from_tree_with_dependency_lookup(
-            tree.deep_clone(),
+            tree.clone(),
             &[],
             dependency_lookup,
         );
@@ -890,7 +900,7 @@ impl CommittedBufferUiSnapshot {
 }
 
 impl CommittedSubtreeSnapshot {
-    pub fn from_tree(tree: Value, reactive_dependencies: &[ReactiveFieldKey]) -> Self {
+    pub fn from_tree(tree: Value, reactive_dependencies: &[ReactiveFieldKey]) -> Arc<Self> {
         Self::from_tree_with_dependency_lookup(tree, reactive_dependencies, &HashMap::new())
     }
 
@@ -898,23 +908,12 @@ impl CommittedSubtreeSnapshot {
         tree: Value,
         reactive_dependencies: &[ReactiveFieldKey],
         dependency_lookup: &HashMap<u64, Vec<ReactiveFieldKey>>,
-    ) -> Self {
-        let map = value_map(&tree);
-        let stable_widget_id = map
-            .as_ref()
-            .and_then(|map| prop_u64(map, "__stable-widget-id"));
-        let subtree_root_id = map
-            .as_ref()
-            .and_then(|map| prop_u64(map, "__subtree-root-id"));
-        let parent_subtree_root_id = map
-            .as_ref()
-            .and_then(|map| prop_u64(map, "__parent-subtree-root-id"));
-        let stable_key = map
-            .as_ref()
-            .and_then(|map| prop_string(map, "__stable-key"));
-        let widget_type = map
-            .as_ref()
-            .and_then(|map| prop_widget_type(map));
+    ) -> Arc<Self> {
+        let stable_widget_id = prop_u64_from_value(&tree, "__stable-widget-id");
+        let subtree_root_id = prop_u64_from_value(&tree, "__subtree-root-id");
+        let parent_subtree_root_id = prop_u64_from_value(&tree, "__parent-subtree-root-id");
+        let stable_key = prop_string_from_value(&tree, "__stable-key");
+        let widget_type = prop_widget_type_from_value(&tree);
         let subtree_dependencies = subtree_root_id
             .and_then(|root_id| dependency_lookup.get(&root_id).cloned())
             .unwrap_or_else(|| reactive_dependencies.to_vec());
@@ -928,7 +927,7 @@ impl CommittedSubtreeSnapshot {
                 )
             })
             .collect();
-        Self {
+        Arc::new(Self {
             stable_widget_id,
             subtree_root_id,
             parent_subtree_root_id,
@@ -937,18 +936,18 @@ impl CommittedSubtreeSnapshot {
             reactive_dependencies: subtree_dependencies,
             tree,
             children,
-        }
+        })
     }
 
     fn collect_indexes(
-        &self,
-        subtree_roots: &mut HashMap<u64, CommittedSubtreeSnapshot>,
-        widgets: &mut HashMap<u64, CommittedSubtreeSnapshot>,
+        self: &Arc<Self>,
+        subtree_roots: &mut HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
+        widgets: &mut HashMap<u64, Arc<CommittedSubtreeSnapshot>>,
         field_to_subtree_roots: &mut HashMap<ReactiveFieldKey, Vec<u64>>,
         subtree_root_dependencies: &mut HashMap<u64, Vec<ReactiveFieldKey>>,
     ) {
         if let Some(root_id) = self.subtree_root_id {
-            subtree_roots.insert(root_id, self.clone());
+            subtree_roots.insert(root_id, Arc::clone(self));
             subtree_root_dependencies.insert(root_id, self.reactive_dependencies.clone());
             for field in &self.reactive_dependencies {
                 field_to_subtree_roots
@@ -958,7 +957,7 @@ impl CommittedSubtreeSnapshot {
             }
         }
         if let Some(widget_id) = self.stable_widget_id {
-            widgets.insert(widget_id, self.clone());
+            widgets.insert(widget_id, Arc::clone(self));
         }
         for child in &self.children {
             child.collect_indexes(
@@ -971,6 +970,7 @@ impl CommittedSubtreeSnapshot {
     }
 }
 
+#[cfg(test)]
 fn value_map(value: &Value) -> Option<HashMap<String, Value>> {
     match value {
         Value::Map(map) => Some(
@@ -983,22 +983,23 @@ fn value_map(value: &Value) -> Option<HashMap<String, Value>> {
 }
 
 fn value_children(value: &Value) -> Vec<Value> {
-    let Some(map) = value_map(value) else {
-        return Vec::new();
-    };
-    match map.get("children") {
-        Some(Value::List(children)) => children
-            .iter()
-            .map(|child| child.borrow().clone())
-            .collect(),
+    match value {
+        Value::Map(map) => match map.get("children").map(|value| value.borrow()) {
+            Some(child) => match &*child {
+                Value::List(children) => children
+                    .iter()
+                    .map(|child| child.borrow().clone())
+                    .collect(),
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        },
         _ => Vec::new(),
     }
 }
 
 pub fn root_subtree_root_id(value: &Value) -> Option<u64> {
-    value_map(value)
-        .as_ref()
-        .and_then(|map| prop_u64(map, "__subtree-root-id"))
+    prop_u64_from_value(value, "__subtree-root-id")
 }
 
 fn collect_subtree_root_ids(value: &Value) -> Vec<u64> {
@@ -1008,9 +1009,7 @@ fn collect_subtree_root_ids(value: &Value) -> Vec<u64> {
 }
 
 fn collect_subtree_root_ids_impl(value: &Value, root_ids: &mut Vec<u64>) {
-    if let Some(map) = value_map(value)
-        && let Some(root_id) = prop_u64(&map, "__subtree-root-id")
-    {
+    if let Some(root_id) = root_subtree_root_id(value) {
         root_ids.push(root_id);
     }
     for child in value_children(value) {
@@ -1018,49 +1017,112 @@ fn collect_subtree_root_ids_impl(value: &Value, root_ids: &mut Vec<u64>) {
     }
 }
 
-fn replace_subtree_in_value(value: &Value, subtree_root_id: u64, replacement_tree: &Value) -> Option<Value> {
-    let map = value_map(value)?;
-    if prop_u64(&map, "__subtree-root-id") == Some(subtree_root_id) {
+fn replace_subtree_in_value(
+    value: &Value,
+    subtree_root_id: u64,
+    replacement_tree: &Value,
+) -> Option<Value> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    if prop_u64_from_map(map, "__subtree-root-id") == Some(subtree_root_id) {
         return Some(replacement_tree.deep_clone());
     }
 
+    let children_value = map.get("children")?;
+    let children_borrow = children_value.borrow();
+    let Value::List(children) = &*children_borrow else {
+        return None;
+    };
+
+    let mut replacements = Vec::with_capacity(children.len());
     let mut replaced_any = false;
-    let mut rebuilt = HashMap::new();
-    for (key, child) in map {
-        if key == "children" {
-            let replaced_children = match child {
-                Value::List(children) => {
-                    let mut next_children = Vec::with_capacity(children.len());
-                    for child in children {
-                        let child_value = child.borrow().clone();
-                        let replaced_child =
-                            replace_subtree_in_value(&child_value, subtree_root_id, replacement_tree);
-                        if let Some(replaced_child) = replaced_child {
-                            replaced_any = true;
-                            next_children.push(std::rc::Rc::new(std::cell::RefCell::new(replaced_child)));
-                        } else {
-                            next_children.push(std::rc::Rc::new(std::cell::RefCell::new(child_value)));
-                        }
-                    }
-                    Value::List(next_children)
-                }
-                other => other,
-            };
-            rebuilt.insert(
-                key,
-                std::rc::Rc::new(std::cell::RefCell::new(replaced_children)),
-            );
-        } else {
-            rebuilt.insert(
-                key,
-                std::rc::Rc::new(std::cell::RefCell::new(child)),
-            );
-        }
+    for child in children {
+        let child_borrow = child.borrow();
+        let replaced_child =
+            replace_subtree_in_value(&child_borrow, subtree_root_id, replacement_tree);
+        replaced_any |= replaced_child.is_some();
+        replacements.push(replaced_child);
     }
 
-    replaced_any.then_some(Value::Map(rebuilt))
+    if !replaced_any {
+        return None;
+    }
+
+    let next_children: Vec<std::rc::Rc<std::cell::RefCell<Value>>> = children
+        .iter()
+        .zip(replacements)
+        .map(|(child, replacement)| {
+            let child_value = replacement.unwrap_or_else(|| child.borrow().clone());
+            std::rc::Rc::new(std::cell::RefCell::new(child_value))
+        })
+        .collect();
+    drop(children_borrow);
+
+    let mut rebuilt = HashMap::with_capacity(map.len());
+    for (key, value) in map {
+        let next_value = if key == "children" {
+            Value::List(next_children.clone())
+        } else {
+            value.borrow().clone()
+        };
+        rebuilt.insert(
+            key.clone(),
+            std::rc::Rc::new(std::cell::RefCell::new(next_value)),
+        );
+    }
+    Some(Value::Map(rebuilt))
 }
 
+fn prop_u64_from_value(value: &Value, key: &str) -> Option<u64> {
+    match value {
+        Value::Map(map) => prop_u64_from_map(map, key),
+        _ => None,
+    }
+}
+
+fn prop_u64_from_map(
+    map: &HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
+    key: &str,
+) -> Option<u64> {
+    match map.get(key).map(|value| value.borrow()) {
+        Some(value) => match &*value {
+            Value::Number(n) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
+            _ => None,
+        },
+        None => None,
+    }
+}
+
+fn prop_string_from_value(value: &Value, key: &str) -> Option<String> {
+    match value {
+        Value::Map(map) => match map.get(key).map(|value| value.borrow()) {
+            Some(value) => match &*value {
+                Value::String(s) => Some(s.clone()),
+                _ => None,
+            },
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+fn prop_widget_type_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Map(map) => match map.get("type").map(|value| value.borrow()) {
+            Some(value) => match &*value {
+                Value::Keyword(widget_type) | Value::String(widget_type) => {
+                    Some(widget_type.clone())
+                }
+                _ => None,
+            },
+            None => None,
+        },
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 fn prop_u64(map: &HashMap<String, Value>, key: &str) -> Option<u64> {
     match map.get(key) {
         Some(Value::Number(n)) if *n >= 0.0 && n.fract() == 0.0 => Some(*n as u64),
@@ -1068,6 +1130,7 @@ fn prop_u64(map: &HashMap<String, Value>, key: &str) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 fn prop_string(map: &HashMap<String, Value>, key: &str) -> Option<String> {
     match map.get(key) {
         Some(Value::String(s)) => Some(s.clone()),
@@ -1075,6 +1138,7 @@ fn prop_string(map: &HashMap<String, Value>, key: &str) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn prop_widget_type(map: &HashMap<String, Value>) -> Option<String> {
     match map.get("type") {
         Some(Value::Keyword(widget_type)) => Some(widget_type.clone()),

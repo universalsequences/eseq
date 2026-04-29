@@ -218,9 +218,14 @@ impl Editor {
             .is_some_and(|filter| filter == "*" || filter == buffer_name)
     }
 
-    fn trace_ui_tree_event(&self, buffer_name: &str, stage: &str, detail: &str) {
+    fn trace_ui_tree_event_with(
+        &self,
+        buffer_name: &str,
+        stage: &str,
+        detail: impl FnOnce() -> String,
+    ) {
         if self.trace_ui_tree_enabled_for(buffer_name) {
-            eprintln!("[ui-tree][{buffer_name}] {stage} {detail}");
+            eprintln!("[ui-tree][{buffer_name}] {stage} {}", detail());
         }
     }
 
@@ -2722,6 +2727,96 @@ impl Editor {
         self.mark_needs_redraw();
     }
 
+    fn refresh_inactive_tile_layouts_for_buffer_subtrees(
+        &mut self,
+        buffer_idx: usize,
+        subtree_roots: &[u64],
+    ) {
+        if subtree_roots.is_empty() {
+            return;
+        }
+        let tree = self.buffers[buffer_idx].widget_tree.clone();
+        let Some(tree) = tree.as_ref() else {
+            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+            return;
+        };
+        let buffer_id = self.buffers[buffer_idx].id as u64;
+        let tile_ids = self.tile_root.leaf_ids();
+        let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
+            .into_iter()
+            .filter(|id| *id != self.active_tile)
+            .filter_map(|id| {
+                let leaf = self.tile_root.find_leaf(id)?;
+                if leaf.buffer_idx != buffer_idx {
+                    return None;
+                }
+                let rect = self
+                    .cached_tile_rects
+                    .iter()
+                    .find(|(tid, _)| *tid == id)
+                    .map(|(_, r)| r);
+                let (cols, rows) = match rect {
+                    Some(r) => (r.width as u16, r.height.max(1.0) as u16),
+                    None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
+                };
+                Some((id, cols, rows))
+            })
+            .collect();
+
+        for (tile_id, cols, rows) in tiles_to_update {
+            let existing_layout = self
+                .tile_root
+                .find_leaf(tile_id)
+                .and_then(|leaf| leaf.cached_layout.clone());
+            let mut dirty_widget_ids = Vec::new();
+            let mut layout = existing_layout;
+            let mut targeted = layout.is_some();
+            let subtree_paths = layout
+                .as_ref()
+                .map(|layout| crate::layout::subtree_root_paths(layout.as_ref()));
+            for subtree_root_id in subtree_roots {
+                let Some(existing) = layout.as_ref() else {
+                    targeted = false;
+                    break;
+                };
+                let Some(child_path) = subtree_paths
+                    .as_ref()
+                    .and_then(|paths| paths.get(subtree_root_id))
+                else {
+                    targeted = false;
+                    break;
+                };
+                let Some(updated) = crate::layout::reuse_layout_node_for_subtree_path(
+                    existing.as_ref(),
+                    tree,
+                    child_path,
+                    &mut dirty_widget_ids,
+                ) else {
+                    targeted = false;
+                    break;
+                };
+                layout = Some(std::sync::Arc::new(updated));
+            }
+            let (layout, dirty_widget_ids) = if targeted {
+                (layout, dirty_widget_ids)
+            } else {
+                let layout = self.runtime.layout_snapshot_for_tree_with_viewport_and_offset(
+                    tree,
+                    Some((cols, rows)),
+                    buffer_id * 100_000,
+                );
+                (layout, Vec::new())
+            };
+            if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
+                leaf.cached_layout = layout;
+                leaf.dirty_widget_ids = dirty_widget_ids;
+                leaf.layout_revision = leaf.layout_revision.wrapping_add(1);
+                leaf.cached_inactive_frame = None;
+            }
+        }
+        self.mark_needs_redraw();
+    }
+
     fn handle_completion_key(&mut self, key: KeyEvent) -> bool {
         let Some(completion) = self.completion.as_mut() else {
             return false;
@@ -3081,7 +3176,7 @@ impl Editor {
             }
         }
 
-        let mut inactive_buffers_to_refresh = HashSet::new();
+        let mut inactive_buffers_to_refresh: HashMap<usize, Option<Vec<u64>>> = HashMap::new();
         for pending in self.runtime.take_pending_buffer_widget_trees() {
             match pending {
                 PendingUiUpdate::FullTree(pending) => {
@@ -3100,30 +3195,30 @@ impl Editor {
                         }
                     };
                     let buffer_name = self.buffers[buffer_idx].name.clone();
-                    self.trace_ui_tree_event(
+                    self.trace_ui_tree_event_with(
                         &buffer_name,
                         "pending-full",
-                        &format!(
+                        || format!(
                             "incoming={} before={}",
                             debug_widget_tree_summary(Some(&pending.tree)),
                             debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref()),
                         ),
                     );
                     let is_active = self.active_buffer_idx() == buffer_idx;
-                    let upgraded_subtree = self.buffers[buffer_idx]
+                    let upgraded_subtree_root = self.buffers[buffer_idx]
                         .committed_ui_snapshot
                         .as_ref()
                         .and_then(|snapshot| {
                             snapshot.matching_non_root_subtree_root_id_for_tree(&pending.tree)
-                        })
-                        .is_some_and(|subtree_root_id| {
-                            self.buffers[buffer_idx].replace_widget_subtree(
+                        });
+                    let upgraded_subtree = upgraded_subtree_root.is_some_and(|subtree_root_id| {
+                        self.buffers[buffer_idx].replace_widget_subtree(
                                 subtree_root_id,
                                 pending.tree.deep_clone(),
                                 pending.source_buffer_id,
                                 pending.reactive_dependencies.clone(),
                             )
-                        });
+                    });
                     if upgraded_subtree {
                         self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
                         if is_active {
@@ -3133,7 +3228,11 @@ impl Editor {
                                 .try_upgrade_full_tree_to_current_subtree(&pending);
                             self.auto_focus_first_widget();
                         } else {
-                            inactive_buffers_to_refresh.insert(buffer_idx);
+                            inactive_buffers_to_refresh
+                                .entry(buffer_idx)
+                                .or_insert_with(|| Some(Vec::new()))
+                                .as_mut()
+                                .map(|roots| roots.push(upgraded_subtree_root.unwrap()));
                         }
                     } else if is_active {
                         crate::widget_render::clear_overlay();
@@ -3149,12 +3248,12 @@ impl Editor {
                             );
                             buffer.view_mode = ViewMode::UiOnly;
                         }
-                        inactive_buffers_to_refresh.insert(buffer_idx);
+                        inactive_buffers_to_refresh.insert(buffer_idx, None);
                     }
-                    self.trace_ui_tree_event(
+                    self.trace_ui_tree_event_with(
                         &buffer_name,
                         "applied-full",
-                        &format!(
+                        || format!(
                             "after={}",
                             debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref())
                         ),
@@ -3179,10 +3278,10 @@ impl Editor {
                         EffectTarget::BufferName(name) => self.ensure_scratch_buffer_named(&name),
                     };
                     let buffer_name = self.buffers[buffer_idx].name.clone();
-                    self.trace_ui_tree_event(
+                    self.trace_ui_tree_event_with(
                         &buffer_name,
                         "pending-subtree",
-                        &format!(
+                        || format!(
                             "root={subtree_root_id} incoming={} before={}",
                             debug_widget_tree_summary(Some(&tree)),
                             debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref()),
@@ -3212,13 +3311,17 @@ impl Editor {
                             );
                             self.auto_focus_first_widget();
                         } else {
-                            inactive_buffers_to_refresh.insert(buffer_idx);
+                            inactive_buffers_to_refresh
+                                .entry(buffer_idx)
+                                .or_insert_with(|| Some(Vec::new()))
+                                .as_mut()
+                                .map(|roots| roots.push(subtree_root_id));
                         }
                     }
-                    self.trace_ui_tree_event(
+                    self.trace_ui_tree_event_with(
                         &buffer_name,
                         if replaced { "applied-subtree" } else { "missed-subtree" },
-                        &format!(
+                        || format!(
                             "root={subtree_root_id} after={}",
                             debug_widget_tree_summary(self.buffers[buffer_idx].widget_tree.as_ref())
                         ),
@@ -3226,8 +3329,16 @@ impl Editor {
                 }
             }
         }
-        for buffer_idx in inactive_buffers_to_refresh {
-            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+        for (buffer_idx, subtree_roots) in inactive_buffers_to_refresh {
+            match subtree_roots {
+                Some(subtree_roots) => {
+                    self.refresh_inactive_tile_layouts_for_buffer_subtrees(
+                        buffer_idx,
+                        &subtree_roots,
+                    );
+                }
+                None => self.refresh_inactive_tile_layouts_for_buffer(buffer_idx),
+            }
         }
 
         // Process set-buffer-mode-for (after buffer creation so targets exist)

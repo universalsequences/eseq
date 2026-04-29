@@ -493,6 +493,146 @@ pub fn reuse_layout_node(
     reuse_layout_node_impl(existing, tree, dirty_widget_ids, &mut path).ok()
 }
 
+pub fn reuse_layout_node_for_subtree(
+    existing: &LayoutNode,
+    tree: &Value,
+    subtree_root_id: u64,
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Option<LayoutNode> {
+    let mut child_path = Vec::new();
+    find_subtree_path(existing, subtree_root_id, &mut child_path)?;
+    reuse_layout_node_for_subtree_path(existing, tree, &child_path, dirty_widget_ids)
+}
+
+pub fn subtree_root_paths(existing: &LayoutNode) -> HashMap<u64, Vec<usize>> {
+    let mut paths = HashMap::new();
+    let mut path = Vec::new();
+    collect_subtree_root_paths(existing, &mut path, &mut paths);
+    paths
+}
+
+fn collect_subtree_root_paths(
+    node: &LayoutNode,
+    path: &mut Vec<usize>,
+    paths: &mut HashMap<u64, Vec<usize>>,
+) {
+    if let Some(root_id) = node.subtree_root_id {
+        paths.insert(root_id, path.clone());
+    }
+    for (idx, child) in node.children.iter().enumerate() {
+        path.push(idx);
+        collect_subtree_root_paths(child, path, paths);
+        path.pop();
+    }
+}
+
+pub fn reuse_layout_node_for_subtree_path(
+    existing: &LayoutNode,
+    tree: &Value,
+    child_path: &[usize],
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Option<LayoutNode> {
+    let mut trace_path = Vec::new();
+    reuse_layout_node_at_path(existing, tree, &child_path, dirty_widget_ids, &mut trace_path).ok()
+}
+
+fn find_subtree_path(node: &LayoutNode, subtree_root_id: u64, path: &mut Vec<usize>) -> Option<()> {
+    if node.subtree_root_id == Some(subtree_root_id) {
+        return Some(());
+    }
+    for (idx, child) in node.children.iter().enumerate() {
+        path.push(idx);
+        if find_subtree_path(child, subtree_root_id, path).is_some() {
+            return Some(());
+        }
+        path.pop();
+    }
+    None
+}
+
+fn reuse_layout_node_at_path(
+    existing: &LayoutNode,
+    tree: &Value,
+    child_path: &[usize],
+    dirty_widget_ids: &mut Vec<u64>,
+    trace_path: &mut Vec<String>,
+) -> Result<LayoutNode, String> {
+    if child_path.is_empty() {
+        return reuse_layout_node_impl(existing, tree, dirty_widget_ids, trace_path);
+    }
+
+    let widget_type = get_widget_type(tree).ok_or_else(|| "not-widget".to_string())?;
+    if widget_type != existing.widget_type {
+        return Err(format!("widget-type:{}->{}", existing.widget_type, widget_type));
+    }
+
+    let new_stable_widget_id = get_prop_u64(tree, "__stable-widget-id");
+    let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
+    let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
+    let new_stable_key = get_prop_str(tree, "__stable-key");
+    if existing.stable_widget_id != new_stable_widget_id
+        || existing.subtree_root_id != new_subtree_root_id
+        || existing.parent_subtree_root_id != new_parent_subtree_root_id
+        || existing.stable_key != new_stable_key
+    {
+        return Err(format!("stable-identity:{widget_type}"));
+    }
+
+    let new_props = collect_props(tree);
+    if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
+        return Err(format!("size-props:{widget_type}"));
+    }
+    if existing.props != new_props {
+        dirty_widget_ids.push(existing.widget_id);
+    }
+
+    let children_values = get_children(tree);
+    let effective_children_values: Vec<&Value> = if widget_type == "tabs" {
+        let selected = (get_prop_num(tree, "value").map(f64_to_f32).unwrap_or(0.0) as usize)
+            .min(children_values.len().saturating_sub(1));
+        children_values.get(selected).into_iter().collect()
+    } else {
+        children_values.iter().collect()
+    };
+    if effective_children_values.len() != existing.children.len() {
+        return Err(format!("children-len:{widget_type}"));
+    }
+
+    let child_idx = child_path[0];
+    let child_layout = existing
+        .children
+        .get(child_idx)
+        .ok_or_else(|| format!("missing-layout-child:{widget_type}[{child_idx}]"))?;
+    let child_tree = effective_children_values
+        .get(child_idx)
+        .ok_or_else(|| format!("missing-tree-child:{widget_type}[{child_idx}]"))?;
+    trace_path.push(format!("{widget_type}[{child_idx}]"));
+    let updated_child = reuse_layout_node_at_path(
+        child_layout,
+        child_tree,
+        &child_path[1..],
+        dirty_widget_ids,
+        trace_path,
+    )?;
+    trace_path.pop();
+
+    let mut children = existing.children.clone();
+    children[child_idx] = updated_child;
+    let focusable = matches!(new_props.get("focusable"), Some(Value::Bool(true)));
+    Ok(LayoutNode {
+        widget_id: existing.widget_id,
+        stable_widget_id: existing.stable_widget_id,
+        subtree_root_id: existing.subtree_root_id,
+        parent_subtree_root_id: existing.parent_subtree_root_id,
+        stable_key: existing.stable_key.clone(),
+        widget_type,
+        rect: existing.rect,
+        props: new_props,
+        children,
+        focusable,
+    })
+}
+
 pub fn reuse_layout_failure_reason(existing: &LayoutNode, tree: &Value) -> Option<String> {
     let mut dirty_widget_ids = Vec::new();
     let mut path = Vec::new();
