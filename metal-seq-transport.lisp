@@ -403,6 +403,7 @@
               (label (fmt " {} " (+ i 1))
                 :font-size 11
                 :color (if (= i SEQ.current-pattern) :white :gray)
+                :hover-color :white
                 :bg :transparent))))
         (label "" :width 0.2 :bg :transparent)
         (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true

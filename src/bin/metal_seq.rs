@@ -6497,6 +6497,40 @@ mod tests {
                 .any(|buffer| buffer.name == "*piano-roll*"),
             "piano roll lisp should create the *piano-roll* buffer"
         );
+        editor
+            .runtime_mut()
+            .eval_str("(set! piano-roll-view-duration 8)")
+            .expect("set piano roll duration");
+        editor
+            .runtime_mut()
+            .eval_str("(set! piano-roll-lane-height 1)")
+            .expect("set piano roll lane height");
+        editor
+            .runtime_mut()
+            .eval_str("(piano-roll-action (dict :type :zoom-view :anchor-time 4 :factor 2))")
+            .expect("zoom piano roll");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-lane-height")
+                .expect("read piano roll lane height after x zoom"),
+            Some(Value::Number(1.0))
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(set! piano-roll-view-duration 8)")
+            .expect("reset piano roll duration");
+        editor
+            .runtime_mut()
+            .eval_str("(piano-roll-action (dict :type :scroll-view :delta-time 100))")
+            .expect("scroll piano roll");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-view-start")
+                .expect("read piano roll view start"),
+            Some(Value::Number(12.0))
+        );
     }
 
     #[test]
