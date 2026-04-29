@@ -351,17 +351,13 @@ impl GraphController<'_> {
             self.shift_engine_route_tables_left(track_idx, old_count);
         }
 
-        if !self
-            .app
-            .state
-            .remove_track(
-                track_idx,
-                &buffer_ids,
-                &names,
-                &instrument_types,
-                &self.app.graph.effect_descriptors,
-            )
-        {
+        if !self.app.state.remove_track(
+            track_idx,
+            &buffer_ids,
+            &names,
+            &instrument_types,
+            &self.app.graph.effect_descriptors,
+        ) {
             return Err("Failed to compact sequencer state for deleted track".to_string());
         }
 
@@ -372,11 +368,11 @@ impl GraphController<'_> {
 
         let new_selected = track_idx.min(self.app.tracks.len().saturating_sub(1));
         self.app.ui.cursor_track = new_selected;
-        self.app.ui.cursor_step = self
-            .app
-            .ui
-            .cursor_step
-            .min(self.app.state.pattern.track_params[new_selected].get_num_steps().saturating_sub(1));
+        self.app.ui.cursor_step = self.app.ui.cursor_step.min(
+            self.app.state.pattern.track_params[new_selected]
+                .get_num_steps()
+                .saturating_sub(1),
+        );
 
         Ok(new_selected)
     }
@@ -586,7 +582,12 @@ impl GraphController<'_> {
     }
 
     fn delete_engine_runtime(&mut self, engine_id: usize) {
-        let Some(engine) = self.app.graph.engine_node_ids.get_mut(engine_id).and_then(Option::take)
+        let Some(engine) = self
+            .app
+            .graph
+            .engine_node_ids
+            .get_mut(engine_id)
+            .and_then(Option::take)
         else {
             return;
         };
@@ -687,7 +688,12 @@ impl GraphController<'_> {
                 }
             }
 
-            let engine_id = self.app.graph.track_engine_ids.get(track_idx).and_then(|id| *id);
+            let engine_id = self
+                .app
+                .graph
+                .track_engine_ids
+                .get(track_idx)
+                .and_then(|id| *id);
             self.app.state.runtime.track_engine_ids[track_idx].store(
                 engine_id.map(|id| id as u32).unwrap_or(u32::MAX),
                 Ordering::Relaxed,
@@ -703,7 +709,8 @@ impl GraphController<'_> {
                     let node_id = self.app.state.pattern.instrument_slots[track_idx]
                         .node_id
                         .load(Ordering::Relaxed);
-                    self.app.state.pattern.instrument_slots[track_idx].sync_descriptor(desc, node_id);
+                    self.app.state.pattern.instrument_slots[track_idx]
+                        .sync_descriptor(desc, node_id);
                 }
             }
         }
@@ -1436,12 +1443,6 @@ impl GraphController<'_> {
                 {
                     sound.engine_id = None;
                 }
-                // Add all sampler voices to watchlist for playhead monitoring
-                for &sid in &sampler_ids {
-                    unsafe {
-                        crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, sid);
-                    }
-                }
                 self.app.graph.track_buffer_ids.push(buffer_id);
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids,
@@ -1456,12 +1457,8 @@ impl GraphController<'_> {
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
                 self.app.graph.track_engine_ids.push(None);
                 let sampler_desc = EffectDescriptor::builtin_sampler();
-                self.app.state.pattern.instrument_slots[idx]
-                    .apply_descriptor(&sampler_desc, 0);
-                self.app
-                    .graph
-                    .instrument_descriptors
-                    .push(sampler_desc);
+                self.app.state.pattern.instrument_slots[idx].apply_descriptor(&sampler_desc, 0);
+                self.app.graph.instrument_descriptors.push(sampler_desc);
             }
             InstrumentRegistration::Custom {
                 engine_id,

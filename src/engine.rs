@@ -46,7 +46,7 @@ fn env_i32(name: &str) -> Option<i32> {
 }
 
 fn recommended_worker_count() -> i32 {
-    6
+    4
 }
 
 pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {

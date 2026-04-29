@@ -23,6 +23,7 @@ pub struct SequencerStepSnapshot {
     pub active: bool,
     pub params: [f32; NUM_PARAMS],
     pub chord: Vec<f32>,
+    pub chord_durations: Vec<f32>,
     pub timebase_override: Option<Timebase>,
     pub swing_override: Option<f32>,
     pub swing_resolution_override: Option<SwingResolution>,
@@ -123,14 +124,18 @@ impl SequencerSnapshot {
 
                 let chord_count = state.pattern.chord_data[track_idx].count(step_idx);
                 let mut chord = Vec::with_capacity(chord_count);
+                let mut chord_durations = Vec::with_capacity(chord_count);
                 for note_idx in 0..chord_count {
                     chord.push(state.pattern.chord_data[track_idx].get(step_idx, note_idx));
+                    chord_durations
+                        .push(state.pattern.chord_data[track_idx].get_duration(step_idx, note_idx));
                 }
 
                 steps.push(SequencerStepSnapshot {
                     active: state.pattern.patterns[track_idx].is_active(step_idx),
                     params: step_params,
                     chord,
+                    chord_durations,
                     timebase_override: state.pattern.timebase_plocks[track_idx].get(step_idx),
                     swing_override: state.pattern.swing_plocks[track_idx].get(step_idx),
                     swing_resolution_override: state.pattern.swing_resolution_plocks[track_idx]

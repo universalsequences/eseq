@@ -958,7 +958,11 @@ fn draw_tools_list(frame: &mut Frame, app: &App, area: Rect, col_focused: bool) 
             format!(
                 "{}{}",
                 swing_resolution.label(),
-                if swing_resolution_is_plock { " [P]" } else { "" }
+                if swing_resolution_is_plock {
+                    " [P]"
+                } else {
+                    ""
+                }
             ),
             None,
         ),

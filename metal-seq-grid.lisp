@@ -5,11 +5,33 @@
 (mac-osx-theme)
 (load "metal-seq-browser.lisp")
 (load "metal-seq-fx.lisp")
+(load "metal-seq-piano-roll.lisp")
 (load "metal-seq-mixer.lisp")
 (load "metal-seq-transport.lisp")
 
 (bind-key "C-p" "seq-toggle-play")
 (bind-key "ESC" "seq-clear-selection")
+
+(defstate lower-panel-buffer "*fx*")
+
+(def seq-toggle-fx-piano-roll ()
+  (if (= (current-buffer-name) "*fx*")
+    (do
+      (set-window-buffer "*piano-roll*")
+      (set! lower-panel-buffer "*piano-roll*"))
+    (if (= (current-buffer-name) "*piano-roll*")
+      (do
+        (set-window-buffer "*fx*")
+        (set! lower-panel-buffer "*fx*"))
+      (if (= lower-panel-buffer "*fx*")
+        (do
+          (set-window-buffer-for "*fx*" "*piano-roll*")
+          (set! lower-panel-buffer "*piano-roll*"))
+        (do
+          (set-window-buffer-for "*piano-roll*" "*fx*")
+          (set! lower-panel-buffer "*fx*"))))))
+
+(bind-key "Tab" "seq-toggle-fx-piano-roll")
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync
 (defstate param-mode 0)
@@ -381,7 +403,7 @@
                 (do
                   (cool-off-follow)
                   (set! cursor-step step)
-                  (if (get evt :shift)
+                  (if (or (get evt :shift) (get evt :cmd))
                     (seq-select-step step)
                     (seq-clear-selection)))
                 nil))
@@ -418,7 +440,7 @@
                     (do
                       (cool-off-follow)
                       (set! cursor-step step)
-                      (if (get evt :shift)
+                      (if (or (get evt :shift) (get evt :cmd))
                         (seq-select-step step)
                         (seq-toggle-step step)))
                     nil))
@@ -607,7 +629,7 @@
   0.8 (:cols 0.2 (:buf "*samples*" :hide-status true :borderless true :min-width 25 :max-width 32)
          0.6 (:buf "*metal*" :hide-status false :min-width 25)
          0.2 (:buf "*mixer*" :hide-status true :borderless true :min-width 25 :max-width 25))
-  0.2 (:buf "*fx*" :hide-status true :min-height 13 :max-height 13)))
+  0.2 (:buf "*fx*" :hide-status true :min-height 13 :max-height 50)))
 
 ; Set mode after buffer exists (effect-buffer creates it above)
 (set-buffer-mode-for "*metal*" "seq-grid-mode")

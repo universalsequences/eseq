@@ -35,9 +35,15 @@ static void wait_for_block_start_or_shutdown(void);
 static void rebuild_invalid_io_caches(LiveGraph *lg, int nframes);
 static int choose_active_worker_count(LiveGraph *lg);
 
+#ifndef AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
+#define AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS 0
+#endif
+
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
 #define PENDING_RUNNING_SENTINEL (-2)
 #define PENDING_DONE_SENTINEL (-3)
 #define COMPLETION_LOG_CAPACITY 64
+#endif
 
 // ===================== Global Engine Instance =====================
 
@@ -75,6 +81,8 @@ static bool using_inline_out_cache(const RTNode *node) {
 
 // Thread-local storage for current node being processed
 static __thread RTNode *g_current_processing_node = NULL;
+
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
 static __thread int g_current_execution_slot = 0;
 
 #define MAX_TRACKED_EXECUTION_SLOTS 65
@@ -156,6 +164,7 @@ static inline bool claim_ready_node(LiveGraph *lg, int32_t nid) {
           node->debug_name ? node->debug_name : "<unnamed>");
   return false;
 }
+#endif
 
 int ap_current_node_ninputs(void) {
   if (g_current_processing_node) {
@@ -173,6 +182,7 @@ void initialize_engine(int block_Size, int sample_rate) {
   atomic_store_explicit(&g_engine.oswg_version, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.rt_time_constraint, 0, memory_order_relaxed);
   atomic_store_explicit(&g_engine.activeWorkerLimit, 0, memory_order_relaxed);
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   for (int i = 0; i < MAX_TRACKED_EXECUTION_SLOTS; i++) {
     atomic_store_explicit(&g_inflight_node_ids[i], -1, memory_order_relaxed);
   }
@@ -182,6 +192,7 @@ void initialize_engine(int block_Size, int sample_rate) {
     atomic_store_explicit(&g_completion_log_nodes[i], -1, memory_order_relaxed);
     atomic_store_explicit(&g_completion_log_seq[i], 0, memory_order_relaxed);
   }
+#endif
 }
 
 // ===================== Graph Management =====================
@@ -256,7 +267,9 @@ static void wait_for_block_start_or_shutdown(void) {
 static void *worker_main(void *arg) {
   intptr_t worker_slot = (intptr_t)arg;
   int worker_index = (int)worker_slot - 1;
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   g_current_execution_slot = (int)worker_slot;
+#endif
   // Elevate worker thread QoS on Apple platforms for better scheduling.
 #ifdef __APPLE__
 #ifdef QOS_CLASS_USER_INTERACTIVE
@@ -427,9 +440,11 @@ static void *worker_main(void *arg) {
       if (nf <= 0 || nf > lg->block_size) {
         nf = lg->block_size; // Clamp to graph's internal block size for safety
       }
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
       if (!claim_ready_node(lg, nid)) {
         continue;
       }
+#endif
       execute_and_fanout(lg, nid, nf);
     }
 
@@ -700,8 +715,10 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
             nid, lg->node_count);
     return;
   }
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   atomic_store_explicit(&g_inflight_node_ids[g_current_execution_slot], nid,
                         memory_order_release);
+#endif
   bind_and_run_live(lg, nid, nframes); // uses silence/scratch for missing ports
 
   RTNode *node = &lg->nodes[nid];
@@ -720,6 +737,7 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
         continue;
       }
       // Use release on decrement to ensure buffer writes are visible to successor
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
       int prev_pending =
           atomic_fetch_sub_explicit(&lg->sched.pending[succ], 1, memory_order_release);
       if (prev_pending == 1) {
@@ -732,9 +750,16 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
                 succ_node->debug_name ? succ_node->debug_name : "<unnamed>",
                 prev_pending, lg->sched.indegree[succ]);
       }
+#else
+      if (atomic_fetch_sub_explicit(&lg->sched.pending[succ], 1,
+                                    memory_order_release) == 1) {
+        rq_push_or_spin(lg->sched.readyQueue, succ);
+      }
+#endif
     }
   }
 
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   // Log completion and decrement counters BEFORE marking node as done.
   // This ensures that if a stall diagnostic sees pending=-3, the matching
   // jobsInFlight-- has already happened. Previously, pending was set first,
@@ -756,6 +781,12 @@ static inline void execute_and_fanout(LiveGraph *lg, int32_t nid, int nframes) {
                         memory_order_release);
   atomic_store_explicit(&g_inflight_node_ids[g_current_execution_slot], -1,
                         memory_order_release);
+#else
+  // Publish this node's output writes before signaling global block completion.
+  // The audio thread waits on jobsInFlight with acquire loads, so the final
+  // transition to zero must carry release semantics.
+  atomic_fetch_sub_explicit(&lg->sched.jobsInFlight, 1, memory_order_release);
+#endif
 }
 
 // Check if a node has any connected outputs (for scheduling)
@@ -771,6 +802,7 @@ static inline bool node_has_any_output_connected(LiveGraph *lg, int node_id) {
   return false;
 }
 
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
 static void dump_stalled_nodes(LiveGraph *lg) {
   if (!lg) {
     return;
@@ -954,6 +986,7 @@ static void dump_ready_queue_state(LiveGraph *lg) {
           qlen, waiters, (unsigned long long)head, (unsigned long long)tail,
           ring->mask, (unsigned long long)(head - tail));
 }
+#endif
 
 // ===================== OPTIMIZATION: Scheduling Cache =====================
 // Instead of O(n) scans every block, we cache source nodes and job counts.
@@ -1063,7 +1096,9 @@ static void init_pending_and_seed(LiveGraph *lg) {
     } else {
       atomic_store_explicit(&lg->sched.pending[i], lg->sched.indegree[i], memory_order_relaxed);
     }
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
     lg->sched.completed_this_block[i] = false;
+#endif
   }
 
   // Memory barrier to ensure all pending stores are visible before workers start
@@ -1073,12 +1108,14 @@ static void init_pending_and_seed(LiveGraph *lg) {
   // Use batch push to reduce semaphore signals from O(sources) to O(1)
   rq_push_batch(lg->sched.readyQueue, lg->sched.source_nodes, lg->sched.source_count);
 
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
   atomic_store_explicit(&g_completed_jobs, 0, memory_order_release);
   atomic_store_explicit(&g_completion_seq, 0, memory_order_release);
   for (int i = 0; i < COMPLETION_LOG_CAPACITY; i++) {
     atomic_store_explicit(&g_completion_log_nodes[i], -1, memory_order_relaxed);
     atomic_store_explicit(&g_completion_log_seq[i], 0, memory_order_relaxed);
   }
+#endif
   atomic_store_explicit(&lg->sched.jobsInFlight, lg->sched.cached_total_jobs,
                         memory_order_release);
 }
@@ -1154,14 +1191,18 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
     // Audio thread helps do some work
     int32_t nid;
     int empty_spins = 0;
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
     bool stall_logged = false;
     struct timespec wait_started;
     clock_gettime(CLOCK_MONOTONIC, &wait_started);
+#endif
     while (atomic_load_explicit(&lg->sched.jobsInFlight, memory_order_acquire) > 0) {
       if (rq_try_pop(lg->sched.readyQueue, &nid)) {
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
         if (!claim_ready_node(lg, nid)) {
           continue;
         }
+#endif
         execute_and_fanout(lg, nid, nframes);
         empty_spins = 0; // Reset on successful work
       } else {
@@ -1175,6 +1216,7 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
         if (++empty_spins > 4096) {
           empty_spins = 0;
         }
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
         if (!stall_logged) {
           struct timespec now;
           clock_gettime(CLOCK_MONOTONIC, &now);
@@ -1207,6 +1249,7 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
             atomic_store_explicit(&lg->sched.jobsInFlight, 0, memory_order_release);
           }
         }
+#endif
       }
     }
 
@@ -1221,9 +1264,11 @@ static void process_live_block_internal(LiveGraph *lg, int nframes, bool update_
     // Single-thread fallback
     int32_t nid;
     while (rq_try_pop(lg->sched.readyQueue, &nid)) {
+#if AUDIOGRAPH_ENABLE_STALL_DIAGNOSTICS
       if (!claim_ready_node(lg, nid)) {
         continue;
       }
+#endif
       execute_and_fanout(lg, nid, nframes);
     }
   }

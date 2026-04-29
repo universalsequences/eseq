@@ -30,3 +30,8 @@ path = "src/bin/metal_seq.rs"
 
 [build-dependencies]
 cc = "1.0"
+
+[profile.release]
+debug = true
+strip = "none"
+split-debuginfo = "packed"

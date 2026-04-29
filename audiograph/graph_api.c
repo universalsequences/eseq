@@ -668,6 +668,31 @@ void *get_node_state(LiveGraph *lg, int node_id, size_t *state_size) {
   return result;
 }
 
+bool get_node_state_into(LiveGraph *lg, int node_id, void *out,
+                         size_t out_capacity, size_t *state_size) {
+  if (state_size)
+    *state_size = 0;
+  if (!lg || !out || node_id < 0 || node_id >= lg->node_capacity) {
+    return false;
+  }
+
+  pthread_rwlock_rdlock(&lg->watch.lock);
+
+  bool copied = false;
+  if (lg->watch.snapshots[node_id] && lg->watch.sizes[node_id] > 0) {
+    size_t size = lg->watch.sizes[node_id];
+    if (state_size)
+      *state_size = size;
+    if (size <= out_capacity) {
+      memcpy(out, lg->watch.snapshots[node_id], size);
+      copied = true;
+    }
+  }
+
+  pthread_rwlock_unlock(&lg->watch.lock);
+  return copied;
+}
+
 // Debug: dump graph topology to stderr
 void debug_dump_graph(LiveGraph *lg) {
   if (!lg) return;

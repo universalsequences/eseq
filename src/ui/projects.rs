@@ -6,8 +6,8 @@ use crossterm::event::KeyCode;
 
 use crate::effects::BUILTIN_SLOT_COUNT;
 use crate::project::{
-    self, chord_snapshot_from_steps, project_file_version, ProjectFile, ProjectPattern,
-    ProjectReverbState, ProjectScratchState, ProjectTrack,
+    self, chord_snapshot_from_steps_and_durations, project_file_version, ProjectFile,
+    ProjectPattern, ProjectReverbState, ProjectScratchState, ProjectTrack,
 };
 use crate::sequencer::{InstrumentType, PatternSnapshot, MAX_STEPS};
 
@@ -407,8 +407,7 @@ impl App {
                         ProjectTrack::Sampler { sample_path } => {
                             eprintln!(
                                 "project-load: add sampler track index={} path={}",
-                                track_idx,
-                                sample_path
+                                track_idx, sample_path
                             );
                             self.graph_controller()
                                 .add_track(Path::new(sample_path))
@@ -419,8 +418,7 @@ impl App {
                         ProjectTrack::Custom { instrument_name } => {
                             eprintln!(
                                 "project-load: add custom track index={} instrument={}",
-                                track_idx,
-                                instrument_name
+                                track_idx, instrument_name
                             );
                             self.add_saved_instrument_track_sync(instrument_name)?;
                         }
@@ -431,9 +429,7 @@ impl App {
             super::PendingProjectLoadPhase::AddEffect { track_idx, offset } => {
                 eprintln!(
                     "project-load: tick={} phase=AddEffect track={} offset={}",
-                    pending.tick,
-                    track_idx,
-                    offset
+                    pending.tick, track_idx, offset
                 );
                 if track_idx >= pending.project.custom_effects.len() {
                     pending.phase = super::PendingProjectLoadPhase::BuildPattern(0);
@@ -704,6 +700,7 @@ impl App {
             instrument_base_note_offsets,
             track_sound_states,
             chord_snapshots,
+            chord_duration_snapshots,
             timebase_plock_snapshots,
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
@@ -746,14 +743,14 @@ impl App {
                             .node_id
                             .load(Ordering::Relaxed);
                         if self.is_sampler_track(track_idx) {
-                            let saved_slot =
-                                instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
-                                    crate::project::ProjectEffectSlot {
-                                        num_params: 0,
-                                        defaults: Vec::new(),
-                                        plocks: vec![Vec::new(); MAX_STEPS],
-                                        param_node_indices: Vec::new(),
-                                    }
+                            let saved_slot = instrument_slots
+                                .get(track_idx)
+                                .cloned()
+                                .unwrap_or_else(|| crate::project::ProjectEffectSlot {
+                                    num_params: 0,
+                                    defaults: Vec::new(),
+                                    plocks: vec![Vec::new(); MAX_STEPS],
+                                    param_node_indices: Vec::new(),
                                 });
                             if saved_slot.num_params >= 4 {
                                 // New project format: sampler params already saved
@@ -826,7 +823,14 @@ impl App {
                 sample_ids,
                 chord_snapshots: chord_snapshots
                     .into_iter()
-                    .map(chord_snapshot_from_steps)
+                    .zip(
+                        chord_duration_snapshots
+                            .into_iter()
+                            .chain(std::iter::repeat_with(|| vec![Vec::new(); MAX_STEPS])),
+                    )
+                    .map(|(steps, durations)| {
+                        chord_snapshot_from_steps_and_durations(steps, durations)
+                    })
                     .collect(),
                 timebase_plock_snapshots: timebase_plock_snapshots
                     .into_iter()

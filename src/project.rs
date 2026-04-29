@@ -70,6 +70,12 @@ pub struct ProjectPattern {
     )]
     pub chord_snapshots: Vec<Vec<Vec<f32>>>,
     #[serde(
+        default,
+        serialize_with = "serialize_chord_snapshots",
+        deserialize_with = "deserialize_chord_snapshots"
+    )]
+    pub chord_duration_snapshots: Vec<Vec<Vec<f32>>>,
+    #[serde(
         serialize_with = "serialize_timebase_plock_snapshots",
         deserialize_with = "deserialize_timebase_plock_snapshots"
     )]
@@ -176,6 +182,11 @@ impl ProjectPattern {
                 .chord_snapshots
                 .iter()
                 .map(|snap| snap.steps.clone())
+                .collect(),
+            chord_duration_snapshots: snapshot
+                .chord_snapshots
+                .iter()
+                .map(|snap| snap.durations.clone())
                 .collect(),
             timebase_plock_snapshots: snapshot
                 .timebase_plock_snapshots
@@ -739,7 +750,19 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
 }
 
 pub fn chord_snapshot_from_steps(steps: Vec<Vec<f32>>) -> ChordSnapshot {
-    ChordSnapshot { steps }
+    let durations = steps.iter().map(|notes| vec![0.0; notes.len()]).collect();
+    ChordSnapshot { steps, durations }
+}
+
+pub fn chord_snapshot_from_steps_and_durations(
+    steps: Vec<Vec<f32>>,
+    mut durations: Vec<Vec<f32>>,
+) -> ChordSnapshot {
+    durations.resize_with(steps.len(), Vec::new);
+    for (idx, notes) in steps.iter().enumerate() {
+        durations[idx].resize(notes.len(), 0.0);
+    }
+    ChordSnapshot { steps, durations }
 }
 
 #[cfg(test)]
@@ -840,6 +863,7 @@ mod tests {
                     },
                 ],
                 chord_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
+                chord_duration_snapshots: vec![vec![Vec::new(); 256], vec![Vec::new(); 256]],
                 timebase_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_resolution_plock_snapshots: vec![vec![None; 256], vec![None; 256]],

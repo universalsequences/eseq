@@ -553,9 +553,7 @@ pub fn spawn_scheduler_thread(
                             }
                         }
                         let step_snapshot = &track.steps[trigger.step];
-                        let swing_pct = step_snapshot
-                            .swing_override
-                            .unwrap_or(track.params.swing);
+                        let swing_pct = step_snapshot.swing_override.unwrap_or(track.params.swing);
                         let swing_resolution = step_snapshot
                             .swing_resolution_override
                             .unwrap_or(track.params.swing_resolution);
@@ -669,6 +667,7 @@ pub fn spawn_scheduler_thread(
                                         let mut chord = ScheduledChordData {
                                             count: target_step.chord.len().min(MAX_VOICES),
                                             notes: [0.0; MAX_VOICES],
+                                            durations: [0.0; MAX_VOICES],
                                             step_transpose: target_step.params
                                                 [StepParam::Transpose.index()],
                                         };
@@ -676,6 +675,14 @@ pub fn spawn_scheduler_thread(
                                             target_step.chord.iter().take(MAX_VOICES).enumerate()
                                         {
                                             chord.notes[idx] = *note;
+                                            chord.durations[idx] = target_step
+                                                .chord_durations
+                                                .get(idx)
+                                                .copied()
+                                                .filter(|duration| *duration > 0.0)
+                                                .unwrap_or(
+                                                    target_step.params[StepParam::Duration.index()],
+                                                );
                                         }
                                         if queue
                                             .push(ScheduledEvent {
@@ -731,11 +738,18 @@ pub fn spawn_scheduler_thread(
                             let mut chord = ScheduledChordData {
                                 count: target_step.chord.len().min(MAX_VOICES),
                                 notes: [0.0; MAX_VOICES],
+                                durations: [0.0; MAX_VOICES],
                                 step_transpose: target_step.params[StepParam::Transpose.index()],
                             };
                             for (idx, note) in target_step.chord.iter().take(MAX_VOICES).enumerate()
                             {
                                 chord.notes[idx] = *note;
+                                chord.durations[idx] = target_step
+                                    .chord_durations
+                                    .get(idx)
+                                    .copied()
+                                    .filter(|duration| *duration > 0.0)
+                                    .unwrap_or(target_step.params[StepParam::Duration.index()]);
                             }
 
                             if queue

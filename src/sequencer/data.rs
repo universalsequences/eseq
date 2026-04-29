@@ -709,6 +709,7 @@ pub struct TrackSoundState {
 
 pub struct ChordData {
     transposes: [AtomicU32; MAX_STEPS * MAX_VOICES],
+    durations: [AtomicU32; MAX_STEPS * MAX_VOICES],
     counts: [AtomicU32; MAX_STEPS],
 }
 
@@ -716,6 +717,7 @@ impl ChordData {
     pub fn new() -> Self {
         Self {
             transposes: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
+            durations: std::array::from_fn(|_| AtomicU32::new(0.0_f32.to_bits())),
             counts: std::array::from_fn(|_| AtomicU32::new(0)),
         }
     }
@@ -726,13 +728,27 @@ impl ChordData {
     pub fn get(&self, step: usize, n: usize) -> f32 {
         f32::from_bits(self.transposes[step * MAX_VOICES + n].load(Ordering::Relaxed))
     }
+    pub fn get_duration(&self, step: usize, n: usize) -> f32 {
+        f32::from_bits(self.durations[step * MAX_VOICES + n].load(Ordering::Relaxed))
+    }
+    pub fn set_duration(&self, step: usize, n: usize, duration: f32) {
+        if n < self.count(step).min(MAX_VOICES) {
+            self.durations[step * MAX_VOICES + n]
+                .store(duration.max(0.0).to_bits(), Ordering::Relaxed);
+        }
+    }
 
     pub fn add_note(&self, step: usize, transpose: f32) -> bool {
+        self.add_note_with_duration(step, transpose, 0.0)
+    }
+
+    pub fn add_note_with_duration(&self, step: usize, transpose: f32, duration: f32) -> bool {
         let c = self.counts[step].load(Ordering::Relaxed) as usize;
         if c >= MAX_VOICES {
             return false;
         }
         self.transposes[step * MAX_VOICES + c].store(transpose.to_bits(), Ordering::Relaxed);
+        self.durations[step * MAX_VOICES + c].store(duration.max(0.0).to_bits(), Ordering::Relaxed);
         self.counts[step].store((c + 1) as u32, Ordering::Relaxed);
         true
     }
@@ -750,6 +766,9 @@ impl ChordData {
                 for j in i..(c - 1) {
                     let next = self.transposes[step * MAX_VOICES + j + 1].load(Ordering::Relaxed);
                     self.transposes[step * MAX_VOICES + j].store(next, Ordering::Relaxed);
+                    let next_duration =
+                        self.durations[step * MAX_VOICES + j + 1].load(Ordering::Relaxed);
+                    self.durations[step * MAX_VOICES + j].store(next_duration, Ordering::Relaxed);
                 }
                 self.counts[step].store((c - 1) as u32, Ordering::Relaxed);
                 return false;
@@ -764,6 +783,8 @@ impl ChordData {
         for n in 0..(c as usize).min(MAX_VOICES) {
             let val = self.transposes[src * MAX_VOICES + n].load(Ordering::Relaxed);
             self.transposes[dst * MAX_VOICES + n].store(val, Ordering::Relaxed);
+            let duration = self.durations[src * MAX_VOICES + n].load(Ordering::Relaxed);
+            self.durations[dst * MAX_VOICES + n].store(duration, Ordering::Relaxed);
         }
     }
 }
@@ -771,20 +792,25 @@ impl ChordData {
 #[derive(Clone)]
 pub struct ChordSnapshot {
     pub steps: Vec<Vec<f32>>,
+    pub durations: Vec<Vec<f32>>,
 }
 
 impl ChordSnapshot {
     pub fn capture(cd: &ChordData) -> Self {
         let mut steps = Vec::with_capacity(MAX_STEPS);
+        let mut durations = Vec::with_capacity(MAX_STEPS);
         for s in 0..MAX_STEPS {
             let c = cd.count(s);
             let mut notes = Vec::with_capacity(c);
+            let mut note_durations = Vec::with_capacity(c);
             for n in 0..c {
                 notes.push(cd.get(s, n));
+                note_durations.push(cd.get_duration(s, n));
             }
             steps.push(notes);
+            durations.push(note_durations);
         }
-        Self { steps }
+        Self { steps, durations }
     }
 
     pub fn restore(&self, cd: &ChordData) {
@@ -794,6 +820,14 @@ impl ChordSnapshot {
             for (n, &t) in notes.iter().enumerate() {
                 if n < MAX_VOICES {
                     cd.transposes[s * MAX_VOICES + n].store(t.to_bits(), Ordering::Relaxed);
+                    let duration = self
+                        .durations
+                        .get(s)
+                        .and_then(|durations| durations.get(n))
+                        .copied()
+                        .unwrap_or(0.0);
+                    cd.durations[s * MAX_VOICES + n]
+                        .store(duration.max(0.0).to_bits(), Ordering::Relaxed);
                 }
             }
         }
@@ -802,6 +836,7 @@ impl ChordSnapshot {
     pub fn new_default() -> Self {
         Self {
             steps: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
+            durations: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
         }
     }
 }
@@ -910,7 +945,11 @@ impl SwingPLockData {
     pub fn snapshot(&self) -> [Option<u32>; MAX_STEPS] {
         std::array::from_fn(|i| {
             let v = self.overrides[i].load(Ordering::Relaxed);
-            if v == u32::MAX { None } else { Some(v) }
+            if v == u32::MAX {
+                None
+            } else {
+                Some(v)
+            }
         })
     }
 
@@ -960,7 +999,11 @@ impl SwingResolutionPLockData {
     pub fn snapshot(&self) -> [Option<u32>; MAX_STEPS] {
         std::array::from_fn(|i| {
             let v = self.overrides[i].load(Ordering::Relaxed);
-            if v == u32::MAX { None } else { Some(v) }
+            if v == u32::MAX {
+                None
+            } else {
+                Some(v)
+            }
         })
     }
 

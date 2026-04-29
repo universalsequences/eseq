@@ -6,10 +6,11 @@
 (defwidget transport-btn-bg
   :width 1 :height 1
   :paint-margin 0.3
+  :state (active)
   :shader
   (sdf/layer
     (sdf/fill (sdf/rounded-rect width height 0.7)
-      (material :color (rgba 0.18 0.18 0.20 1.0)
+      (material :color (if active (rgba 0.00 0.35 0.82 1.0) (rgba 0.18 0.18 0.20 1.0))
         :shadow (shadow :color (rgba 0 0 0 0.4) :blur 0.08 :offset (vec2 0 0.03))))))
 
 (defwidget transport-led-bg
@@ -97,17 +98,17 @@
         :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
           :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
         :color 
-        (if active
-        (let ((base 
-              (rgba 0.00 0.01 0.42 1.0) )
-            
-            (lit (+ 0.06 (* 0.03 diffuse)))
-            (shine (* 0.25 specular))
-            )
-          (+ base (rgba lit lit lit 1) (rgba shine shine shine 0))
-          )
-        
-      (rgba 0 0 0 0))))))
+        (if (> active 0)
+          (let ((base (rgba 0.00 0.01 0.42 1.0))
+                (lit (+ 0.06 (* 0.03 diffuse)))
+                (shine (* 0.25 specular)))
+            (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
+          (if hit/hover
+            (let ((base (rgba 0.10 0.10 0.12 0.72))
+                  (lit (+ 0.06 (* 0.03 diffuse)))
+                  (shine (* 0.25 specular)))
+              (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
+            (rgba 0 0 0 0)))))))
 
 
 (defwidget pattern-pill-btn-bg
@@ -121,17 +122,17 @@
         :lighting (lighting :edge-min -0.1015 :edge-max 0.9413
           :light (vec3 -0.31 -0.851 1.5) :shininess 51.0)
         :color 
-        (if active
-        (let ((base 
-              (rgba 0.00 0.01 0.02 1.0) )
-            
-            (lit (+ 0.06 (* 0.03 diffuse)))
-            (shine (* 0.25 specular))
-            )
-          (+ base (rgba lit lit lit 1) (rgba shine shine shine 0))
-          )
-        
-      (rgba 0 0 0 0))))))
+        (if (> active 0)
+          (let ((base (rgba 0.00 0.01 0.02 1.0))
+                (lit (+ 0.06 (* 0.03 diffuse)))
+                (shine (* 0.25 specular)))
+            (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
+          (if hit/hover
+            (let ((base (rgba 0.10 0.10 0.12 0.72))
+                  (lit (+ 0.06 (* 0.03 diffuse)))
+                  (shine (* 0.25 specular)))
+              (+ base (rgba lit lit lit 1) (rgba shine shine shine 0)))
+            (rgba 0 0 0 0)))))))
 
 (defwidget add-track-icon
   :width 2.5 :height 1.8
@@ -140,10 +141,7 @@
   :shader
   (let ((fg-col (if (= active 1) (rgba 1 1 1 1.0) (rgba 0.75 0.75 0.78 1.0))))
     (sdf/layer
-      (if (= active 1)
-        (sdf/fill (sdf/rounded-rect (* 0.75 height) (* 0.75 height) 0.4)
-          (material :color (rgba 0.00 0.35 0.82 1.0)))
-        (rgba 0 0 0 0))
+        (rgba 0 0 0 0)
       (sdf/fill (sdf/rounded-rect 0.12 0.72 0.05)
         (material :color fg-col))
       (sdf/fill (sdf/rounded-rect 0.72 0.12 0.05)
@@ -280,19 +278,41 @@
 (def seq-delete-pattern ()
   (host-command "delete-pattern" (dict)))
 
+(def transport-icon-style
+  (ui/style
+    :pressed (dict
+      :scale 1.08
+      :transition (dict :scale 0.12 :ease :smoothstep))
+    :hover (dict
+      :brightness 1.10
+      :transition (dict :brightness 0.12 :ease :smoothstep))))
+
+(def pattern-control-style
+  (ui/style
+    :pressed (dict
+      :scale 1.06
+      :transition (dict :scale 0.10 :ease :smoothstep))
+    :hover (dict
+      :brightness 1.12
+      :transition (dict :brightness 0.12 :ease :smoothstep))))
+
 ;; ── Transport layout ──
 
 (effect-buffer "*transport*"
   (h-stack :gap 0.5 :padding 0.5 :align :center
     
-    (box :background "transport-btn-bg" :padding 0.015 :height 1.4
-      (box :width 3
+    (box :background "transport-btn-bg" 
+      :active (if (sbrowser-create-mode?) 1 0)
+      :padding 0.015 :height 1.4 :width 3.
+      (add-track-icon
         :on-click |x y r| (sbrowser-toggle-create-track-mode)
-        (add-track-icon :active (if (sbrowser-create-mode?) 1 0))))
+        :active (if (sbrowser-create-mode?) 1 0)))
     
-          (save-icon 
-            :on-click |x y r| (sbrowser-open-project-save)
-            :active (if (sbrowser-project-save-mode?) 1 0))
+    
+    (save-icon 
+      :on-click |x y r| (sbrowser-open-project-save)
+      :style transport-icon-style
+      :active (if (sbrowser-project-save-mode?) 1 0))
     
     (box :width 5.0 :height 1.40 :padding 0.255
       :background "transport-tool-chip-bg"
@@ -324,52 +344,52 @@
     ;; Single continuous LED panel
     (box :background "transport-led-bg" :height 1.4 :width 41
       (h-stack
-      (subtree :key "transport-clock"
-        (h-stack :gap 0 :align :center :padding 0.5
-          (label (fmt "{:>3}" (+ (floor (/ SEQ.transport-playhead 16)) 1))
-            :font-size 15 :width 4
-            :color '(rgba 0.85 0.85 0.85 1)
-            :bg :transparent)
-          (label (fmt "{:>3}" (+ (floor (/ (mod SEQ.transport-playhead 16) 4)) 1))
-            :font-size 15 :width 3
-            :color '(rgba 0.85 0.85 0.85 1)
-            :bg :transparent)
-          (label (fmt "{:>3}" (+ (mod (mod SEQ.transport-playhead 16) 4) 1))
-            :font-size 15 :width 3
-            :color '(rgba 0.85 0.85 0.85 1)
-            :bg :transparent)
-          (label "" :width 1 :bg :transparent)
-          (number-picker :value SEQ.bpm :min 20 :max 300 :decimals 1
-            :noui true
-            :font-size 15
-            :text-color (rgba 0.85 0.85 0.85 1)
-            :on-change (lambda (v) (seq-set-bpm v))
-            :width 7 :height 1.2)))
-      (v-stack :gap 0.05 :align :center :padding 0.18
-        (h-stack :gap 0.25 :align :center
-          (label "L"
-            :font-size 8 :width 0.9
-            :color '(rgba 0.63 0.88 0.41 1)
-            :bg :transparent)
-          (subtree :key "master-meter-l"
-            (transport-master-meter :level SEQ.master-peak-l)))
-        (h-stack :gap 0.25 :align :center
-          (label "R"
-            :font-size 8 :width 0.9
-            :color '(rgba 0.63 0.88 0.41 1)
-            :bg :transparent)
-          (subtree :key "master-meter-r"
-            (transport-master-meter :level SEQ.master-peak-r))))
-      (subtree :key "transport-cpu"
-        (h-stack :gap 0 :align :center :padding 0.3
-          (label "cpu"
-            :font-size 12 :width 2.5
-            :color '(rgba 0.30 0.30 0.32 1)
-            :bg :transparent)
-          (label (fmt "{:>2.0}%" SEQ.cpu-load-pct)
-            :font-size 12 :width 4.5
-            :color :gray
-            :bg :transparent)))))
+        (subtree :key "transport-clock"
+          (h-stack :gap 0 :align :center :padding 0.5
+            (label (fmt "{:>3}" (+ (floor (/ SEQ.transport-playhead 16)) 1))
+              :font-size 15 :width 4
+              :color '(rgba 0.85 0.85 0.85 1)
+              :bg :transparent)
+            (label (fmt "{:>3}" (+ (floor (/ (mod SEQ.transport-playhead 16) 4)) 1))
+              :font-size 15 :width 3
+              :color '(rgba 0.85 0.85 0.85 1)
+              :bg :transparent)
+            (label (fmt "{:>3}" (+ (mod (mod SEQ.transport-playhead 16) 4) 1))
+              :font-size 15 :width 3
+              :color '(rgba 0.85 0.85 0.85 1)
+              :bg :transparent)
+            (label "" :width 1 :bg :transparent)
+            (number-picker :value SEQ.bpm :min 20 :max 300 :decimals 1
+              :noui true
+              :font-size 15
+              :text-color (rgba 0.85 0.85 0.85 1)
+              :on-change (lambda (v) (seq-set-bpm v))
+              :width 7 :height 1.2)))
+        (v-stack :gap 0.05 :align :center :padding 0.18
+          (h-stack :gap 0.25 :align :center
+            (label "L"
+              :font-size 8 :width 0.9
+              :color '(rgba 0.63 0.88 0.41 1)
+              :bg :transparent)
+            (subtree :key "master-meter-l"
+              (transport-master-meter :level SEQ.master-peak-l)))
+          (h-stack :gap 0.25 :align :center
+            (label "R"
+              :font-size 8 :width 0.9
+              :color '(rgba 0.63 0.88 0.41 1)
+              :bg :transparent)
+            (subtree :key "master-meter-r"
+              (transport-master-meter :level SEQ.master-peak-r))))
+        (subtree :key "transport-cpu"
+          (h-stack :gap 0 :align :center :padding 0.3
+            (label "cpu"
+              :font-size 12 :width 2.5
+              :color '(rgba 0.30 0.30 0.32 1)
+              :bg :transparent)
+            (label (fmt "{:>2.0}%" SEQ.cpu-load-pct)
+              :font-size 12 :width 4.5
+              :color :gray
+              :bg :transparent)))))
     
     (box :background "transport-btn-bg" :padding 0.2 :height 1.4
       (h-stack :gap 0.1 :align :center
@@ -377,6 +397,7 @@
           (box :width 2.5 :height 1.1 
             :background "pattern-pill-bg"
             :active (if (= i SEQ.current-pattern) 1 0)
+            :style pattern-control-style
             :on-click |x y r| (seq-switch-pattern i)
             (v-stack :align :center
               (label (fmt " {} " (+ i 1))
@@ -385,6 +406,7 @@
                 :bg :transparent))))
         (label "" :width 0.2 :bg :transparent)
         (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+          :style pattern-control-style
           :on-click |x y r| (seq-clone-pattern)
           (v-stack :align :center
             (label "+"
@@ -394,6 +416,7 @@
               :bg :transparent)))
         
         (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true
+          :style (if (> SEQ.num-patterns 1) pattern-control-style nil)
           :on-click |x y r| (if (> SEQ.num-patterns 1) (seq-delete-pattern) nil)
           (v-stack :align :center
             (label "-"

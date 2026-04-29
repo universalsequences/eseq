@@ -7,10 +7,10 @@ use crate::effects::{
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, InstrumentType, StepData, StepParam, SwingPLockData,
-    SwingResolution, SwingResolutionPLockData, Timebase, TimebasePLockData, TrackParams,
-    TrackParamsSnapshot, TrackPattern, TrackSoundState, DEFAULT_BPM, MAX_STEPS, MAX_TRACKS,
-    NUM_PARAMS, TRACK_PATTERN_WORDS,
+    ChordData, ChordSnapshot, InstrumentType, StepData, StepParam, SwingPLockData, SwingResolution,
+    SwingResolutionPLockData, Timebase, TimebasePLockData, TrackParams, TrackParamsSnapshot,
+    TrackPattern, TrackSoundState, DEFAULT_BPM, MAX_STEPS, MAX_TRACKS, NUM_PARAMS,
+    TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
 
@@ -346,7 +346,8 @@ impl PatternSnapshot {
         self.chord_snapshots.push(ChordSnapshot::new_default());
         self.timebase_plock_snapshots.push([None; MAX_STEPS]);
         self.swing_plock_snapshots.push([None; MAX_STEPS]);
-        self.swing_resolution_plock_snapshots.push([None; MAX_STEPS]);
+        self.swing_resolution_plock_snapshots
+            .push([None; MAX_STEPS]);
         self.instrument_types.push(InstrumentType::Sampler);
     }
 
@@ -443,7 +444,11 @@ fn sidechain_source_track(
     None
 }
 
-fn sidechain_selection_index(owner_track: usize, source_track: usize, total_tracks: usize) -> usize {
+fn sidechain_selection_index(
+    owner_track: usize,
+    source_track: usize,
+    total_tracks: usize,
+) -> usize {
     if source_track >= total_tracks || source_track == owner_track {
         return 0;
     }
@@ -513,7 +518,12 @@ fn remap_snapshot_sidechain_references_after_track_delete(
                 }
                 let remapped = remap_sidechain_selection_after_track_delete(
                     owner_track,
-                    slot.defaults.get(param_idx).copied().unwrap_or(0.0).round().max(0.0) as usize,
+                    slot.defaults
+                        .get(param_idx)
+                        .copied()
+                        .unwrap_or(0.0)
+                        .round()
+                        .max(0.0) as usize,
                     deleted_track,
                     old_track_count,
                 ) as f32;
@@ -522,14 +532,13 @@ fn remap_snapshot_sidechain_references_after_track_delete(
                 }
                 for step in 0..MAX_STEPS {
                     if let Some(selection) = slot.plocks[step].get(param_idx).and_then(|v| *v) {
-                        slot.plocks[step][param_idx] = Some(
-                            remap_sidechain_selection_after_track_delete(
+                        slot.plocks[step][param_idx] =
+                            Some(remap_sidechain_selection_after_track_delete(
                                 owner_track,
                                 selection.round().max(0.0) as usize,
                                 deleted_track,
                                 old_track_count,
-                            ) as f32,
-                        );
+                            ) as f32);
                     }
                 }
             }
@@ -589,6 +598,7 @@ pub struct TransportState {
     pub track_playheads: Vec<AtomicU32>,
     /// Per-track sampler playhead as normalized 0.0–1.0 (f32 bits).
     pub sampler_playheads: Vec<AtomicU32>,
+    pub active_voice_counts: Vec<AtomicU32>,
     pub playhead_phase: AtomicU32,
     pub record_quantize_thresh: AtomicU32,
 }
@@ -697,6 +707,7 @@ impl SequencerState {
                 sampler_playheads: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(0.0_f32.to_bits()))
                     .collect(),
+                active_voice_counts: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 playhead_phase: AtomicU32::new(0.0_f32.to_bits()),
                 record_quantize_thresh: AtomicU32::new(0.5_f32.to_bits()),
             },
@@ -780,7 +791,10 @@ impl SequencerState {
     }
 
     pub fn topology_edit_ready(&self, request_id: u64) -> bool {
-        self.transport.topology_edit_ready_id.load(Ordering::Acquire) >= request_id
+        self.transport
+            .topology_edit_ready_id
+            .load(Ordering::Acquire)
+            >= request_id
     }
 
     pub fn topology_edit_in_flight(&self) -> bool {
@@ -788,7 +802,9 @@ impl SequencerState {
     }
 
     pub fn complete_topology_edit(&self, request_id: u64) {
-        self.transport.topology_epoch.fetch_add(1, Ordering::Relaxed);
+        self.transport
+            .topology_epoch
+            .fetch_add(1, Ordering::Relaxed);
         self.transport
             .topology_edit_applied_id
             .store(request_id, Ordering::Release);
@@ -840,7 +856,13 @@ impl SequencerState {
         }
         self.pattern.instrument_slots[track].clear();
         self.pattern.instrument_base_note_offsets[track].store(0.0f32.to_bits(), Ordering::Relaxed);
-        if let Some(sound) = self.pattern.track_sound_state.lock().unwrap().get_mut(track) {
+        if let Some(sound) = self
+            .pattern
+            .track_sound_state
+            .lock()
+            .unwrap()
+            .get_mut(track)
+        {
             *sound = TrackSoundState::default();
         }
     }
@@ -1519,7 +1541,9 @@ impl SequencerState {
                 None => self.pattern.swing_plocks[track].clear(step),
             }
             match self.pattern.swing_resolution_plocks[track].get(src) {
-                Some(resolution) => self.pattern.swing_resolution_plocks[track].set(step, resolution),
+                Some(resolution) => {
+                    self.pattern.swing_resolution_plocks[track].set(step, resolution)
+                }
                 None => self.pattern.swing_resolution_plocks[track].clear(step),
             }
         }
@@ -1544,7 +1568,9 @@ impl SequencerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effects::{EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling};
+    use crate::effects::{
+        EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+    };
 
     fn sample_track_params(id: usize) -> TrackParamsSnapshot {
         TrackParamsSnapshot {
@@ -1609,7 +1635,9 @@ mod tests {
             instrument_slots: (0..num_tracks)
                 .map(|track| sample_effect_slot_snapshot(track + 10))
                 .collect(),
-            instrument_base_note_offsets: (0..num_tracks).map(|track| track as f32 - 12.0).collect(),
+            instrument_base_note_offsets: (0..num_tracks)
+                .map(|track| track as f32 - 12.0)
+                .collect(),
             track_sound_states: (0..num_tracks)
                 .map(|track| TrackSoundState {
                     loaded_preset: Some(format!("preset-{track}")),
@@ -1931,7 +1959,9 @@ mod tests {
     fn make_state_with_tracks(num_tracks: usize) -> SequencerState {
         SequencerState::new(
             num_tracks,
-            (0..num_tracks).map(|_| default_empty_effect_chain()).collect(),
+            (0..num_tracks)
+                .map(|_| default_empty_effect_chain())
+                .collect(),
         )
     }
 
@@ -2022,8 +2052,11 @@ mod tests {
             state.pattern.track_params[track].set_accum_limit(10.0 + track as f32);
             state.pattern.track_params[track].set_fts_scale(track + 1);
             state.pattern.patterns[track].set_step_active(track, true);
-            state.pattern.step_data[track]
-                .set(track, StepParam::Velocity, 0.1 * (track + 1) as f32);
+            state.pattern.step_data[track].set(
+                track,
+                StepParam::Velocity,
+                0.1 * (track + 1) as f32,
+            );
             state.pattern.chord_data[track].add_note(track, track as f32 + 0.5);
             state.pattern.timebase_plocks[track].set(track, Timebase::Eighth);
             state.pattern.swing_plocks[track].set(track, 55.0 + track as f32);
@@ -2064,8 +2097,7 @@ mod tests {
             state.runtime.delay_lids[track].store((track as u64) + 30, Ordering::Relaxed);
             state.runtime.send_lids[track].store((track as u64) + 40, Ordering::Relaxed);
             state.runtime.voice_counts[track].store((track + 1) as u32, Ordering::Relaxed);
-            state.runtime.instrument_type_flags[track]
-                .store((track % 2) as u32, Ordering::Relaxed);
+            state.runtime.instrument_type_flags[track].store((track % 2) as u32, Ordering::Relaxed);
             state.runtime.track_engine_ids[track].store((track as u32) + 50, Ordering::Relaxed);
             state.runtime.voice_lids[track][0].store((track as u64) + 60, Ordering::Relaxed);
             state.runtime.synth_node_ids[track][0].store((track as u32) + 70, Ordering::Relaxed);
@@ -2085,7 +2117,9 @@ mod tests {
         assert_eq!(state.pattern.track_params[1].get_volume(), 0.6);
         assert_eq!(state.pattern.track_params[1].get_accumulator_idx(), 2);
         assert_eq!(
-            state.pattern.track_params[1].script_accumulator_name().as_deref(),
+            state.pattern.track_params[1]
+                .script_accumulator_name()
+                .as_deref(),
             Some("acc-2")
         );
         assert_eq!(state.pattern.track_params[1].get_accum_limit(), 12.0);
@@ -2093,27 +2127,38 @@ mod tests {
         assert!(state.pattern.patterns[1].is_active(2));
         assert_eq!(state.pattern.step_data[1].get(2, StepParam::Velocity), 0.3);
         assert_eq!(state.pattern.chord_data[1].get(2, 0), 2.5);
-        assert_eq!(state.pattern.timebase_plocks[1].get(2), Some(Timebase::Eighth));
+        assert_eq!(
+            state.pattern.timebase_plocks[1].get(2),
+            Some(Timebase::Eighth)
+        );
         assert_eq!(state.pattern.swing_plocks[1].get(2), Some(57.0));
         assert_eq!(
             state.pattern.swing_resolution_plocks[1].get(2),
             Some(SwingResolution::Quarter)
         );
         assert_eq!(
-            state.pattern.effect_chains[1][0].node_id.load(Ordering::Relaxed),
+            state.pattern.effect_chains[1][0]
+                .node_id
+                .load(Ordering::Relaxed),
             102
         );
         assert_eq!(state.pattern.effect_chains[1][0].defaults.get(0), 3.0);
-        assert_eq!(state.pattern.effect_chains[1][0].plocks.get(2, 0), Some(302.0));
         assert_eq!(
-            state.pattern.instrument_slots[1].node_id.load(Ordering::Relaxed),
+            state.pattern.effect_chains[1][0].plocks.get(2, 0),
+            Some(302.0)
+        );
+        assert_eq!(
+            state.pattern.instrument_slots[1]
+                .node_id
+                .load(Ordering::Relaxed),
             202
         );
-        assert_eq!(state.pattern.instrument_slots[1].plocks.get(2, 0), Some(2.25));
         assert_eq!(
-            f32::from_bits(
-                state.pattern.instrument_base_note_offsets[1].load(Ordering::Relaxed)
-            ),
+            state.pattern.instrument_slots[1].plocks.get(2, 0),
+            Some(2.25)
+        );
+        assert_eq!(
+            f32::from_bits(state.pattern.instrument_base_note_offsets[1].load(Ordering::Relaxed)),
             14.0
         );
         assert_eq!(
@@ -2122,17 +2167,29 @@ mod tests {
                 .as_deref(),
             Some("preset-2")
         );
-        assert_eq!(state.transport.track_playheads[1].load(Ordering::Relaxed), 8);
+        assert_eq!(
+            state.transport.track_playheads[1].load(Ordering::Relaxed),
+            8
+        );
         assert_eq!(state.transport.trigger_flash[1].load(Ordering::Relaxed), 20);
         assert_eq!(state.runtime.sampler_lids[1].load(Ordering::Relaxed), 12);
         assert_eq!(state.runtime.pan_lids[1].load(Ordering::Relaxed), 22);
         assert_eq!(state.runtime.delay_lids[1].load(Ordering::Relaxed), 32);
         assert_eq!(state.runtime.send_lids[1].load(Ordering::Relaxed), 42);
         assert_eq!(state.runtime.voice_counts[1].load(Ordering::Relaxed), 3);
-        assert_eq!(state.runtime.instrument_type_flags[1].load(Ordering::Relaxed), 0);
-        assert_eq!(state.runtime.track_engine_ids[1].load(Ordering::Relaxed), 52);
+        assert_eq!(
+            state.runtime.instrument_type_flags[1].load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state.runtime.track_engine_ids[1].load(Ordering::Relaxed),
+            52
+        );
         assert_eq!(state.runtime.voice_lids[1][0].load(Ordering::Relaxed), 62);
-        assert_eq!(state.runtime.synth_node_ids[1][0].load(Ordering::Relaxed), 72);
+        assert_eq!(
+            state.runtime.synth_node_ids[1][0].load(Ordering::Relaxed),
+            72
+        );
         assert!(state.pending_accumulator_reset_tracks[1].load(Ordering::Relaxed));
     }
 
@@ -2150,11 +2207,19 @@ mod tests {
         state.pattern.timebase_plocks[2].set(0, Timebase::Quarter);
         state.pattern.swing_plocks[2].set(0, 60.0);
         state.pattern.swing_resolution_plocks[2].set(0, SwingResolution::Eighth);
-        state.pattern.effect_chains[2][0].node_id.store(999, Ordering::Relaxed);
-        state.pattern.effect_chains[2][0].num_params.store(1, Ordering::Relaxed);
+        state.pattern.effect_chains[2][0]
+            .node_id
+            .store(999, Ordering::Relaxed);
+        state.pattern.effect_chains[2][0]
+            .num_params
+            .store(1, Ordering::Relaxed);
         state.pattern.effect_chains[2][0].plocks.set(0, 0, 123.0);
-        state.pattern.instrument_slots[2].node_id.store(888, Ordering::Relaxed);
-        state.pattern.instrument_slots[2].num_params.store(1, Ordering::Relaxed);
+        state.pattern.instrument_slots[2]
+            .node_id
+            .store(888, Ordering::Relaxed);
+        state.pattern.instrument_slots[2]
+            .num_params
+            .store(1, Ordering::Relaxed);
         state.pattern.instrument_slots[2].plocks.set(0, 0, 0.75);
         state.transport.track_playheads[2].store(12, Ordering::Relaxed);
         state.runtime.sampler_lids[2].store(77, Ordering::Relaxed);
@@ -2178,18 +2243,28 @@ mod tests {
         assert_eq!(state.pattern.swing_plocks[2].get(0), None);
         assert_eq!(state.pattern.swing_resolution_plocks[2].get(0), None);
         assert_eq!(
-            state.pattern.effect_chains[2][0].node_id.load(Ordering::Relaxed),
+            state.pattern.effect_chains[2][0]
+                .node_id
+                .load(Ordering::Relaxed),
             0
         );
         assert_eq!(state.pattern.effect_chains[2][0].plocks.get(0, 0), None);
         assert_eq!(
-            state.pattern.instrument_slots[2].node_id.load(Ordering::Relaxed),
+            state.pattern.instrument_slots[2]
+                .node_id
+                .load(Ordering::Relaxed),
             0
         );
         assert_eq!(state.pattern.instrument_slots[2].plocks.get(0, 0), None);
-        assert_eq!(state.transport.track_playheads[2].load(Ordering::Relaxed), 0);
+        assert_eq!(
+            state.transport.track_playheads[2].load(Ordering::Relaxed),
+            0
+        );
         assert_eq!(state.runtime.sampler_lids[2].load(Ordering::Relaxed), 0);
-        assert_eq!(state.runtime.track_engine_ids[2].load(Ordering::Relaxed), u32::MAX);
+        assert_eq!(
+            state.runtime.track_engine_ids[2].load(Ordering::Relaxed),
+            u32::MAX
+        );
     }
 
     #[test]
@@ -2213,7 +2288,10 @@ mod tests {
         state.runtime.track_engine_ids[0].store(91, Ordering::Relaxed);
         snapshot.restore(&state);
 
-        assert_eq!(state.runtime.track_engine_ids[0].load(Ordering::Relaxed), 91);
+        assert_eq!(
+            state.runtime.track_engine_ids[0].load(Ordering::Relaxed),
+            91
+        );
         assert_eq!(
             state.pattern.track_sound_state.lock().unwrap()[0].engine_id,
             Some(77)

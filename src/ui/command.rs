@@ -533,7 +533,11 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             None => app.state.pattern.swing_plocks[track].clear(step),
         },
 
-        AppCommand::SetTrackSwingPlockMulti { track, steps, value } => {
+        AppCommand::SetTrackSwingPlockMulti {
+            track,
+            steps,
+            value,
+        } => {
             for step in steps {
                 app.state.pattern.swing_plocks[track].set(step, value);
             }
@@ -559,7 +563,9 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             step,
             resolution,
         } => match resolution {
-            Some(resolution) => app.state.pattern.swing_resolution_plocks[track].set(step, resolution),
+            Some(resolution) => {
+                app.state.pattern.swing_resolution_plocks[track].set(step, resolution)
+            }
             None => app.state.pattern.swing_resolution_plocks[track].clear(step),
         },
 

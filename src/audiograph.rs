@@ -113,7 +113,18 @@ extern "C" {
     pub fn process_next_block(lg: *mut LiveGraph, output_buffer: *mut f32, nframes: c_int);
     pub fn add_node_to_watchlist(lg: *mut LiveGraph, node_id: c_int) -> bool;
     pub fn remove_node_from_watchlist(lg: *mut LiveGraph, node_id: c_int) -> bool;
-    pub fn get_node_state(lg: *mut LiveGraph, node_id: c_int, state_size: *mut usize) -> *mut c_void;
+    pub fn get_node_state(
+        lg: *mut LiveGraph,
+        node_id: c_int,
+        state_size: *mut usize,
+    ) -> *mut c_void;
+    pub fn get_node_state_into(
+        lg: *mut LiveGraph,
+        node_id: c_int,
+        out: *mut c_void,
+        out_capacity: usize,
+        state_size: *mut usize,
+    ) -> bool;
 
     // Wrapper for the static-inline params_push
     pub fn params_push_wrapper(lg: *mut LiveGraph, m: ParamMsg) -> bool;

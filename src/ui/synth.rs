@@ -319,7 +319,10 @@ impl App {
     }
 
     pub(super) fn set_instrument_base_note_offset(&mut self, track: usize, value: f32) {
-        apply_command(self, AppCommand::SetInstrumentBaseNoteOffset { track, value });
+        apply_command(
+            self,
+            AppCommand::SetInstrumentBaseNoteOffset { track, value },
+        );
     }
 
     pub(super) fn synth_row_count(&self) -> usize {
@@ -961,13 +964,33 @@ impl App {
             .and_then(|(_, maybe_row)| *maybe_row)
     }
 
-    pub(super) fn set_instrument_param_or_plock(&mut self, track: usize, param_idx: usize, value: f32) {
+    pub(super) fn set_instrument_param_or_plock(
+        &mut self,
+        track: usize,
+        param_idx: usize,
+        value: f32,
+    ) {
         if self.has_selection() {
             for step in self.selected_steps() {
-                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlock {
+                        track,
+                        step,
+                        param_idx,
+                        value,
+                    },
+                );
             }
         } else {
-            apply_command(self, AppCommand::SetInstrumentParam { track, param_idx, value });
+            apply_command(
+                self,
+                AppCommand::SetInstrumentParam {
+                    track,
+                    param_idx,
+                    value,
+                },
+            );
         }
     }
 
@@ -990,13 +1013,28 @@ impl App {
         let param_desc = &desc.params[param_idx];
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
-                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
-                let inc = param_desc.increment(current);
-                (step, param_desc.clamp(current + direction * inc))
-            }).collect();
+            let new_vals: Vec<(usize, f32)> = self
+                .selected_steps()
+                .into_iter()
+                .map(|step| {
+                    let current = slot
+                        .plocks
+                        .get(step, param_idx)
+                        .unwrap_or_else(|| slot.defaults.get(param_idx));
+                    let inc = param_desc.increment(current);
+                    (step, param_desc.clamp(current + direction * inc))
+                })
+                .collect();
             for (step, value) in new_vals {
-                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlock {
+                        track,
+                        step,
+                        param_idx,
+                        value,
+                    },
+                );
             }
         } else {
             let old = slot.defaults.get(param_idx);
@@ -1021,13 +1059,28 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
-                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
-                let inc = param_desc.increment(current);
-                (step, param_desc.clamp(current + direction * inc))
-            }).collect();
+            let new_vals: Vec<(usize, f32)> = self
+                .selected_steps()
+                .into_iter()
+                .map(|step| {
+                    let current = slot
+                        .plocks
+                        .get(step, param_idx)
+                        .unwrap_or_else(|| slot.defaults.get(param_idx));
+                    let inc = param_desc.increment(current);
+                    (step, param_desc.clamp(current + direction * inc))
+                })
+                .collect();
             for (step, value) in new_vals {
-                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlock {
+                        track,
+                        step,
+                        param_idx,
+                        value,
+                    },
+                );
             }
         } else {
             let old = slot.defaults.get(param_idx);
@@ -1052,13 +1105,28 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
-                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
-                let inc = param_desc.increment(current);
-                (step, param_desc.clamp(current + direction * inc))
-            }).collect();
+            let new_vals: Vec<(usize, f32)> = self
+                .selected_steps()
+                .into_iter()
+                .map(|step| {
+                    let current = slot
+                        .plocks
+                        .get(step, param_idx)
+                        .unwrap_or_else(|| slot.defaults.get(param_idx));
+                    let inc = param_desc.increment(current);
+                    (step, param_desc.clamp(current + direction * inc))
+                })
+                .collect();
             for (step, value) in new_vals {
-                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlock {
+                        track,
+                        step,
+                        param_idx,
+                        value,
+                    },
+                );
             }
         } else {
             let old = slot.defaults.get(param_idx);
@@ -1147,12 +1215,27 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
-                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
-                (step, if current > 0.5 { 0.0 } else { 1.0 })
-            }).collect();
+            let new_vals: Vec<(usize, f32)> = self
+                .selected_steps()
+                .into_iter()
+                .map(|step| {
+                    let current = slot
+                        .plocks
+                        .get(step, param_idx)
+                        .unwrap_or_else(|| slot.defaults.get(param_idx));
+                    (step, if current > 0.5 { 0.0 } else { 1.0 })
+                })
+                .collect();
             for (step, value) in new_vals {
-                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlock {
+                        track,
+                        step,
+                        param_idx,
+                        value,
+                    },
+                );
             }
         } else {
             let current = slot.defaults.get(param_idx);
@@ -1169,12 +1252,27 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
-                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
-                (step, if current > 0.5 { 0.0 } else { 1.0 })
-            }).collect();
+            let new_vals: Vec<(usize, f32)> = self
+                .selected_steps()
+                .into_iter()
+                .map(|step| {
+                    let current = slot
+                        .plocks
+                        .get(step, param_idx)
+                        .unwrap_or_else(|| slot.defaults.get(param_idx));
+                    (step, if current > 0.5 { 0.0 } else { 1.0 })
+                })
+                .collect();
             for (step, value) in new_vals {
-                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlock {
+                        track,
+                        step,
+                        param_idx,
+                        value,
+                    },
+                );
             }
         } else {
             let current = slot.defaults.get(param_idx);
@@ -1191,12 +1289,27 @@ impl App {
         };
         let slot = &self.state.pattern.instrument_slots[track];
         if self.has_selection() {
-            let new_vals: Vec<(usize, f32)> = self.selected_steps().into_iter().map(|step| {
-                let current = slot.plocks.get(step, param_idx).unwrap_or_else(|| slot.defaults.get(param_idx));
-                (step, if current > 0.5 { 0.0 } else { 1.0 })
-            }).collect();
+            let new_vals: Vec<(usize, f32)> = self
+                .selected_steps()
+                .into_iter()
+                .map(|step| {
+                    let current = slot
+                        .plocks
+                        .get(step, param_idx)
+                        .unwrap_or_else(|| slot.defaults.get(param_idx));
+                    (step, if current > 0.5 { 0.0 } else { 1.0 })
+                })
+                .collect();
             for (step, value) in new_vals {
-                apply_command(self, AppCommand::SetInstrumentPlock { track, step, param_idx, value });
+                apply_command(
+                    self,
+                    AppCommand::SetInstrumentPlock {
+                        track,
+                        step,
+                        param_idx,
+                        value,
+                    },
+                );
             }
         } else {
             let current = slot.defaults.get(param_idx);

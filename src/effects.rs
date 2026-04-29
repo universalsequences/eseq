@@ -866,7 +866,6 @@ impl EffectSlotSnapshot {
                 }
             }
         }
-
     }
 
     pub fn new_default(desc: &EffectDescriptor, node_id: u32) -> Self {

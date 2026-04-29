@@ -4,6 +4,20 @@
 (def track-peak (i)
   (reactive-get "SEQ" (str "track-peak-" i)))
 
+(defwidget track-container
+  :width 1.5 :height 1.5
+  :state (even selected)
+  :shader
+  (sdf/layer 
+    (sdf/fill (sdf/rounded-rect width height 0.6) 
+      (mix 
+        (if selected (rgba 0.3 0.3 0.3 1) (rgba 0 0 0 0))
+        (if even (rgba 0 0 0 0) (rgba 0.1 0.1 0.1 1))
+        (if selected (smoothstep 0 -0.1 d) 1)
+        )
+      )
+    )
+
 ;; Record arm indicator (small circle)
 (defwidget rec-arm-dot
   :width 1.5 :height 1.5
@@ -78,7 +92,7 @@
         (rgba 0 0 0 0)))))
 
 (defwidget delete-track-icon
-  :width 1.5 :height 1.2
+  :width 1.5 :height 1.5
   :paint-margin 0.35
   :state (active)
   :shader
@@ -89,7 +103,7 @@
                   (rgba 0.72 0.16 0.16 1.0)
                   (rgba 0.14 0.15 0.17 1.0))))
     (sdf/layer
-      (sdf/fill (sdf/rounded-rect (* 0.72 height) (* 0.72 height) 0.3)
+      (sdf/fill (sdf/rounded-rect (* 1 width) (* 0.6 height) 1)
         (material :color bg-col))
       (sdf/fill
         (let ((clip (max (- (abs x) 0.28) (- (abs y) 0.28)))
@@ -99,31 +113,36 @@
         (material :color fg-col)))))
 
 (effect-buffer "*mixer*"
-  (v-stack :padding 1 :gap 0.5
+  (v-stack :padding 0.5 :gap 0.25
     (each SEQ.track-names |name i|
-      (h-stack :gap 0.5 :align :center
-        (box :width 2 :height 1.5
-          :background "rec-arm-dot"
-          :active (if (nth SEQ.record-armed i) 1 0)
-          :on-click |x y r| (seq-toggle-record-arm i))
-        (box :width 12 :height 1
-          :bg (if (= SEQ.current-track i) :blue :dark-gray)
-          :on-click |x y r| (seq-set-track i)
-          (label (substring name 0 16) :font-size 11 :width 12
-            :color (if (= SEQ.current-track i) :white :gray)
-            :bg :transparent))
-        (box :width 5.2
-          (v-stack :gap 0.18
-            (hslider :min 0 :max 1 :width 5
-              :value (nth SEQ.track-volumes i)
-              :material (aqua-slider-material)
-              :on-change (lambda (v) (seq-set-track-volume i v)))
-            (subtree :key (str "mixer-track-meter-" i)
-              (mixer-track-meter :level (track-peak i)))))
-        (if (and (= SEQ.current-track i) (> SEQ.num-tracks 1))
-          (box :width 1.6 :height 1.2 :align :center
-            :bg :transparent
-            :on-click |x y r| (host-command "delete-track" (dict :track i))
-            :background "delete-track-icon"
-            :active 0)
-          (label "" :width 1.6 :bg :transparent))))))
+      (box :background "track-container"
+        :padding 0.5 
+        :even (mod i 2)
+        :selected (if (= SEQ.current-track i) 1 0)
+        
+        (h-stack :gap 0.5 :align :center
+          (box :width 2 :height 1.5
+            :background "rec-arm-dot"
+            :active (if (nth SEQ.record-armed i) 1 0)
+            :on-click |x y r| (seq-toggle-record-arm i))
+          (box :width 12 :height 1
+            :bg (if (= SEQ.current-track i) :blue :dark-gray)
+            :on-click |x y r| (seq-set-track i)
+            (label (substring name 0 16) :font-size 11 :width 12
+              :color (if (= SEQ.current-track i) :white :gray)
+              :bg :transparent))
+          (box :width 5.2
+            (v-stack :gap 0.18
+              (hslider :min 0 :max 1 :width 5
+                :value (nth SEQ.track-volumes i)
+                :material (aqua-slider-material)
+                :on-change (lambda (v) (seq-set-track-volume i v)))
+              (subtree :key (str "mixer-track-meter-" i)
+                (mixer-track-meter :level (track-peak i)))))
+          (if (and (= SEQ.current-track i) (> SEQ.num-tracks 1))
+            (box :width 1.6 :height 1.2 :align :center
+              :bg :transparent
+              :on-click |x y r| (host-command "delete-track" (dict :track i))
+              :background "delete-track-icon"
+              :active 0)
+            (label "" :width 1.6 :bg :transparent)))))))

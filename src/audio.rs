@@ -335,7 +335,8 @@ fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool: &mut Voic
 }
 
 fn sync_custom_engine_pool(state: &SequencerState, engine_id: usize, pool: &mut CustomEnginePool) {
-    let desired_count = state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
+    let desired_count =
+        state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
     let desired_count = desired_count.min(MAX_VOICES);
 
     let mut needs_reset = pool.num_voices != desired_count;
@@ -372,8 +373,8 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
         let voice_count =
             data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) as usize;
         for voice_idx in 0..voice_count.min(MAX_VOICES) {
-            let lid = data.state.runtime.engine_voice_lids[engine_id][voice_idx]
-                .load(Ordering::Acquire);
+            let lid =
+                data.state.runtime.engine_voice_lids[engine_id][voice_idx].load(Ordering::Acquire);
             if lid != 0 {
                 unsafe {
                     send_custom_note_off(data.lg.0, lid);
@@ -411,8 +412,41 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
     for t in 0..num_tracks {
         sync_sampler_voice_pool(&data.state, t, &mut data.voice_pools[t]);
         if let Some(engine_id) = track_engine_id(&data.state, t) {
-            sync_custom_engine_pool(&data.state, engine_id, &mut data.custom_engine_pools[engine_id]);
+            sync_custom_engine_pool(
+                &data.state,
+                engine_id,
+                &mut data.custom_engine_pools[engine_id],
+            );
         }
+    }
+}
+
+fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
+    for track in 0..MAX_TRACKS {
+        let active = if track < num_tracks {
+            let is_custom =
+                data.state.runtime.instrument_type_flags[track].load(Ordering::Relaxed) == 1;
+            if is_custom {
+                track_engine_id(&data.state, track)
+                    .map(|engine_id| {
+                        let pool = &data.custom_engine_pools[engine_id];
+                        pool.voices[..pool.num_voices]
+                            .iter()
+                            .filter(|voice| voice.active && voice.assigned_track == Some(track))
+                            .count()
+                    })
+                    .unwrap_or(0)
+            } else {
+                let pool = &data.voice_pools[track];
+                pool.voices[..pool.num_voices]
+                    .iter()
+                    .filter(|voice| voice.active)
+                    .count()
+            }
+        } else {
+            0
+        };
+        data.state.transport.active_voice_counts[track].store(active as u32, Ordering::Relaxed);
     }
 }
 
@@ -1076,6 +1110,13 @@ fn fire_resolved(
     let chord_count = chord.count;
     if chord_count > 0 {
         for n in 0..chord_count {
+            let note_duration = chord.durations[n].max(0.0);
+            let note_total_gate = if note_duration > 0.0 {
+                (note_duration as f64 * samples_per_step) as f32
+            } else {
+                total_gate
+            };
+            let note_chop_gate = note_total_gate / chop as f32;
             // Apply accumulator offset using pre-FTS transpose, then FTS-quantize each note.
             let raw = resolved_chord_transpose(chord.notes[n], step_transpose, pre_fts_transpose);
             let transpose = if fts > 0 {
@@ -1153,7 +1194,7 @@ fn fire_resolved(
                     send_custom_trigger(data.lg.0, lid, pitch_hz, velocity);
                 }
                 if gate_mode > 0.5 {
-                    data.gate_off_state[track_idx].schedule(lid, total_gate as f64);
+                    data.gate_off_state[track_idx].schedule(lid, note_total_gate as f64);
                 }
             } else {
                 let voice = data.voice_pools[track_idx].allocate_voice(transpose);
@@ -1169,7 +1210,7 @@ fn fire_resolved(
                         lid,
                         velocity,
                         resolved.speed,
-                        chop_gate,
+                        note_chop_gate,
                         attack_samples,
                         release_samples,
                         gate_mode,
@@ -1333,7 +1374,11 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         sync_sampler_voice_pool(&data.state, t, &mut data.voice_pools[t]);
 
         if let Some(engine_id) = track_engine_id(&data.state, t) {
-            sync_custom_engine_pool(&data.state, engine_id, &mut data.custom_engine_pools[engine_id]);
+            sync_custom_engine_pool(
+                &data.state,
+                engine_id,
+                &mut data.custom_engine_pools[engine_id],
+            );
         }
     }
 
@@ -1760,6 +1805,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         .transport
         .peak_r
         .store(peak_r.to_bits(), Ordering::Relaxed);
+    publish_active_voice_counts(data, num_tracks);
 
     if nframes > 0 {
         let elapsed_secs = callback_start.elapsed().as_secs_f32();

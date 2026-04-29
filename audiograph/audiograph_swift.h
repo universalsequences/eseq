@@ -135,6 +135,8 @@ bool remove_node_from_watchlist(LiveGraph *lg, int node_id);
 // Returns NULL if node is not watched or doesn't exist
 // If state_size is not NULL, it will be set to the size of the returned state
 void *get_node_state(LiveGraph *lg, int node_id, size_t *state_size);
+bool get_node_state_into(LiveGraph *lg, int node_id, void *out,
+                         size_t out_capacity, size_t *state_size);
 
 // ===================== Buffer API =====================
 

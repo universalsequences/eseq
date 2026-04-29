@@ -1153,8 +1153,7 @@ pub fn set_dgen_instrument_output_count(slot_id: usize, count: usize) {
 
 pub fn set_dgen_engine_enabled_voices(engine_id: usize, count: usize) {
     if engine_id < MAX_TRACKS {
-        DGEN_ENGINE_ENABLED_VOICES[engine_id]
-            .store(count.clamp(1, MAX_VOICES), Ordering::Release);
+        DGEN_ENGINE_ENABLED_VOICES[engine_id].store(count.clamp(1, MAX_VOICES), Ordering::Release);
     }
 }
 
