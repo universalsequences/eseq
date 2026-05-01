@@ -84,10 +84,10 @@
 
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
-    (box :height 1.25 :no-clamp-width true
-      (h-stack :gap 0.45 :align :center :no-clamp-width true
-        (box :width 13.2 :height 1.25 :no-clamp-width true
-          (h-stack :gap 0.25 :align :baseline :no-clamp-width true
+    (box :height 1.25
+      (h-stack :gap 0.45 :align :center
+        (box :width 13.2 :height 1.25
+          (h-stack :gap 0.25 :align :baseline
             (label (substring (get p :name) 0 9) :font-size 12 :width 7
                    :color :gray :bg :transparent)
             (if (get p :boolean)
@@ -129,9 +129,9 @@
                        (fx-set-instrument-value p v)))))))))
 
 (def fx-param-grid (params fx)
-  (h-stack :gap 1.5 :no-clamp-width true
+  (h-stack :gap 1.5
     (each (chunks params 6) |chunk ci|
-      (v-stack :gap 0.25 :no-clamp-width true
+      (v-stack :gap 0.25
         (each chunk |p pi|
           (fx-param-row p fx
             (if fx
@@ -139,9 +139,9 @@
               (str "instrument-tab-" instrument-panel-tab "-chunk-" ci "-param-" (get p :idx)))))))))
 
 (def instrument-sources-grid (sections)
-  (h-stack :gap 2 :no-clamp-width true
+  (h-stack :gap 2
     (each sections |section si|
-      (v-stack :gap 0.25 :no-clamp-width true
+      (v-stack :gap 0.25
         (label (get section :name) :font-size 14 :color :white :bg :transparent)
         (each (get section :params) |p pi|
           (fx-param-row p false
@@ -152,7 +152,6 @@
     (tabs :items (get inst :source-names)
       :bind instrument-source-tab
       :compact true
-      :no-clamp-width true
       :gap 0.75
       :tab-padding 0.5
       :header-height 1.2
@@ -191,10 +190,10 @@
         (material :color fg-col)))))
 
 (def fx-panel (title params fx)
-  (box :background-self-rect true :background "fx-panel-bg" :padding 0 :no-clamp-width true
-    (v-stack :gap 0 :no-clamp-width true
-      (box :height 1.0 :padding 0 :v-align :center :h-align :start :no-clamp-width true
-        (h-stack :gap 0.5 :align :center :no-clamp-width true
+  (box :background "fx-panel-bg" :padding 0
+    (v-stack :gap 0
+      (box :height 1.0 :padding 0 :v-align :center :h-align :start
+        (h-stack :gap 0.5 :align :center
           (box :width 0.75 :height 0)
           (label title :font-size 13 :color :white :bg :transparent)
           ;; Only show edit button for custom dgenlisp effects (not built-in Filter/Delay)
@@ -205,7 +204,7 @@
                 (dict :name title :slot (get fx :slot-idx)))
               (label "edit" :font-size 8 :color :gray :bg :transparent))
             (box))))
-      (box :padding 1 :no-clamp-width true
+      (box :padding 1
         (fx-param-grid params fx)))))
 
 (def instrument-tab-button (text idx width)
@@ -243,8 +242,8 @@
 (def instrument-synth-panel-body (inst)
   (let ((custom (custom-instrument-synth-ui inst)))
     (if custom
-      (box :debug-name "custom-synth-wrapper" :no-clamp-width true :padding 0 :h-align :start :v-align :start custom)
-      (box :debug-name "fallback-synth-wrapper" :no-clamp-width true
+      (box :debug-name "custom-synth-wrapper" :padding 0 :h-align :start :v-align :start custom)
+      (box :debug-name "fallback-synth-wrapper"
         (fx-param-grid (get inst :synth) false)))))
 
 (defstate sampler-view-start 0.0)
@@ -283,14 +282,14 @@
     nil))
 
 (def sampler-panel (inst)
-  (box :background-self-rect true :background "fx-panel-bg" :padding 0 :no-clamp-width true
-    (v-stack :gap 0 :no-clamp-width true
-      (box :height 1 :padding 0 :v-align :center :h-align :start :no-clamp-width true
-        (h-stack :gap 0 :align :center :no-clamp-width true
+  (box :background "fx-panel-bg" :padding 0
+    (v-stack :gap 0
+      (box :height 1 :padding 0 :v-align :center :h-align :start
+        (h-stack :gap 0 :align :center
           (box :width 0.75 :height 0)
           (label "Sampler" :font-size 13 :color :white :bg :transparent)))
-      (box :padding 1.5 :no-clamp-width true
-        (v-stack :gap 0.8 :no-clamp-width true
+      (box :padding 1.5
+        (v-stack :gap 0.8
           (if (get inst :buffer)
             (subtree :key (str "sampler-waveform-" (get inst :buffer))
               (box :width 25 :height 2.5
@@ -319,10 +318,10 @@
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
     (sampler-panel inst)
-    (box :debug-name "instrument-panel" :background-self-rect true :background "fx-panel-bg" :padding 0 :no-clamp-width true
-      (v-stack :debug-name "instrument-panel-vstack" :gap 0 :no-clamp-width true
-        (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :start :h-align :start :no-clamp-width true
-          (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center :no-clamp-width true
+    (box :debug-name "instrument-panel" :background "fx-panel-bg" :padding 0
+      (v-stack :debug-name "instrument-panel-vstack" :gap 0
+        (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :start :h-align :start
+          (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center
             (box :width 0.75 :height 0)
             (box :debug-name "instrument-name-box" :width 12 :height 1 :v-align :center :h-align :start
               (label (substring (get inst :display-name) 0 12)
@@ -336,21 +335,21 @@
               (fx-mini-save-icon
                 :on-click |x y r| (sbrowser-enter-preset-save)
                 :active 0))))
-        (box :debug-name "instrument-content-box" :padding 0.35 :no-clamp-width true
-          (v-stack :debug-name "instrument-content-vstack" :gap 0.0 :no-clamp-width true
-            (h-stack :debug-name "instrument-tabs-row" :gap 0.85 :align :center :no-clamp-width true
+        (box :debug-name "instrument-content-box" :padding 0.35
+          (v-stack :debug-name "instrument-content-vstack" :gap 0.0
+            (h-stack :debug-name "instrument-tabs-row" :gap 0.85 :align :center
               (instrument-tab-button "synth" 0 4.5)
               (instrument-tab-button "mods" 1 4.0)
               (instrument-tab-button "sources" 2 5.8))
             (if (= instrument-panel-tab 0)
               (instrument-synth-panel-body inst)
               (if (= instrument-panel-tab 1)
-                (box :debug-name "mods-wrapper" :no-clamp-width true (fx-param-grid (get inst :mod) false))
-                (box :debug-name "sources-wrapper" :no-clamp-width true (instrument-source-tabs inst))))))))))
+                (box :debug-name "mods-wrapper" (fx-param-grid (get inst :mod) false))
+                (box :debug-name "sources-wrapper" (instrument-source-tabs inst))))))))))
 
 (effect-buffer "*fx*"
-  (v-stack :padding 0.5 :gap 1 :no-clamp-width true
-    (h-stack :gap 1 :no-clamp-width true
+  (v-stack :padding 0.5 :gap 1
+    (h-stack :gap 1
       (each SEQ.instrument-panel |inst inst-idx|
         (instrument-panel inst))
       (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|

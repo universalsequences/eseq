@@ -667,7 +667,7 @@ fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                         }
                     }
                     return format!(
-                        "(v-stack :gap 0.25 :no-clamp-width true {})",
+                        "(v-stack :gap 0.25 {})",
                         controls.join(" ")
                     );
                 }
