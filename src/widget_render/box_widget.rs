@@ -6,7 +6,8 @@ use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent
 use super::{MetalPrimitive, WidgetViewport};
 use crate::layout::Rect;
 use crate::layout::{
-    Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num, shrink_constraints_xy,
+    Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num, prop_is_keyword,
+    shrink_constraints_xy,
 };
 use crate::vm::Value;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
@@ -181,11 +182,12 @@ impl WidgetDefinition for BoxWidget {
                     height: inner_height,
                 });
 
-                let child_width = if h_align == Align::Stretch {
-                    inner_width
-                } else {
-                    size.width
-                };
+                let child_width =
+                    if h_align == Align::Stretch || prop_is_keyword(child, "width", "fill") {
+                        inner_width
+                    } else {
+                        size.width
+                    };
                 let child_height = if v_align == Align::Stretch {
                     inner_height
                 } else {
@@ -297,12 +299,10 @@ impl WidgetDefinition for BoxWidget {
         viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
         if let Some(Value::String(bg_type)) = node.props.get("background") {
-            // Check if any child is a scroll container. If so, use the box's own
-            // layout rect — content_extent would still be correct but node.rect
-            // is the definitive bounds for a scroll-containing box.
+            // Scroll-containing boxes use their own layout rect: content_extent
+            // would include scroll children, but node.rect is the viewport.
             let has_scroll_child = node.children.iter().any(|c| c.widget_type == "scroll");
-            let use_own_rect = matches!(node.props.get("background-self-rect"), Some(Value::Bool(true)));
-            let bg_rect = if has_scroll_child || use_own_rect {
+            let bg_rect = if has_scroll_child {
                 node.rect
             } else {
                 content_extent(node)

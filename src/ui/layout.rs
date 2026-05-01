@@ -118,6 +118,11 @@ impl<'a> LayoutEngine<'a> {
             },
             DEFAULT_FONT_SIZE,
         )?;
+        let root_width = if prop_is_keyword(tree, "width", "fill") {
+            self.terminal_cols as f32
+        } else {
+            size.width
+        };
         // If any direct child has :flex, use viewport height so flex children
         // can fill remaining space (e.g. a scroll container with :flex 1).
         // Otherwise use measured content height to preserve existing behavior.
@@ -134,7 +139,7 @@ impl<'a> LayoutEngine<'a> {
             Rect {
                 row: 0.0,
                 col: 0.0,
-                width: size.width,
+                width: root_width,
                 height: root_height,
             },
             DEFAULT_FONT_SIZE,
@@ -203,7 +208,7 @@ impl<'a> LayoutEngine<'a> {
             measure_builtin_leaf(node, &widget_type, constraints.aspect)
         };
 
-        Some(clamp_size_for_node(node, size, constraints))
+        Some(clamp_size_for_node(size, constraints))
     }
 
     fn build_layout_node(&self, node: &Value, rect: Rect, inherited_font_size: f32) -> LayoutNode {
@@ -820,17 +825,9 @@ fn clamp_size(size: Size, constraints: Constraints) -> Size {
     }
 }
 
-fn clamp_size_for_node(node: &Value, size: Size, constraints: Constraints) -> Size {
-    let unclamped_width = get_map(node)
-        .and_then(|map| map.get("no-clamp-width").cloned())
-        .is_some_and(|value| matches!(value, Value::Bool(true)));
+fn clamp_size_for_node(size: Size, constraints: Constraints) -> Size {
     Size {
-        width: if unclamped_width {
-            size.width.max(constraints.min_width)
-        } else {
-            size.width
-                .clamp(constraints.min_width, constraints.max_width)
-        },
+        width: size.width.max(constraints.min_width),
         height: size
             .height
             .clamp(constraints.min_height, constraints.max_height),
@@ -911,6 +908,18 @@ pub(crate) fn get_prop_str(v: &Value, key: &str) -> Option<String> {
         Some(Value::String(s)) => Some(s.clone()),
         _ => None,
     }
+}
+
+pub(crate) fn get_prop_keyword(v: &Value, key: &str) -> Option<String> {
+    let map = get_map(v)?;
+    match map.get(key) {
+        Some(Value::Keyword(s)) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+pub(crate) fn prop_is_keyword(v: &Value, key: &str, expected: &str) -> bool {
+    get_prop_keyword(v, key).is_some_and(|value| value == expected)
 }
 
 pub(crate) fn get_prop_u64(v: &Value, key: &str) -> Option<u64> {
@@ -1058,6 +1067,24 @@ mod tests {
             args.push(child);
         }
         build_widget("h-stack", args)
+    }
+
+    /// Build a h-stack: (h-stack :width :fill :gap g children...)
+    fn hstack_fill(gap: f64, children: Vec<Value>) -> Value {
+        let mut args = vec![kw("width"), kw("fill"), kw("gap"), num(gap)];
+        for child in children {
+            args.push(child);
+        }
+        build_widget("h-stack", args)
+    }
+
+    /// Build a box: (box :flex f children...)
+    fn flex_box(flex: f64, children: Vec<Value>) -> Value {
+        let mut args = vec![kw("flex"), num(flex)];
+        for child in children {
+            args.push(child);
+        }
+        build_widget("box", args)
     }
 
     /// Build a grid: (grid :cols c :col-width w children...)
@@ -1309,5 +1336,79 @@ mod tests {
             natural, 29.0,
             "bare label should use text char count as width"
         );
+    }
+
+    #[test]
+    fn width_fill_hstack_expands_to_parent_width() {
+        let tree = bx(
+            Some(40.0),
+            None,
+            vec![hstack_fill(
+                1.0,
+                vec![label("hello", None), label("world", None)],
+            )],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+        let stack = &layout.children[0];
+
+        assert_eq!(layout.rect.width, 40.0);
+        assert_eq!(stack.rect.width, 40.0);
+    }
+
+    #[test]
+    fn width_fill_root_hstack_expands_to_viewport_width() {
+        let tree = hstack_fill(1.0, vec![label("hello", None), label("world", None)]);
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+
+        assert_eq!(layout.rect.width, 80.0);
+    }
+
+    #[test]
+    fn width_fill_hstack_gives_remaining_width_to_flex_child() {
+        let tree = bx(
+            Some(40.0),
+            None,
+            vec![hstack_fill(
+                1.0,
+                vec![flex_box(1.0, vec![label("hello", None)]), label("x", None)],
+            )],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+        let stack = &layout.children[0];
+        let flex_child = &stack.children[0];
+        let fixed_child = &stack.children[1];
+
+        assert_eq!(stack.rect.width, 40.0);
+        assert_eq!(fixed_child.rect.width, 1.0);
+        assert_eq!(flex_child.rect.width, 38.0);
+    }
+
+    #[test]
+    fn width_fill_is_ignored_for_unbounded_natural_width() {
+        let tree = hstack_fill(1.0, vec![label("hello", None), label("world", None)]);
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let natural = engine.natural_content_width(&tree);
+
+        assert_eq!(natural, 11.0);
+    }
+
+    #[test]
+    fn width_fill_child_does_not_inflate_vstack_natural_width() {
+        let tree = vstack(
+            0.0,
+            0.0,
+            vec![
+                hstack_fill(1.0, vec![label("hello", None), label("world", None)]),
+                label("body content is wider", None),
+            ],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+
+        assert_eq!(layout.rect.width, 21.0);
+        assert_eq!(layout.children[0].rect.width, 21.0);
     }
 }

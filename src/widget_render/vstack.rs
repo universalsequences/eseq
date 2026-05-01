@@ -1,6 +1,6 @@
 use super::{Align, Justify, WidgetDefinition, distribute_justify, resolve_align, resolve_justify};
 use crate::layout::{
-    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, prop_is_keyword,
     shrink_constraints_xy,
 };
 use crate::vm::Value;
@@ -19,7 +19,7 @@ impl WidgetDefinition for VStackWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["padding", "gap", "align", "justify"]
+        &["padding", "gap", "align", "justify", "width"]
     }
 
     fn measure(
@@ -112,11 +112,12 @@ impl WidgetDefinition for VStackWidget {
                     0.0
                 };
                 let child_height = size.height + extra;
-                let child_width = if align == Align::Stretch {
-                    inner_width
-                } else {
-                    size.width
-                };
+                let child_width =
+                    if align == Align::Stretch || prop_is_keyword(child, "width", "fill") {
+                        inner_width
+                    } else {
+                        size.width
+                    };
                 let col = match align {
                     Align::Start | Align::Stretch | Align::Baseline => area.col + padding,
                     Align::Center => area.col + padding + (inner_width - child_width) / 2.0,

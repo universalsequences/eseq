@@ -19,7 +19,7 @@ impl WidgetDefinition for HStackWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["padding", "gap", "align", "justify"]
+        &["padding", "gap", "align", "justify", "width"]
     }
 
     fn measure(
