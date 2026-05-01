@@ -301,6 +301,7 @@ fn node_has_event_handler(node: &LayoutNode) -> bool {
         || node.props.contains_key("on-drag")
         || node.props.contains_key("on-change")
         || node.props.contains_key("on-mouse-down")
+        || node.props.contains_key("on-mouse-up")
 }
 
 pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutNode> {
@@ -344,6 +345,9 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
         if node.props.contains_key("on-change")
             || node.props.contains_key("bind")
             || node.props.contains_key("on-click")
+            || node.props.contains_key("on-drag")
+            || node.props.contains_key("on-mouse-down")
+            || node.props.contains_key("on-mouse-up")
         {
             return Some(node);
         }

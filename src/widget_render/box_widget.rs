@@ -50,6 +50,46 @@ pub struct BoxWidget;
 
 pub static BOX_WIDGET: BoxWidget = BoxWidget;
 
+fn box_mouse_info(phase: &str, modifiers: KeyModifiers) -> Value {
+    let mut info = std::collections::HashMap::new();
+    info.insert(
+        "phase".to_string(),
+        Rc::new(RefCell::new(Value::String(phase.to_string()))),
+    );
+    info.insert(
+        "shift".to_string(),
+        Rc::new(RefCell::new(Value::Bool(
+            modifiers.contains(KeyModifiers::SHIFT),
+        ))),
+    );
+    info.insert(
+        "ctrl".to_string(),
+        Rc::new(RefCell::new(Value::Bool(
+            modifiers.contains(KeyModifiers::CONTROL),
+        ))),
+    );
+    info.insert(
+        "alt".to_string(),
+        Rc::new(RefCell::new(Value::Bool(
+            modifiers.contains(KeyModifiers::ALT),
+        ))),
+    );
+    let super_pressed = modifiers.contains(KeyModifiers::SUPER);
+    info.insert(
+        "super".to_string(),
+        Rc::new(RefCell::new(Value::Bool(super_pressed))),
+    );
+    info.insert(
+        "cmd".to_string(),
+        Rc::new(RefCell::new(Value::Bool(super_pressed))),
+    );
+    info.insert(
+        "meta".to_string(),
+        Rc::new(RefCell::new(Value::Bool(super_pressed))),
+    );
+    Value::Map(info)
+}
+
 impl WidgetDefinition for BoxWidget {
     fn names(&self) -> &'static [&'static str] {
         &["box"]
@@ -177,6 +217,14 @@ impl WidgetDefinition for BoxWidget {
             .collect()
     }
 
+    fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
+        if node.props.contains_key("on-drag") || node.props.contains_key("on-mouse-up") {
+            Some(Value::String("box-pointer".to_string()))
+        } else {
+            None
+        }
+    }
+
     fn mouse_event(
         &self,
         node: &LayoutNode,
@@ -187,41 +235,57 @@ impl WidgetDefinition for BoxWidget {
         _gesture: Option<&Value>,
         modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
-        if node.props.contains_key("on-click") {
-            if let MouseEventKind::Down(MouseButton::Left) = mouse_kind {
-                return MouseEventOutcome::Dispatch(WidgetEvent::Activate(modifiers));
+        match mouse_kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if node.props.contains_key("on-mouse-down") {
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                        "down", modifiers,
+                    )));
+                }
+                if node.props.contains_key("on-click") {
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Activate(modifiers));
+                }
             }
+            MouseEventKind::Drag(MouseButton::Left) if node.props.contains_key("on-drag") => {
+                return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                    "drag", modifiers,
+                )));
+            }
+            MouseEventKind::Up(MouseButton::Left) if node.props.contains_key("on-mouse-up") => {
+                return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                    "up", modifiers,
+                )));
+            }
+            _ => {}
         }
         MouseEventOutcome::Ignore
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
-        let WidgetEvent::Activate(modifiers) = event else {
-            return None;
+        let (callback_name, arg) = match event {
+            WidgetEvent::Activate(modifiers) => ("on-click", box_mouse_info("click", modifiers)),
+            WidgetEvent::Custom(value) => {
+                let phase = match &value {
+                    Value::Map(map) => map.get("phase").and_then(|v| match &*v.borrow() {
+                        Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                    _ => None,
+                }?;
+                let callback_name = match phase.as_str() {
+                    "down" => "on-mouse-down",
+                    "drag" => "on-drag",
+                    "up" => "on-mouse-up",
+                    _ => return None,
+                };
+                (callback_name, value)
+            }
+            _ => return None,
         };
-        let callback = node.props.get("on-click")?.clone();
-        let mut info = std::collections::HashMap::new();
-        info.insert(
-            "shift".to_string(),
-            Rc::new(RefCell::new(Value::Bool(
-                modifiers.contains(KeyModifiers::SHIFT),
-            ))),
-        );
-        info.insert(
-            "ctrl".to_string(),
-            Rc::new(RefCell::new(Value::Bool(
-                modifiers.contains(KeyModifiers::CONTROL),
-            ))),
-        );
-        info.insert(
-            "alt".to_string(),
-            Rc::new(RefCell::new(Value::Bool(
-                modifiers.contains(KeyModifiers::ALT),
-            ))),
-        );
+        let callback = node.props.get(callback_name)?.clone();
         Some(EventOutput {
             callback,
-            args: vec![Value::Map(info)],
+            args: vec![arg],
         })
     }
 
@@ -237,7 +301,8 @@ impl WidgetDefinition for BoxWidget {
             // layout rect — content_extent would still be correct but node.rect
             // is the definitive bounds for a scroll-containing box.
             let has_scroll_child = node.children.iter().any(|c| c.widget_type == "scroll");
-            let bg_rect = if has_scroll_child {
+            let use_own_rect = matches!(node.props.get("background-self-rect"), Some(Value::Bool(true)));
+            let bg_rect = if has_scroll_child || use_own_rect {
                 node.rect
             } else {
                 content_extent(node)

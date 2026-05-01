@@ -24,6 +24,7 @@ use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
 use crate::tile::{HighlightCache, SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
 use crate::vm::{EffectTarget, PendingUiUpdate, Value, format_lisp_value};
+use crate::widget_render::WidgetCursor;
 use commands::key_str;
 use natives::register_editor_natives;
 
@@ -202,6 +203,7 @@ pub struct Editor {
     mode_registry: HashMap<String, MajorMode>,
     /// Cached tile rects, recomputed when tiles change or viewport resizes.
     cached_tile_rects: Vec<(TileId, Rect)>,
+    widget_cursor: WidgetCursor,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -260,12 +262,17 @@ impl Editor {
             minibuffer_input: None,
             mode_registry: HashMap::new(),
             cached_tile_rects: vec![],
+            widget_cursor: WidgetCursor::Default,
         };
         editor.bind_defaults();
         editor.load_init(config.init_source.as_deref());
         editor.refresh_runtime_side_effects();
         editor.sync_runtime_context();
         editor
+    }
+
+    pub fn widget_cursor(&self) -> WidgetCursor {
+        self.widget_cursor
     }
 
     // ── Tile accessors ─────────────────────────────────────────────────────
@@ -2155,7 +2162,21 @@ impl Editor {
                         .last_mouse_precise
                         .unwrap_or((precise_col, precise_row));
                     if let Some(gesture) = self.active_leaf().active_widget_gesture.clone() {
-                        if let Some(output) = self.dispatch_gesture_widget_mouse_event(
+                        let is_box_pointer = matches!(
+                            gesture.gesture_data.as_ref(),
+                            Some(crate::vm::Value::String(s)) if s == "box-pointer"
+                        );
+                        if is_box_pointer {
+                            // Box pointer gestures keep mouse-up tied to the original box, but
+                            // drag should still hit-test across boxes (step drag-select).
+                            self.try_handle_widget_drag_segment(
+                                mouse,
+                                content_col,
+                                content_row,
+                                previous,
+                                (precise_col, precise_row),
+                            );
+                        } else if let Some(output) = self.dispatch_gesture_widget_mouse_event(
                             gesture,
                             mouse.kind,
                             content_col,
@@ -2210,6 +2231,14 @@ impl Editor {
                             mouse.modifiers,
                         );
                         let _ = self.apply_widget_output(output);
+                    } else {
+                        let _ = self.try_handle_widget_mouse_precise(
+                            mouse,
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        );
                     }
                 }
                 self.last_mouse_precise = None;
@@ -2227,6 +2256,7 @@ impl Editor {
                     }
                 }
                 if widgets_visible {
+                    self.update_widget_cursor(content_col, content_row, precise_col, precise_row);
                     self.update_sdf_hover(
                         content_col,
                         content_row,
@@ -2234,6 +2264,15 @@ impl Editor {
                         precise_row,
                         false,
                     );
+                    let _ = self.try_handle_widget_mouse_precise(
+                        mouse,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    );
+                } else {
+                    self.widget_cursor = WidgetCursor::Default;
                 }
             }
             MouseEventKind::ScrollUp => {

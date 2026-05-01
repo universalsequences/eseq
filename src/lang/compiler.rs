@@ -154,6 +154,13 @@ fn extract_if_statement(list: &[Expression]) -> Option<(Expression, Expression, 
         {
             Some((condition.clone(), then_body.clone(), else_body.clone()))
         }
+        (Some(Expression::Symbol(s)), Some(condition), Some(then_body), None) if s == "if" => {
+            Some((
+                condition.clone(),
+                then_body.clone(),
+                Expression::Symbol("nil".to_string()),
+            ))
+        }
         _ => None,
     }
 }

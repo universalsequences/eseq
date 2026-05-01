@@ -220,25 +220,17 @@ impl WidgetDefinition for TabsWidget {
         area: Rect,
         children: &[Value],
         _aspect: f32,
-        measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
+        _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
         build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let selected = selected_index(node, children.len());
-
-        let child_constraints = Constraints {
-            min_width: 0.0,
-            max_width: area.width,
-            min_height: 0.0,
-            max_height: area.height,
-            aspect: 1.0,
-        };
-        let selected_child_height = children
-            .get(selected)
-            .and_then(|child| measure_child(child, child_constraints))
-            .map(|size| size.height)
-            .unwrap_or(0.0);
-        let min_header_h = header_height_for_value(node, 1.0);
-        let header_h = (area.height - selected_child_height).clamp(min_header_h, area.height);
+        // Keep the tab header at its explicit/natural height. Previously this
+        // used leftover height (`area.height - selected_child_height`), which
+        // made the header expand whenever a parent gave tabs more vertical
+        // space than their selected child naturally needed. Custom instrument
+        // UIs often nest a tabs widget inside a stretched panel, causing the
+        // tab labels/content to be pushed down.
+        let header_h = header_height_for_value(node, 1.0).min(area.height);
         let child_h = (area.height - header_h).max(0.0);
 
         let child_area = Rect {
