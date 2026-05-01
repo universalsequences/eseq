@@ -158,11 +158,12 @@ impl App {
                         self.handle_mouse_click(mouse.column, mouse.row, mouse.modifiers);
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        self.handle_mouse_drag(mouse.column, mouse.row);
+                        self.handle_mouse_drag(mouse.column, mouse.row, mouse.modifiers);
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         self.ui.param_mouse_drag = None;
                         self.ui.track_drag_anchor = None;
+                        self.ui.step_drag_anchor = None;
                     }
                     MouseEventKind::ScrollUp => {
                         self.handle_mouse_scroll(mouse.column, mouse.row, -3);
@@ -948,28 +949,41 @@ impl App {
             return;
         }
 
-        // Bars area: click selects step, double-click toggles
+        // Bars area: click selects step / scrubs value. Shift/Cmd starts step drag-select.
         if rect_contains(l.bars, col, row) {
             if let Some(step) = self.step_from_click_x(col, l.bars.x) {
                 self.touch_follow_timer();
                 self.ui.cursor_step = step;
                 self.ui.focused_region = Region::Cirklon;
-                self.ui.param_mouse_drag = Some(ParamMouseDrag {
-                    track: self.ui.cursor_track,
-                    target: ParamMouseDragTarget::CirklonStepParam { step },
-                    start_col: col,
-                    start_display_value: self.state.pattern.step_data[self.ui.cursor_track]
-                        .get(step, self.ui.active_param),
-                });
-                self.apply_param_mouse_drag(col, row);
+                let range_select = modifiers.contains(KeyModifiers::SHIFT)
+                    || modifiers.contains(KeyModifiers::SUPER);
+                if range_select {
+                    self.ui.selection_anchor = Some(step);
+                    self.ui.visual_steps.clear();
+                    self.ui.step_drag_anchor = Some(step);
+                    self.ui.last_step_click = None;
+                } else {
+                    self.ui.param_mouse_drag = Some(ParamMouseDrag {
+                        track: self.ui.cursor_track,
+                        target: ParamMouseDragTarget::CirklonStepParam { step },
+                        start_col: col,
+                        start_display_value: self.state.pattern.step_data[self.ui.cursor_track]
+                            .get(step, self.ui.active_param),
+                    });
+                    self.apply_param_mouse_drag(col, row);
+                }
             }
             return;
         }
 
-        // Trigger row: click selects step, double-click toggles
+        // Trigger row: click selects step, double-click toggles. Shift/Cmd also arms drag-select.
         if rect_contains(l.trigger_row, col, row) {
             if let Some(step) = self.step_from_click_x(col, l.trigger_row.x) {
                 self.handle_step_click(step, modifiers);
+                if modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::SUPER)
+                {
+                    self.ui.step_drag_anchor = Some(step);
+                }
             }
             return;
         }
@@ -1308,7 +1322,29 @@ impl App {
         }
     }
 
-    fn handle_mouse_drag(&mut self, col: u16, row: u16) {
+    fn handle_mouse_drag(&mut self, col: u16, row: u16, modifiers: KeyModifiers) {
+        if let Some(anchor) = self.ui.step_drag_anchor {
+            if modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::SUPER) {
+                let l = &self.ui.layout;
+                let step = if rect_contains(l.trigger_row, col, row) {
+                    self.step_from_click_x(col, l.trigger_row.x)
+                } else if rect_contains(l.bars, col, row) {
+                    self.step_from_click_x(col, l.bars.x)
+                } else {
+                    None
+                };
+                if let Some(step) = step {
+                    self.touch_follow_timer();
+                    self.ui.cursor_step = step;
+                    self.ui.selection_anchor = Some(anchor);
+                    self.ui.visual_steps.clear();
+                    self.ui.focused_region = Region::Cirklon;
+                }
+            } else {
+                self.ui.step_drag_anchor = None;
+            }
+            return;
+        }
         if self.ui.param_mouse_drag.is_some() {
             self.apply_param_mouse_drag(col, row);
             return;

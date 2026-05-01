@@ -473,7 +473,10 @@ fn sample_tree_nodes_to_value(items: &[SampleTreeNode]) -> Value {
     )
 }
 
-fn build_instrument_tree_nodes(dir: &std::path::Path, root: &std::path::Path) -> Vec<InstrumentTreeNode> {
+fn build_instrument_tree_nodes(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+) -> Vec<InstrumentTreeNode> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -498,6 +501,9 @@ fn build_instrument_tree_nodes(dir: &std::path::Path, root: &std::path::Path) ->
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
+            if matches!(label.as_str(), "dsp" | "ui" | "presets") {
+                continue;
+            }
             if let Ok(rel) = path.strip_prefix(root) {
                 let instrument_name = rel.with_extension("").to_string_lossy().replace('\\', "/");
                 files.push((label, instrument_name));
@@ -509,6 +515,18 @@ fn build_instrument_tree_nodes(dir: &std::path::Path, root: &std::path::Path) ->
 
     let mut items = Vec::new();
     for (label, path) in dirs {
+        if path.join("dsp.lisp").exists() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                let instrument_name = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
+                items.push(InstrumentTreeNode {
+                    label,
+                    name: Some(instrument_name),
+                    children: Vec::new(),
+                });
+            }
+            continue;
+        }
+
         let children = build_instrument_tree_nodes(&path, root);
         if !children.is_empty() {
             items.push(InstrumentTreeNode {
@@ -560,44 +578,273 @@ fn instrument_tree_nodes_to_value(items: &[InstrumentTreeNode]) -> Value {
     )
 }
 
-fn build_instrument_tree_value() -> Value {
+fn lisp_string_literal(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    )
+}
+
+fn expr_to_lisp(expr: &eseqlisp::parser::Expression) -> String {
+    use eseqlisp::parser::Expression;
+    match expr {
+        Expression::Symbol(s) => s.clone(),
+        Expression::Keyword(s) => format!(":{s}"),
+        Expression::String(s) => lisp_string_literal(s),
+        Expression::QuoteSymbol(s) => format!("'{s}"),
+        Expression::QuoteList(items) => format!(
+            "'({})",
+            items.iter().map(expr_to_lisp).collect::<Vec<_>>().join(" ")
+        ),
+        Expression::Number(n) => {
+            if n.fract() == 0.0 {
+                format!("{n:.0}")
+            } else {
+                n.to_string()
+            }
+        }
+        Expression::List(items) => format!(
+            "({})",
+            items.iter().map(expr_to_lisp).collect::<Vec<_>>().join(" ")
+        ),
+        Expression::Quasiquote(inner) => format!("`{}", expr_to_lisp(inner)),
+        Expression::Unquote(inner) => format!(",{}", expr_to_lisp(inner)),
+    }
+}
+
+fn custom_ui_param_name(expr: &eseqlisp::parser::Expression) -> Option<String> {
+    use eseqlisp::parser::Expression;
+    match expr {
+        Expression::Symbol(name) => Some(name.clone()),
+        Expression::List(items) => items.first().and_then(custom_ui_param_name),
+        _ => None,
+    }
+}
+
+fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
+    use eseqlisp::parser::Expression;
+    match expr {
+        Expression::List(items) if !items.is_empty() => {
+            if let Expression::Symbol(head) = &items[0] {
+                if head == "tabs" {
+                    let mut out = Vec::new();
+                    let mut i = 0;
+                    let mut has_header_height = false;
+                    while i < items.len() {
+                        if matches!(&items[i], Expression::Keyword(k) if k == "header-height") {
+                            has_header_height = true;
+                            out.push(":header-height".to_string());
+                            out.push("1.0".to_string());
+                            i += 2;
+                            continue;
+                        }
+                        out.push(transform_synth_ui_expr(&items[i]));
+                        i += 1;
+                    }
+                    if !has_header_height {
+                        out.insert(1, ":header-height".to_string());
+                        out.insert(2, "1.0".to_string());
+                    }
+                    return format!("({})", out.join(" "));
+                }
+                if head == "param" {
+                    if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
+                        return format!("(ui-param-control {})", lisp_string_literal(&name));
+                    }
+                }
+                if head == "params" {
+                    let mut controls = Vec::new();
+                    for item in items.iter().skip(1) {
+                        if matches!(item, Expression::Keyword(_)) {
+                            continue;
+                        }
+                        if let Some(name) = custom_ui_param_name(item) {
+                            controls
+                                .push(format!("(ui-param-control {})", lisp_string_literal(&name)));
+                        }
+                    }
+                    return format!(
+                        "(v-stack :gap 0.25 :no-clamp-width true {})",
+                        controls.join(" ")
+                    );
+                }
+            }
+            format!(
+                "({})",
+                items
+                    .iter()
+                    .map(transform_synth_ui_expr)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        }
+        _ => expr_to_lisp(expr),
+    }
+}
+
+fn safe_lisp_ident(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+fn build_custom_instrument_ui_source() -> String {
+    use eseqlisp::parser::{ASTParser, Expression, Parser};
+
+    fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if path.join("dsp.lisp").exists() {
+                    let ui_path = path.join("ui.lisp");
+                    if ui_path.exists() {
+                        if let (Ok(rel), Ok(src)) =
+                            (path.strip_prefix(root), std::fs::read_to_string(&ui_path))
+                        {
+                            let inst_name =
+                                format!("{}/", rel.to_string_lossy().replace('\\', "/"));
+                            out.push((inst_name, ui_path.display().to_string(), src));
+                        }
+                    }
+                }
+                collect(&path, root, out);
+            }
+        }
+    }
+
+    let root = Path::new("instruments");
+    let mut ui_sources = Vec::new();
+    collect(root, root, &mut ui_sources);
+
+    let mut functions = String::new();
+    let mut dispatch = "false".to_string();
+    for (instrument_name, ui_path, src) in ui_sources {
+        let tokens = match Parser::new(src).parse() {
+            Ok(tokens) => tokens,
+            Err(err) => {
+                eprintln!("custom instrument UI parse error in {ui_path}: {err:?}");
+                continue;
+            }
+        };
+        let exprs = match ASTParser::new(tokens).parse() {
+            Ok(exprs) => exprs,
+            Err(err) => {
+                eprintln!("custom instrument UI AST error in {ui_path}: {err:?}");
+                continue;
+            }
+        };
+        let mut body = None;
+        let mut helpers = Vec::new();
+        for expr in &exprs {
+            if let Expression::List(items) = expr {
+                if matches!(items.first(), Some(Expression::Symbol(head)) if head == "defsynth-ui")
+                {
+                    body = items.get(1).map(transform_synth_ui_expr);
+                    continue;
+                }
+            }
+            helpers.push(transform_synth_ui_expr(expr));
+        }
+        let Some(body) = body else {
+            continue;
+        };
+        let fn_name = format!("custom-synth-ui-{}", safe_lisp_ident(&instrument_name));
+        for helper in helpers {
+            functions.push_str(&format!("\n{helper}\n"));
+        }
+        functions.push_str(&format!(
+            "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) {body}))\n",
+            lisp_string_literal(&instrument_name)
+        ));
+        dispatch = format!(
+            "(if (= (get inst :name) {}) ({fn_name} inst) {dispatch})",
+            lisp_string_literal(&instrument_name)
+        );
+    }
+
+    if functions.is_empty() {
+        return String::new();
+    }
+    format!("{functions}\n(def custom-instrument-synth-ui (inst) {dispatch})\n")
+}
+
+fn filter_instrument_tree_nodes(
+    items: &[InstrumentTreeNode],
+    query_lower: &str,
+) -> Vec<InstrumentTreeNode> {
+    if query_lower.is_empty() {
+        return items.to_vec();
+    }
+
+    items
+        .iter()
+        .filter_map(|item| {
+            let children = filter_instrument_tree_nodes(&item.children, query_lower);
+            let label_matches = item.label.to_lowercase().contains(query_lower);
+            let name_matches = item
+                .name
+                .as_ref()
+                .map(|name| name.to_lowercase().contains(query_lower))
+                .unwrap_or(false);
+            if label_matches || name_matches || !children.is_empty() {
+                let mut filtered = item.clone();
+                filtered.children = children;
+                Some(filtered)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn build_instrument_tree_value(query: &str) -> Value {
+    let query_lower = query.trim().to_lowercase();
     let mut top = vec![
         InstrumentTreeNode {
             label: "Sampler".to_string(),
-            name: None,
+            name: Some("Sampler".to_string()),
             children: Vec::new(),
         },
         InstrumentTreeNode {
             label: "+ New Instrument".to_string(),
-            name: None,
+            name: Some("+ New Instrument".to_string()),
             children: Vec::new(),
         },
     ];
-    if let Some(node) = top.get_mut(0) {
-        node.name = Some("Sampler".to_string());
-    }
-    if let Some(node) = top.get_mut(1) {
-        node.name = Some("+ New Instrument".to_string());
-    }
     let root = std::path::Path::new("instruments");
     top.extend(build_instrument_tree_nodes(root, root));
+    let top = filter_instrument_tree_nodes(&top, &query_lower);
 
     let mut value = instrument_tree_nodes_to_value(&top);
     if let Value::List(items) = &mut value {
-        if let Some(item) = items.get(0) {
+        for item in items {
             if let Value::Map(map) = &mut *item.borrow_mut() {
-                map.insert(
-                    "kind".to_string(),
-                    Rc::new(RefCell::new(Value::String("sampler".to_string()))),
-                );
-            }
-        }
-        if let Some(item) = items.get(1) {
-            if let Value::Map(map) = &mut *item.borrow_mut() {
-                map.insert(
-                    "kind".to_string(),
-                    Rc::new(RefCell::new(Value::String("new-instrument".to_string()))),
-                );
+                let label = map.get("label").and_then(|value| match &*value.borrow() {
+                    Value::String(label) => Some(label.clone()),
+                    _ => None,
+                });
+                if label.as_deref() == Some("Sampler") {
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+                    );
+                } else if label.as_deref() == Some("+ New Instrument") {
+                    map.insert(
+                        "kind".to_string(),
+                        Rc::new(RefCell::new(Value::String("new-instrument".to_string()))),
+                    );
+                }
             }
         }
     }
@@ -864,6 +1111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ),
                 ("sidebar-loaded-preset", Value::String(String::new())),
                 ("sidebar-selected-sample", Value::String(String::new())),
+                ("sidebar-track-index", Value::Number(0.0)),
                 ("sidebar-presets", Value::List(vec![])),
                 ("sidebar-preset-tree", Value::List(vec![])),
                 ("current-project-name", Value::String(String::new())),
@@ -1100,6 +1348,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Value::Bool(!was_selected))
     });
 
+    // seq-select-step-range — replace selection with inclusive step range
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
+    runtime.register_native("seq-select-step-range", move |args, _ctx| {
+        let (Some(Value::Number(a)), Some(Value::Number(b))) = (args.first(), args.get(1)) else {
+            return Err("seq-select-step-range: expected start and end steps".into());
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let num_steps = st.pattern.track_params[track].get_num_steps();
+        if num_steps == 0 {
+            return Ok(Value::Number(0.0));
+        }
+        let a = (*a as usize).min(num_steps - 1);
+        let b = (*b as usize).min(num_steps - 1);
+        let lo = a.min(b);
+        let hi = a.max(b);
+        let mut set = sel.lock().unwrap();
+        set.clear();
+        set.extend(lo..=hi);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number((hi - lo + 1) as f64))
+    });
+
     // seq-clear-selection
     let sel = selected_steps.clone();
     let ui_ep = ui_epoch.clone();
@@ -1158,6 +1433,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ui_ep.fetch_add(1, Ordering::Relaxed);
         fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(steps.len() as f64))
+    });
+
+    // seq-move-step-drag — move clicked step, or selected steps if clicked step is selected.
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    runtime.register_native("seq-move-step-drag", move |args, _ctx| {
+        let (Some(Value::Number(start)), Some(Value::Number(target))) = (args.first(), args.get(1)) else {
+            return Err("seq-move-step-drag: expected start and target steps".into());
+        };
+        let start = *start as usize;
+        let target = *target as usize;
+        if start == target {
+            return Ok(Value::Bool(false));
+        }
+        let track = ct.load(Ordering::Relaxed);
+        let num_steps = st.pattern.track_params[track].get_num_steps();
+        if start >= num_steps || target >= num_steps {
+            return Ok(Value::Bool(false));
+        }
+        let delta = target as isize - start as isize;
+        let mut move_selection = false;
+        let steps: Vec<usize> = {
+            let set = sel.lock().unwrap();
+            if set.contains(&start) {
+                move_selection = true;
+                let mut steps: Vec<usize> = set.iter().copied().collect();
+                steps.sort_unstable();
+                steps
+            } else {
+                vec![start]
+            }
+        };
+        if steps.is_empty() {
+            return Ok(Value::Bool(false));
+        }
+        let Some(&first) = steps.first() else { return Ok(Value::Bool(false)); };
+        let Some(&last) = steps.last() else { return Ok(Value::Bool(false)); };
+        let new_first = first as isize + delta;
+        let new_last = last as isize + delta;
+        if new_first < 0 || new_last >= num_steps as isize {
+            return Ok(Value::Bool(false));
+        }
+        let snapshots: Vec<(usize, sequencer::sequencer::StepSnapshot)> = steps
+            .iter()
+            .map(|&step| (step, st.capture_step_snapshot(track, step)))
+            .collect();
+        for &(step, _) in &snapshots {
+            st.clear_step_payload(track, step);
+        }
+        let moved_steps: Vec<usize> = snapshots
+            .iter()
+            .map(|(step, _)| (*step as isize + delta) as usize)
+            .collect();
+        for ((_, snapshot), dst_step) in snapshots.iter().zip(moved_steps.iter().copied()) {
+            st.restore_step_snapshot(track, dst_step, snapshot);
+        }
+        if move_selection {
+            let mut set = sel.lock().unwrap();
+            set.clear();
+            set.extend(moved_steps.iter().copied());
+        }
+        st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(true))
     });
 
     // seq-shift-selected-steps — rotate selected step payloads left/right in place
@@ -1732,6 +2077,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         Ok(build_project_tree(&query))
     });
+    runtime.register_native("seq-preset-tree", move |args, _ctx| {
+        let query = match args.get(1) {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        Ok(build_preset_tree_from_list(args.first(), query))
+    });
     runtime.register_native("seq-saved-instruments", move |_args, _ctx| {
         Ok(Value::List(
             sequencer::lisp_effect::list_saved_instruments()
@@ -1740,8 +2092,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect(),
         ))
     });
-    runtime.register_native("seq-saved-instrument-tree", move |_args, _ctx| {
-        Ok(build_instrument_tree_value())
+    runtime.register_native("seq-saved-instrument-tree", move |args, _ctx| {
+        let query = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        Ok(build_instrument_tree_value(query))
     });
 
     // 4. Create editor with Metal backend
@@ -1758,6 +2114,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
     editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    let custom_ui_source = build_custom_instrument_ui_source();
+    if !custom_ui_source.is_empty() {
+        if let Err(err) = editor.runtime_mut().eval_str(&custom_ui_source) {
+            eprintln!("custom instrument UI load error: {err:?}");
+        }
+    }
     push_project_scratch_to_named_buffer(&mut editor, &app);
 
     let mut backend =
@@ -4453,7 +4815,10 @@ fn build_piano_roll_items_value(
                 ("start", Value::Number(step as f64)),
                 ("end", Value::Number((step as f32 + note.duration) as f64)),
                 ("selected", Value::Bool(selected.contains(&id))),
-                ("label", Value::String(piano_roll_transpose_label(note.transpose))),
+                (
+                    "label",
+                    Value::String(piano_roll_transpose_label(note.transpose)),
+                ),
             ]));
         }
     }
@@ -5980,9 +6345,14 @@ fn build_instrument_panel_value(
             continue;
         }
         if is_mod_param(&pdesc.name) {
+            let mod_name = pdesc
+                .name
+                .strip_prefix("mod ")
+                .unwrap_or(&pdesc.name)
+                .to_string();
             push_param(
                 &mut mod_params,
-                pdesc.name.clone(),
+                mod_name,
                 "param",
                 Some(param_idx),
                 pdesc.stored_to_user(current_val),
@@ -6005,6 +6375,7 @@ fn build_instrument_panel_value(
     }
 
     let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
     for section_name in ["LFO 1", "ENV 1", "RAND", "DRIFT", "LFO 2", "LFO 3"] {
         let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
         for &param_idx in &source_actual {
@@ -6036,6 +6407,9 @@ fn build_instrument_panel_value(
         if params.is_empty() {
             continue;
         }
+        source_names.push(Rc::new(RefCell::new(Value::String(
+            section_name.to_string(),
+        ))));
         let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
         section_map.insert(
             "name".to_string(),
@@ -6049,11 +6423,17 @@ fn build_instrument_panel_value(
     }
 
     let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    let instrument_name =
+        current_custom_instrument_name(app, track).unwrap_or_else(|| "Instrument".to_string());
     panel_map.insert(
         "name".to_string(),
-        Rc::new(RefCell::new(Value::String(
-            current_custom_instrument_name(app, track).unwrap_or_else(|| "Instrument".to_string()),
-        ))),
+        Rc::new(RefCell::new(Value::String(instrument_name.clone()))),
+    );
+    panel_map.insert(
+        "display-name".to_string(),
+        Rc::new(RefCell::new(Value::String(instrument_display_name(
+            &instrument_name,
+        )))),
     );
     panel_map.insert(
         "synth".to_string(),
@@ -6062,6 +6442,10 @@ fn build_instrument_panel_value(
     panel_map.insert(
         "mod".to_string(),
         Rc::new(RefCell::new(Value::List(mod_params))),
+    );
+    panel_map.insert(
+        "source-names".to_string(),
+        Rc::new(RefCell::new(Value::List(source_names))),
     );
     panel_map.insert(
         "sources".to_string(),
@@ -6148,6 +6532,24 @@ fn build_project_tree(query: &str) -> Value {
     build_flat_tree_items(&items)
 }
 
+fn build_preset_tree_from_list(items_value: Option<&Value>, query: &str) -> Value {
+    let query = query.trim().to_lowercase();
+    let mut items: Vec<String> = match items_value {
+        Some(Value::List(items)) => items
+            .iter()
+            .filter_map(|item| match &*item.borrow() {
+                Value::String(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    if !query.is_empty() {
+        items.retain(|item| item.to_lowercase().contains(&query));
+    }
+    build_flat_tree_items(&items)
+}
+
 fn sync_project_state(rt: &mut Runtime, app: &ui::App) {
     rt.set_reactive(
         "SEQ",
@@ -6202,10 +6604,12 @@ fn current_custom_instrument_name(app: &ui::App, track: usize) -> Option<String>
 }
 
 fn instrument_display_name(name: &str) -> String {
-    Path::new(name)
-        .file_stem()
+    let trimmed = name.trim_end_matches('/');
+    Path::new(trimmed)
+        .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or(name)
+        .unwrap_or(trimmed)
+        .trim_end_matches(".lisp")
         .to_string()
 }
 
@@ -6242,6 +6646,7 @@ fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
             Value::String(String::new()),
         );
         rt.set_reactive("SEQ", "sidebar-loaded-preset", Value::String(String::new()));
+        rt.set_reactive("SEQ", "sidebar-track-index", Value::Number(track as f64));
         rt.set_reactive(
             "SEQ",
             "sidebar-selected-sample",
@@ -6284,6 +6689,7 @@ fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
         "sidebar-loaded-preset",
         Value::String(loaded_preset.clone()),
     );
+    rt.set_reactive("SEQ", "sidebar-track-index", Value::Number(track as f64));
     rt.set_reactive(
         "SEQ",
         "sidebar-selected-sample",

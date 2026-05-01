@@ -104,6 +104,64 @@
     (cool-off-follow)
     (seq-toggle-step (current-step))))
 
+(def selection-click? (evt)
+  (or (get evt :shift)
+    (get evt :cmd)
+    (get evt :super)
+    (get evt :meta)
+    (get evt :ctrl)))
+
+(defstate step-drag-anchor nil)
+(defstate step-click-pending nil)
+(defstate step-move-last nil)
+
+(def step-select-drag-start (step evt)
+  (do
+    (cool-off-follow)
+    (set! cursor-step step)
+    (set! step-click-pending nil)
+    (set! step-drag-anchor step)
+    (seq-select-step-range step step)))
+
+(def step-select-drag-over (step evt)
+  (if (selection-click? evt)
+    (do
+      (set! step-click-pending nil)
+      (set! step-move-last nil)
+      (cool-off-follow)
+      (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
+      (set! cursor-step step)
+      (seq-select-step-range step-drag-anchor step))
+    (if (= step-move-last nil)
+      nil
+      (if (= step step-move-last)
+        nil
+        (do
+          (set! step-click-pending nil)
+          (cool-off-follow)
+          (seq-move-step-drag step-move-last step)
+          (set! step-move-last step)
+          (set! cursor-step step))))))
+
+(def step-pointer-down (step evt)
+  (if (selection-click? evt)
+    (step-select-drag-start step evt)
+    (do
+      (cool-off-follow)
+      (set! cursor-step step)
+      (set! step-drag-anchor nil)
+      (set! step-move-last step)
+      (set! step-click-pending step))))
+
+(def step-pointer-up (step evt)
+  (do
+    (if (and (= step-click-pending step) (not (selection-click? evt)))
+      (seq-toggle-step step)
+      nil)
+    (set! step-click-pending nil)
+    (set! step-drag-anchor nil)
+    (set! step-move-last nil)))
+
 (def select-all-steps ()
   (do
     (cool-off-follow)
@@ -403,9 +461,13 @@
                 (do
                   (cool-off-follow)
                   (set! cursor-step step)
-                  (if (or (get evt :shift) (get evt :cmd))
-                    (seq-select-step step)
+                  (if (selection-click? evt)
+                    (step-select-drag-start step evt)
                     (seq-clear-selection)))
+                nil))
+            :on-drag (lambda (evt)
+              (if visible
+                (step-select-drag-over step evt)
                 nil))
             (v-stack :align :center :gap 0.5
               (vslider :height 4
@@ -435,14 +497,17 @@
                 :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
                 :background "aqua-button"
                 :align :center :width 3 :height 1.5
-                :on-click (lambda (evt)
+                :on-mouse-down (lambda (evt)
                   (if visible
-                    (do
-                      (cool-off-follow)
-                      (set! cursor-step step)
-                      (if (or (get evt :shift) (get evt :cmd))
-                        (seq-select-step step)
-                        (seq-toggle-step step)))
+                    (step-pointer-down step evt)
+                    nil))
+                :on-drag (lambda (evt)
+                  (if visible
+                    (step-select-drag-over step evt)
+                    nil))
+                :on-mouse-up (lambda (evt)
+                  (if visible
+                    (step-pointer-up step evt)
                     nil))
                 (tick :active (if visible (if (nth SEQ.steps step) 1 0) 0)
                       :plocked (if visible (if (nth SEQ.step-has-plocks step) 1 0) 0)
