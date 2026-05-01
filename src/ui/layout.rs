@@ -827,7 +827,9 @@ fn clamp_size(size: Size, constraints: Constraints) -> Size {
 
 fn clamp_size_for_node(size: Size, constraints: Constraints) -> Size {
     Size {
-        width: size.width.max(constraints.min_width),
+        width: size
+            .width
+            .clamp(constraints.min_width, constraints.max_width),
         height: size
             .height
             .clamp(constraints.min_height, constraints.max_height),
@@ -1410,5 +1412,19 @@ mod tests {
 
         assert_eq!(layout.rect.width, 21.0);
         assert_eq!(layout.children[0].rect.width, 21.0);
+    }
+
+    #[test]
+    fn layout_width_clamps_to_viewport_but_natural_width_can_overflow() {
+        let tree = hstack(
+            1.0,
+            vec![label("left", Some(60.0)), label("right", Some(60.0))],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+        let natural = engine.natural_content_width(&tree);
+
+        assert_eq!(layout.rect.width, 80.0);
+        assert_eq!(natural, 121.0);
     }
 }
