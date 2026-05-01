@@ -208,7 +208,7 @@ impl<'a> LayoutEngine<'a> {
             measure_builtin_leaf(node, &widget_type, constraints.aspect)
         };
 
-        Some(clamp_size_for_node(size, constraints))
+        Some(clamp_size_for_node(node, size, constraints))
     }
 
     fn build_layout_node(&self, node: &Value, rect: Rect, inherited_font_size: f32) -> LayoutNode {
@@ -825,11 +825,15 @@ fn clamp_size(size: Size, constraints: Constraints) -> Size {
     }
 }
 
-fn clamp_size_for_node(size: Size, constraints: Constraints) -> Size {
+fn clamp_size_for_node(node: &Value, size: Size, constraints: Constraints) -> Size {
+    let has_explicit_width = get_prop_num(node, "width").is_some();
     Size {
-        width: size
-            .width
-            .clamp(constraints.min_width, constraints.max_width),
+        width: if has_explicit_width {
+            size.width.max(constraints.min_width)
+        } else {
+            size.width
+                .clamp(constraints.min_width, constraints.max_width)
+        },
         height: size
             .height
             .clamp(constraints.min_height, constraints.max_height),
@@ -1426,5 +1430,15 @@ mod tests {
 
         assert_eq!(layout.rect.width, 80.0);
         assert_eq!(natural, 121.0);
+    }
+
+    #[test]
+    fn explicit_child_width_can_overflow_parent_viewport() {
+        let tree = hstack(1.0, vec![bx(Some(120.0), Some(2.0), vec![])]);
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+
+        assert_eq!(layout.rect.width, 80.0);
+        assert_eq!(layout.children[0].rect.width, 120.0);
     }
 }
