@@ -12,6 +12,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "vslider",
         "toggle",
         "knob",
+        "knob-number",
         "meter",
         "text-input",
         "number-picker",
@@ -82,8 +83,12 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
         }
     }
 
-    // text-input and number-picker are always focusable
-    if widget_type == "text-input" || widget_type == "number-picker" || widget_type == "dropdown" {
+    // Text-entry and composite value widgets are always focusable.
+    if widget_type == "text-input"
+        || widget_type == "number-picker"
+        || widget_type == "dropdown"
+        || widget_type == "knob-number"
+    {
         map.entry("focusable".to_string())
             .or_insert_with(|| Rc::new(RefCell::new(Value::Bool(true))));
     }

@@ -21,24 +21,42 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float2 uv = in.uv;
     float aspect = in.aspect;
 
-    float2 scale = float2(max(aspect, 1.0), max(1.0 / max(aspect, 0.0001), 1.0));
-    float2 centerPos = float2((uv.x - 0.5) * 2.0, (uv.y - 0.5) * 2.0) * scale;
-    float dist = length(centerPos);
-    float distDeriv = max(fwidth(dist), 0.001);
+    float2 scale = aspect >= 1.0
+        ? float2(aspect, 1.0)
+        : float2(1.0, 1.0 / max(aspect, 0.0001));
+    float2 p = float2((uv.x - 0.5) * 2.0, (uv.y - 0.5) * 2.0) * scale;
+    float r = length(p);
+    float a = atan2(p.y, p.x);
 
-    float outerRadius = 0.90;
-    float ringInnerRadius = 0.85;
-    float fillRadius = mix(0.12, 0.83, in.value_t);
+    float start = 1.57079633;
+    float sweep = 4.71238898;
+    float rel = fmod((a - start + 6.2831853), 6.2831853);
+    float inRange = step(rel, sweep);
+    float active = step(rel, sweep * in.value_t);
 
-    float outerMask = smoothstep(outerRadius + distDeriv, outerRadius - distDeriv, dist);
-    if (outerMask <= 0.001) { discard_fragment(); }
+    float aa = max(fwidth(r), 0.0015);
+    float ring = abs(r - 0.74) - 0.11;
+    float ringMask = smoothstep(aa, -aa, ring) * inRange;
+    float activeMask = ringMask * active;
 
-    float ringMask = smoothstep(ringInnerRadius + distDeriv, ringInnerRadius - distDeriv, dist);
-    float fillMask = smoothstep(fillRadius + distDeriv, fillRadius - distDeriv, dist);
+    float notchAngle = start + sweep * in.value_t;
+    float2 valueDir = float2(cos(notchAngle), sin(notchAngle));
+    float2 notchPos = valueDir * 0.74;
+    float notch = length(p - notchPos) - 0.105;
+    float notchMask = smoothstep(aa, -aa, notch);
+    float lineAlong = dot(p, valueDir);
+    float lineAcross = abs(p.x * valueDir.y - p.y * valueDir.x);
+    float lineSegment = step(0.0, lineAlong) * step(lineAlong, 0.68);
+    float line = lineAcross - 0.11;
+    float lineMask = smoothstep(aa, -aa, line) * lineSegment;
 
-    float3 baseRgb = mix(in.color_b.rgb, in.color_a.rgb, fillMask);
-    float3 borderRgb = mix(baseRgb, float3(0.55, 0.55, 0.60), 1.0 - ringMask);
-    return float4(borderRgb, outerMask);
+    float4 col = float4(0.0);
+    col = mix(col, in.color_b, ringMask);
+    col = mix(col, in.color_a, activeMask);
+    col = mix(col, in.color_b, lineMask);
+    col = mix(col, in.color_a, notchMask);
+    if (col.a < 0.01) { discard_fragment(); }
+    return col;
 }
 "#;
 
@@ -193,7 +211,7 @@ impl WidgetDefinition for KnobWidget {
                 itime: 0.0,
                 uniform_a: [0.0; 4],
                 uniform_b: [0.0; 4],
-                color_a: theme::WIDGET_KNOB_FILLED().to_rgba(),
+                color_a: theme::WIDGET_FOCUS_BG().to_rgba(),
                 color_b: theme::WIDGET_KNOB_TRACK().to_rgba(),
                 color_c: [0.0; 4],
                 color_d: [0.0; 4],

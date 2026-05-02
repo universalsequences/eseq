@@ -3,7 +3,12 @@ use std::rc::Rc;
 
 use super::{Align, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, resolve_align};
 #[cfg(target_os = "macos")]
-use super::{MetalPrimitive, WidgetViewport};
+use super::{
+    MetalPrimitive, MetalRectPrimitive, WidgetInstance, WidgetViewport, ndc_bounds,
+    resolve_named_color,
+};
+#[cfg(target_os = "macos")]
+use crate::backend::Color;
 use crate::layout::Rect;
 use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num, prop_is_keyword,
@@ -89,6 +94,57 @@ fn box_mouse_info(phase: &str, modifiers: KeyModifiers) -> Value {
         Rc::new(RefCell::new(Value::Bool(super_pressed))),
     );
     Value::Map(info)
+}
+
+#[cfg(target_os = "macos")]
+fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
+    if radius_px <= 0.0 {
+        return 0.001;
+    }
+    let px_h = (rect.height * viewport.cell_h).max(1.0);
+    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+}
+
+#[cfg(target_os = "macos")]
+fn push_rounded_rect(
+    prims: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    color: Color,
+    viewport: WidgetViewport,
+    radius_px: f32,
+) {
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    prims.push(MetalPrimitive::WidgetInstance {
+        widget_type: "box".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [0.0; 4],
+            uniform_b: [0.0; 4],
+            color_a: color.to_rgba(),
+            color_b: [0.0; 4],
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: normalized_corner_radius(rect, viewport, radius_px),
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+        },
+        is_background: true,
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn inset_rect(rect: Rect, inset_x: f32, inset_y: f32) -> Rect {
+    Rect {
+        row: rect.row + inset_y,
+        col: rect.col + inset_x,
+        width: (rect.width - inset_x * 2.0).max(0.0),
+        height: (rect.height - inset_y * 2.0).max(0.0),
+    }
 }
 
 impl WidgetDefinition for BoxWidget {
@@ -292,12 +348,139 @@ impl WidgetDefinition for BoxWidget {
     }
 
     #[cfg(target_os = "macos")]
+    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
+        Some(super::ROUNDED_RECT_SHADER)
+    }
+
+    #[cfg(target_os = "macos")]
     fn build_metal_primitives(
         &self,
         _widget_type: &str,
         node: &LayoutNode,
         viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
+        let mut prims = Vec::new();
+        let corner_radius_px = match node.props.get("corner-radius") {
+            Some(Value::Number(n)) => (*n as f32).max(0.0),
+            _ => 0.0,
+        };
+        let border_width_px = match node.props.get("border-width") {
+            Some(Value::Number(n)) => (*n as f32).max(0.0),
+            _ => 1.0,
+        };
+        let has_rounded_corners = corner_radius_px > 0.0;
+        let background_color = if node.props.contains_key("background-color") {
+            Some(resolve_named_color(
+                &node.props,
+                "background-color",
+                Color::rgba(0.0, 0.0, 0.0, 0.0),
+            ))
+        } else {
+            None
+        };
+        let border_color = if node.props.contains_key("border-color") {
+            Some(resolve_named_color(
+                &node.props,
+                "border-color",
+                Color::rgba(0.0, 0.0, 0.0, 0.0),
+            ))
+        } else {
+            None
+        };
+
+        if has_rounded_corners {
+            if let Some(color) = border_color {
+                if color.a > 0.0 && border_width_px > 0.0 {
+                    push_rounded_rect(&mut prims, node.rect, color, viewport, corner_radius_px);
+                }
+            }
+            if let Some(color) = background_color {
+                if color.a > 0.0 {
+                    let inset_x = if viewport.cell_w > 0.0 {
+                        border_width_px / viewport.cell_w
+                    } else {
+                        0.0
+                    };
+                    let inset_y = if viewport.cell_h > 0.0 {
+                        border_width_px / viewport.cell_h
+                    } else {
+                        0.0
+                    };
+                    push_rounded_rect(
+                        &mut prims,
+                        inset_rect(node.rect, inset_x, inset_y),
+                        color,
+                        viewport,
+                        (corner_radius_px - border_width_px).max(0.0),
+                    );
+                }
+            }
+        } else if let Some(color) = background_color {
+            if color.a > 0.0 {
+                prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
+                    rect: node.rect,
+                    color,
+                }));
+            }
+        }
+
+        if !has_rounded_corners {
+            let Some(color) = border_color else {
+                if let Some(Value::String(bg_type)) = node.props.get("background") {
+                    let has_scroll_child = node.children.iter().any(|c| c.widget_type == "scroll");
+                    let bg_rect = if has_scroll_child {
+                        node.rect
+                    } else {
+                        content_extent(node)
+                    };
+                    prims.extend(super::sdf_widget::sdf_widget_background_primitives(
+                        bg_type,
+                        node.widget_id,
+                        bg_rect,
+                        viewport,
+                        &node.props,
+                    ));
+                }
+                return prims;
+            };
+            if color.a > 0.0 {
+                let px = border_width_px;
+                let bw_x = if viewport.cell_w > 0.0 {
+                    px / viewport.cell_w
+                } else {
+                    0.0
+                };
+                let bw_y = if viewport.cell_h > 0.0 {
+                    px / viewport.cell_h
+                } else {
+                    0.0
+                };
+                if bw_x > 0.0 && bw_y > 0.0 {
+                    let top = Rect {
+                        height: bw_y.min(node.rect.height),
+                        ..node.rect
+                    };
+                    let bottom = Rect {
+                        row: node.rect.row + (node.rect.height - bw_y).max(0.0),
+                        height: bw_y.min(node.rect.height),
+                        ..node.rect
+                    };
+                    let left = Rect {
+                        width: bw_x.min(node.rect.width),
+                        ..node.rect
+                    };
+                    let right = Rect {
+                        col: node.rect.col + (node.rect.width - bw_x).max(0.0),
+                        width: bw_x.min(node.rect.width),
+                        ..node.rect
+                    };
+                    for rect in [top, bottom, left, right] {
+                        prims.push(MetalPrimitive::Rect(MetalRectPrimitive { rect, color }));
+                    }
+                }
+            }
+        }
+
         if let Some(Value::String(bg_type)) = node.props.get("background") {
             // Scroll-containing boxes use their own layout rect: content_extent
             // would include scroll children, but node.rect is the viewport.
@@ -307,14 +490,15 @@ impl WidgetDefinition for BoxWidget {
             } else {
                 content_extent(node)
             };
-            return super::sdf_widget::sdf_widget_background_primitives(
+            prims.extend(super::sdf_widget::sdf_widget_background_primitives(
                 bg_type,
                 node.widget_id,
                 bg_rect,
                 viewport,
                 &node.props,
-            );
+            ));
         }
-        Vec::new()
+
+        prims
     }
 }

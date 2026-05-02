@@ -4,6 +4,7 @@ pub mod grid;
 pub mod hslider;
 pub mod hstack;
 pub mod knob;
+pub mod knob_number;
 pub mod label;
 pub mod number_picker;
 pub mod scroll;
@@ -555,6 +556,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &label::LABEL_WIDGET,
     &hslider::HSLIDER_WIDGET,
     &vslider::VSLIDER_WIDGET,
+    &knob_number::KNOB_NUMBER_WIDGET,
     &toggle::TOGGLE_WIDGET,
     &knob::KNOB_WIDGET,
     &tabs::TABS_WIDGET,
