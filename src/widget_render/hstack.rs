@@ -1,7 +1,7 @@
 use super::{Align, Justify, WidgetDefinition, distribute_justify, resolve_align, resolve_justify};
 use crate::layout::{
     Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, get_widget_type,
-    shrink_constraints_xy,
+    prop_is_keyword, shrink_constraints_xy,
 };
 use crate::vm::Value;
 
@@ -33,7 +33,10 @@ impl WidgetDefinition for HStackWidget {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
         let pad_y = padding / constraints.aspect;
         let gap = get_prop_num(node, "gap").map(f64_to_f32).unwrap_or(1.0);
-        let inner = shrink_constraints_xy(constraints, padding, pad_y);
+        let mut inner = shrink_constraints_xy(constraints, padding, pad_y);
+        if !prop_is_keyword(node, "width", "fill") {
+            inner.max_width = f32::MAX;
+        }
         let child_sizes = children
             .iter()
             .filter_map(|child| measure_child(child, inner))
@@ -67,13 +70,16 @@ impl WidgetDefinition for HStackWidget {
 
         let inner_width = (area.width - padding * 2.0).max(0.0);
         let inner_height = (area.height - pad_y * 2.0).max(0.0);
-        let inner_constraints = Constraints {
+        let mut inner_constraints = Constraints {
             min_width: 0.0,
             max_width: inner_width,
             min_height: 0.0,
             max_height: inner_height,
             aspect: 1.0,
         };
+        if !prop_is_keyword(node, "width", "fill") {
+            inner_constraints.max_width = f32::MAX;
+        }
 
         // Pass 1: measure all children, collect flex values
         let measured: Vec<(&Value, Size, f32)> = children

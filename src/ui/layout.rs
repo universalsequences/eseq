@@ -1441,4 +1441,21 @@ mod tests {
         assert_eq!(layout.rect.width, 80.0);
         assert_eq!(layout.children[0].rect.width, 120.0);
     }
+
+    #[test]
+    fn non_fill_hstack_positions_siblings_after_overflow_child() {
+        let tree = hstack(
+            1.0,
+            vec![
+                bx(None, Some(2.0), vec![bx(Some(120.0), Some(2.0), vec![])]),
+                bx(Some(20.0), Some(2.0), vec![]),
+            ],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+
+        assert_eq!(layout.rect.width, 80.0);
+        assert_eq!(layout.children[0].rect.width, 120.0);
+        assert_eq!(layout.children[1].rect.col, 121.0);
+    }
 }
