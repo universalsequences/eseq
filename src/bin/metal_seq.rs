@@ -5319,7 +5319,7 @@ fn focused_widget_matches(editor: &Editor, predicate: impl FnOnce(&str) -> bool)
 
 fn focused_widget_captures_typing(editor: &Editor) -> bool {
     focused_widget_matches(editor, |widget_type| {
-        matches!(widget_type, "text-input" | "number-picker")
+        matches!(widget_type, "text-input" | "number-picker" | "knob-number")
     })
 }
 
