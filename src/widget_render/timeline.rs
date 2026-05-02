@@ -6,8 +6,8 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MetalProportionalTextPrimitive, MetalQuadPrimitive,
-    MetalRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent,
-    resolve_named_color, styled_cell,
+    MetalRectPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetInstance,
+    WidgetKeyEvent, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
     time_view::{TimeRuler, TimeRulerMode, TimeViewport},
 };
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
@@ -33,6 +33,7 @@ struct TimelineItem {
     start: f64,
     end: f64,
     selected: bool,
+    label: Option<String>,
     color: Option<crate::backend::Color>,
 }
 
@@ -54,6 +55,12 @@ enum TimelineTool {
     Scrub,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SidebarStyle {
+    Default,
+    Piano,
+}
+
 #[derive(Clone)]
 struct TimelineView {
     rect: Rect,
@@ -64,8 +71,13 @@ struct TimelineView {
     zoom_min_duration: f64,
     zoom_max_duration: f64,
     content_length: Option<f64>,
+    content_length_min: f64,
+    content_length_max: f64,
     time_ruler: Option<TimeRuler>,
     playhead_time: Option<f64>,
+    item_color: crate::backend::Color,
+    loop_color: crate::backend::Color,
+    sidebar_style: SidebarStyle,
     lane_scroll: f64,
     lane_height: Option<f32>,
     snap: f64,
@@ -84,10 +96,78 @@ struct TimelineView {
 #[derive(Clone)]
 enum HitRegion {
     Header,
+    ContentLengthEnd,
     Sidebar { lane: usize },
     Background { time: f64 },
     ItemBody { item: TimelineItem },
     ItemEdgeEnd { item: TimelineItem },
+}
+
+thread_local! {
+    static TIMELINE_HOVER_EDGE: RefCell<Option<(u64, Value)>> = const { RefCell::new(None) };
+}
+
+fn set_timeline_hover_edge(widget_id: u64, item_id: Option<Value>) {
+    TIMELINE_HOVER_EDGE.with(|state| {
+        let mut state = state.borrow_mut();
+        let next = item_id.map(|id| (widget_id, id));
+        if *state != next {
+            *state = next;
+            super::bump_widget_state_generation();
+        }
+    });
+}
+
+fn timeline_hover_edge_matches(widget_id: u64, item_id: &Value) -> bool {
+    TIMELINE_HOVER_EDGE.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .is_some_and(|(hover_widget_id, hover_item_id)| {
+                *hover_widget_id == widget_id && hover_item_id == item_id
+            })
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
+    if radius_px <= 0.0 {
+        return 0.001;
+    }
+    let px_h = (rect.height * viewport.cell_h).max(1.0);
+    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+}
+
+#[cfg(target_os = "macos")]
+fn push_rounded_rect(
+    primitives: &mut Vec<MetalPrimitive>,
+    rect: Rect,
+    color: crate::backend::Color,
+    viewport: WidgetViewport,
+    radius_px: f32,
+) {
+    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let px_w = rect.width * viewport.cell_w;
+    let px_h = rect.height * viewport.cell_h;
+    primitives.push(MetalPrimitive::WidgetInstance {
+        widget_type: "box".to_string(),
+        instance: WidgetInstance {
+            ndc_min,
+            ndc_max,
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: viewport.time_seconds,
+            uniform_a: [0.0; 4],
+            uniform_b: [0.0; 4],
+            color_a: color.to_rgba(),
+            color_b: [0.0; 4],
+            color_c: [0.0; 4],
+            color_d: [0.0; 4],
+            corner_radius: normalized_corner_radius(rect, viewport, radius_px),
+            pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+        },
+        is_background: false,
+    });
 }
 
 impl WidgetDefinition for TimelineWidget {
@@ -292,6 +372,14 @@ impl WidgetDefinition for TimelineWidget {
     ) -> MouseEventOutcome {
         let view = TimelineView::from_props(&node.props, node.rect);
         match mouse_kind {
+            MouseEventKind::Moved => {
+                let hovered_item = match view.hit_test(local_col, local_row) {
+                    Some(HitRegion::ItemEdgeEnd { item }) => Some(item.id),
+                    _ => None,
+                };
+                set_timeline_hover_edge(node.widget_id, hovered_item);
+                MouseEventOutcome::Consume
+            }
             MouseEventKind::Down(MouseButton::Left) => view
                 .handle_pointer_down(local_col, local_row)
                 .map(WidgetEvent::Custom)
@@ -316,6 +404,16 @@ impl WidgetDefinition for TimelineWidget {
                 .map(MouseEventOutcome::Dispatch)
                 .unwrap_or(MouseEventOutcome::Consume),
             _ => MouseEventOutcome::Consume,
+        }
+    }
+
+    fn cursor(&self, node: &LayoutNode, local_col: f32, local_row: f32) -> super::WidgetCursor {
+        let view = TimelineView::from_props(&node.props, node.rect);
+        match view.hit_test(local_col, local_row) {
+            Some(HitRegion::ItemEdgeEnd { .. }) | Some(HitRegion::ContentLengthEnd) => {
+                super::WidgetCursor::EwResize
+            }
+            _ => super::WidgetCursor::Default,
         }
     }
 
@@ -394,7 +492,7 @@ impl WidgetDefinition for TimelineWidget {
 #[cfg(target_os = "macos")]
 fn build_metal_primitives(
     node: &LayoutNode,
-    _viewport: super::WidgetViewport,
+    viewport: super::WidgetViewport,
 ) -> Vec<MetalPrimitive> {
     if node.widget_type != "timeline" {
         return Vec::new();
@@ -406,39 +504,63 @@ fn build_metal_primitives(
     let mut primitives = Vec::new();
 
     if view.header_height > 0.0 {
+        let loop_band = view.loop_band_rect().map(|(x, width)| {
+            let y = rect.row + (view.header_height * 0.55).min(view.header_height - 0.18);
+            let bottom_inset = 0.08_f32.min(view.header_height * 0.12);
+            let height = (view.header_height - (y - rect.row) - bottom_inset).max(0.12);
+            (x, y, width, height)
+        });
         primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
             rect: Rect {
                 row: rect.row,
                 col: rect.col,
                 width: rect.width,
-                height: 1.0,
+                height: view.header_height,
             },
             color: theme::STATUS_BG(),
         }));
+        if let Some((x, y, width, height)) = loop_band {
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width,
+                height,
+                color: crate::backend::Color {
+                    a: 0.16,
+                    ..view.loop_color
+                },
+            }));
+        }
         for (x, _) in view.metal_grid_lines() {
             primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
                 x: x - 0.0625,
                 y: rect.row,
                 width: 0.125,
-                height: 1.0,
+                height: view.header_height,
                 color: theme::BRIGHT_BLACK(),
             }));
         }
         for (x, label) in view.metal_time_ruler_labels() {
             let label_col = x + 0.36;
             let label_width = label.chars().count() as f32 * 0.58 + 0.28;
+            let label_row = rect.row
+                + if view.header_height >= 1.6 {
+                    0.26
+                } else {
+                    0.06
+                };
             primitives.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: Rect {
-                    row: rect.row,
+                    row: label_row - 0.04,
                     col: label_col - 0.10,
                     width: label_width,
-                    height: view.header_height.max(1.0),
+                    height: 0.86,
                 },
                 color: theme::STATUS_BG(),
             }));
             primitives.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
-                    row: rect.row - 0.02,
+                    row: label_row,
                     col: label_col,
                     text: label,
                     font_size: 10.5,
@@ -446,6 +568,42 @@ fn build_metal_primitives(
                     bg: theme::STATUS_BG(),
                 },
             ));
+        }
+        if let Some((x, y, width, height)) = loop_band {
+            let border_color = crate::backend::Color {
+                a: 0.95,
+                ..view.loop_color
+            };
+            let h = (1.0 / viewport.cell_h).min(height);
+            let v = (1.0 / viewport.cell_w).min(width);
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width,
+                height: h,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y: y + height - h,
+                width,
+                height: h,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x,
+                y,
+                width: v,
+                height,
+                color: border_color,
+            }));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: x + width - v,
+                y,
+                width: v,
+                height,
+                color: border_color,
+            }));
         }
     }
 
@@ -456,25 +614,97 @@ fn build_metal_primitives(
         if view.sidebar_width > 0.0 {
             let lane = &view.lanes[lane_index];
             let sidebar_bg = lane.sidebar_bg.unwrap_or(theme::BLACK());
-            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
-                x: rect.col,
-                y: row_start,
-                width: view.sidebar_width,
-                height: lane_height,
-                color: sidebar_bg,
-            }));
+            if view.sidebar_style == SidebarStyle::Piano {
+                let white_key = theme::WHITE();
+                let border_color = crate::backend::Color::from_hex(0x1a, 0x1a, 0x1d);
+                let is_black_key = sidebar_bg == theme::BLACK();
+                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    x: rect.col,
+                    y: row_start,
+                    width: view.sidebar_width,
+                    height: lane_height,
+                    color: white_key,
+                }));
+                let separator_height = (1.0 / viewport.cell_h).min(lane_height);
+                push_rounded_rect(
+                    &mut primitives,
+                    Rect {
+                        row: row_start + lane_height * 0.5 - separator_height * 0.5,
+                        col: rect.col,
+                        width: view.sidebar_width,
+                        height: separator_height,
+                    },
+                    border_color,
+                    viewport,
+                    0.0,
+                );
+                if is_black_key {
+                    let black_width = (view.sidebar_width * 0.66).max(0.0);
+                    let black_height = (lane_height * 0.78).max(0.24);
+                    let black_color = crate::backend::Color::from_hex(0x05, 0x05, 0x06);
+                    let black_rect = Rect {
+                        row: row_start + ((lane_height - black_height) * 0.5),
+                        col: rect.col,
+                        width: black_width,
+                        height: black_height,
+                    };
+                    let cap_width = (black_height * 0.7).min(black_width);
+                    let body_width = (black_width - cap_width * 0.5).max(0.0);
+                    primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                        x: black_rect.col,
+                        y: black_rect.row,
+                        width: body_width,
+                        height: black_rect.height,
+                        color: black_color,
+                    }));
+                    push_rounded_rect(
+                        &mut primitives,
+                        Rect {
+                            row: black_rect.row,
+                            col: black_rect.col + black_width - cap_width,
+                            width: cap_width,
+                            height: black_rect.height,
+                        },
+                        black_color,
+                        viewport,
+                        16.0,
+                    );
+                }
+            } else {
+                primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                    x: rect.col,
+                    y: row_start,
+                    width: view.sidebar_width,
+                    height: lane_height,
+                    color: sidebar_bg,
+                }));
+            }
             // Lane label text
             let label = lane.label.as_deref().unwrap_or("");
             if !label.is_empty() {
                 let label_fg = lane.label_fg.unwrap_or(theme::FG());
                 primitives.push(MetalPrimitive::ProportionalText(
                     MetalProportionalTextPrimitive {
-                        row: row_start + ((lane_height - 1.0).max(0.0) * 0.5) - 0.02,
-                        col: rect.col + 0.12,
+                        row: row_start + ((lane_height - 1.0).max(0.0) * 0.5)
+                            - 0.02
+                            - if view.sidebar_style == SidebarStyle::Piano {
+                                lane_height * 0.5
+                            } else {
+                                0.0
+                            },
+                        col: if view.sidebar_style == SidebarStyle::Piano {
+                            rect.col + 0.24
+                        } else {
+                            rect.col + 0.12
+                        },
                         text: label.to_string(),
                         font_size: 10.5,
                         fg: label_fg,
-                        bg: sidebar_bg,
+                        bg: if view.sidebar_style == SidebarStyle::Piano {
+                            theme::WHITE()
+                        } else {
+                            sidebar_bg
+                        },
                     },
                 ));
             }
@@ -515,7 +745,7 @@ fn build_metal_primitives(
                 x: playhead_x - 0.0625,
                 y: rect.row,
                 width: 0.125,
-                height: 1.0,
+                height: view.header_height,
                 color: theme::YELLOW(),
             }));
         }
@@ -593,15 +823,12 @@ fn build_metal_primitives(
         }));
     }
 
+    let mut item_rects = Vec::new();
     for item in &view.items {
         let Some((x, y, width, height)) = view.metal_item_rect(item) else {
             continue;
         };
-        let item_color = if view.item_selected(item) {
-            theme::PURPLE()
-        } else {
-            item.color.unwrap_or(theme::WHITE())
-        };
+        let item_color = item.color.unwrap_or(view.item_color);
         primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
             x,
             y,
@@ -609,6 +836,92 @@ fn build_metal_primitives(
             height,
             color: item_color,
         }));
+        if let Some(label) = &item.label {
+            if width >= 3.0 && height >= 0.85 {
+                primitives.push(MetalPrimitive::ProportionalText(
+                    MetalProportionalTextPrimitive {
+                        row: y + ((height - 0.80).max(0.0) * 0.5) - 0.02,
+                        col: x + 0.34,
+                        text: label.clone(),
+                        font_size: 10.5,
+                        fg: theme::BLACK(),
+                        bg: item_color,
+                    },
+                ));
+            }
+        }
+        item_rects.push((
+            x,
+            y,
+            width,
+            height,
+            view.item_selected(item),
+            timeline_hover_edge_matches(node.widget_id, &item.id),
+        ));
+    }
+
+    let item_border_color = crate::backend::Color {
+        r: 0.02,
+        g: 0.025,
+        b: 0.03,
+        a: 0.72,
+    };
+    let selected_border_color = crate::backend::Color::from_hex(0xb9, 0xee, 0xff);
+    for (x, y, width, height, selected, resize_hovered) in item_rects {
+        let thickness = if selected { 0.16_f32 } else { 0.08_f32 }
+            .min(width * 0.5)
+            .min(height * 0.5);
+        if thickness <= 0.0 {
+            continue;
+        }
+        let border_color = if selected {
+            selected_border_color
+        } else {
+            item_border_color
+        };
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x,
+            y,
+            width,
+            height: thickness,
+            color: border_color,
+        }));
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x,
+            y: y + height - thickness,
+            width,
+            height: thickness,
+            color: border_color,
+        }));
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x,
+            y,
+            width: thickness,
+            height,
+            color: border_color,
+        }));
+        primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+            x: x + width - thickness,
+            y,
+            width: thickness,
+            height,
+            color: border_color,
+        }));
+        if resize_hovered {
+            let hover_width = 0.22_f32.min(width.max(0.0));
+            primitives.push(MetalPrimitive::Quad(MetalQuadPrimitive {
+                x: x + width - hover_width,
+                y,
+                width: hover_width,
+                height,
+                color: crate::backend::Color {
+                    r: 0.74,
+                    g: 0.94,
+                    b: 1.0,
+                    a: 0.95,
+                },
+            }));
+        }
     }
 
     primitives
@@ -642,11 +955,16 @@ impl TimelineView {
                 .get("content-length")
                 .and_then(as_number)
                 .map(|length| length.max(0.0)),
+            content_length_min: get_num(props, "content-length-min", 1.0).max(0.0),
+            content_length_max: get_num(props, "content-length-max", 256.0).max(1.0),
             time_ruler: props
                 .get("time-ruler")
                 .and_then(get_map)
                 .and_then(|map| get_time_ruler(&map)),
             playhead_time: props.get("playhead-time").and_then(as_number),
+            item_color: resolve_named_color(props, "item-color", theme::BLUE()),
+            loop_color: resolve_named_color(props, "loop-color", theme::BLUE()),
+            sidebar_style: get_sidebar_style(props),
             lane_scroll: get_num(props, "lane-scroll", 0.0).max(0.0),
             lane_height: props
                 .get("lane-height")
@@ -703,6 +1021,28 @@ impl TimelineView {
             return None;
         }
         Some((x, self.rect.row, width, self.rect.height))
+    }
+
+    fn loop_band_rect(&self) -> Option<(f32, f32)> {
+        let content_length = self.content_length?;
+        if content_length <= 0.0 {
+            return None;
+        }
+        let view_end = self.view_start + self.view_duration;
+        if view_end <= 0.0 || self.view_start >= content_length {
+            return None;
+        }
+        let content = self.content_rect();
+        let start = self
+            .x_for_time(0.0_f64.max(self.view_start))
+            .max(content.col);
+        let end = self
+            .x_for_time(content_length.min(view_end))
+            .min(content.col + content.width);
+        if end <= start {
+            return None;
+        }
+        Some((start, end - start))
     }
 
     fn minimum_duration(&self) -> f64 {
@@ -795,6 +1135,10 @@ impl TimelineView {
 
     fn snap_resize_time(&self, time: f64) -> f64 {
         self.snap_value(time, self.effective_resize_snap(), self.resize_snap_floor)
+    }
+
+    fn snap_edit_time(&self, time: f64) -> f64 {
+        self.snap_resize_time(time)
     }
 
     fn effective_resize_snap(&self) -> f64 {
@@ -936,6 +1280,18 @@ impl TimelineView {
             return Some(HitRegion::Sidebar { lane });
         }
         if local_row < self.rect.row + self.header_height {
+            if self.content_length.is_some() {
+                let content = self.content_rect();
+                let content_end = self.x_for_time(self.content_length?);
+                let edge_slop = 0.75;
+                if content_end >= content.col
+                    && content_end <= content.col + content.width
+                    && local_col >= content_end - edge_slop
+                    && local_col <= content_end + edge_slop
+                {
+                    return Some(HitRegion::ContentLengthEnd);
+                }
+            }
             return Some(HitRegion::Header);
         }
         for item in self.items.iter().rev() {
@@ -969,6 +1325,7 @@ impl TimelineView {
     fn begin_gesture(&self, local_col: f32, local_row: f32) -> Option<Value> {
         let hit = self.hit_test(local_col, local_row)?;
         let current_time = self.snap_time(self.time_at_col(local_col));
+        let current_edit_time = self.snap_edit_time(self.time_at_col(local_col));
         let current_lane = self.lane_at_row(local_row);
         match self.tool {
             TimelineTool::Pointer => match hit {
@@ -993,9 +1350,12 @@ impl TimelineView {
                     ("kind", keyword(":resize-end")),
                     ("id", item.id),
                 ])),
-                HitRegion::Background { time } => Some(map_value(vec![
+                HitRegion::ContentLengthEnd => {
+                    Some(map_value(vec![("kind", keyword(":resize-content-length"))]))
+                }
+                HitRegion::Background { .. } => Some(map_value(vec![
                     ("kind", keyword(":marquee")),
-                    ("time", Value::Number(time)),
+                    ("time", Value::Number(current_edit_time)),
                     ("lane", Value::Number(current_lane as f64)),
                 ])),
                 HitRegion::Header => Some(map_value(vec![("kind", keyword(":scrub"))])),
@@ -1011,7 +1371,7 @@ impl TimelineView {
             ])),
             TimelineTool::Marquee => Some(map_value(vec![
                 ("kind", keyword(":marquee")),
-                ("time", Value::Number(current_time)),
+                ("time", Value::Number(current_edit_time)),
                 ("lane", Value::Number(current_lane as f64)),
             ])),
             TimelineTool::Pan => Some(map_value(vec![
@@ -1035,6 +1395,7 @@ impl TimelineView {
                         ("mode", keyword(":replace")),
                     ]))
                 }
+                HitRegion::ContentLengthEnd => None,
                 HitRegion::Background { time, .. } => Some(action_map(vec![
                     ("type", keyword(":clear-selection")),
                     ("time", Value::Number(time)),
@@ -1076,9 +1437,9 @@ impl TimelineView {
             return None;
         }
         match self.hit_test(local_col, local_row)? {
-            HitRegion::Background { time } => {
-                let start = self.snap_time(time);
-                let default_duration = self.effective_resize_snap().max(1.0);
+            HitRegion::Background { .. } => {
+                let start = self.snap_edit_time(self.time_at_col(local_col));
+                let default_duration = self.minimum_duration();
                 Some(action_map(vec![
                     ("type", keyword(":finish-create-item")),
                     ("lane", Value::Number(self.lane_at_row(local_row) as f64)),
@@ -1100,6 +1461,7 @@ impl TimelineView {
         let raw_time = self.time_at_col(local_col);
         let current_time = self.snap_time(raw_time);
         let current_resize_time = self.snap_resize_time(raw_time);
+        let current_edit_time = self.snap_edit_time(raw_time);
         let current_lane = self.lane_at_row(local_row);
         let gesture = get_map(gesture?)?;
         match gesture.get("kind") {
@@ -1152,18 +1514,29 @@ impl TimelineView {
                     ),
                 ]))
             }
+            Some(Value::Keyword(kind)) if kind == "resize-content-length" => {
+                let length = current_resize_time
+                    .round()
+                    .clamp(self.content_length_min, self.content_length_max);
+                Some(action_map(vec![
+                    ("type", keyword(":resize-content-length")),
+                    ("length", Value::Number(length)),
+                ]))
+            }
             Some(Value::Keyword(kind)) if kind == "marquee" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)? as usize;
-                if (start_time - current_time).abs() < f64::EPSILON && start_lane == current_lane {
+                if (start_time - current_edit_time).abs() < f64::EPSILON
+                    && start_lane == current_lane
+                {
                     return Some(action_map(vec![("type", keyword(":clear-selection"))]));
                 }
                 let lane_a = start_lane.min(current_lane);
                 let lane_b = start_lane.max(current_lane);
                 Some(action_map(vec![
                     ("type", keyword(":marquee-select")),
-                    ("time-a", Value::Number(start_time.min(current_time))),
-                    ("time-b", Value::Number(start_time.max(current_time))),
+                    ("time-a", Value::Number(start_time.min(current_edit_time))),
+                    ("time-b", Value::Number(start_time.max(current_edit_time))),
                     ("lane-a", Value::Number(lane_a as f64)),
                     ("lane-b", Value::Number(lane_b as f64)),
                     ("mode", keyword(":replace")),
@@ -1387,8 +1760,8 @@ impl TimelineView {
         gesture: Option<&Value>,
     ) -> Option<Value> {
         let raw_time = self.time_at_col(local_col);
-        let current_time = self.snap_time(raw_time);
         let current_resize_time = self.snap_resize_time(raw_time);
+        let current_edit_time = self.snap_edit_time(raw_time);
         let current_lane = self.lane_at_row(local_row);
         let gesture = get_map(gesture?)?;
         match gesture.get("kind") {
@@ -1406,15 +1779,17 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "marquee" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)? as usize;
-                if (start_time - current_time).abs() < f64::EPSILON && start_lane == current_lane {
+                if (start_time - current_edit_time).abs() < f64::EPSILON
+                    && start_lane == current_lane
+                {
                     return Some(action_map(vec![("type", keyword(":clear-selection"))]));
                 }
                 let lane_a = start_lane.min(current_lane);
                 let lane_b = start_lane.max(current_lane);
                 Some(action_map(vec![
                     ("type", keyword(":finish-marquee-select")),
-                    ("time-a", Value::Number(start_time.min(current_time))),
-                    ("time-b", Value::Number(start_time.max(current_time))),
+                    ("time-a", Value::Number(start_time.min(current_edit_time))),
+                    ("time-b", Value::Number(start_time.max(current_edit_time))),
                     ("lane-a", Value::Number(lane_a as f64)),
                     ("lane-b", Value::Number(lane_b as f64)),
                     ("mode", keyword(":replace")),
@@ -1573,6 +1948,15 @@ fn get_tool(props: &HashMap<String, Value>) -> TimelineTool {
     }
 }
 
+fn get_sidebar_style(props: &HashMap<String, Value>) -> SidebarStyle {
+    match props.get("sidebar-style") {
+        Some(Value::Keyword(style)) | Some(Value::String(style)) if style == "piano" => {
+            SidebarStyle::Piano
+        }
+        _ => SidebarStyle::Default,
+    }
+}
+
 fn get_num(props: &HashMap<String, Value>, key: &str, default: f64) -> f64 {
     match props.get(key) {
         Some(Value::Number(n)) => *n,
@@ -1616,6 +2000,7 @@ fn get_items(props: &HashMap<String, Value>) -> Vec<TimelineItem> {
                 start: map.get("start").and_then(as_number).unwrap_or(0.0),
                 end: map.get("end").and_then(as_number).unwrap_or(0.0),
                 selected: map.get("selected").and_then(as_bool).unwrap_or(false),
+                label: map.get("label").and_then(as_string),
                 color: map.get("color").map(|value| {
                     resolve_named_color(
                         &HashMap::from([("color".to_string(), value.clone())]),
@@ -2206,6 +2591,107 @@ mod tests {
 
         assert_eq!(view.effective_resize_snap(), 0.5);
         assert_eq!(view.snap_resize_time(3.4), 3.5);
+    }
+
+    #[test]
+    fn double_click_create_uses_zoomed_grid_snap() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(4.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("resize-snap".to_string(), keyword_value("grid")),
+            ("resize-snap-mode".to_string(), keyword_value("round")),
+            (
+                "time-ruler".to_string(),
+                map_value_raw(vec![
+                    ("mode", keyword_value("bars-beats")),
+                    ("beats-per-bar", number_value(4.0)),
+                ]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 128.0,
+                height: 8.0,
+            },
+        );
+
+        let action = view
+            .handle_double_click(76.8, 2.0)
+            .expect("double click should create");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("start").map(|value| value.borrow().clone()),
+            Some(Value::Number(2.5))
+        );
+        assert_eq!(
+            map.get("end").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.0))
+        );
+    }
+
+    #[test]
+    fn marquee_selection_uses_zoomed_grid_snap() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(4.0)),
+            ("snap".to_string(), number_value(1.0)),
+            ("resize-snap".to_string(), keyword_value("grid")),
+            ("resize-snap-mode".to_string(), keyword_value("round")),
+            (
+                "time-ruler".to_string(),
+                map_value_raw(vec![
+                    ("mode", keyword_value("bars-beats")),
+                    ("beats-per-bar", number_value(4.0)),
+                ]),
+            ),
+        ]);
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 128.0,
+                height: 8.0,
+            },
+        );
+
+        let gesture = view.begin_gesture(76.8, 2.0).expect("marquee gesture");
+        let action = view
+            .handle_pointer_drag(108.8, 2.0, Some(&gesture))
+            .expect("marquee action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("time-a").map(|value| value.borrow().clone()),
+            Some(Value::Number(2.5))
+        );
+        assert_eq!(
+            map.get("time-b").map(|value| value.borrow().clone()),
+            Some(Value::Number(3.5))
+        );
     }
 
     #[test]
