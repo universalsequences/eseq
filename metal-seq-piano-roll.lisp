@@ -5,7 +5,7 @@
 (defstate piano-roll-view-start 0)
 (defstate piano-roll-view-duration 10.6667)
 (defstate piano-roll-lane-scroll 36)
-(defstate piano-roll-lane-height 1)
+(defstate piano-roll-lane-height 0.5)
 (defstate piano-roll-cursor-time 0)
 (defstate piano-roll-selection-rect nil)
 (defstate piano-roll-status "piano roll")
@@ -78,6 +78,10 @@
       (piano-roll-zoom-lanes event)
       :set-cursor
       (set! piano-roll-cursor-time event.time)
+      :resize-content-length
+      (do
+        (cool-off-follow)
+        (seq-set-track-param :num-steps event.length))
       :marquee-select
       (set! piano-roll-selection-rect event)
       :finish-marquee-select
@@ -95,10 +99,11 @@
     :height 35
     :focusable true
     :sidebar-width 5
+    :sidebar-style :piano
     :header-height 2
     :time-ruler (dict :mode :bars-beats :beats-per-bar 4)
-    :item-color :blue
-    :loop-color :blue
+    :item-color "#48aaf8"
+    :loop-color "#48aaf8"
     :tool piano-roll-tool
     :playhead-time SEQ.playhead
     :lanes SEQ.piano-roll-lanes
@@ -108,6 +113,8 @@
     :view-start piano-roll-view-start
     :view-duration piano-roll-view-duration
     :content-length SEQ.tp-num-steps
+    :content-length-min 1
+    :content-length-max 256
     :lane-scroll piano-roll-lane-scroll
     :lane-height (piano-roll-lane-height-value)
     :snap 1
