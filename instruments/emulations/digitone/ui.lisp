@@ -41,17 +41,19 @@
 (def digitone-param-cell (name title decimals)
   (digitone-param-cell-step-section name title decimals 0 digitone-selected-section))
 
-(def digitone-param-number-section (name title decimals section)
+(def digitone-param-number-section (name title decimals unit section)
   (let ((p (inst-param synth-ui-current-inst name)))
     (if p
       (subtree :key (str "digitone-adsr-number-" name)
         (v-stack :width 4.75 :height 1.75 :gap 0.0 :align :center
-          (label title :font-size 10 :width 4.6
+          (label title :font-size 10
                  :color :gray :bg :transparent)
           (number-picker :value (get p :value)
             :min (get p :min) :max (get p :max) :decimals decimals
+            :unit unit
             :noui true :font-size 10.5
-            :text-color :gray :edit-color :yellow
+            :text-align :center
+            :text-color :widget_focus_bg :edit-color :yellow
             :width 4.6 :height 0.95
             :on-change (lambda (v)
               (do
@@ -88,13 +90,14 @@
         (digitone-set-param release (get env :release))))))
 
 (def digitone-adsr-controls (attack decay sustain release section)
-  (h-stack :width :fill :gap 0.35 :align :start
-    (digitone-param-number-section attack "atk" 0 section)
-    (digitone-param-number-section decay "dec" 0 section)
-    (digitone-param-number-section sustain "sus" 2 section)
-    (if release
-      (digitone-param-number-section release "rel" 0 section)
-      (box :width 4.75 :height 1.75))))
+  (box :width :fill :height 1.95 :padding 0.25
+    (h-stack :width :fill :gap 0.45 :align :start
+      (digitone-param-number-section attack "atk" 0 "ms" section)
+      (digitone-param-number-section decay "dec" 0 "ms" section)
+      (digitone-param-number-section sustain "sus" 2 false section)
+      (if release
+        (digitone-param-number-section release "rel" 0 "ms" section)
+        (box :width 4.75 :height 1.75)))))
 
 (def digitone-selected-adsr ()
   (if (= digitone-selected-section 1)
