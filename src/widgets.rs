@@ -13,6 +13,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "toggle",
         "knob",
         "knob-number",
+        "adsr-editor",
         "meter",
         "text-input",
         "number-picker",

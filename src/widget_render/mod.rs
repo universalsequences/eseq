@@ -1,3 +1,4 @@
+pub mod adsr_editor;
 pub mod box_widget;
 pub mod dropdown;
 pub mod grid;
@@ -559,6 +560,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &knob_number::KNOB_NUMBER_WIDGET,
     &toggle::TOGGLE_WIDGET,
     &knob::KNOB_WIDGET,
+    &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,
     &waveform::WAVEFORM_WIDGET,
