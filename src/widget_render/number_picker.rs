@@ -59,7 +59,7 @@ fn format_value(value: f64, decimals: u32) -> String {
     format!("{:.*}", decimals as usize, value)
 }
 
-/// Compute cursor X offset in cells by summing cached per-character widths.
+/// Compute text X offset in cells by summing cached per-character widths.
 #[cfg(target_os = "macos")]
 fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f32) -> f32 {
     let key = font_size.to_bits();
@@ -88,7 +88,7 @@ impl WidgetDefinition for NumberPickerWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["width", "height", "font-size", "decimals", "noui"]
+        &["width", "height", "font-size", "decimals", "noui", "unit"]
     }
 
     fn measure(
@@ -109,7 +109,9 @@ impl WidgetDefinition for NumberPickerWidget {
                 let mut cache = cw.borrow_mut();
                 if !cache.contains_key(&key) {
                     let mut widths = HashMap::new();
-                    for ch in "0123456789.-".chars() {
+                    for ch in
+                        "0123456789.- %abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".chars()
+                    {
                         let px = measurer.measure_text_px(&ch.to_string(), font_size);
                         widths.insert(ch, px / ctx.cell_w);
                     }
@@ -314,7 +316,17 @@ impl WidgetDefinition for NumberPickerWidget {
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         let value = get_f32_prop(props, "value", 0.0);
         let decimals = get_f32_prop(props, "decimals", 2.0) as u32;
-        let text = format!("▶ {}", format_value(value as f64, decimals));
+        let unit = match props.get("unit") {
+            Some(Value::String(unit)) => unit.as_str(),
+            _ => "",
+        };
+        let value_text = format_value(value as f64, decimals);
+        let display_value = if unit.is_empty() {
+            value_text
+        } else {
+            format!("{value_text} {unit}")
+        };
+        let text = format!("▶ {display_value}");
         let fg = crate::backend::Color {
             r: 0.9,
             g: 0.9,
@@ -358,6 +370,14 @@ impl WidgetDefinition for NumberPickerWidget {
         let state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
         let noui = get_bool_prop(&node.props, "noui", false);
+        let unit = match node.props.get("unit") {
+            Some(Value::String(unit)) => unit.as_str(),
+            _ => "",
+        };
+        let text_align = match node.props.get("text-align") {
+            Some(Value::Keyword(align)) => align.as_str(),
+            _ => "start",
+        };
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
@@ -522,7 +542,7 @@ impl WidgetDefinition for NumberPickerWidget {
         }
 
         // ── Value text ──
-        let text_col = if noui {
+        let base_text_col = if noui {
             node.rect.col + TEXT_PADDING_H
         } else {
             node.rect.col + TEXT_PADDING_H + TRIANGLE_WIDTH
@@ -535,12 +555,29 @@ impl WidgetDefinition for NumberPickerWidget {
             a: 0.0,
         };
 
+        let value_text = format_value(value as f64, decimals);
+        let display_value = if unit.is_empty() {
+            value_text
+        } else {
+            format!("{value_text} {unit}")
+        };
         let (display_text, fg) = if state.editing {
             (state.edit_text.clone(), edit_color)
         } else if is_focused {
-            (format_value(value as f64, decimals), edit_color)
+            (display_value, edit_color)
         } else {
-            (format_value(value as f64, decimals), text_color)
+            (display_value, text_color)
+        };
+        let text_width = cursor_x_from_cache(
+            &display_text,
+            display_text.chars().count(),
+            font_size,
+            viewport.cell_w,
+        );
+        let text_col = match text_align {
+            "center" => node.rect.col + ((node.rect.width - text_width).max(0.0) * 0.5),
+            "right" => node.rect.col + (node.rect.width - text_width - TEXT_PADDING_H).max(0.0),
+            _ => base_text_col,
         };
 
         if !display_text.is_empty() {

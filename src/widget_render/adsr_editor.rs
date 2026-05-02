@@ -46,7 +46,7 @@ fn adsr_x_positions(props: &HashMap<String, Value>) -> (f32, f32, f32, f32) {
     let decay_norm = (adsr_log_weight(decay) / adsr_log_weight(decay_max)).clamp(0.0, 1.0);
     let release_norm = (adsr_log_weight(release) / adsr_log_weight(release_max)).clamp(0.0, 1.0);
     let x1 = release_start * 0.42 * attack_norm;
-    let x2 = (x1 + release_start * 0.23 * decay_norm).min(release_start - 0.08);
+    let x2 = x1 + (release_start - x1) * decay_norm;
     let x3 = release_start;
     let x4 = x3 + (1.0 - x3) * release_norm;
     (x1, x2, x3, x4)
@@ -134,7 +134,7 @@ fn event_for_drag(node: &LayoutNode, handle_idx: i32, col: f32, row: f32) -> Val
             attack = adsr_ms_from_norm(norm, attack_max);
         }
         2 => {
-            let norm = (data_x - x1) / (release_start * 0.23);
+            let norm = (data_x - x1) / (release_start - x1).max(0.0001);
             decay = adsr_ms_from_norm(norm, decay_max);
             sustain = data_y;
         }
@@ -345,7 +345,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float decayNorm = clamp(adsr_logWeight(decay) / adsr_logWeight(5000.0), 0.0, 1.0);
     float releaseNorm = clamp(adsr_logWeight(release) / adsr_logWeight(10000.0), 0.0, 1.0);
     float x1 = releaseStart * 0.42 * attackNorm;
-    float x2 = min(releaseStart - 0.08, x1 + releaseStart * 0.23 * decayNorm);
+    float x2 = x1 + (releaseStart - x1) * decayNorm;
     float x3 = releaseStart;
     float x4 = mix(x3, 1.0, releaseNorm);
 
