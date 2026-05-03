@@ -64,6 +64,7 @@ extern "C" {
     pub fn engine_set_os_workgroup(oswg: *mut c_void);
     pub fn engine_clear_os_workgroup();
     pub fn engine_enable_rt_logging(enable: c_int);
+    pub fn engine_enable_graph_logging(enable: c_int);
     pub fn engine_enable_rt_time_constraint(enable: c_int);
 
     // Graph lifecycle
@@ -158,6 +159,10 @@ pub unsafe fn free_c_ptr(ptr: *mut c_void) {
 
 pub unsafe fn enable_rt_logging(enable: bool) {
     engine_enable_rt_logging(if enable { 1 } else { 0 });
+}
+
+pub unsafe fn enable_graph_logging(enable: bool) {
+    engine_enable_graph_logging(if enable { 1 } else { 0 });
 }
 
 pub unsafe fn enable_rt_time_constraint(enable: bool) {

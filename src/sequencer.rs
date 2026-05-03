@@ -21,4 +21,6 @@ pub use snapshot::{
     SequencerSnapshot, SequencerStepSnapshot, SequencerTrackSnapshot, SequencerTransportSnapshot,
 };
 #[allow(unused_imports)]
-pub use state::{default_empty_effect_chain, PatternSnapshot, SequencerState, StepSnapshot};
+pub use state::{
+    default_empty_effect_chain, PatternSnapshot, SequencerState, StepSlotPlocks, StepSnapshot,
+};

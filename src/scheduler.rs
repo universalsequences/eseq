@@ -302,6 +302,9 @@ fn resolve_effect_params(
                 .copied()
                 .flatten()
                 .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(0.0));
+            if !value.is_finite() {
+                continue;
+            }
             params.push(ScheduledEffectParam {
                 logical_id: slot.node_id as u64,
                 idx,
@@ -341,6 +344,9 @@ fn resolve_instrument_params(
             .copied()
             .flatten()
             .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(0.0));
+        if !value.is_finite() {
+            continue;
+        }
         params.push(ScheduledInstrumentParam { target, idx, value });
     }
     params

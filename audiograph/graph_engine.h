@@ -3,6 +3,9 @@
 
 #include "graph_types.h"
 
+extern _Atomic uint64_t g_param_push_count;
+extern _Atomic uint64_t g_param_push_fail_count;
+
 // ===================== Runtime Graph Types =====================
 
 // Live graph edge buffer
@@ -153,6 +156,7 @@ typedef struct Engine {
   _Atomic int oswg_join_remaining; // count of workers that need to see the flag
   _Atomic int oswg_version;      // incremented on each workgroup change for re-join detection
   _Atomic int rt_log; // enable lightweight debug prints from workers
+  _Atomic int graph_log; // enable per-block audiograph scheduler/output trace
   _Atomic int rt_time_constraint; // apply Mach RT time-constraint policy
 } Engine;
 
@@ -168,6 +172,7 @@ void engine_clear_os_workgroup(void);
 
 // Enable or disable minimal worker join logging (off by default).
 void engine_enable_rt_logging(int enable);
+void engine_enable_graph_logging(int enable);
 
 // Enable/disable Mach time-constraint scheduling for workers (Apple only).
 void engine_enable_rt_time_constraint(int enable);

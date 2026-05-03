@@ -143,11 +143,6 @@ fn register_waveform_sample(path: &Path) {
     }
 }
 
-const DEFAULT_SAMPLES: &[&str] = &[
-    "samples/producers/Boom-Bap/Boom-Bap Kick 51.wav",
-    "samples/producers/madlib/Snare SwaggedOut 3.wav",
-    "samples/producers/donda/PABLO HAT.wav",
-];
 const PAGE_SIZE: usize = 16;
 const AUTO_FOLLOW_COOLDOWN: Duration = Duration::from_secs(5);
 const METER_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -666,10 +661,7 @@ fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                                 .push(format!("(ui-param-control {})", lisp_string_literal(&name)));
                         }
                     }
-                    return format!(
-                        "(v-stack :gap 0.25 {})",
-                        controls.join(" ")
-                    );
+                    return format!("(v-stack :gap 0.25 {})", controls.join(" "));
                 }
             }
             format!(
@@ -692,7 +684,9 @@ fn safe_lisp_ident(value: &str) -> String {
         .collect()
 }
 
-fn build_custom_instrument_ui_source() -> String {
+fn build_custom_instrument_ui_source_with_overlay(
+    overlay: Option<(String, String, String)>,
+) -> String {
     use eseqlisp::parser::{ASTParser, Expression, Parser};
 
     fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String, String)>) {
@@ -729,6 +723,17 @@ fn build_custom_instrument_ui_source() -> String {
 
     let mut functions = String::new();
     let mut dispatch = "false".to_string();
+    if let Some((instrument_name, ui_path, src)) = overlay {
+        if let Some(existing) = ui_sources
+            .iter_mut()
+            .find(|(name, _, _)| name == &instrument_name)
+        {
+            *existing = (instrument_name, ui_path, src);
+        } else {
+            ui_sources.push((instrument_name, ui_path, src));
+        }
+    }
+
     for (instrument_name, ui_path, src) in ui_sources {
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
@@ -767,16 +772,49 @@ fn build_custom_instrument_ui_source() -> String {
             "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) {body}))\n",
             lisp_string_literal(&instrument_name)
         ));
-        dispatch = format!(
-            "(if (= (get inst :name) {}) ({fn_name} inst) {dispatch})",
-            lisp_string_literal(&instrument_name)
-        );
+        let normalized_instrument_name = instrument_name.trim_end_matches('/');
+        let name_match = if normalized_instrument_name == instrument_name {
+            format!(
+                "(= (get inst :name) {})",
+                lisp_string_literal(&instrument_name)
+            )
+        } else {
+            format!(
+                "(or (= (get inst :name) {}) (= (get inst :name) {}))",
+                lisp_string_literal(&instrument_name),
+                lisp_string_literal(normalized_instrument_name)
+            )
+        };
+        dispatch = format!("(if {name_match} ({fn_name} inst) {dispatch})");
     }
 
-    if functions.is_empty() {
-        return String::new();
-    }
     format!("{functions}\n(def custom-instrument-synth-ui (inst) {dispatch})\n")
+}
+
+fn reload_custom_instrument_ui(editor: &mut Editor) {
+    let custom_ui_source =
+        build_custom_instrument_ui_source_with_overlay(active_custom_ui_buffer_overlay(editor));
+    if !custom_ui_source.is_empty() {
+        if let Err(err) = editor.runtime_mut().eval_str(&custom_ui_source) {
+            eprintln!("custom instrument UI load error: {err:?}");
+        }
+    }
+}
+
+fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, String)> {
+    let buffer = editor.active_buffer();
+    let path = buffer.path.as_ref()?;
+    if path.file_name().and_then(|name| name.to_str()) != Some("ui.lisp") {
+        return None;
+    }
+    let folder = path.parent()?;
+    if !folder.join("dsp.lisp").exists() {
+        return None;
+    }
+    let root = Path::new("instruments");
+    let rel = folder.strip_prefix(root).ok()?;
+    let instrument_name = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
+    Some((instrument_name, path.display().to_string(), buffer.text()))
 }
 
 fn filter_instrument_tree_nodes(
@@ -810,45 +848,11 @@ fn filter_instrument_tree_nodes(
 
 fn build_instrument_tree_value(query: &str) -> Value {
     let query_lower = query.trim().to_lowercase();
-    let mut top = vec![
-        InstrumentTreeNode {
-            label: "Sampler".to_string(),
-            name: Some("Sampler".to_string()),
-            children: Vec::new(),
-        },
-        InstrumentTreeNode {
-            label: "+ New Instrument".to_string(),
-            name: Some("+ New Instrument".to_string()),
-            children: Vec::new(),
-        },
-    ];
     let root = std::path::Path::new("instruments");
-    top.extend(build_instrument_tree_nodes(root, root));
+    let top = build_instrument_tree_nodes(root, root);
     let top = filter_instrument_tree_nodes(&top, &query_lower);
 
-    let mut value = instrument_tree_nodes_to_value(&top);
-    if let Value::List(items) = &mut value {
-        for item in items {
-            if let Value::Map(map) = &mut *item.borrow_mut() {
-                let label = map.get("label").and_then(|value| match &*value.borrow() {
-                    Value::String(label) => Some(label.clone()),
-                    _ => None,
-                });
-                if label.as_deref() == Some("Sampler") {
-                    map.insert(
-                        "kind".to_string(),
-                        Rc::new(RefCell::new(Value::String("sampler".to_string()))),
-                    );
-                } else if label.as_deref() == Some("+ New Instrument") {
-                    map.insert(
-                        "kind".to_string(),
-                        Rc::new(RefCell::new(Value::String("new-instrument".to_string()))),
-                    );
-                }
-            }
-        }
-    }
-    value
+    instrument_tree_nodes_to_value(&top)
 }
 
 fn filter_sample_tree_nodes(items: &[SampleTreeNode], query_lower: &str) -> Vec<SampleTreeNode> {
@@ -887,7 +891,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = eng.state.clone();
     let stream = eng._stream;
 
-    // 2. Create App and add default tracks
+    // 2. Create App. Start intentionally empty so the first action is choosing
+    // a sound instead of editing a canned pattern.
     let mut app = ui::App::new(
         eng.state.clone(),
         eng.lg_ptr,
@@ -898,22 +903,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut track_names: Vec<String> = Vec::new();
-    for sample_path in DEFAULT_SAMPLES {
-        let path = Path::new(sample_path);
-        if path.exists() {
-            let idx = app.graph_controller().add_track(path)?;
-            register_waveform_sample(path);
-            let name = app.tracks[idx].clone();
-            eprintln!("metal_seq: track {idx} = {name} ({sample_path})");
-            track_names.push(name);
-        } else {
-            eprintln!("metal_seq: skipping missing sample: {sample_path}");
-        }
-    }
-
-    if track_names.is_empty() {
-        return Err("No samples found".into());
-    }
 
     // Collect node IDs for param pushing to audiograph
     let track_pan_ids: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(
@@ -977,11 +966,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("transport-playhead", Value::Number(0.0)),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("track-names", build_track_names(&track_names)),
-                ("steps", build_steps_value(&state, 0)),
+                (
+                    "steps",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_steps_value(&state, 0)
+                    },
+                ),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
                 (
                     "piano-roll-items",
-                    build_piano_roll_items_value(&state, 0, &piano_roll_selection),
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_piano_roll_items_value(&state, 0, &piano_roll_selection)
+                    },
                 ),
                 (
                     "piano-roll-selection",
@@ -989,19 +989,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ),
                 (
                     "velocities",
-                    build_param_list(&state, 0, StepParam::Velocity),
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::Velocity)
+                    },
                 ),
                 (
                     "durations",
-                    build_param_list(&state, 0, StepParam::Duration),
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::Duration)
+                    },
                 ),
                 (
                     "transposes",
-                    build_param_list(&state, 0, StepParam::Transpose),
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::Transpose)
+                    },
                 ),
-                ("auxas", build_param_list(&state, 0, StepParam::AuxA)),
-                ("pans", build_param_list(&state, 0, StepParam::Pan)),
-                ("syncs", build_param_list(&state, 0, StepParam::Sync)),
+                (
+                    "auxas",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::AuxA)
+                    },
+                ),
+                (
+                    "pans",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::Pan)
+                    },
+                ),
+                (
+                    "syncs",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_param_list(&state, 0, StepParam::Sync)
+                    },
+                ),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
                 ("track-mutes", build_track_mutes(&state)),
@@ -1009,11 +1042,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("track-muted-by-solo", build_track_muted_by_solo(&state)),
                 (
                     "effects",
-                    build_effects_value(&state, 0, &effect_descriptors, &selected_steps),
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_effects_value(&state, 0, &effect_descriptors, &selected_steps)
+                    },
                 ),
                 (
                     "instrument-panel",
-                    build_instrument_panel_value(&app, 0, &selected_steps),
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_instrument_panel_value(&app, 0, &selected_steps)
+                    },
                 ),
                 ("track-params", build_track_params(&state, 0)),
                 (
@@ -1094,7 +1135,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("selected-steps", build_selection_value(&selected_steps)),
                 (
                     "step-has-plocks",
-                    build_step_has_plocks(&state, 0, &effect_descriptors),
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_step_has_plocks(&state, 0, &effect_descriptors)
+                    },
                 ),
                 ("compiling", Value::Bool(false)),
                 ("recording", Value::Bool(false)),
@@ -1494,7 +1539,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let fx_ep = fx_epoch.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     runtime.register_native("seq-move-step-drag", move |args, _ctx| {
-        let (Some(Value::Number(start)), Some(Value::Number(target))) = (args.first(), args.get(1)) else {
+        let (Some(Value::Number(start)), Some(Value::Number(target))) = (args.first(), args.get(1))
+        else {
             return Err("seq-move-step-drag: expected start and target steps".into());
         };
         let start = *start as usize;
@@ -1523,8 +1569,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if steps.is_empty() {
             return Ok(Value::Bool(false));
         }
-        let Some(&first) = steps.first() else { return Ok(Value::Bool(false)); };
-        let Some(&last) = steps.last() else { return Ok(Value::Bool(false)); };
+        let Some(&first) = steps.first() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(&last) = steps.last() else {
+            return Ok(Value::Bool(false));
+        };
         let new_first = first as isize + delta;
         let new_last = last as isize + delta;
         if new_first < 0 || new_last >= num_steps as isize {
@@ -2162,15 +2212,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
+    reload_custom_instrument_ui(&mut editor);
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
     editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
-    let custom_ui_source = build_custom_instrument_ui_source();
-    if !custom_ui_source.is_empty() {
-        if let Err(err) = editor.runtime_mut().eval_str(&custom_ui_source) {
-            eprintln!("custom instrument UI load error: {err:?}");
-        }
-    }
+    reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
 
     let mut backend =
@@ -2318,7 +2364,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                     // Only pass Press events to the editor (Release is only for note-off)
                     if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
+                        let should_reload_custom_ui = should_reload_custom_ui_after_key(&key);
                         editor.handle_key(key);
+                        if should_reload_custom_ui {
+                            reload_custom_instrument_ui(&mut editor);
+                        }
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -2428,6 +2478,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "audition-sample" => {
                         let path_str = extract_path_from_payload(&payload);
                         if let Some(path_str) = path_str {
+                            if app.tracks.is_empty() {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Add a track before auditioning samples".to_string(),
+                                ));
+                                continue;
+                            }
                             let path = Path::new(&path_str);
                             let track = current_track.load(Ordering::Relaxed);
                             match sequencer::sampler::load_wav_buffer(lg_raw, path) {
@@ -4274,12 +4330,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rt.set_reactive(
                 "SEQ",
                 "effects",
-                build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                if app.tracks.is_empty() {
+                    Value::List(vec![])
+                } else {
+                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps)
+                },
             );
             rt.set_reactive(
                 "SEQ",
                 "instrument-panel",
-                build_instrument_panel_value(&app, ct, &selected_steps),
+                if app.tracks.is_empty() {
+                    Value::List(vec![])
+                } else {
+                    build_instrument_panel_value(&app, ct, &selected_steps)
+                },
             );
             rt.run_reactive_cycle();
             editor.refresh_runtime_side_effects();
@@ -4323,7 +4387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut needs_reactive_cycle = false;
 
             // Track switch — rebuild everything
-            if ct != prev_current_track {
+            if ct != prev_current_track && !app.tracks.is_empty() {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);
@@ -4430,7 +4494,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_playhead = playhead;
                 needs_reactive_cycle = true;
             }
-            if epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version {
+            if (epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version)
+                && !app.tracks.is_empty()
+            {
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
@@ -4511,12 +4577,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive(
                     "SEQ",
                     "effects",
-                    build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                    if app.tracks.is_empty() {
+                        Value::List(vec![])
+                    } else {
+                        build_effects_value(
+                            &state,
+                            ct,
+                            &app.graph.effect_descriptors,
+                            &selected_steps,
+                        )
+                    },
                 );
                 rt.set_reactive(
                     "SEQ",
                     "instrument-panel",
-                    build_instrument_panel_value(&app, ct, &selected_steps),
+                    if app.tracks.is_empty() {
+                        Value::List(vec![])
+                    } else {
+                        build_instrument_panel_value(&app, ct, &selected_steps)
+                    },
                 );
                 prev_fx_epoch = fx_ep;
                 needs_reactive_cycle = true;
@@ -5378,10 +5457,8 @@ fn focused_widget_matches(editor: &Editor, predicate: impl FnOnce(&str) -> bool)
     predicate(node.widget_type.as_str())
 }
 
-fn focused_widget_captures_typing(editor: &Editor) -> bool {
-    focused_widget_matches(editor, |widget_type| {
-        matches!(widget_type, "text-input" | "number-picker" | "knob-number")
-    })
+fn focused_widget_captures_space(editor: &Editor) -> bool {
+    focused_widget_matches(editor, |widget_type| widget_type == "text-input")
 }
 
 fn focused_widget_captures_text_input(editor: &Editor) -> bool {
@@ -5461,12 +5538,19 @@ fn should_toggle_play_on_space(editor: &Editor, key: &crossterm::event::KeyEvent
         return false;
     }
 
-    if editor.minibuffer_prompt().is_some() || focused_widget_captures_typing(editor) {
+    if editor.minibuffer_prompt().is_some() || focused_widget_captures_space(editor) {
         return false;
     }
 
     let buffer = editor.active_buffer();
     buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly) || buffer.name == "*metal*"
+}
+
+fn should_reload_custom_ui_after_key(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn current_metal_cursor_step(editor: &mut Editor) -> Option<usize> {
@@ -5552,7 +5636,8 @@ fn handle_metal_command_shortcut(
                     if !snapshot.active && state.pattern.patterns[track].is_active(dest) {
                         continue;
                     }
-                    state.restore_step_snapshot(track, dest, snapshot);
+                    let sanitized = snapshot.without_audio_plocks();
+                    state.restore_step_snapshot(track, dest, &sanitized);
                 }
                 state.publish_scheduler_snapshot();
                 editor.handle_host_event(HostEvent::Status(format!(
@@ -7439,6 +7524,56 @@ mod tests {
             state.pattern.step_data[track].get(step, StepParam::Duration),
             4.0
         );
+    }
+
+    #[test]
+    fn generated_custom_instrument_uis_eval_and_dispatch() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"
+                (def synth-ui-current-inst false)
+                (def synth-ui-current-name "")
+                (def inst-param (inst name)
+                  (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
+                (def inst-base-note-param (inst)
+                  (nth (filter |p| (= (get p :control) "base-note") (get inst :synth)) 0))
+                (def base-note ()
+                  (label "base" :font-size 10 :color :gray :bg :transparent))
+                "#,
+            )
+            .expect("load custom UI test helpers");
+
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
+        runtime
+            .eval_str(&custom_ui_source)
+            .expect("load custom instrument UIs");
+
+        for instrument_name in [
+            "emulations/dx7-4op/",
+            "emulations/hammond-organ/",
+            "emulations/minimoog/",
+            "emulations/monomachine-digipro/",
+            "emulations/monomachine-fmplus/",
+            "emulations/monomachine-sid/",
+            "emulations/monomachine-superwave/",
+            "emulations/oberheim-sem/",
+            "emulations/prophet-5/",
+            "emulations/prophet-6/",
+            "emulations/prophet-6-emu/",
+            "emulations/prophet-6-inspired/",
+            "emulations/rhodes-additive-v2/",
+        ] {
+            let expr = format!(
+                "(custom-instrument-synth-ui (dict :name {:?} :synth (list (dict :name \"base_note\" :control \"base-note\" :value 0 :min -48 :max 48))))",
+                instrument_name
+            );
+            let rendered = runtime.eval_str(&expr).expect(instrument_name);
+            assert!(
+                !matches!(rendered, Some(Value::Bool(false)) | None),
+                "{instrument_name} did not dispatch to a custom UI"
+            );
+        }
     }
 }
 

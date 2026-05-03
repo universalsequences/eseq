@@ -18,6 +18,10 @@ use crate::sequencer::{StepParam, StepSnapshot, SwingResolution, Timebase};
 
 use super::App;
 
+fn sanitize_pasted_step_snapshot(snapshot: &StepSnapshot) -> StepSnapshot {
+    snapshot.without_audio_plocks()
+}
+
 /// Every mutation the UI layer can make to sequencer or transport state.
 ///
 /// Variants are grouped loosely:
@@ -375,6 +379,51 @@ pub fn apply_command(app: &mut App, cmd: AppCommand) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::sanitize_pasted_step_snapshot;
+    use crate::sequencer::{StepSlotPlocks, StepSnapshot, SwingResolution, Timebase, NUM_PARAMS};
+
+    #[test]
+    fn paste_sanitizer_clears_audio_plocks_but_keeps_sequencer_plocks() {
+        let mut params = [0.0; NUM_PARAMS];
+        params[0] = 0.75;
+        let snapshot = StepSnapshot {
+            active: true,
+            params,
+            chord: vec![0.0, 7.0],
+            timebase: Some(Timebase::Eighth),
+            swing: Some(62.0),
+            swing_resolution: Some(SwingResolution::Eighth),
+            effect_plocks: vec![StepSlotPlocks {
+                params: vec![Some(0.1), None, Some(0.9)],
+            }],
+            instrument_plocks: StepSlotPlocks {
+                params: vec![Some(0.2), Some(0.8)],
+            },
+        };
+
+        let sanitized = sanitize_pasted_step_snapshot(&snapshot);
+
+        assert!(sanitized.active);
+        assert_eq!(sanitized.params, params);
+        assert_eq!(sanitized.chord, vec![0.0, 7.0]);
+        assert_eq!(sanitized.timebase, Some(Timebase::Eighth));
+        assert_eq!(sanitized.swing, Some(62.0));
+        assert_eq!(sanitized.swing_resolution, Some(SwingResolution::Eighth));
+        assert!(sanitized
+            .effect_plocks
+            .iter()
+            .flat_map(|plocks| plocks.params.iter())
+            .all(Option::is_none));
+        assert!(sanitized
+            .instrument_plocks
+            .params
+            .iter()
+            .all(Option::is_none));
+    }
+}
+
 /// Returns `true` for commands that write to `app.state.pattern` or
 /// `app.state.transport` and therefore need a snapshot publish.
 ///
@@ -451,7 +500,8 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
                 if !snap.active && app.state.pattern.patterns[track].is_active(dest) {
                     continue;
                 }
-                app.state.restore_step_snapshot(track, dest, snap);
+                let sanitized = sanitize_pasted_step_snapshot(snap);
+                app.state.restore_step_snapshot(track, dest, &sanitized);
             }
         }
 

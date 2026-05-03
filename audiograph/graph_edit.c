@@ -198,6 +198,65 @@ static inline void indegree_dec_on_last_pred(LiveGraph *lg, int src, int dst) {
   }
 }
 
+static bool node_is_deleted(const RTNode *node) {
+  return node && node->vtable.process == NULL && node->nInputs == 0 &&
+         node->nOutputs == 0;
+}
+
+static void clear_successors(RTNode *node) {
+  if (!node) {
+    return;
+  }
+  free(node->succ);
+  node->succ = NULL;
+  node->succCount = 0;
+}
+
+static void rebuild_dependency_links_from_edges(LiveGraph *lg) {
+  if (!lg || !lg->sched.indegree) {
+    return;
+  }
+
+  for (int nid = 0; nid < lg->node_count; nid++) {
+    lg->sched.indegree[nid] = 0;
+    clear_successors(&lg->nodes[nid]);
+  }
+
+  for (int dst = 0; dst < lg->node_count; dst++) {
+    RTNode *dst_node = &lg->nodes[dst];
+    if (node_is_deleted(dst_node) || !dst_node->inEdgeId) {
+      continue;
+    }
+
+    for (int port = 0; port < dst_node->nInputs; port++) {
+      int edge_id = dst_node->inEdgeId[port];
+      if (edge_id < 0 || edge_id >= lg->edge_capacity) {
+        continue;
+      }
+      LiveEdge *edge = &lg->edges[edge_id];
+      if (!edge->in_use) {
+        continue;
+      }
+
+      int src = edge->src_node;
+      if (src < 0 || src >= lg->node_count || src == dst) {
+        continue;
+      }
+      if (node_is_deleted(&lg->nodes[src])) {
+        continue;
+      }
+
+      // Scheduling tracks unique predecessor nodes, not individual input
+      // ports. A stereo node with L/R from the same source should wait for
+      // that source once, because one execution writes all of its outputs.
+      if (!has_successor(&lg->nodes[src], dst)) {
+        add_successor_port(&lg->nodes[src], dst);
+        lg->sched.indegree[dst]++;
+      }
+    }
+  }
+}
+
 // Forward declarations
 bool apply_delete_node_internal(LiveGraph *lg, int node_id);
 static bool apply_add_watchlist(LiveGraph *lg, int node_id);
@@ -394,10 +453,12 @@ void update_orphaned_status(LiveGraph *lg) {
   mark_reachable_from_dac(lg, lg->dac_node_id, visited);
   free(visited);
 
-  // NOTE: Indegree is maintained incrementally by connect/disconnect operations
-  // via indegree_inc_on_first_pred() and indegree_dec_on_last_pred().
-  // The O(n²) recomputation that was here was removed for performance -
-  // with 7000 nodes it caused ~50ms audio dropouts on topology changes.
+  // Rebuild scheduler dependencies from the authoritative edge graph after
+  // each topology update. Hidden auto-SUM nodes are especially sensitive to
+  // stale predecessor/successor links: if a SUM is marked ready before all of
+  // its real producers complete, it can publish a zero output even though its
+  // input edge buffers contain signal later in the block.
+  rebuild_dependency_links_from_edges(lg);
 }
 
 // ===================== Failed ID Tracking =====================

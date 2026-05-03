@@ -71,7 +71,7 @@ profile: $(TARGET)
 	instruments -t "Time Profiler" ./$(TARGET)
 
 # Test targets
-test: tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_validation tests/test_watchlist_capacity_growth tests/test_watchlist_initial_capacity tests/test_watchlist_upstream_processing tests/test_mpmc_queue tests/test_live_graph_partial_connections tests/test_disconnect tests/test_graph_edit_queue tests/test_queue_api tests/test_capacity_growth tests/test_custom_engine_growth tests/test_simple_teardown tests/test_orphan_comprehensive tests/test_auto_sum tests/test_sum_slot_overwrite tests/test_ordered_sum_topology tests/test_sum_behavior tests/test_sum_high_fanin tests/test_hot_swap tests/test_multi_port_routing tests/test_complex_topology tests/test_4_node_topology tests/test_4_node_fuzz tests/test_param_updates tests/test_stereo tests/test_patch_disconnect_orphan tests/test_indegree_unique_pred tests/test_deadlock_disconnect tests/test_buffer_api tests/test_cycle_prevention
+test: tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_validation tests/test_watchlist_capacity_growth tests/test_watchlist_initial_capacity tests/test_watchlist_upstream_processing tests/test_mpmc_queue tests/test_live_graph_partial_connections tests/test_disconnect tests/test_graph_edit_queue tests/test_queue_api tests/test_capacity_growth tests/test_custom_engine_growth tests/test_simple_teardown tests/test_orphan_comprehensive tests/test_auto_sum tests/test_sum_slot_overwrite tests/test_ordered_sum_topology tests/test_sum_behavior tests/test_sum_high_fanin tests/test_dependency_rebuild_sum tests/test_param_update_bounds tests/test_hot_swap tests/test_multi_port_routing tests/test_complex_topology tests/test_4_node_topology tests/test_4_node_fuzz tests/test_param_updates tests/test_stereo tests/test_patch_disconnect_orphan tests/test_indegree_unique_pred tests/test_deadlock_disconnect tests/test_scheduler_queue_saturation tests/test_buffer_api tests/test_cycle_prevention
 	./tests/test_watchlist
 	./tests/test_watchlist_advanced
 	./tests/test_watchlist_validation
@@ -92,6 +92,8 @@ test: tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_va
 	./tests/test_ordered_sum_topology
 	./tests/test_sum_behavior
 	./tests/test_sum_high_fanin
+	./tests/test_dependency_rebuild_sum
+	./tests/test_param_update_bounds
 	./tests/test_hot_swap
 	./tests/test_multi_port_routing
 	./tests/test_complex_topology
@@ -102,6 +104,7 @@ test: tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_va
 	./tests/test_patch_disconnect_orphan
 	./tests/test_indegree_unique_pred
 	./tests/test_deadlock_disconnect
+	./tests/test_scheduler_queue_saturation
 	./tests/test_buffer_api
 	./tests/test_cycle_prevention
 
@@ -163,6 +166,9 @@ tests/test_sum_behavior: tests/test_sum_behavior.c $(HEADERS) $(TEST_OBJS)
 tests/test_sum_high_fanin: tests/test_sum_high_fanin.c $(HEADERS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -I. -o tests/test_sum_high_fanin tests/test_sum_high_fanin.c $(TEST_OBJS)
 
+tests/test_dependency_rebuild_sum: tests/test_dependency_rebuild_sum.c $(HEADERS) $(TEST_OBJS)
+	$(CC) $(CFLAGS) -I. -o tests/test_dependency_rebuild_sum tests/test_dependency_rebuild_sum.c $(TEST_OBJS)
+
 # Build hot swap test (verify hot swap functionality)
 tests/test_hot_swap: tests/test_hot_swap.c $(HEADERS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -I. -o tests/test_hot_swap tests/test_hot_swap.c $(TEST_OBJS)
@@ -174,6 +180,9 @@ tests/test_number_node: tests/test_number_node.c $(HEADERS) $(TEST_OBJS)
 # Build parameter updates test (verify params_push functionality)
 tests/test_param_updates: tests/test_param_updates.c $(HEADERS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -I. -o tests/test_param_updates tests/test_param_updates.c $(TEST_OBJS)
+
+tests/test_param_update_bounds: tests/test_param_update_bounds.c $(HEADERS) $(TEST_OBJS)
+	$(CC) $(CFLAGS) -I. -o tests/test_param_update_bounds tests/test_param_update_bounds.c $(TEST_OBJS)
 
 # Build multi-port routing test (verify multi-output to multi-input connections)
 tests/test_multi_port_routing: tests/test_multi_port_routing.c $(HEADERS) $(TEST_OBJS)
@@ -254,6 +263,14 @@ tests/test_indegree_unique_pred: tests/test_indegree_unique_pred.c $(HEADERS) $(
 tests/test_deadlock_disconnect: tests/test_deadlock_disconnect.c $(HEADERS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -I. -o tests/test_deadlock_disconnect tests/test_deadlock_disconnect.c $(TEST_OBJS)
 
+# Build ready-queue saturation regression test
+tests/test_scheduler_queue_saturation: tests/test_scheduler_queue_saturation.c $(HEADERS) $(TEST_OBJS)
+	$(CC) $(CFLAGS) -I. -o tests/test_scheduler_queue_saturation tests/test_scheduler_queue_saturation.c $(TEST_OBJS)
+
+# Build long-running poly-style scheduler stress test (run manually; not in default test)
+tests/test_polysynth_scheduler_stress: tests/test_polysynth_scheduler_stress.c $(HEADERS) $(TEST_OBJS)
+	$(CC) $(CFLAGS) -O3 -I. -o tests/test_polysynth_scheduler_stress tests/test_polysynth_scheduler_stress.c $(TEST_OBJS)
+
 # Build buffer API test (create_buffer and hot_swap_buffer functionality)
 tests/test_buffer_api: tests/test_buffer_api.c $(HEADERS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -I. -o tests/test_buffer_api tests/test_buffer_api.c $(TEST_OBJS)
@@ -270,7 +287,7 @@ tests/test_fm_benchmark: tests/test_fm_benchmark.c $(HEADERS) $(TEST_OBJS)
 clean: clean_tests
 
 clean_tests:
-	rm -f tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_validation tests/test_watchlist_capacity_growth tests/test_watchlist_initial_capacity tests/test_watchlist_upstream_processing tests/test_mpmc_queue tests/test_engine_workers tests/test_live_graph_multithreaded tests/test_live_graph_workers tests/test_live_graph_partial_connections tests/test_disconnect tests/test_graph_edit_queue tests/test_queue_api tests/test_deletion_safety tests/test_capacity_growth tests/test_simple_teardown tests/test_orphan_comprehensive tests/test_auto_sum tests/test_sum_behavior tests/test_sum_high_fanin tests/test_engine_workers_debug tests/test_number_node tests/test_orphan_edge_cases tests/test_new_worker_system tests/test_hot_swap tests/test_multi_port_routing tests/test_complex_topology tests/test_4_node_topology tests/test_4_node_fuzz tests/test_param_updates tests/test_stereo tests/test_patch_disconnect_orphan tests/test_indegree_unique_pred tests/test_deadlock_disconnect tests/test_buffer_api tests/test_cycle_prevention
+	rm -f tests/test_watchlist tests/test_watchlist_advanced tests/test_watchlist_validation tests/test_watchlist_capacity_growth tests/test_watchlist_initial_capacity tests/test_watchlist_upstream_processing tests/test_mpmc_queue tests/test_engine_workers tests/test_live_graph_multithreaded tests/test_live_graph_workers tests/test_live_graph_partial_connections tests/test_disconnect tests/test_graph_edit_queue tests/test_queue_api tests/test_deletion_safety tests/test_capacity_growth tests/test_simple_teardown tests/test_orphan_comprehensive tests/test_auto_sum tests/test_sum_behavior tests/test_sum_high_fanin tests/test_dependency_rebuild_sum tests/test_param_update_bounds tests/test_engine_workers_debug tests/test_number_node tests/test_orphan_edge_cases tests/test_new_worker_system tests/test_hot_swap tests/test_multi_port_routing tests/test_complex_topology tests/test_4_node_topology tests/test_4_node_fuzz tests/test_param_updates tests/test_stereo tests/test_patch_disconnect_orphan tests/test_indegree_unique_pred tests/test_deadlock_disconnect tests/test_scheduler_queue_saturation tests/test_polysynth_scheduler_stress tests/test_buffer_api tests/test_cycle_prevention
 	rm -rf tests/*.dSYM
 
 .PHONY: all debug release lib lib-release run clean valgrind profile test clean_tests

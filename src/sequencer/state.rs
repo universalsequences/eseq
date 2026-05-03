@@ -31,6 +31,21 @@ pub struct StepSnapshot {
     pub instrument_plocks: StepSlotPlocks,
 }
 
+impl StepSnapshot {
+    pub fn without_audio_plocks(&self) -> Self {
+        let mut snapshot = self.clone();
+        for plocks in &mut snapshot.effect_plocks {
+            for value in &mut plocks.params {
+                *value = None;
+            }
+        }
+        for value in &mut snapshot.instrument_plocks.params {
+            *value = None;
+        }
+        snapshot
+    }
+}
+
 #[derive(Clone)]
 pub struct PatternSnapshot {
     pub track_bits: Vec<[u64; TRACK_PATTERN_WORDS]>,
