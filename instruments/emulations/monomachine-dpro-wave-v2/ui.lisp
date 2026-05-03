@@ -86,20 +86,24 @@
         (mdp2-set-param decay (get env :decay))
         (mdp2-set-param sustain (get env :sustain))
         (mdp2-set-param release (get env :release))))))
-(def mdp2-adsr-controls (section)
+(def mdp2-adsr-controls (attack decay sustain release section)
   (box :width :fill :height 1.95 :padding 0.25
     (h-stack :width :fill :gap 0.20 :align :start
-      (mdp2-param-number-section "amp_attack_ms" "atk" 0 "ms" section)
-      (mdp2-param-number-section "amp_decay_ms" "dec" 0 "ms" section)
-      (mdp2-param-number-section "amp_sustain" "sus" 2 false section)
-      (mdp2-param-number-section "amp_release_ms" "rel" 0 "ms" section))))
-(def mdp2-adsr-panel ()
+      (mdp2-param-number-section attack "atk" 0 "ms" section)
+      (mdp2-param-number-section decay "dec" 0 "ms" section)
+      (mdp2-param-number-section sustain "sus" 2 false section)
+      (mdp2-param-number-section release "rel" 0 "ms" section))))
+(def mdp2-adsr-panel-for (attack decay sustain release section)
   (box :width :fill :height 6.35
        :background-color (rgba 0.0 0.0 0.0 1)
        :border-width 1 :corner-radius 8 :padding 0.15
     (v-stack :width :fill :gap 0.10
-      (mdp2-adsr-view "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 1)
-      (mdp2-adsr-controls 1))))
+      (mdp2-adsr-view attack decay sustain release section)
+      (mdp2-adsr-controls attack decay sustain release section))))
+(def mdp2-adsr-panel ()
+  (if (= monomachine-dpro-wave-v2-selected-section 2)
+    (mdp2-adsr-panel-for "filter_attack_ms" "filter_decay_ms" "filter_sustain" "filter_release_ms" 2)
+    (mdp2-adsr-panel-for "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 1)))
 (def mdp2-row-label (title)
   (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
     (label title :font-size 8.0 :width 2.7 :color :gray :bg :transparent)))
@@ -158,10 +162,11 @@
     (v-stack :width 23.1 :gap 0.10
       (mdp2-adsr-panel))
     (v-stack :width 27.2 :gap 0.10
-      (mdp2-panel-3 "FILT" 0
-        (mdp2-param-cell-section "cutoff" "cut" 0 0)
-        (mdp2-param-cell-section "resonance" "res" 2 0)
-        (mdp2-param-cell-section "keytrack" "key" 2 0))
+      (mdp2-panel-4 "FILT" 2
+        (mdp2-param-cell-section "cutoff" "cut" 0 2)
+        (mdp2-param-cell-section "resonance" "res" 2 2)
+        (mdp2-param-cell-section "keytrack" "key" 2 2)
+        (mdp2-param-cell-section "filter_env_amt" "env" 0 2))
       (mdp2-panel-2 "OUT" 0
         (mdp2-param-cell-section "drive" "drv" 2 0)
         (mdp2-param-cell-section "gain" "gain" 2 0)))))

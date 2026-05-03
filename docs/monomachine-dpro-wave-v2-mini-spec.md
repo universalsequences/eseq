@@ -43,8 +43,6 @@ Core:
 
 - `wave`: 1..32, integer-ish selection
 - `wp`: 0..127, wave phase/morph amount
-- `wpm`: 0..20 Hz, sweep speed; 0 disables sweep
-- `wprs`: 0/1, restart sweep on trigger
 - `sync_mode`: 0 off, 1 hard sync with fixed `sfrq` slave frequency, 2 hard sync with key-tracked `pitch + sfrq` slave frequency
 - `sfrq`: 20..8000 Hz. In sync modes, played note pitch is the sync master/reset rate.
 - `tune_cents`: -100..100 cents
@@ -53,11 +51,17 @@ Host shaping:
 
 - amp ADSR
 - lowpass cutoff/resonance/keytrack
+- dedicated filter ADSR with bipolar cutoff amount
 - drive and gain
+
+UI behavior:
+
+- The center ADSR editor shows the amp envelope by default.
+- Selecting or editing the FILT panel switches the center ADSR editor to the filter envelope.
 
 Modulation:
 
-- `wp`, `sfrq`, `tune_cents`, `cutoff`, `resonance`, `drive`, and `gain` are modulation destinations.
+- `wp`, `sfrq`, `tune_cents`, `cutoff`, `resonance`, `filter_env_amt`, `drive`, and `gain` are modulation destinations.
 
 ## Non-Goals
 

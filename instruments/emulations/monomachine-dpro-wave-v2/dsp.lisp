@@ -22,6 +22,11 @@
 (param amp_sustain     @default 0.78 @min 0     @max 1)
 (param amp_release_ms  @default 90   @min 1     @max 5000 @unit ms)
 
+(param filter_attack_ms  @default 6    @min 1     @max 5000 @unit ms)
+(param filter_decay_ms   @default 260  @min 1     @max 5000 @unit ms)
+(param filter_sustain    @default 0.18 @min 0     @max 1)
+(param filter_release_ms @default 180  @min 1     @max 5000 @unit ms)
+
 (param wave            @default 7    @min 1     @max 32)
 (param wp              @default 0    @min 0     @max 127 @mod true @mod-mode additive)
 (param sync_mode       @default 0    @min 0     @max 2)
@@ -31,10 +36,12 @@
 (param cutoff          @default 7200 @min 80    @max 12000 @unit Hz @mod true @mod-mode additive)
 (param resonance       @default 0.707 @min 0.5   @max 2.5 @mod true @mod-mode additive)
 (param keytrack        @default 0.18 @min 0     @max 2)
+(param filter_env_amt  @default 1800 @min -8000 @max 8000 @unit Hz @mod true @mod-mode additive)
 (param drive           @default 1.1  @min 0.5   @max 6 @mod true @mod-mode additive)
 (param gain            @default 0.14 @min 0     @max 1 @mod true @mod-mode additive)
 
 (def amp_env (adsr gate trigger amp_attack_ms amp_decay_ms amp_sustain amp_release_ms))
+(def filt_env (adsr gate trigger filter_attack_ms filter_decay_ms filter_sustain filter_release_ms))
 (def tuned_pitch (* pitch (semi_ratio (/ (mod tune_cents) 100))))
 
 (def sync_on (gt sync_mode 0.5))
@@ -64,6 +71,6 @@
 (write-history scan_hist scan_pos)
 (def raw_wave (wavetable-read-512 waves (clip scan_pos 0 31) osc_phase))
 (def driven (tanh (* raw_wave (clip (mod drive) 0.5 6))))
-(def filter_cutoff (clip (+ (mod cutoff) (* tuned_pitch keytrack)) 80 12000))
+(def filter_cutoff (clip (+ (mod cutoff) (* tuned_pitch keytrack) (* filt_env (mod filter_env_amt))) 80 12000))
 (def filtered (biquad driven filter_cutoff (clip (mod resonance) 0.5 2.5) 1 0))
 (out (* filtered amp_env velocity (clip (mod gain) 0 1)) 1 @name audio)
