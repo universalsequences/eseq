@@ -105,6 +105,9 @@ impl App {
 
     pub fn add_saved_instrument_track_sync(&mut self, name: &str) -> Result<usize, String> {
         let source = lisp_effect::load_instrument_source(name).map_err(|e| e.to_string())?;
+        let asset_base = lisp_effect::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
 
         if let Some(cache_idx) = self.cached_instrument_engine_idx(name, &source) {
             let manifest = self.editor.engine_registry.engines[cache_idx]
@@ -119,7 +122,11 @@ impl App {
             };
         }
 
-        let result = lisp_effect::compile_and_load_instrument(&source, self.graph.sample_rate)?;
+        let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+            &source,
+            self.graph.sample_rate,
+            asset_base.as_deref(),
+        )?;
         let cache_idx = self.cache_instrument_engine(name, &source, &result.manifest, result.lib);
         let manifest = self.editor.engine_registry.engines[cache_idx]
             .manifest
@@ -153,7 +160,14 @@ impl App {
                 "The current custom instrument track has no engine binding.".to_string()
             })?;
 
-        let result = lisp_effect::compile_and_load_instrument(source, self.graph.sample_rate)?;
+        let asset_base = lisp_effect::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+            source,
+            self.graph.sample_rate,
+            asset_base.as_deref(),
+        )?;
         let cache_idx = self.cache_instrument_engine(name, source, &result.manifest, result.lib);
         let manifest = self.editor.engine_registry.engines[cache_idx]
             .manifest
@@ -362,9 +376,6 @@ impl App {
             manifest.n_inputs,
             manifest.n_outputs,
         );
-        for param in &mut desc.params {
-            param.node_param_idx += lisp_effect::HEADER_SLOTS as u32;
-        }
 
         let sidechain_labels = self.effect_sidechain_labels(track);
         let mut modulators = manifest.modulators.clone();
@@ -1116,8 +1127,15 @@ impl App {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let sample_rate = self.graph.sample_rate;
+        let asset_base = lisp_effect::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
         std::thread::spawn(move || {
-            let result = lisp_effect::compile_and_load_instrument(&source, sample_rate);
+            let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+                &source,
+                sample_rate,
+                asset_base.as_deref(),
+            );
             let _ = tx.send(result);
         });
         self.editor.pending_compile = Some(PendingCompile {

@@ -183,6 +183,7 @@ pub struct DGenManifest {
     pub mod_destinations: Vec<DGenModDestination>,
     pub n_inputs: usize,
     pub n_outputs: usize,
+    pub tensors: Vec<TensorMeta>,
     pub tensor_init_data: Vec<TensorInit>,
     /// Memory cell that holds the voice index (0-5) for voice-aware instruments.
     pub voice_cell_id: Option<usize>,
@@ -203,6 +204,16 @@ pub struct DGenParam {
 pub struct TensorInit {
     pub offset: usize,
     pub data: Vec<f32>,
+}
+
+#[derive(Clone)]
+pub struct TensorMeta {
+    pub name: String,
+    pub cell_offset: usize,
+    pub shape: Vec<usize>,
+    pub kind: String,
+    pub mutable: bool,
+    pub source_file: Option<String>,
 }
 
 #[derive(Clone)]
@@ -247,6 +258,29 @@ unsafe impl Sync for LoadedDGenLib {}
 pub struct CompileResult {
     pub manifest: DGenManifest,
     pub lib: LoadedDGenLib,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstrumentRenderOptions {
+    pub sample_rate: u32,
+    pub block_size: usize,
+    pub frames: usize,
+    pub midi_note: f32,
+    pub velocity: f32,
+    pub gate_frames: usize,
+    pub voice_index: usize,
+    pub param_overrides: Vec<(String, f32)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstrumentRenderReport {
+    pub frames: usize,
+    pub peak: f32,
+    pub rms: f32,
+    pub mean_abs: f32,
+    pub nonzero_frames: usize,
+    pub first_nonzero_frame: Option<usize>,
+    pub first_samples: Vec<f32>,
 }
 
 pub fn compile_and_load(source: &str, sample_rate: u32) -> Result<CompileResult, String> {
@@ -654,6 +688,30 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
         })
         .unwrap_or_default();
 
+    let tensors = v["tensors"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .map(|t| TensorMeta {
+                    name: t["name"].as_str().unwrap_or("").to_string(),
+                    cell_offset: t["cellOffset"].as_u64().unwrap_or(0) as usize,
+                    shape: t["shape"]
+                        .as_array()
+                        .map(|shape| {
+                            shape
+                                .iter()
+                                .map(|dim| dim.as_u64().unwrap_or(0) as usize)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    kind: t["kind"].as_str().unwrap_or("").to_string(),
+                    mutable: t["mutable"].as_bool().unwrap_or(false),
+                    source_file: t["sourceFile"].as_str().map(|s| s.to_string()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let voice_cell_id = v["voiceCellId"].as_u64().map(|id| id as usize);
 
     Ok(DGenManifest {
@@ -665,6 +723,7 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
         mod_destinations,
         n_inputs,
         n_outputs,
+        tensors,
         tensor_init_data,
         voice_cell_id,
     })
@@ -708,7 +767,12 @@ fn build_init_message(slot_id: usize, manifest: &DGenManifest) -> Vec<f32> {
 
     for param in &manifest.params {
         if param.cell_id < manifest.total_memory_slots && param.default != 0.0 {
-            entries.push((param.cell_id, param.default));
+            for lane in 0..4 {
+                let idx = param.cell_id + lane;
+                if idx < manifest.total_memory_slots {
+                    entries.push((idx, param.default));
+                }
+            }
         }
     }
 
@@ -1143,6 +1207,35 @@ fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<Pa
     }
 }
 
+pub fn instrument_source_path(name: &str) -> io::Result<PathBuf> {
+    resolve_instrument_storage_path(name, "lisp")
+}
+
+fn instrument_name_from_source_path(path: &Path) -> Option<String> {
+    if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
+        if let Some(parent) = path.parent() {
+            if let Ok(rel) = parent.strip_prefix(INSTRUMENTS_DIR) {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                if !rel.is_empty() {
+                    return Some(format!("{rel}/"));
+                }
+            }
+        }
+    }
+
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+}
+
+fn source_name_from_path(kind: &CompileKind, path: &Path) -> Option<String> {
+    match kind {
+        CompileKind::Instrument => instrument_name_from_source_path(path),
+        CompileKind::Effect => path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string()),
+    }
+}
+
 fn instrument_preset_path(name: &str) -> io::Result<PathBuf> {
     resolve_instrument_storage_path(name, "presets")
 }
@@ -1322,7 +1415,12 @@ pub fn build_init_message_for_voice(
 
     for param in &manifest.params {
         if param.cell_id < manifest.total_memory_slots && param.default != 0.0 {
-            entries.push((param.cell_id, param.default));
+            for lane in 0..4 {
+                let idx = param.cell_id + lane;
+                if idx < manifest.total_memory_slots {
+                    entries.push((idx, param.default));
+                }
+            }
         }
     }
 
@@ -1460,6 +1558,14 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
      (polyblep phase freq)
      (* -1.0 (polyblep falling_phase freq))))
 
+; Wavetable helpers assume tensor shape [samples, waves], matching DGenLisp
+; peek's (index, channel) convention.
+(defmacro wavetable-read-512 (table wave phase)
+  (peek table (* (wrap phase 0 1) 512) wave))
+
+(defmacro wavetable-morph-512 (table wave_a wave_b phase morph)
+  (wavetable-read-512 table (+ wave_a (* (clip morph 0 1) (- wave_b wave_a))) phase))
+
 (defmacro adsr (gate_sig trigger_sig attack_ms decay_ms sustain release_ms)
   (make-history env)
   (make-history gate_hist)
@@ -1532,6 +1638,14 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
 "#;
 
 pub fn compile_instrument(source: &str, sample_rate: u32) -> Result<String, String> {
+    compile_instrument_with_asset_base(source, sample_rate, None)
+}
+
+pub fn compile_instrument_with_asset_base(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+) -> Result<String, String> {
     let dir = output_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
 
@@ -1546,12 +1660,17 @@ pub fn compile_instrument(source: &str, sample_rate: u32) -> Result<String, Stri
     let tool_path = std::env::current_dir()
         .unwrap_or_default()
         .join("tools/DGenLisp");
-    let output = std::process::Command::new(&tool_path)
+    let mut command = std::process::Command::new(&tool_path);
+    command
         .args(["compile", src_path.to_str().unwrap()])
         .args(["-o", dir.to_str().unwrap()])
         .args(["--name", &dylib_name])
         .args(["--sample-rate", &sample_rate.to_string()])
-        .args(["--voices", "12"])
+        .args(["--voices", "12"]);
+    if let Some(asset_base) = asset_base {
+        command.args(["--asset-base", asset_base.to_str().unwrap_or(".")]);
+    }
+    let output = command
         .output()
         .map_err(|e| format!("Failed to run DGenLisp: {e}"))?;
 
@@ -1570,10 +1689,153 @@ pub fn compile_and_load_instrument(
     source: &str,
     sample_rate: u32,
 ) -> Result<CompileResult, String> {
-    let json = compile_instrument(source, sample_rate)?;
+    compile_and_load_instrument_with_asset_base(source, sample_rate, None)
+}
+
+pub fn compile_and_load_instrument_with_asset_base(
+    source: &str,
+    sample_rate: u32,
+    asset_base: Option<&Path>,
+) -> Result<CompileResult, String> {
+    let json = compile_instrument_with_asset_base(source, sample_rate, asset_base)?;
     let manifest = parse_manifest(&json)?;
     let lib = load_dylib(&manifest.dylib_path)?;
     Ok(CompileResult { manifest, lib })
+}
+
+pub fn render_instrument_source_for_test(
+    source: &str,
+    asset_base: Option<&Path>,
+    options: &InstrumentRenderOptions,
+) -> Result<InstrumentRenderReport, String> {
+    let result =
+        compile_and_load_instrument_with_asset_base(source, options.sample_rate, asset_base)?;
+    render_loaded_instrument_for_test(&result.manifest, &result.lib, options)
+}
+
+pub fn render_loaded_instrument_for_test(
+    manifest: &DGenManifest,
+    lib: &LoadedDGenLib,
+    options: &InstrumentRenderOptions,
+) -> Result<InstrumentRenderReport, String> {
+    if options.block_size == 0 {
+        return Err("block_size must be greater than zero".to_string());
+    }
+    if options.frames == 0 {
+        return Err("frames must be greater than zero".to_string());
+    }
+
+    let total_slots = manifest.total_memory_slots;
+    let mut memory_read = vec![0.0f32; total_slots];
+    let mut memory_write = vec![0.0f32; total_slots];
+    let slot_id = options.voice_index;
+    let init_msg = build_init_message_for_voice(slot_id, manifest, options.voice_index);
+    let entry_count = init_msg.get(4).copied().unwrap_or(0.0) as usize;
+    for i in 0..entry_count {
+        let idx = init_msg[5 + i * 2] as usize;
+        let value = init_msg[5 + i * 2 + 1];
+        if idx < total_slots {
+            memory_read[idx] = value;
+        }
+    }
+    memory_write.copy_from_slice(&memory_read);
+
+    for (name, value) in &options.param_overrides {
+        let param = manifest
+            .params
+            .iter()
+            .find(|param| param.name == *name)
+            .ok_or_else(|| format!("unknown instrument parameter '{name}'"))?;
+        if param.cell_id >= total_slots {
+            return Err(format!(
+                "parameter '{}' cell {} is outside memory size {}",
+                param.name, param.cell_id, total_slots
+            ));
+        }
+        for lane in 0..4 {
+            let idx = param.cell_id + lane;
+            if idx < total_slots {
+                memory_read[idx] = *value;
+                memory_write[idx] = *value;
+            }
+        }
+    }
+
+    let pitch_hz = 440.0 * 2f32.powf((options.midi_note - 69.0) / 12.0);
+    let n_inputs = manifest.n_inputs.max(4);
+    let n_outputs = manifest.n_outputs.max(1);
+    let mut rendered = Vec::with_capacity(options.frames);
+    let mut frames_done = 0usize;
+
+    while frames_done < options.frames {
+        let block = options.block_size.min(options.frames - frames_done);
+        let gate_value = if frames_done < options.gate_frames {
+            1.0
+        } else {
+            0.0
+        };
+        let trigger_value = if frames_done == 0 { 1.0 } else { 0.0 };
+
+        let mut input_buffers = vec![vec![0.0f32; block]; n_inputs];
+        input_buffers[0].fill(gate_value);
+        input_buffers[1].fill(pitch_hz);
+        input_buffers[2].fill(options.velocity);
+        input_buffers[3][0] = trigger_value;
+        let input_ptrs: Vec<*mut f32> = input_buffers
+            .iter_mut()
+            .map(|buffer| buffer.as_mut_ptr())
+            .collect();
+
+        let mut output_buffers = vec![vec![0.0f32; block]; n_outputs];
+        let output_ptrs: Vec<*mut f32> = output_buffers
+            .iter_mut()
+            .map(|buffer| buffer.as_mut_ptr())
+            .collect();
+
+        unsafe {
+            (lib.process_fn)(
+                input_ptrs.as_ptr(),
+                output_ptrs.as_ptr(),
+                block as c_int,
+                memory_read.as_mut_ptr() as *mut c_void,
+                memory_write.as_mut_ptr() as *mut c_void,
+            );
+        }
+        memory_read.copy_from_slice(&memory_write);
+        rendered.extend_from_slice(&output_buffers[0]);
+        frames_done += block;
+    }
+
+    let mut peak = 0.0f32;
+    let mut sum_sq = 0.0f64;
+    let mut sum_abs = 0.0f64;
+    let mut nonzero_frames = 0usize;
+    let mut first_nonzero_frame = None;
+    for (idx, sample) in rendered.iter().enumerate() {
+        let abs = sample.abs();
+        peak = peak.max(abs);
+        sum_sq += (*sample as f64) * (*sample as f64);
+        sum_abs += abs as f64;
+        if abs > 1.0e-7 {
+            nonzero_frames += 1;
+            if first_nonzero_frame.is_none() {
+                first_nonzero_frame = Some(idx);
+            }
+        }
+    }
+    let frames = rendered.len().max(1);
+    let rms = (sum_sq / frames as f64).sqrt() as f32;
+    let mean_abs = (sum_abs / frames as f64) as f32;
+
+    Ok(InstrumentRenderReport {
+        frames: rendered.len(),
+        peak,
+        rms,
+        mean_abs,
+        nonzero_frames,
+        first_nonzero_frame,
+        first_samples: rendered.into_iter().take(32).collect(),
+    })
 }
 
 // ── Instrument editor flow ──
@@ -1652,11 +1914,17 @@ impl Drop for RestoreTerminalGuard {
 }
 
 fn editor_file_path(kind: CompileKind, existing_name: Option<&str>) -> PathBuf {
-    let (dir, name) = match kind {
-        CompileKind::Instrument => (INSTRUMENTS_DIR, existing_name.unwrap_or("untitled")),
-        CompileKind::Effect => (EFFECTS_DIR, existing_name.unwrap_or("untitled")),
-    };
-    Path::new(dir).join(format!("{name}.lisp"))
+    match kind {
+        CompileKind::Instrument => existing_name
+            .and_then(|name| instrument_source_path(name).ok())
+            .unwrap_or_else(|| {
+                Path::new(INSTRUMENTS_DIR)
+                    .join(format!("{}.lisp", existing_name.unwrap_or("untitled")))
+            }),
+        CompileKind::Effect => {
+            Path::new(EFFECTS_DIR).join(format!("{}.lisp", existing_name.unwrap_or("untitled")))
+        }
+    }
 }
 
 fn default_template_for_kind(kind: &CompileKind) -> &'static str {
@@ -3706,6 +3974,7 @@ where
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            vim_mode: true,
         },
     );
     let initial = match std::fs::read_to_string(&path) {
@@ -3752,9 +4021,8 @@ where
                 } if matches!(kind, CompileKind::Instrument) => {
                     let name = suggested_name
                         .or_else(|| {
-                            path.as_ref().and_then(|p| {
-                                p.file_stem().map(|stem| stem.to_string_lossy().to_string())
-                            })
+                            path.as_ref()
+                                .and_then(|p| source_name_from_path(&CompileKind::Instrument, p))
                         })
                         .unwrap_or_else(|| "untitled".to_string());
                     let save_path =
@@ -3772,8 +4040,13 @@ where
                     });
                     let (tx, rx) = std::sync::mpsc::channel();
                     let compile_source = source.clone();
+                    let asset_base = save_path.parent().map(|p| p.to_path_buf());
                     std::thread::spawn(move || {
-                        let result = compile_and_load_instrument(&compile_source, sample_rate);
+                        let result = compile_and_load_instrument_with_asset_base(
+                            &compile_source,
+                            sample_rate,
+                            asset_base.as_deref(),
+                        );
                         let _ = tx.send(result);
                     });
                     pending_job = Some(PendingCompileJob {
@@ -3791,9 +4064,8 @@ where
                 } if matches!(kind, CompileKind::Effect) => {
                     let name = suggested_name
                         .or_else(|| {
-                            path.as_ref().and_then(|p| {
-                                p.file_stem().map(|stem| stem.to_string_lossy().to_string())
-                            })
+                            path.as_ref()
+                                .and_then(|p| source_name_from_path(&CompileKind::Effect, p))
                         })
                         .unwrap_or_else(|| "untitled".to_string());
                     let save_path =
@@ -3832,9 +4104,7 @@ where
                             .path
                             .clone()
                             .unwrap_or_else(|| editor_file_path(kind.clone(), None));
-                        let suggested_name = save_path
-                            .file_stem()
-                            .map(|stem| stem.to_string_lossy().to_string());
+                        let suggested_name = source_name_from_path(&kind, &save_path);
                         let command = match kind {
                             CompileKind::Instrument => HostCommand::CompileInstrument {
                                 source,
@@ -3860,8 +4130,7 @@ where
                                 let name = suggested_name
                                     .or_else(|| {
                                         path.as_ref().and_then(|p| {
-                                            p.file_stem()
-                                                .map(|stem| stem.to_string_lossy().to_string())
+                                            source_name_from_path(&CompileKind::Instrument, p)
                                         })
                                     })
                                     .unwrap_or_else(|| "untitled".to_string());
@@ -3884,9 +4153,13 @@ where
                                 });
                                 let (tx, rx) = std::sync::mpsc::channel();
                                 let compile_source = source.clone();
+                                let asset_base = save_path.parent().map(|p| p.to_path_buf());
                                 std::thread::spawn(move || {
-                                    let result =
-                                        compile_and_load_instrument(&compile_source, sample_rate);
+                                    let result = compile_and_load_instrument_with_asset_base(
+                                        &compile_source,
+                                        sample_rate,
+                                        asset_base.as_deref(),
+                                    );
                                     let _ = tx.send(result);
                                 });
                                 pending_job = Some(PendingCompileJob {
@@ -3905,8 +4178,7 @@ where
                                 let name = suggested_name
                                     .or_else(|| {
                                         path.as_ref().and_then(|p| {
-                                            p.file_stem()
-                                                .map(|stem| stem.to_string_lossy().to_string())
+                                            source_name_from_path(&CompileKind::Effect, p)
                                         })
                                     })
                                     .unwrap_or_else(|| "untitled".to_string());
@@ -4044,9 +4316,7 @@ where
                     continue;
                 }
 
-                let name = save_path
-                    .file_stem()
-                    .map(|stem| stem.to_string_lossy().to_string())
+                let name = source_name_from_path(&kind, &save_path)
                     .unwrap_or_else(|| "untitled".to_string());
 
                 if last_live_applied
@@ -4070,8 +4340,15 @@ where
                 match kind {
                     CompileKind::Instrument => {
                         let compile_source = source.clone();
+                        let asset_base = editor_file_path(kind.clone(), Some(&name))
+                            .parent()
+                            .map(|p| p.to_path_buf());
                         std::thread::spawn(move || {
-                            let result = compile_and_load_instrument(&compile_source, sample_rate);
+                            let result = compile_and_load_instrument_with_asset_base(
+                                &compile_source,
+                                sample_rate,
+                                asset_base.as_deref(),
+                            );
                             let _ = tx.send(result);
                         });
                     }
@@ -4114,6 +4391,7 @@ pub fn run_embedded_scratch_flow(
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            vim_mode: true,
         },
     );
     let initial = if initial_text.trim().is_empty() {
@@ -4422,9 +4700,10 @@ pub fn run_instrument_editor_flow(
 #[cfg(test)]
 mod tests {
     use super::{
-        fallback_effect_descriptors, fallback_instrument_descriptors, new_eval_context,
+        compile_instrument_with_asset_base, fallback_effect_descriptors,
+        fallback_instrument_descriptors, new_eval_context, parse_manifest,
         register_sequencer_natives, scratch_runtime_with_fallbacks, shared_native_metadata,
-        DGenParam, ScratchControlRuntime, HEADER_SLOTS,
+        DGenParam, ScratchControlRuntime,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
@@ -4435,6 +4714,19 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::vm::Value;
     use eseqlisp::{BufferMode, Editor, EditorConfig, Runtime};
+
+    #[test]
+    fn folder_instrument_dsp_path_maps_to_instrument_name() {
+        let path = std::path::Path::new("instruments/emulations/monomachine-fmplus/dsp.lisp");
+        assert_eq!(
+            super::instrument_name_from_source_path(path).as_deref(),
+            Some("emulations/monomachine-fmplus/")
+        );
+        assert_eq!(
+            super::source_name_from_path(&eseqlisp::CompileKind::Instrument, path).as_deref(),
+            Some("emulations/monomachine-fmplus/")
+        );
+    }
     use std::sync::Arc;
 
     #[test]
@@ -4790,7 +5082,7 @@ mod tests {
     #[test]
     fn scratch_runtime_with_fallbacks_uses_state_published_descriptors() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let mut custom_desc = EffectDescriptor::from_lisp_manifest(
+        let custom_desc = EffectDescriptor::from_lisp_manifest(
             "MODUM_DELAY",
             &[DGenParam {
                 name: "max1".to_string(),
@@ -4804,9 +5096,6 @@ mod tests {
             2,
             2,
         );
-        for param in &mut custom_desc.params {
-            param.node_param_idx += HEADER_SLOTS as u32;
-        }
         let mut effect_descriptors = fallback_effect_descriptors(1);
         effect_descriptors[0][0] = custom_desc;
         state.set_scratch_runtime_descriptors(
@@ -4944,6 +5233,7 @@ mod tests {
             runtime,
             EditorConfig {
                 init_source: Some(init_src),
+                ..EditorConfig::default()
             },
         );
         editor.open_scratch_buffer_with_mode("*scratch*", "(seq-step 0)", BufferMode::ESeqLisp);
@@ -5240,6 +5530,7 @@ mod tests {
             runtime,
             EditorConfig {
                 init_source: Some(init_src),
+                ..EditorConfig::default()
             },
         );
         editor.open_scratch_buffer_with_mode("*scratch*", "(+ 1 1)", BufferMode::ESeqLisp);
@@ -5249,5 +5540,114 @@ mod tests {
         editor.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
 
         assert_eq!(editor.minibuffer.unwrap_or_default(), "2");
+    }
+
+    #[test]
+    fn parse_manifest_reads_wavetable_tensor_metadata() {
+        let manifest = parse_manifest(
+            r#"{
+              "version": 1,
+              "dylib": "test.dylib",
+              "totalMemorySlots": 16,
+              "params": [],
+              "inputs": [],
+              "outputs": [{"channel": 0, "name": "audio"}],
+              "modulators": [],
+              "modDestinations": [],
+              "tensors": [
+                {
+                  "name": "waves",
+                  "cellOffset": 4,
+                  "shape": [2, 4],
+                  "kind": "wavetable",
+                  "mutable": false,
+                  "sourceFile": "waves/tiny.json"
+                }
+              ],
+              "tensorInitData": [
+                {"offset": 4, "data": [0.0, 0.25, 0.5, 0.75, 1.0, 0.5, 0.0, -0.5]}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(manifest.tensors.len(), 1);
+        assert_eq!(manifest.tensors[0].name, "waves");
+        assert_eq!(manifest.tensors[0].cell_offset, 4);
+        assert_eq!(manifest.tensors[0].shape, vec![2, 4]);
+        assert_eq!(manifest.tensors[0].kind, "wavetable");
+        assert!(!manifest.tensors[0].mutable);
+        assert_eq!(
+            manifest.tensors[0].source_file.as_deref(),
+            Some("waves/tiny.json")
+        );
+        assert_eq!(manifest.tensor_init_data[0].offset, 4);
+        assert_eq!(manifest.tensor_init_data[0].data.len(), 8);
+    }
+
+    #[test]
+    fn compile_instrument_passes_asset_base_for_wavetable_files() {
+        let root = std::env::temp_dir().join(format!(
+            "sequencer-wavetable-asset-test-{}",
+            std::process::id()
+        ));
+        let waves = root.join("waves");
+        std::fs::create_dir_all(&waves).unwrap();
+        std::fs::write(
+            waves.join("tiny.json"),
+            r#"{"shape":[4,2],"data":[0.0,1.0,0.25,0.5,0.5,0.0,0.75,-0.5]}"#,
+        )
+        .unwrap();
+
+        let source = r#"
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (def waves (wavetable @shape [4 2] @file "waves/tiny.json"))
+            (out (* (peek waves 1 0) gate velocity) 1 @name audio)
+        "#;
+
+        let json = compile_instrument_with_asset_base(source, 44_100, Some(&root)).unwrap();
+        let manifest = parse_manifest(&json).unwrap();
+        assert_eq!(manifest.tensors.len(), 1);
+        assert_eq!(manifest.tensors[0].name, "waves");
+        assert_eq!(manifest.tensors[0].shape, vec![4, 2]);
+        assert_eq!(manifest.tensor_init_data[0].data.len(), 8);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dpro_wave_v2_renders_audible_signal() {
+        let name = "emulations/monomachine-dpro-wave-v2/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let report = super::render_instrument_source_for_test(
+            &source,
+            asset_base.as_deref(),
+            &super::InstrumentRenderOptions {
+                sample_rate: 44_100,
+                block_size: 128,
+                frames: 4096,
+                midi_note: 69.0,
+                velocity: 1.0,
+                gate_frames: 4096,
+                voice_index: 0,
+                param_overrides: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            report.peak > 0.01,
+            "expected audible peak, got report: {report:?}"
+        );
+        assert!(
+            report.rms > 0.001,
+            "expected audible rms, got report: {report:?}"
+        );
     }
 }

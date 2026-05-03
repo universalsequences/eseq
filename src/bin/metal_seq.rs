@@ -3678,9 +3678,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(cell) = map.get("name") {
                                 if let Value::String(inst_name) = &*cell.borrow() {
                                     let inst_name = inst_name.clone();
-                                    let file_path = std::path::PathBuf::from(format!(
-                                        "instruments/{inst_name}.lisp"
-                                    ));
+                                    let file_path =
+                                        match sequencer::lisp_effect::instrument_source_path(
+                                            &inst_name,
+                                        ) {
+                                            Ok(path) => path,
+                                            Err(e) => {
+                                                editor.handle_host_event(HostEvent::Error(
+                                                    format!("Instrument file not found: {e}"),
+                                                ));
+                                                continue;
+                                            }
+                                        };
                                     if !file_path.exists() {
                                         editor.handle_host_event(HostEvent::Error(format!(
                                             "Instrument file not found: {}",
@@ -3735,9 +3744,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let source =
                                         editor.read_buffer_text(&buf_name).unwrap_or_default();
 
-                                    // Save to file
-                                    let final_path = format!("instruments/{inst_name}.lisp");
-                                    if let Err(e) = std::fs::write(&final_path, &source) {
+                                    if let Err(e) =
+                                        sequencer::lisp_effect::save_instrument(&inst_name, &source)
+                                    {
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(
                                             "SEQ",
@@ -7554,6 +7563,7 @@ mod tests {
             "emulations/hammond-organ/",
             "emulations/minimoog/",
             "emulations/monomachine-digipro/",
+            "emulations/monomachine-dpro-wave-v2/",
             "emulations/monomachine-fmplus/",
             "emulations/monomachine-sid/",
             "emulations/monomachine-superwave/",

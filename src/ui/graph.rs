@@ -1540,11 +1540,6 @@ impl GraphController<'_> {
             manifest.n_inputs,
             manifest.n_outputs,
         );
-        for param in &mut inst_desc.params {
-            if param.node_param_idx < crate::voice_modulator::MOD_PARAM_BASE {
-                param.node_param_idx += lisp_effect::HEADER_SLOTS as u32;
-            }
-        }
         inst_desc
             .params
             .extend(crate::voice_modulator::ui_param_descriptors());

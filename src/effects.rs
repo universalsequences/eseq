@@ -305,6 +305,29 @@ mod tests {
         assert_eq!(slot.plocks.get(3, 0), Some(0.33));
         assert_eq!(slot.plocks.get(4, 1), Some(0.66));
     }
+
+    #[test]
+    fn lisp_manifest_params_address_dgen_wrapper_state() {
+        let desc = EffectDescriptor::from_lisp_manifest(
+            "custom",
+            &[crate::lisp_effect::DGenParam {
+                name: "cutoff".to_string(),
+                cell_id: 12,
+                default: 1000.0,
+                min: 20.0,
+                max: 20_000.0,
+                unit: Some("Hz".to_string()),
+                hidden: false,
+            }],
+            0,
+            1,
+        );
+
+        assert_eq!(
+            desc.params[0].node_param_idx,
+            (crate::lisp_effect::HEADER_SLOTS + 12) as u32
+        );
+    }
 }
 
 // ── EffectDescriptor ──
@@ -554,7 +577,7 @@ impl EffectDescriptor {
                     unit: p.unit.clone(),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: p.cell_id as u32,
+                node_param_idx: (crate::lisp_effect::HEADER_SLOTS + p.cell_id) as u32,
                 host_control: None,
             })
             .collect();

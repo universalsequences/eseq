@@ -164,6 +164,44 @@ The audio runs through a C-based lock-free graph engine (`audiograph/`) that sup
 
 tinyseq supports custom DSP effects written in DGenLisp, a Lisp dialect that compiles to native shared libraries. Place `.dgenlisp` source files in the `effects/` directory and load them via **Ctrl+L**. Effects are hot-compiled in a background thread and patched into the audio graph on completion.
 
+## Instrument probe
+
+`instrument_probe` is a command-line render harness for DGenLisp instruments. It loads an instrument through the same host-side compile/load/init path used by tinyseq, sends a note into the instrument, renders audio blocks, and reports basic signal statistics. Use it when adding or changing instruments so quiet output, silent output, broken parameter defaults, and missing local data files are caught before testing in the DAW/TUI.
+
+Run it against a saved instrument name:
+
+```sh
+cargo run --bin instrument_probe -- emulations/monomachine-dpro-wave-v2 \
+  --frames 4096 \
+  --min-peak 0.01 \
+  --min-rms 0.001
+```
+
+Or run it against a direct source path:
+
+```sh
+cargo run --bin instrument_probe -- instruments/emulations/monomachine-dpro-wave-v2/dsp.lisp \
+  --midi-note 60 \
+  --velocity 0.8
+```
+
+Useful options:
+
+| Option | Meaning |
+|--------|---------|
+| `--frames N` | Total frames to render, default `44100` |
+| `--block-size N` | DSP block size, default `128` |
+| `--sample-rate N` | Render sample rate, default `44100` |
+| `--midi-note N` | MIDI note sent to the instrument, default `69` |
+| `--velocity V` | Note velocity from `0..1`, default `1` |
+| `--gate-frames N` | Number of frames the gate stays high, default is the full render |
+| `--param name=value` | Override an instrument parameter; repeat the flag for multiple params |
+| `--min-peak V` | Exit with failure if the rendered peak is below `V` |
+| `--min-rms V` | Exit with failure if the rendered RMS is below `V` |
+| `--json` | Print a machine-readable report |
+
+For direct paths, relative assets such as wavetable JSON files are resolved from the source file's parent directory. For saved instrument names, assets are resolved from the saved instrument directory, matching the normal host loader.
+
 ## `eseqlisp` integration
 
 tinyseq now embeds [`eseqlisp`](https://github.com/universalsequences/eseqlisp) for control scripting and editing.
