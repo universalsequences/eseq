@@ -7,7 +7,7 @@ use crate::tile::{WidgetClick, WidgetGesture};
 use crate::ui::hit::{self, HitGrid};
 use crate::vm::Value;
 use crate::widget_render::{
-    self, MouseEventOutcome, begin_widget_gesture as begin_widget_gesture_data,
+    self, MouseEventOutcome, WidgetCursor, begin_widget_gesture as begin_widget_gesture_data,
     captures_scroll_gesture, handle_event, map_double_click_event, map_magnify_event,
     map_mouse_event, map_scroll_gesture_event,
 };
@@ -15,7 +15,83 @@ use crate::widget_render::{
 use super::Editor;
 use super::widget_focus::find_node_by_id;
 
+fn is_slider_widget(node: &LayoutNode) -> bool {
+    matches!(node.widget_type.as_str(), "hslider" | "vslider" | "slider")
+}
+
 impl Editor {
+    fn dispatch_slider_drag_to_node(
+        &mut self,
+        node: &LayoutNode,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        start: (f32, f32),
+        end: (f32, f32),
+    ) {
+        self.last_slider_drag_widget_id = Some(node.widget_id);
+        let output = self.dispatch_widget_mouse_event(
+            node,
+            mouse.kind,
+            content_col,
+            content_row,
+            end.0,
+            end.1,
+            Some(start),
+            None,
+            mouse.modifiers,
+        );
+        let _ = self.apply_widget_output(output);
+    }
+
+    fn dispatch_slider_drag_to_last(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        start: (f32, f32),
+        end: (f32, f32),
+    ) -> bool {
+        let Some(widget_id) = self.last_slider_drag_widget_id else {
+            return false;
+        };
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            return false;
+        };
+        let Some(node) = find_node_by_id(&layout, widget_id) else {
+            self.last_slider_drag_widget_id = None;
+            return false;
+        };
+        if !is_slider_widget(&node) {
+            self.last_slider_drag_widget_id = None;
+            return false;
+        }
+        self.dispatch_slider_drag_to_node(&node, mouse, content_col, content_row, start, end);
+        true
+    }
+
+    pub(super) fn update_widget_cursor(
+        &mut self,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        let Some((local_col, local_row)) =
+            hit::to_local(precise_col, precise_row, content_col, content_row)
+        else {
+            self.widget_cursor = WidgetCursor::Default;
+            return;
+        };
+        let Some(node) = self.widget_node_at_local(local_col, local_row) else {
+            self.widget_cursor = WidgetCursor::Default;
+            return;
+        };
+        let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
+        let scrolled_row = local_row + self.total_scroll_top();
+        self.widget_cursor = widget_render::cursor_for_node(&node, scrolled_col, scrolled_row);
+    }
+
     pub(super) fn try_handle_widget_mouse_precise(
         &mut self,
         mouse: MouseEvent,
@@ -29,46 +105,42 @@ impl Editor {
         else {
             return false;
         };
-        // Overlay (dropdown menu, etc.) intercepts clicks before normal hit-test
+        // Overlay (dropdown menu, etc.) intercepts pointer events before normal
+        // hit-test. Do not gate this on overlay_contains: overlay geometry is
+        // visual/screen-space and may extend over widgets that should not see
+        // the same click sequence.
         if widget_render::overlay_widget_id().is_some()
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
+            )
         {
-            if widget_render::overlay_contains(local_col, local_row) {
-                // Click inside overlay → dispatch to overlay widget
-                if let Some(overlay_id) = widget_render::overlay_widget_id() {
-                    let Some(layout) = self.runtime.current_layout.clone() else {
-                        return false;
+            if let Some(overlay_id) = widget_render::overlay_widget_id() {
+                let Some(layout) = self.runtime.current_layout.clone() else {
+                    return true;
+                };
+                if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id) {
+                    let widget_event = map_mouse_event(
+                        &node,
+                        mouse.kind,
+                        local_col,
+                        local_row,
+                        None,
+                        None,
+                        mouse.modifiers,
+                    );
+                    let output = match widget_event {
+                        MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
+                        MouseEventOutcome::Dispatch(widget_event) => {
+                            handle_event(&node, widget_event)
+                        }
                     };
-                    if let Some(node) = super::widget_focus::find_node_by_id(&layout, overlay_id) {
-                        let widget_event = map_mouse_event(
-                            &node,
-                            mouse.kind,
-                            local_col,
-                            local_row,
-                            None,
-                            None,
-                            mouse.modifiers,
-                        );
-                        let output = match widget_event {
-                            MouseEventOutcome::Ignore | MouseEventOutcome::Consume => None,
-                            MouseEventOutcome::Dispatch(widget_event) => {
-                                handle_event(&node, widget_event)
-                            }
-                        };
-                        let _ = self.apply_widget_output(output);
-                        return true;
-                    }
+                    let _ = self.apply_widget_output(output);
                 }
-            } else {
-                // Click outside overlay → dismiss and close the dropdown state
-                if let Some(id) = widget_render::overlay_widget_id() {
-                    widget_render::dropdown::close_dropdown(id);
-                }
-                widget_render::clear_overlay();
-                self.mark_needs_redraw();
-                // Don't return — let the click pass through to normal handling
-                // (e.g., clicking another dropdown should open it)
             }
+            return true;
         }
 
         let gen_before = widget_render::widget_state_generation();
@@ -91,7 +163,7 @@ impl Editor {
         };
         if self.apply_widget_output(output) {
             true
-        } else if matches!(mouse.kind, MouseEventKind::Down(_)) {
+        } else if matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Moved) {
             let has_widget = self.widget_node_at_local(local_col, local_row).is_some();
             // Only invalidate layout if widget state actually changed
             // (e.g. tree expand/collapse bumps the generation counter).
@@ -292,6 +364,7 @@ impl Editor {
         let end_local = (end.0 - content_col as f32, end.1 - content_row as f32);
         let start_node = self.widget_node_at_local(start_local.0, start_local.1);
         let end_node = self.widget_node_at_local(end_local.0, end_local.1);
+        let allow_slider_drag = self.pointer_drag_started_on_slider;
 
         if let Some(node) = start_node.as_ref()
             && widget_render::widget_captures_drag(&node.widget_type)
@@ -330,6 +403,61 @@ impl Editor {
             return;
         }
 
+        if allow_slider_drag {
+            let steps = ((end.0 - start.0).abs().max((end.1 - start.1).abs()) * 2.0)
+                .ceil()
+                .max(1.0) as usize;
+            let mut last_hit_slider_id: Option<u64> = None;
+            let mut target_slider: Option<LayoutNode> = None;
+            for step in 0..=steps {
+                let t = step as f32 / steps as f32;
+                let col = start.0 + (end.0 - start.0) * t;
+                let row = start.1 + (end.1 - start.1) * t;
+                let local_col = col - content_col as f32;
+                let local_row = row - content_row as f32;
+                let Some(node) = self.widget_node_at_local(local_col, local_row) else {
+                    continue;
+                };
+                if !is_slider_widget(&node) || Some(node.widget_id) == last_hit_slider_id {
+                    continue;
+                }
+                if step < steps {
+                    self.dispatch_slider_drag_to_node(
+                        &node,
+                        mouse,
+                        content_col,
+                        content_row,
+                        start,
+                        (col, row),
+                    );
+                }
+                last_hit_slider_id = Some(node.widget_id);
+                target_slider = Some(node);
+            }
+
+            if let Some(node) = target_slider {
+                self.dispatch_slider_drag_to_node(
+                    &node,
+                    mouse,
+                    content_col,
+                    content_row,
+                    start,
+                    end,
+                );
+            } else {
+                let _ =
+                    self.dispatch_slider_drag_to_last(mouse, content_col, content_row, start, end);
+            }
+            return;
+        }
+
+        if !allow_slider_drag
+            && (start_node.as_ref().is_some_and(is_slider_widget)
+                || end_node.as_ref().is_some_and(is_slider_widget))
+        {
+            return;
+        }
+
         if HitGrid::same_hit(start_node.as_ref(), end_node.as_ref()) {
             let _ =
                 self.try_handle_widget_mouse_precise(mouse, content_col, content_row, end.0, end.1);
@@ -347,6 +475,10 @@ impl Editor {
             let local_col = col - content_col as f32;
             let local_row = row - content_row as f32;
             let node = self.widget_node_at_local(local_col, local_row);
+            if !allow_slider_drag && node.as_ref().is_some_and(is_slider_widget) {
+                last_hit = node;
+                continue;
+            }
             if node.is_some() && !HitGrid::same_hit(node.as_ref(), last_hit.as_ref()) {
                 let _ =
                     self.try_handle_widget_mouse_precise(mouse, content_col, content_row, col, row);

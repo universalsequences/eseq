@@ -25,6 +25,30 @@ fn resolve_color(props: &HashMap<String, Value>, hovered: bool) -> Color {
     resolve_named_color(props, "color", theme::WIDGET_LABEL_FG())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_text_row_respects_vertical_alignment() {
+        let rect = Rect {
+            row: 2.0,
+            col: 0.0,
+            width: 8.0,
+            height: 3.0,
+        };
+        let mut props = HashMap::new();
+
+        assert_eq!(label_text_row(&props, rect), 2.0);
+
+        props.insert("v-align".to_string(), Value::Keyword("center".to_string()));
+        assert_eq!(label_text_row(&props, rect), 3.0);
+
+        props.insert("v-align".to_string(), Value::Keyword("end".to_string()));
+        assert_eq!(label_text_row(&props, rect), 4.0);
+    }
+}
+
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let text = match props.get("text") {
         Some(Value::String(s)) => s.clone(),
@@ -32,7 +56,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     };
 
     let fg = resolve_color(props, false);
-    let row_u16 = rect.row.round() as u16;
+    let row_u16 = label_text_row(props, rect).round() as u16;
     let col_u16 = rect.col.round() as u16;
     let width_u16 = rect.width.round() as u16;
 
@@ -52,13 +76,25 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
     }
 }
 
+pub fn label_text_row(props: &HashMap<String, Value>, rect: Rect) -> f32 {
+    match props.get("v-align") {
+        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "center" => {
+            rect.row + (rect.height - 1.0).max(0.0) * 0.5
+        }
+        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "end" => {
+            rect.row + (rect.height - 1.0).max(0.0)
+        }
+        _ => rect.row,
+    }
+}
+
 impl WidgetDefinition for LabelWidget {
     fn names(&self) -> &'static [&'static str] {
         &["label"]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["text", "width", "font-size"]
+        &["text", "width", "height", "font-size"]
     }
 
     fn measure(
@@ -84,7 +120,9 @@ impl WidgetDefinition for LabelWidget {
             let px_height = measurer.line_height_px(font_size);
             return Some(Size {
                 width: px_width / ctx.cell_w,
-                height: px_height / ctx.cell_h,
+                height: get_prop_num(node, "height")
+                    .map(f64_to_f32)
+                    .unwrap_or(px_height / ctx.cell_h),
             });
         }
 
@@ -97,7 +135,7 @@ impl WidgetDefinition for LabelWidget {
                         .map(|text| usize_to_f32(text.chars().count()))
                         .unwrap_or(0.0)
                 }),
-            height: 1.0,
+            height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.0),
         })
     }
 
@@ -142,8 +180,10 @@ impl WidgetDefinition for LabelWidget {
         }
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
-                row: node.rect.row,
+                row: label_text_row(&node.props, node.rect),
                 col: node.rect.col,
+                align_width: 0.0,
+                h_align: 0.0,
                 text: text.clone(),
                 font_size,
                 fg,

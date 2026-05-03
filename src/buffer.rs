@@ -303,14 +303,21 @@ impl Buffer {
         self.save()
     }
 
-    /// Adjust scroll_top so the cursor stays within the visible viewport.
-    ///
-    pub fn adjust_scroll(&mut self, viewport_height: usize) {
+    /// Clamp scroll_top to the valid range for the current buffer size.
+    pub fn clamp_scroll(&mut self, viewport_height: usize) {
         if viewport_height == 0 {
             return;
         }
         let max_scroll = self.lines.len().saturating_sub(viewport_height);
         self.scroll_top = self.scroll_top.min(max_scroll);
+    }
+
+    /// Adjust scroll_top so the cursor stays within the visible viewport.
+    pub fn adjust_scroll(&mut self, viewport_height: usize) {
+        if viewport_height == 0 {
+            return;
+        }
+        self.clamp_scroll(viewport_height);
 
         if self.cursor.0 < self.scroll_top {
             self.scroll_top = self.cursor.0;

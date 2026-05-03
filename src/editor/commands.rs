@@ -29,6 +29,16 @@ impl Editor {
             (KeyCode::Char('w'), KeyModifiers::ALT, "copy-region"),
             (KeyCode::Char('y'), KeyModifiers::CONTROL, "yank"),
             (
+                KeyCode::Char('c'),
+                KeyModifiers::SUPER,
+                "copy-selection-to-clipboard",
+            ),
+            (
+                KeyCode::Char('v'),
+                KeyModifiers::SUPER,
+                "paste-from-clipboard",
+            ),
+            (
                 KeyCode::Char('k'),
                 KeyModifiers::CONTROL,
                 "delete-to-line-end",
@@ -174,8 +184,11 @@ impl Editor {
                     return;
                 }
                 self.minibuffer = None;
-                self.clear_mark();
-                self.active_buffer_mut().delete_char_before();
+                if !self.delete_active_region() {
+                    self.clear_mark();
+                    self.active_buffer_mut().delete_char_before();
+                }
+                self.sync_text_horizontal_scroll_to_viewport();
                 self.refresh_completion();
             }
             "kill-region-or-word" => {
@@ -186,6 +199,7 @@ impl Editor {
                 if !self.kill_active_region() {
                     self.active_buffer_mut().delete_word_before();
                 }
+                self.sync_text_horizontal_scroll_to_viewport();
                 self.refresh_completion();
             }
             "copy-region" => {
@@ -206,9 +220,24 @@ impl Editor {
                 self.clear_mark();
                 if let Some(text) = self.kill_ring.last().cloned() {
                     self.active_buffer_mut().insert_str(&text);
+                    self.sync_text_horizontal_scroll_to_viewport();
                 } else {
                     self.minibuffer = Some("Kill ring is empty".to_string());
                 }
+            }
+            "copy-selection-to-clipboard" => {
+                self.completion = None;
+                if !self.copy_active_region_to_clipboard() {
+                    self.minibuffer = Some("No active region".to_string());
+                }
+            }
+            "paste-from-clipboard" => {
+                if self.guard_read_only() {
+                    return;
+                }
+                self.completion = None;
+                self.minibuffer = None;
+                self.paste_from_system_clipboard();
             }
             "delete-to-line-end" => {
                 if self.guard_read_only() {
@@ -218,6 +247,7 @@ impl Editor {
                 self.minibuffer = None;
                 self.clear_mark();
                 self.active_buffer_mut().delete_to_line_end();
+                self.sync_text_horizontal_scroll_to_viewport();
             }
             "save-buffer" => {
                 self.completion = None;

@@ -460,6 +460,8 @@ impl WidgetDefinition for TextInputWidget {
                 MetalProportionalTextPrimitive {
                     row: text_row,
                     col: text_col,
+                    align_width: 0.0,
+                    h_align: 0.0,
                     text: display_text,
                     font_size,
                     fg: display_color,

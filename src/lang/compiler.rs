@@ -109,6 +109,7 @@ fn is_widget_name(name: &str) -> bool {
     matches!(
         name,
         "label"
+            | "button"
             | "slider"
             | "hslider"
             | "vslider"

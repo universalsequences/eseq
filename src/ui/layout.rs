@@ -696,8 +696,13 @@ fn size_affecting_props_equal(
 ) -> bool {
     if widget_type == "label" {
         let width_equal = value_option_eq(old_props.get("width"), new_props.get("width"));
+        let height_equal = value_option_eq(old_props.get("height"), new_props.get("height"));
+        let font_size_equal =
+            value_option_eq(old_props.get("font-size"), new_props.get("font-size"));
         let width_locked = old_props.contains_key("width") || new_props.contains_key("width");
         return width_equal
+            && height_equal
+            && font_size_equal
             && (width_locked || value_option_eq(old_props.get("text"), new_props.get("text")));
     }
 

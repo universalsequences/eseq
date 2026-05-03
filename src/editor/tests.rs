@@ -399,6 +399,35 @@
     }
 
     #[test]
+    fn mouse_scroll_does_not_move_cursor_or_snap_back_on_render() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let text = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.open_scratch_buffer("*test*", &text);
+        editor.set_layout_viewport(20, 6);
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::ScrollDown, 1, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+        assert_eq!(editor.active_buffer().scroll_top, 3);
+
+        let _frame = crate::ui::frame::build_render_frame(&mut editor, 20, 6);
+
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+        assert_eq!(editor.active_buffer().scroll_top, 3);
+    }
+
+    #[test]
     fn ctrl_s_opens_incremental_search_in_minibuffer() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -429,6 +458,32 @@
 
         editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!(editor.active_buffer().cursor, (0, 0));
+    }
+
+    #[test]
+    fn incremental_search_scrolls_to_match() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        let text = (0..20)
+            .map(|i| {
+                if i == 12 {
+                    "needle".to_string()
+                } else {
+                    format!("line {i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        editor.open_scratch_buffer("*test*", &text);
+        editor.set_layout_viewport(20, 6);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        for c in "needle".chars() {
+            editor.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+
+        assert_eq!(editor.active_buffer().cursor, (12, 0));
+        assert_eq!(editor.active_buffer().scroll_top, 7);
     }
 
     #[test]
@@ -702,6 +757,24 @@
     }
 
     #[test]
+    fn backspace_deletes_active_region() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), " def");
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+        assert!(editor.active_region_range().is_none());
+    }
+
+    #[test]
     fn alt_w_copies_region_and_ctrl_y_yanks_it() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -717,6 +790,44 @@
         editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
 
         assert_eq!(editor.active_buffer().text(), "abc defabc");
+    }
+
+    #[test]
+    fn cmd_c_copies_region_to_system_clipboard() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER));
+
+        assert_eq!(editor.test_clipboard(), Some("abc"));
+        assert_eq!(editor.active_buffer().text(), "abc def");
+        assert_eq!(editor.active_region_range(), Some(((0, 0), (0, 3))));
+    }
+
+    #[test]
+    fn cmd_v_pastes_system_clipboard_and_replaces_region() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_test_clipboard("XYZ");
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.active_buffer_mut().cursor = (0, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER));
+
+        assert_eq!(editor.active_buffer().text(), "XYZ def");
+        assert_eq!(editor.active_buffer().cursor, (0, 3));
+        assert!(editor.active_region_range().is_none());
     }
 
     #[test]
@@ -1219,6 +1330,49 @@ fn transient_minibuffer_message_expires_without_input() {
         let value = editor.runtime.eval_str("level").unwrap().unwrap();
         match value {
             Value::Number(n) => assert!(n > 90.0),
+            _ => panic!("expected numeric slider state"),
+        }
+    }
+
+    #[test]
+    fn slider_drag_continues_after_pointer_leaves_slider_bounds() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(20, 6);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def level (state 0))
+                (effect
+                  (hslider
+                    :min 0
+                    :max 100
+                    :value level
+                    :on-change |v| (set! level v)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(20, 6);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 9, 1),
+            1,
+            1,
+            20,
+            6,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 16, 3),
+            1,
+            1,
+            20,
+            6,
+        );
+
+        let value = editor.runtime.eval_str("level").unwrap().unwrap();
+        match value {
+            Value::Number(n) => assert!(n > 90.0, "expected off-row drag to keep editing slider, got {n}"),
             _ => panic!("expected numeric slider state"),
         }
     }

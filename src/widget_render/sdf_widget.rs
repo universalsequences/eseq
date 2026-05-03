@@ -805,7 +805,9 @@ pub fn sdf_widget_background_primitives(
         None => return Vec::new(),
     };
 
-    let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
+    let paint_rect = sdf_widget_paint_rect(rect, def.paint_margin);
+    let (ndc_min, ndc_max) = ndc_bounds(paint_rect, viewport);
+    let logical_uv_bounds = sdf_widget_logical_uv_bounds(rect, paint_rect);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
     let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
@@ -848,7 +850,7 @@ pub fn sdf_widget_background_primitives(
                 visual_ease,
                 visual_brightness,
             ],
-            color_c: [0.0, 0.0, 1.0, 1.0],
+            color_c: logical_uv_bounds,
             color_d: visual_scale,
             corner_radius: 0.0,
             pixel_aspect,
@@ -1033,6 +1035,66 @@ mod tests {
             sdf_widget_logical_uv_bounds(logical, paint),
             [0.25, 0.25, 0.75, 0.75]
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_primitives_apply_paint_margin() {
+        use super::super::{MetalPrimitive, WidgetViewport};
+
+        register_sdf_widget(SdfWidgetDef {
+            name: "sdf-background-margin".to_string(),
+            shader_source: String::new(),
+            sdf_expr: Expression::Symbol("shape".to_string()),
+            state_uniforms: Vec::new(),
+            region_count: 0,
+            width: 1.0,
+            height: 1.0,
+            paint_margin: 0.5,
+        });
+
+        let viewport = WidgetViewport {
+            vp_w: 100.0,
+            vp_h: 100.0,
+            cell_w: 10.0,
+            cell_h: 10.0,
+            scroll_top: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 10.0,
+            inherited_hover: false,
+            time_seconds: 0.0,
+            scroll_left: 0.0,
+        };
+        let rect = Rect {
+            row: 2.0,
+            col: 3.0,
+            width: 4.0,
+            height: 2.0,
+        };
+
+        let prims = sdf_widget_background_primitives(
+            "sdf-background-margin",
+            1,
+            rect,
+            viewport,
+            &HashMap::new(),
+        );
+
+        let MetalPrimitive::WidgetInstance { instance, .. } = &prims[0] else {
+            panic!("expected widget instance");
+        };
+        for (actual, expected) in instance
+            .color_c
+            .iter()
+            .zip([0.1, 0.16666667, 0.9, 0.8333333])
+        {
+            assert!((actual - expected).abs() < 0.0001);
+        }
+        assert!((instance.ndc_min[0] - -0.5).abs() < 0.0001);
+        assert!((instance.ndc_max[0] - 0.5).abs() < 0.0001);
+        assert!((instance.ndc_min[1] - 0.7).abs() < 0.0001);
+        assert!((instance.ndc_max[1] - 0.1).abs() < 0.0001);
     }
 
     #[test]

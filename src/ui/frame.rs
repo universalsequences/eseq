@@ -257,7 +257,7 @@ pub fn build_render_frame(
     }
     editor.sync_text_horizontal_scroll(viewport_width as u16);
     if editor.active_buffer().view_mode != ViewMode::UiOnly {
-        editor.active_buffer_mut().adjust_scroll(viewport_height);
+        editor.active_buffer_mut().clamp_scroll(viewport_height);
     }
 
     let region_range = editor.active_region_range();

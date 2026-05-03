@@ -450,6 +450,8 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
                 MetalProportionalTextPrimitive {
                     row: metal_header_text_row(rect, view.header_height),
                     col: absolute_col as f32 + 0.5,
+                    align_width: 0.0,
+                    h_align: 0.0,
                     text: label,
                     font_size: ruler_font_size,
                     fg: ruler_fg,

@@ -213,10 +213,6 @@ impl WidgetDefinition for VerticalSliderWidget {
         tui_render(props, rect, buf);
     }
 
-    fn captures_drag(&self) -> bool {
-        true
-    }
-
     fn mouse_event(
         &self,
         node: &LayoutNode,
@@ -228,7 +224,7 @@ impl WidgetDefinition for VerticalSliderWidget {
         _modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         match mouse_kind {
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
+            MouseEventKind::Drag(MouseButton::Left) => {
                 let denom = node.rect.height.max(0.001);
                 let offset = (local_row - node.rect.row) / denom;
                 let t = (1.0 - offset).clamp(0.0, 1.0);
@@ -284,6 +280,8 @@ impl WidgetDefinition for VerticalSliderWidget {
                         MetalProportionalTextPrimitive {
                             row: row as f32,
                             col: col as f32,
+                            align_width: 0.0,
+                            h_align: 0.0,
                             text: ch.to_string(),
                             font_size,
                             fg,

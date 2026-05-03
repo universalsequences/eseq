@@ -21,19 +21,22 @@ impl Editor {
         content_row: u16,
     ) -> bool {
         // If an overlay (dropdown menu) is active and click is inside it,
-        // skip focus — the overlay intercept handles it. If outside, dismiss
-        // the overlay and proceed with normal focus logic.
+        // skip focus so the overlay intercept handles it. If outside, dismiss
+        // the overlay and consume the click so it cannot activate the widget
+        // underneath the menu in the same mouse-down.
         if crate::widget_render::overlay_widget_id().is_some() {
             let local_row = precise_row - content_row as f32;
             let local_col = precise_col - content_col as f32;
             if crate::widget_render::overlay_contains(local_col, local_row) {
                 return false;
             }
-            // Dismiss overlay and fall through to normal focus handling
+            // Dismiss overlay and stop here.
             if let Some(id) = crate::widget_render::overlay_widget_id() {
                 crate::widget_render::dropdown::close_dropdown(id);
             }
             crate::widget_render::clear_overlay();
+            self.mark_needs_redraw();
+            return true;
         }
         if !self.has_focusable_widgets() {
             return false;

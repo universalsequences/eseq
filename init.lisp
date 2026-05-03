@@ -61,7 +61,6 @@
 (bind-key "C-x C-b" "eval-buffer-command")
 (bind-key "C-x C-s" "save-current-buffer")
 (bind-key "C-c C-k" "compile-current")
-(bind-key "C-c C-c" "compile-current")
 (bind-key "C-x d" "dired-here")
 
 ;; ── Dired mode ──────────────────────────────────────────────────────────────

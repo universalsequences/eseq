@@ -5,7 +5,9 @@ mod widget_focus;
 mod widget_interaction;
 
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -204,6 +206,11 @@ pub struct Editor {
     /// Cached tile rects, recomputed when tiles change or viewport resizes.
     cached_tile_rects: Vec<(TileId, Rect)>,
     widget_cursor: WidgetCursor,
+    suppress_mouse_until_left_up: bool,
+    pointer_drag_started_on_slider: bool,
+    last_slider_drag_widget_id: Option<u64>,
+    #[cfg(test)]
+    test_clipboard: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -263,6 +270,11 @@ impl Editor {
             mode_registry: HashMap::new(),
             cached_tile_rects: vec![],
             widget_cursor: WidgetCursor::Default,
+            suppress_mouse_until_left_up: false,
+            pointer_drag_started_on_slider: false,
+            last_slider_drag_widget_id: None,
+            #[cfg(test)]
+            test_clipboard: None,
         };
         editor.bind_defaults();
         editor.load_init(config.init_source.as_deref());
@@ -682,6 +694,50 @@ impl Editor {
         precise_row: f32,
         border_inset: u16,
     ) {
+        if crate::widget_render::overlay_widget_id().is_some()
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
+                    | MouseEventKind::Up(MouseButton::Left)
+            )
+        {
+            let tile_id = self.active_tile;
+            let Some((content_col, content_row, content_width, content_height)) =
+                self.tile_content_area(tile_id, border_inset)
+            else {
+                return;
+            };
+            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+                editor.handle_mouse_precise(
+                    mouse,
+                    content_col,
+                    content_row,
+                    content_width,
+                    content_height,
+                    precise_col,
+                    precise_row,
+                );
+            });
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.suppress_mouse_until_left_up = true;
+            }
+            return;
+        }
+
+        if self.suppress_mouse_until_left_up {
+            if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+                self.suppress_mouse_until_left_up = false;
+            }
+            if matches!(
+                mouse.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            ) {
+                return;
+            }
+            self.suppress_mouse_until_left_up = false;
+        }
+
         if self.handle_tile_resize_drag(mouse, precise_col, precise_row) {
             return;
         }
@@ -1596,6 +1652,10 @@ impl Editor {
     }
 
     pub fn sync_text_horizontal_scroll_to_viewport(&mut self) {
+        if self.active_buffer().view_mode != ViewMode::UiOnly {
+            let viewport_height = self.runtime.layout_rows() as usize;
+            self.active_buffer_mut().adjust_scroll(viewport_height);
+        }
         self.sync_text_horizontal_scroll(self.runtime.layout_cols());
     }
 
@@ -2037,6 +2097,7 @@ impl Editor {
                 self.minibuffer = None;
                 self.clear_mark();
                 self.active_buffer_mut().insert_char(c);
+                self.sync_text_horizontal_scroll_to_viewport();
                 self.sync_runtime_context();
                 self.refresh_completion();
             }
@@ -2048,6 +2109,7 @@ impl Editor {
                 self.minibuffer = None;
                 self.clear_mark();
                 self.active_buffer_mut().insert_newline_with_indent();
+                self.sync_text_horizontal_scroll_to_viewport();
                 self.sync_runtime_context();
             }
             _ => {}
@@ -2091,7 +2153,24 @@ impl Editor {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.last_mouse_precise = Some((precise_col, precise_row));
                 self.active_leaf_mut().active_widget_gesture = None;
+                self.pointer_drag_started_on_slider = false;
+                self.last_slider_drag_widget_id = None;
                 if widgets_visible {
+                    if crate::widget_render::overlay_widget_id().is_some() {
+                        let local_col = precise_col - content_col as f32;
+                        let local_row = precise_row - content_row as f32;
+                        if crate::widget_render::overlay_contains(local_col, local_row)
+                            && self.try_handle_widget_mouse_precise(
+                                mouse,
+                                content_col,
+                                content_row,
+                                precise_col,
+                                precise_row,
+                            )
+                        {
+                            return;
+                        }
+                    }
                     self.update_sdf_hover(content_col, content_row, precise_col, precise_row, true);
                     // Try click-to-activate on focusable widgets first
                     if self.try_click_focusable_widget(
@@ -2101,6 +2180,19 @@ impl Editor {
                         content_row,
                     ) {
                         return;
+                    }
+                    let pressed_widget = self.widget_node_at_screen(
+                        precise_col,
+                        precise_row,
+                        content_col,
+                        content_row,
+                    );
+                    if pressed_widget.as_ref().is_some_and(|node| {
+                        matches!(node.widget_type.as_str(), "hslider" | "vslider" | "slider")
+                    }) {
+                        self.pointer_drag_started_on_slider = true;
+                        self.last_slider_drag_widget_id =
+                            pressed_widget.as_ref().map(|node| node.widget_id);
                     }
                     if self.try_handle_widget_double_click(
                         content_col,
@@ -2242,6 +2334,8 @@ impl Editor {
                     }
                 }
                 self.last_mouse_precise = None;
+                self.pointer_drag_started_on_slider = false;
+                self.last_slider_drag_widget_id = None;
             }
             MouseEventKind::Moved => {
                 // Update dropdown hover when overlay is open
@@ -2299,10 +2393,6 @@ impl Editor {
                     let buffer = self.active_buffer_mut();
                     if buffer.scroll_top > 0 {
                         buffer.scroll_top = buffer.scroll_top.saturating_sub(3);
-                        buffer.cursor.0 = buffer
-                            .cursor
-                            .0
-                            .min(buffer.scroll_top + content_height.saturating_sub(1) as usize);
                     }
                     self.mark_needs_redraw();
                 }
@@ -2338,9 +2428,6 @@ impl Editor {
                     let buffer = self.active_buffer_mut();
                     let max_scroll = buffer.lines.len().saturating_sub(1);
                     buffer.scroll_top = (buffer.scroll_top + 3).min(max_scroll);
-                    if buffer.cursor.0 < buffer.scroll_top {
-                        buffer.cursor.0 = buffer.scroll_top;
-                    }
                     self.mark_needs_redraw();
                 }
             }
@@ -3635,6 +3722,105 @@ impl Editor {
         self.active_buffer_mut().delete_range(start, end);
         self.clear_mark();
         true
+    }
+
+    fn delete_active_region(&mut self) -> bool {
+        let Some((start, end)) = self.active_region_range() else {
+            return false;
+        };
+        self.active_buffer_mut().delete_range(start, end);
+        self.clear_mark();
+        true
+    }
+
+    fn copy_active_region_to_clipboard(&mut self) -> bool {
+        let Some((start, end)) = self.active_region_range() else {
+            return false;
+        };
+        let text = self.active_buffer().slice_range(start, end);
+        match self.write_system_clipboard(&text) {
+            Ok(()) => {
+                self.kill_ring.push(text);
+                self.minibuffer = None;
+                true
+            }
+            Err(error) => {
+                self.minibuffer = Some(format!("Clipboard error: {error}"));
+                false
+            }
+        }
+    }
+
+    fn paste_from_system_clipboard(&mut self) {
+        let text = match self.read_system_clipboard() {
+            Ok(text) => text,
+            Err(error) => {
+                self.minibuffer = Some(format!("Clipboard error: {error}"));
+                return;
+            }
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.delete_active_region();
+        self.active_buffer_mut().insert_str(&text);
+        self.sync_text_horizontal_scroll_to_viewport();
+        self.sync_runtime_context();
+        self.refresh_completion();
+    }
+
+    fn write_system_clipboard(&mut self, text: &str) -> Result<(), String> {
+        #[cfg(test)]
+        if self.test_clipboard.is_some() {
+            self.test_clipboard = Some(text.to_string());
+            return Ok(());
+        }
+
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("failed to start pbcopy: {error}"))?;
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "failed to open pbcopy stdin".to_string())?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|error| format!("failed to write to pbcopy: {error}"))?;
+        let status = child
+            .wait()
+            .map_err(|error| format!("failed to wait for pbcopy: {error}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("pbcopy exited with {status}"))
+        }
+    }
+
+    fn read_system_clipboard(&mut self) -> Result<String, String> {
+        #[cfg(test)]
+        if let Some(text) = &self.test_clipboard {
+            return Ok(text.clone());
+        }
+
+        let output = Command::new("pbpaste")
+            .output()
+            .map_err(|error| format!("failed to start pbpaste: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("pbpaste exited with {}", output.status));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|error| format!("clipboard did not contain UTF-8 text: {error}"))
+    }
+
+    #[cfg(test)]
+    fn set_test_clipboard(&mut self, text: impl Into<String>) {
+        self.test_clipboard = Some(text.into());
+    }
+
+    #[cfg(test)]
+    fn test_clipboard(&self) -> Option<&str> {
+        self.test_clipboard.as_deref()
     }
 
     fn guard_read_only(&mut self) -> bool {

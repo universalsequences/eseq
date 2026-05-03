@@ -127,10 +127,6 @@ impl WidgetDefinition for HorizontalSliderWidget {
         tui_render(props, rect, buf);
     }
 
-    fn captures_drag(&self) -> bool {
-        true
-    }
-
     fn mouse_event(
         &self,
         node: &LayoutNode,
@@ -142,7 +138,7 @@ impl WidgetDefinition for HorizontalSliderWidget {
         _modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
         match mouse_kind {
-            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left) => {
+            MouseEventKind::Drag(MouseButton::Left) => {
                 let denom = node.rect.width.max(0.001);
                 let t = ((local_col - node.rect.col) / denom).clamp(0.0, 1.0);
                 MouseEventOutcome::Dispatch(WidgetEvent::SetNormalized(t))

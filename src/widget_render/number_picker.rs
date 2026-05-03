@@ -585,6 +585,8 @@ impl WidgetDefinition for NumberPickerWidget {
                 MetalProportionalTextPrimitive {
                     row: text_row,
                     col: text_col,
+                    align_width: 0.0,
+                    h_align: 0.0,
                     text: display_text.clone(),
                     font_size,
                     fg,

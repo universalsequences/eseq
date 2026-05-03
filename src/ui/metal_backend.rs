@@ -34,7 +34,7 @@ mod inner {
         keyboard::{Key, KeyCode as WinitKeyCode, NamedKey, PhysicalKey},
         platform::pump_events::EventLoopExtPumpEvents,
         raw_window_handle::{HasWindowHandle, RawWindowHandle},
-        window::Window,
+        window::{CursorIcon, Window},
     };
 
     use crate::audio::sample::get_registered_sample;
@@ -814,6 +814,17 @@ fragment float4 waveform_frag(
 
         pub fn take_pending_scroll(&mut self) -> Option<((f32, f32), (f32, f32))> {
             self.pending_scroll.pop_front()
+        }
+
+        pub fn set_widget_cursor(&self, cursor: crate::widget_render::WidgetCursor) {
+            let Some(window) = &self.window else {
+                return;
+            };
+            let icon = match cursor {
+                crate::widget_render::WidgetCursor::Default => CursorIcon::Default,
+                crate::widget_render::WidgetCursor::EwResize => CursorIcon::EwResize,
+            };
+            window.set_cursor_icon(icon);
         }
 
         /// Create a TextMeasurer for the proportional font. Called once after
@@ -1797,7 +1808,10 @@ fragment float4 waveform_frag(
                 let wlib = self
                     .device
                     .newLibraryWithSource_options_error(&src_ns, None)
-                    .map_err(|_| BackendError::MetalError)?;
+                    .map_err(|err| {
+                        eprintln!("Metal widget shader compile failed for {widget_type}: {err:?}");
+                        BackendError::MetalError
+                    })?;
 
                 let wvert = wlib
                     .newFunctionWithName(&NSString::from_str("widget_vert"))
@@ -1825,7 +1839,12 @@ fragment float4 waveform_frag(
                 let pipeline_state = self
                     .device
                     .newRenderPipelineStateWithDescriptor_error(&wdesc)
-                    .map_err(|_| BackendError::MetalError)?;
+                    .map_err(|err| {
+                        eprintln!(
+                            "Metal widget pipeline creation failed for {widget_type}: {err:?}"
+                        );
+                        BackendError::MetalError
+                    })?;
                 self.widget_pipelines
                     .insert(widget_type.to_string(), pipeline_state);
             }
@@ -2498,7 +2517,22 @@ fragment float4 waveform_frag(
             let fg = run.fg.to_rgba();
             let bg = [0.0, 0.0, 0.0, 0.0]; // Transparent — alpha blending handles bg
 
-            let base_x_px = run.col * mono_cell_w;
+            let text_width_px: f32 = run
+                .text
+                .chars()
+                .filter_map(|ch| {
+                    prop_atlas
+                        .get_or_rasterize(ch, size_tenths)
+                        .map(|entry| entry.advance)
+                })
+                .sum();
+            let align_extra_px = if run.align_width > 0.0 {
+                (run.align_width * mono_cell_w - text_width_px).max(0.0)
+                    * run.h_align.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let base_x_px = run.col * mono_cell_w + align_extra_px;
             let base_y_px = run.row * mono_cell_h;
             let mut pen_x = base_x_px;
 

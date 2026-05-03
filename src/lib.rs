@@ -217,6 +217,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
                         precise_row,
                         0, // Metal: no cell borders
                     );
+                    backend.set_widget_cursor(editor.widget_cursor());
                 }
             }
             Some(Event::Resize(_, _)) => editor.mark_needs_redraw(),

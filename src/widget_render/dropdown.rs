@@ -25,7 +25,8 @@ use crate::backend::Color;
 const PADDING_H: f32 = 0.6;
 const MENU_ROW_HEIGHT: f32 = 1.4;
 const MENU_PADDING_V: f32 = 0.3;
-const CHEVRON_WIDTH: f32 = 1.5;
+const CHEVRON_RIGHT_PAD: f32 = 0.35;
+const TEXT_CHEVRON_GAP: f32 = 0.4;
 /// Extra right-side padding in the menu when a scrollbar is visible.
 const SCROLLBAR_WIDTH: f32 = 0.4;
 const SCROLLBAR_MARGIN: f32 = 0.15;
@@ -38,6 +39,9 @@ const APPROX_CHAR_WIDTH: f32 = 0.55;
 struct DropdownState {
     open: bool,
     hovered_idx: Option<usize>,
+    /// True between the trigger mouse-down that opens the menu and that same
+    /// click's mouse-up.
+    ignore_opening_mouse_up: bool,
     /// Scroll offset (in content-space rows) when the menu is taller than the viewport.
     scroll_offset: f32,
     /// Visible menu height (set at render time, used by key_event/scroll for clamping).
@@ -352,7 +356,7 @@ impl WidgetDefinition for DropdownWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["options", "width", "height", "font-size"]
+        &["options", "value", "width", "height", "font-size"]
     }
 
     fn renders_own_focus(&self) -> bool {
@@ -370,9 +374,9 @@ impl WidgetDefinition for DropdownWidget {
         let font_size = get_prop_num(node, "font-size")
             .map(f64_to_f32)
             .unwrap_or(ctx.inherited_font_size);
+        let props = props_from_node(node);
+        let selected = get_selected(&props);
         if ctx.text_measurer.is_some() {
-            let props = props_from_node(node);
-            let selected = get_selected(&props);
             if !selected.is_empty() {
                 cache_text_widths(&selected, font_size, ctx);
             }
@@ -381,9 +385,16 @@ impl WidgetDefinition for DropdownWidget {
                 cache_text_widths(&option, font_size, ctx);
             }
         }
+        let height = get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.5);
+        let explicit_width = get_prop_num(node, "width").map(f64_to_f32);
+        let width = explicit_width.unwrap_or(10.0);
+        let selected_width = text_width_cells(&selected, font_size);
+        let chevron_width = height * 0.48 * 1.8;
+        let min_width =
+            PADDING_H + selected_width + TEXT_CHEVRON_GAP + chevron_width + CHEVRON_RIGHT_PAD;
         Some(Size {
-            width: get_prop_num(node, "width").map(f64_to_f32).unwrap_or(10.0),
-            height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.5),
+            width: explicit_width.unwrap_or_else(|| width.max(min_width)),
+            height,
         })
     }
 
@@ -397,7 +408,12 @@ impl WidgetDefinition for DropdownWidget {
         _gesture: Option<&Value>,
         _modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
-        if !matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left)) {
+        if !matches!(
+            mouse_kind,
+            MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                | MouseEventKind::Up(MouseButton::Left)
+        ) {
             return MouseEventOutcome::Consume;
         }
 
@@ -405,6 +421,13 @@ impl WidgetDefinition for DropdownWidget {
         let options = get_options(&node.props);
 
         if state.open {
+            if matches!(mouse_kind, MouseEventKind::Up(MouseButton::Left))
+                && state.ignore_opening_mouse_up
+            {
+                state.ignore_opening_mouse_up = false;
+                set_state(node.widget_id, state);
+                return MouseEventOutcome::Consume;
+            }
             // Use the overlay rect (registered at render time) for hit-testing.
             // The overlay rect is in screen-space; local_row is in layout-space.
             let overlay_rect = super::get_overlay_rect();
@@ -420,29 +443,42 @@ impl WidgetDefinition for DropdownWidget {
                 let content_row = menu_row + state.scroll_offset;
                 let item_idx = ((content_row - MENU_PADDING_V) / MENU_ROW_HEIGHT).floor() as usize;
                 if item_idx < options.len() {
-                    state.open = false;
-                    state.hovered_idx = None;
-                    state.scroll_offset = 0.0;
+                    state.hovered_idx = Some(item_idx);
                     set_state(node.widget_id, state);
-                    super::clear_overlay();
-                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::String(
-                        options[item_idx].clone(),
-                    )));
+                    if matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left)) {
+                        let mut state = get_state(node.widget_id);
+                        state.open = false;
+                        state.hovered_idx = None;
+                        state.ignore_opening_mouse_up = false;
+                        state.scroll_offset = 0.0;
+                        set_state(node.widget_id, state);
+                        super::clear_overlay();
+                        return MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::String(
+                            options[item_idx].clone(),
+                        )));
+                    }
+                    return MouseEventOutcome::Consume;
                 }
             }
 
-            // Click on trigger area or outside menu → close
-            state.open = false;
-            state.hovered_idx = None;
-            state.scroll_offset = 0.0;
-            set_state(node.widget_id, state);
-            super::clear_overlay();
+            if matches!(mouse_kind, MouseEventKind::Up(MouseButton::Left)) {
+                state.open = false;
+                state.hovered_idx = None;
+                state.ignore_opening_mouse_up = false;
+                state.scroll_offset = 0.0;
+                set_state(node.widget_id, state);
+                super::clear_overlay();
+            }
             MouseEventOutcome::Consume
         } else {
+            if !matches!(mouse_kind, MouseEventKind::Down(MouseButton::Left)) {
+                return MouseEventOutcome::Consume;
+            }
             // Open the dropdown
             close_other_dropdowns(node.widget_id);
             state.open = true;
             state.hovered_idx = selected_index(&options, &get_selected(&node.props));
+            state.ignore_opening_mouse_up = true;
             state.scroll_offset = 0.0;
             set_state(node.widget_id, state);
             MouseEventOutcome::Consume
@@ -675,20 +711,29 @@ impl WidgetDefinition for DropdownWidget {
                 width: node.rect.width + ring_h * 2.0,
                 height: node.rect.height + ring_v * 2.0,
             };
-            emit_rounded_rect(&mut prims, ring_rect, ring_color, viewport, true);
+            emit_rounded_rect(&mut prims, ring_rect, ring_color, viewport, true, 0.0);
         }
 
         // ── Background ──
-        emit_rounded_rect(&mut prims, node.rect, bg_color, viewport, true);
+        emit_rounded_rect(&mut prims, node.rect, bg_color, viewport, true, 0.0);
+
+        let ch_h = node.rect.height * 0.48;
+        let ch_w = ch_h * 1.8;
+        let ch_col = node.rect.col + node.rect.width - CHEVRON_RIGHT_PAD - ch_w;
+        let ch_rect = Rect {
+            row: node.rect.row + (node.rect.height - ch_h) * 0.5,
+            col: ch_col,
+            width: ch_w,
+            height: ch_h,
+        };
 
         // ── Selected text ──
         let text_col = node.rect.col + PADDING_H;
         let text_row = node.rect.row + (node.rect.height - 1.0) * 0.5;
-        let text_right_pad = CHEVRON_WIDTH + PADDING_H * 0.5;
         let text_clip_rect = Rect {
             row: node.rect.row + 0.08,
             col: text_col,
-            width: (node.rect.width - PADDING_H - text_right_pad).max(0.0),
+            width: (ch_rect.col - TEXT_CHEVRON_GAP - text_col).max(0.0),
             height: (node.rect.height - 0.16).max(0.0),
         };
         let selected_display = truncate_text_to_width(&selected, text_clip_rect.width, font_size);
@@ -698,6 +743,8 @@ impl WidgetDefinition for DropdownWidget {
                 MetalProportionalTextPrimitive {
                     row: text_row,
                     col: text_col,
+                    align_width: 0.0,
+                    h_align: 0.0,
                     text: selected_display,
                     font_size,
                     fg: text_color,
@@ -709,16 +756,6 @@ impl WidgetDefinition for DropdownWidget {
 
         // ── Chevron badge + arrows ──
         {
-            let ch_h = node.rect.height * 0.48;
-            let ch_w = ch_h * 1.8;
-            let ch_col = node.rect.col + node.rect.width - CHEVRON_WIDTH - ch_w * 0.55;
-            let ch_rect = Rect {
-                row: node.rect.row + (node.rect.height - ch_h) * 0.5,
-                col: ch_col,
-                width: ch_w,
-                height: ch_h,
-            };
-
             // Badge background behind chevrons
             let badge_color = resolve_named_color(
                 &node.props,
@@ -737,31 +774,7 @@ impl WidgetDefinition for DropdownWidget {
                 width: ch_rect.width + badge_pad,
                 height: ch_rect.height + badge_pad * 2.0,
             };
-            // Use corner_radius 0.3 for a tighter badge shape
-            {
-                let (ndc_min, ndc_max) = ndc_bounds(badge_rect, viewport);
-                let px_w = badge_rect.width * viewport.cell_w;
-                let px_h = badge_rect.height * viewport.cell_h;
-                prims.push(MetalPrimitive::WidgetInstance {
-                    widget_type: "dropdown".to_string(),
-                    instance: WidgetInstance {
-                        ndc_min,
-                        ndc_max,
-                        value_t: 0.0,
-                        orientation: 0.0,
-                        itime: viewport.time_seconds,
-                        uniform_a: [0.0; 4],
-                        uniform_b: [0.0; 4],
-                        color_a: [badge_color.r, badge_color.g, badge_color.b, badge_color.a],
-                        color_b: [0.0; 4],
-                        color_c: [0.0; 4],
-                        color_d: [0.0; 4],
-                        corner_radius: 0.4,
-                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
-                    },
-                    is_background: false,
-                });
-            }
+            emit_rounded_rect(&mut prims, badge_rect, badge_color, viewport, false, 0.4);
             let (ndc_min, ndc_max) = ndc_bounds(ch_rect, viewport);
             let px_w = ch_rect.width * viewport.cell_w;
             let px_h = ch_rect.height * viewport.cell_h;
@@ -834,13 +847,16 @@ impl WidgetDefinition for DropdownWidget {
             // Register overlay for hit-testing (visible rect only)
             super::set_overlay(node.widget_id, menu_rect);
 
-            // Menu border (slightly larger rect behind the background)
-            let border_width = 0.06;
+            // Menu border: expand by a real pixel in each axis so the stroke stays even
+            // regardless of cell aspect ratio.
+            let border_px = 1.0;
+            let border_row = border_px / viewport.cell_h.max(1.0);
+            let border_col = border_px / viewport.cell_w.max(1.0);
             let border_rect = Rect {
-                row: menu_rect.row - border_width,
-                col: menu_rect.col - border_width,
-                width: menu_rect.width + border_width * 2.0,
-                height: menu_rect.height + border_width * 2.0,
+                row: menu_rect.row - border_row,
+                col: menu_rect.col - border_col,
+                width: menu_rect.width + border_col * 2.0,
+                height: menu_rect.height + border_row * 2.0,
             };
             let border_color = Color {
                 r: 0.45,
@@ -848,18 +864,12 @@ impl WidgetDefinition for DropdownWidget {
                 b: 0.48,
                 a: 1.0,
             };
-            emit_rounded_rect_overlay(border_rect, border_color, 0.2, viewport);
+            emit_rounded_rect_overlay(border_rect, border_color, 11.0, viewport);
 
-            // Menu background (slightly inset so the border is visible)
-            let inset = 0.06;
-            let bg_rect = Rect {
-                row: menu_rect.row + inset,
-                col: menu_rect.col + inset,
-                width: menu_rect.width - inset * 2.0,
-                height: menu_rect.height - inset * 2.0,
-            };
-            emit_rounded_rect_overlay(bg_rect, menu_bg, 0.12, viewport);
-            super::push_overlay_primitive(MetalPrimitive::PushClipRect(bg_rect));
+            // Menu background. The matching pixel radii avoid the "lumpy" corners that
+            // came from using normalized radii plus a cell-based inset.
+            emit_rounded_rect_overlay(menu_rect, menu_bg, 10.0, viewport);
+            super::push_overlay_primitive(MetalPrimitive::PushClipRect(menu_rect));
 
             // Menu items — only emit those within the visible scroll window
             let sel_idx = selected_index(&options, &selected);
@@ -899,6 +909,8 @@ impl WidgetDefinition for DropdownWidget {
                         MetalProportionalTextPrimitive {
                             row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
                             col: label_col,
+                            align_width: 0.0,
+                            h_align: 0.0,
                             text: "✓".to_string(),
                             font_size,
                             fg: check_color,
@@ -916,6 +928,8 @@ impl WidgetDefinition for DropdownWidget {
                     MetalProportionalTextPrimitive {
                         row: item_y + (MENU_ROW_HEIGHT - 1.0) * 0.5,
                         col: item_text_col,
+                        align_width: 0.0,
+                        h_align: 0.0,
                         text: option_display,
                         font_size,
                         fg: text_color,
@@ -951,7 +965,7 @@ impl WidgetDefinition for DropdownWidget {
                     b: 1.0,
                     a: 0.25,
                 };
-                emit_rounded_rect_overlay(thumb_rect, thumb_color, 0.15, viewport);
+                emit_rounded_rect_overlay(thumb_rect, thumb_color, 3.0, viewport);
             }
         } else if !state.open {
             // Ensure overlay is cleared when closed
@@ -967,12 +981,26 @@ impl WidgetDefinition for DropdownWidget {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "macos")]
+fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
+    // The shared shader's radius is normalized to half the primitive height.
+    // Converting from pixels keeps dropdown corners intentional across widths,
+    // heights, and font/cell aspect ratios. A tiny positive value opts out of
+    // the shader's historical pill default for intentionally square-ish rects.
+    if radius_px <= 0.0 {
+        return 0.001;
+    }
+    let px_h = (rect.height * viewport.cell_h).max(1.0);
+    ((radius_px * 2.0) / px_h).clamp(0.001, 0.5)
+}
+
+#[cfg(target_os = "macos")]
 fn emit_rounded_rect(
     prims: &mut Vec<MetalPrimitive>,
     rect: Rect,
     color: Color,
     viewport: WidgetViewport,
     is_background: bool,
+    corner_radius: f32,
 ) {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
@@ -991,7 +1019,7 @@ fn emit_rounded_rect(
             color_b: [0.0; 4],
             color_c: [0.0; 4],
             color_d: [0.0; 4],
-            corner_radius: 0.0,
+            corner_radius,
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background,
@@ -999,12 +1027,7 @@ fn emit_rounded_rect(
 }
 
 #[cfg(target_os = "macos")]
-fn emit_rounded_rect_overlay(
-    rect: Rect,
-    color: Color,
-    corner_radius: f32,
-    viewport: WidgetViewport,
-) {
+fn emit_rounded_rect_overlay(rect: Rect, color: Color, radius_px: f32, viewport: WidgetViewport) {
     let (ndc_min, ndc_max) = ndc_bounds(rect, viewport);
     let px_w = rect.width * viewport.cell_w;
     let px_h = rect.height * viewport.cell_h;
@@ -1022,7 +1045,7 @@ fn emit_rounded_rect_overlay(
             color_b: [0.0; 4],
             color_c: [0.0; 4],
             color_d: [0.0; 4],
-            corner_radius,
+            corner_radius: normalized_corner_radius(rect, viewport, radius_px),
             pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
         },
         is_background: true,

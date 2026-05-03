@@ -7,6 +7,7 @@ use crate::vm::{VM, Value, format_lisp_value};
 pub fn register_widget_natives(vm: &mut VM) {
     for widget in [
         "label",
+        "button",
         "slider",
         "hslider",
         "vslider",
@@ -44,7 +45,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     let mut children = Vec::new();
     let mut i = 0;
 
-    if widget_type == "label"
+    if (widget_type == "label" || widget_type == "button")
         && let Some(value) = args.first()
     {
         let text = match value {
@@ -85,7 +86,8 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     }
 
     // Text-entry and composite value widgets are always focusable.
-    if widget_type == "text-input"
+    if widget_type == "button"
+        || widget_type == "text-input"
         || widget_type == "number-picker"
         || widget_type == "dropdown"
         || widget_type == "knob-number"

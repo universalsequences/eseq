@@ -451,6 +451,8 @@ impl WidgetDefinition for KnobNumberWidget {
                     row: label_row,
                     col: node.rect.col + node.rect.width * 0.5
                         - (label.chars().count() as f32 * 0.31),
+                    align_width: 0.0,
+                    h_align: 0.0,
                     text: label.clone(),
                     font_size: label_size,
                     fg: label_color,
@@ -477,6 +479,8 @@ impl WidgetDefinition for KnobNumberWidget {
             MetalProportionalTextPrimitive {
                 row: text_row,
                 col: text_col,
+                align_width: 0.0,
+                h_align: 0.0,
                 text: display_text.clone(),
                 font_size,
                 fg,

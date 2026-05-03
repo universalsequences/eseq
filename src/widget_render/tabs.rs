@@ -357,6 +357,8 @@ impl WidgetDefinition for TabsWidget {
                 super::MetalProportionalTextPrimitive {
                     row: header_rect.row,
                     col: tab_col + text_pad,
+                    align_width: 0.0,
+                    h_align: 0.0,
                     text: label.clone(),
                     font_size: DEFAULT_FONT_SIZE,
                     fg,

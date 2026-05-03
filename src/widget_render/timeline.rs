@@ -562,6 +562,8 @@ fn build_metal_primitives(
                 MetalProportionalTextPrimitive {
                     row: label_row,
                     col: label_col,
+                    align_width: 0.0,
+                    h_align: 0.0,
                     text: label,
                     font_size: 10.5,
                     fg: theme::FG_MUTED(),
@@ -697,6 +699,8 @@ fn build_metal_primitives(
                         } else {
                             rect.col + 0.12
                         },
+                        align_width: 0.0,
+                        h_align: 0.0,
                         text: label.to_string(),
                         font_size: 10.5,
                         fg: label_fg,
@@ -842,6 +846,8 @@ fn build_metal_primitives(
                     MetalProportionalTextPrimitive {
                         row: y + ((height - 0.80).max(0.0) * 0.5) - 0.02,
                         col: x + 0.34,
+                        align_width: 0.0,
+                        h_align: 0.0,
                         text: label.clone(),
                         font_size: 10.5,
                         fg: theme::BLACK(),

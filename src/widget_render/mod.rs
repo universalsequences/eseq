@@ -1,5 +1,6 @@
 pub mod adsr_editor;
 pub mod box_widget;
+pub mod button;
 pub mod dropdown;
 pub mod grid;
 pub mod hslider;
@@ -278,6 +279,12 @@ pub enum MouseEventOutcome {
     Dispatch(WidgetEvent),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidgetCursor {
+    Default,
+    EwResize,
+}
+
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -352,6 +359,11 @@ pub struct MetalProportionalTextPrimitive {
     /// Position in cell-space (fractional allowed).
     pub row: f32,
     pub col: f32,
+    /// Optional horizontal alignment box in cell-space. When positive,
+    /// `h_align` controls where text sits inside this width: 0=start,
+    /// 0.5=center, 1=end.
+    pub align_width: f32,
+    pub h_align: f32,
     pub text: String,
     /// Font size in points.
     pub font_size: f32,
@@ -485,6 +497,10 @@ pub trait WidgetDefinition: Sync {
     ) -> MouseEventOutcome {
         MouseEventOutcome::Ignore
     }
+
+    fn cursor(&self, _node: &LayoutNode, _local_col: f32, _local_row: f32) -> WidgetCursor {
+        WidgetCursor::Default
+    }
     fn double_click_event(
         &self,
         _node: &LayoutNode,
@@ -557,9 +573,10 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &label::LABEL_WIDGET,
     &hslider::HSLIDER_WIDGET,
     &vslider::VSLIDER_WIDGET,
-    &knob_number::KNOB_NUMBER_WIDGET,
+    &button::BUTTON_WIDGET,
     &toggle::TOGGLE_WIDGET,
     &knob::KNOB_WIDGET,
+    &knob_number::KNOB_NUMBER_WIDGET,
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,
@@ -607,7 +624,7 @@ pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
 fn cacheable_widget_primitives(widget_type: &str) -> bool {
     matches!(
         widget_type,
-        "label" | "slider" | "hslider" | "vslider" | "toggle" | "knob" | "tabs" | "box"
+        "label" | "button" | "slider" | "hslider" | "vslider" | "toggle" | "knob" | "tabs" | "box"
     )
 }
 
@@ -808,8 +825,8 @@ fn collect_metal_primitives_recursive(
             inherited_hover: node_viewport.inherited_hover || child_hover,
             ..node_viewport
         };
-        primitives.push(MetalPrimitive::PushClipRect(node.rect));
         primitives.extend(widget_primitives_for_node(node, node_viewport));
+        primitives.push(MetalPrimitive::PushClipRect(node.rect));
         for child in &node.children {
             collect_metal_primitives_recursive(
                 child,
@@ -882,6 +899,12 @@ pub fn map_mouse_event(
             )
         })
         .unwrap_or(MouseEventOutcome::Ignore)
+}
+
+pub fn cursor_for_node(node: &LayoutNode, local_col: f32, local_row: f32) -> WidgetCursor {
+    widget_definition(&node.widget_type)
+        .map(|definition| definition.cursor(node, local_col, local_row))
+        .unwrap_or(WidgetCursor::Default)
 }
 
 pub fn widget_captures_drag(widget_type: &str) -> bool {

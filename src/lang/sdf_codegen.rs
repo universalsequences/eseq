@@ -202,7 +202,7 @@ impl MetalEmitter {
 
                     // 1-arg math intrinsics (same name in Metal)
                     "abs" | "sin" | "cos" | "sqrt" | "fract" | "floor" | "ceil" | "round"
-                    | "length" | "normalize" => self.emit_func_call(head, args),
+                    | "length" | "normalize" | "fwidth" => self.emit_func_call(head, args),
 
                     // 2-arg math intrinsics
                     "pow" | "atan2" | "dot" | "mod" => {

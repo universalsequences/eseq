@@ -1590,7 +1590,7 @@ impl VM {
         VM {
             chunks,
             current_chunk: 0,
-            globals: vec![None; 512],
+            globals: vec![None; 4096],
             global_names: vec![],
             pending_widget_trees: Vec::new(),
             dag: ReactiveDag::new(),
@@ -2645,6 +2645,9 @@ impl VM {
                 }
                 OpCode::StoreGlobal(idx) => {
                     if let Some(frame) = frames.last_mut() {
+                        if idx >= self.globals.len() {
+                            self.globals.resize(idx + 1, None);
+                        }
                         self.globals[idx] = stack.pop();
                         frame.pc += 1;
                     }
@@ -3062,5 +3065,26 @@ impl VM {
             return Ok(Some(result.borrow().clone()));
         }
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VM, Value};
+
+    #[test]
+    fn eval_str_grows_global_storage_for_large_programs() {
+        let mut vm = VM::new(Vec::new());
+        let mut source = String::new();
+        for idx in 0..4105 {
+            source.push_str(&format!("(def generated-global-{idx} {idx})\n"));
+        }
+
+        vm.eval_str(&source).expect("large global table eval");
+
+        assert_eq!(
+            vm.global_value("generated-global-4104"),
+            Some(Value::Number(4104.0))
+        );
     }
 }

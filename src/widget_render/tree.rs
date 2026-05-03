@@ -794,6 +794,8 @@ impl WidgetDefinition for TreeWidget {
                 MetalProportionalTextPrimitive {
                     row: text_y,
                     col: label_x,
+                    align_width: 0.0,
+                    h_align: 0.0,
                     text: row.label.clone(),
                     font_size,
                     fg,
