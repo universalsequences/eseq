@@ -18,8 +18,10 @@
   (exp (/ (* (log 2) semi) 12)))
 
 (defmacro bitreduce_12 (sig amount)
-  (/ (floor (* (clip sig -1 1) (pow 2 (clip (- 12 amount) 3 12))))
-     (pow 2 (clip (- 12 amount) 3 12))))
+  (- (* (/ (floor (* (+ (clip sig -1 1) 1) 0.5 (pow 2 (clip (- 12 amount) 1 12))))
+           (pow 2 (clip (- 12 amount) 1 12)))
+        2)
+     1))
 
 (param amp_attack_ms     @default 3    @min 1     @max 5000 @unit ms)
 (param amp_decay_ms      @default 120  @min 1     @max 5000 @unit ms)
@@ -31,13 +33,13 @@
 (param filter_sustain    @default 0.18 @min 0     @max 1)
 (param filter_release_ms @default 180  @min 1     @max 5000 @unit ms)
 
-(param wav1              @default 9    @min 1     @max 64)
+(param wav1              @default 9    @min 1     @max 64 @mod true @mod-mode additive)
 (param mix               @default 0.5  @min 0     @max 1 @mod true @mod-mode additive)
-(param wav2              @default 38   @min 1     @max 64)
+(param wav2              @default 38   @min 1     @max 64 @mod true @mod-mode additive)
 (param time              @default 18   @min 0     @max 127)
-(param br1               @default 0    @min 0     @max 9 @mod true @mod-mode additive)
+(param br1               @default 0    @min 0     @max 11 @mod true @mod-mode additive)
 (param wid               @default 0    @min 0     @max 127 @mod true @mod-mode additive)
-(param br2               @default 0    @min 0     @max 9 @mod true @mod-mode additive)
+(param br2               @default 0    @min 0     @max 11 @mod true @mod-mode additive)
 (param tune_cents        @default 0    @min -100  @max 100 @unit cents @mod true @mod-mode additive)
 
 (param cutoff            @default 7200 @min 80    @max 12000 @unit Hz @mod true @mod-mode additive)
@@ -51,8 +53,8 @@
 (def filt_env (adsr gate trigger filter_attack_ms filter_decay_ms filter_sustain filter_release_ms))
 (def tuned_pitch (* pitch (semi_ratio (/ (mod tune_cents) 100))))
 
-(def target_wav1 (clip (floor (- wav1 1)) 0 63))
-(def target_wav2 (clip (floor (- wav2 1)) 0 63))
+(def target_wav1 (clip (- (mod wav1) 1) 0 63))
+(def target_wav2 (clip (- (mod wav2) 1) 0 63))
 (def time_ms (* (/ (clip time 0 127) 127) 650))
 (def wave_slew_coeff (gswitch (gt time 0.5) (- 1.0 (exp (/ -1.0 (* (+ time_ms 1.0) 0.001 44100.0)))) 1.0))
 
@@ -71,8 +73,8 @@
 
 (def wave1_raw (wavetable-read-512 waves (clip wav1_pos 0 63) phase1))
 (def wave2_raw (wavetable-read-512 waves (clip wav2_pos 0 63) phase2))
-(def wave1 (bitreduce_12 wave1_raw (clip (mod br1) 0 9)))
-(def wave2 (bitreduce_12 wave2_raw (clip (mod br2) 0 9)))
+(def wave1 (bitreduce_12 wave1_raw (clip (mod br1) 0 11)))
+(def wave2 (bitreduce_12 wave2_raw (clip (mod br2) 0 11)))
 (def ddrw_mix (clip (mod mix) 0 1))
 (def raw_wave (+ (* wave1 (- 1 ddrw_mix)) (* wave2 ddrw_mix)))
 

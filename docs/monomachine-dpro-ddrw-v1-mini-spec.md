@@ -29,9 +29,11 @@ Reference:
 
 The first oscillator reads `wav1` at played pitch. The second oscillator reads `wav2` at played pitch plus `wid`, mixed by `mix`.
 
-`TIME` slews waveform slot changes. It does not smooth pitch, mix, or bit reduction.
+`WAV1` and `WAV2` are modulation destinations. The panel knobs step through integer slots, but modulation is read fractionally so LFOs and other modulators can morph between neighboring user-bank waves.
 
-`BR1` and `BR2` are implemented as 12-bit-style sample quantization amounts, with higher values reducing effective resolution.
+`TIME` slews waveform slot changes, including modulated `WAV1` and `WAV2` movement. It does not smooth pitch, mix, or bit reduction.
+
+`BR1` and `BR2` are implemented as 12-bit-style sample quantization amounts, with higher values reducing effective resolution. At maximum they reach an intentionally obvious low-bit sound.
 
 ## Added Host Shaping
 
