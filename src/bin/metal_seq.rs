@@ -1004,6 +1004,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("syncs", build_param_list(&state, 0, StepParam::Sync)),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
+                ("track-mutes", build_track_mutes(&state)),
+                ("track-solos", build_track_solos(&state)),
+                ("track-muted-by-solo", build_track_muted_by_solo(&state)),
                 (
                     "effects",
                     build_effects_value(&state, 0, &effect_descriptors, &selected_steps),
@@ -1240,6 +1243,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("seq-set-track-volume: expected (track volume)".into());
         };
         let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-set-track-volume: track {track} out of range").into());
+        }
         let vol = (*vol as f32).clamp(0.0, 1.0);
         st.pattern.track_params[track].set_volume(vol);
         ui_ep.fetch_add(1, Ordering::Relaxed);
@@ -1258,6 +1264,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Ok(Value::Number(vol as f64))
+    });
+
+    // seq-toggle-track-mute — (seq-toggle-track-mute track-idx)
+    let st = state.clone();
+    let pan_ids = track_pan_ids.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-track-mute", move |args, _ctx| {
+        let Some(Value::Number(track)) = args.first() else {
+            return Err("seq-toggle-track-mute: expected track".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-toggle-track-mute: track {track} out of range").into());
+        }
+        let muted = st.pattern.track_params[track].toggle_mute();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let pan_ids_lock = pan_ids.lock().unwrap();
+        if let Some(&pan_id) = pan_ids_lock.get(track) {
+            push_panner_bool(
+                lg_raw,
+                pan_id,
+                sequencer::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                muted,
+            );
+        }
+        Ok(Value::Bool(muted))
+    });
+
+    // seq-toggle-track-solo — (seq-toggle-track-solo track-idx)
+    let st = state.clone();
+    let pan_ids = track_pan_ids.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-track-solo", move |args, _ctx| {
+        let Some(Value::Number(track)) = args.first() else {
+            return Err("seq-toggle-track-solo: expected track".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-toggle-track-solo: track {track} out of range").into());
+        }
+        let solo = st.pattern.track_params[track].toggle_solo();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let pan_ids_lock = pan_ids.lock().unwrap();
+        push_solo_mutes(lg_raw, &st, &pan_ids_lock);
+        Ok(Value::Bool(solo))
     });
 
     // seq-set-effect-param — (seq-set-effect-param slot-idx param-idx value)
@@ -2428,10 +2479,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let new_name = app.tracks[idx].clone();
                                     track_names.push(new_name.clone());
                                     // Update pan IDs for new track
-                                    track_pan_ids
-                                        .lock()
-                                        .unwrap()
-                                        .push(app.graph.track_node_ids[idx].pan_id);
+                                    {
+                                        let mut pan_ids = track_pan_ids.lock().unwrap();
+                                        pan_ids.push(app.graph.track_node_ids[idx].pan_id);
+                                        push_solo_mutes(lg_raw, &state, &pan_ids);
+                                    }
                                     // Extend record_armed for new track
                                     record_armed.lock().unwrap().push(false);
                                     // Update reactive state
@@ -2453,11 +2505,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
                                     sync_step_param_lists(rt, &state, idx);
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "track-volumes",
-                                        build_track_volumes(&state),
-                                    );
+                                    sync_track_mixer_state(rt, &state);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     rt.set_reactive(
                                         "SEQ",
@@ -2511,10 +2559,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             current_track.store(idx, Ordering::Relaxed);
                                             let new_name = app.tracks[idx].clone();
                                             track_names.push(new_name.clone());
-                                            track_pan_ids
-                                                .lock()
-                                                .unwrap()
-                                                .push(app.graph.track_node_ids[idx].pan_id);
+                                            {
+                                                let mut pan_ids = track_pan_ids.lock().unwrap();
+                                                pan_ids.push(app.graph.track_node_ids[idx].pan_id);
+                                                push_solo_mutes(lg_raw, &state, &pan_ids);
+                                            }
                                             record_armed.lock().unwrap().push(false);
                                             let rt = editor.runtime_mut();
                                             rt.set_reactive(
@@ -2538,11 +2587,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 build_steps_value(&state, idx),
                                             );
                                             sync_step_param_lists(rt, &state, idx);
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "track-volumes",
-                                                build_track_volumes(&state),
-                                            );
+                                            sync_track_mixer_state(rt, &state);
                                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                                             rt.set_reactive(
                                                 "SEQ",
@@ -2639,12 +2684,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     state.publish_scheduler_snapshot();
                                 }
                                 current_track.store(new_idx, Ordering::Relaxed);
-                                *track_pan_ids.lock().unwrap() = app
-                                    .graph
-                                    .track_node_ids
-                                    .iter()
-                                    .map(|ids| ids.pan_id)
-                                    .collect();
+                                {
+                                    let mut pan_ids = track_pan_ids.lock().unwrap();
+                                    *pan_ids = app
+                                        .graph
+                                        .track_node_ids
+                                        .iter()
+                                        .map(|ids| ids.pan_id)
+                                        .collect();
+                                    push_solo_mutes(lg_raw, &state, &pan_ids);
+                                }
                                 cached_track_peak_levels = read_track_peak_levels(
                                     app.graph.lg,
                                     &track_pan_ids.lock().unwrap(),
@@ -3228,11 +3277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_pattern_state(rt, &state);
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                                     sync_step_param_lists(rt, &state, ct);
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "track-volumes",
-                                        build_track_volumes(&state),
-                                    );
+                                    sync_track_mixer_state(rt, &state);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     rt.set_reactive(
                                         "SEQ",
@@ -3338,7 +3383,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             sync_pattern_state(rt, &state);
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
-                            rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                            sync_track_mixer_state(rt, &state);
                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                             rt.set_reactive(
                                 "SEQ",
@@ -3479,10 +3524,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             current_track.store(idx, Ordering::Relaxed);
                                             let new_name = app.tracks[idx].clone();
                                             track_names.push(new_name.clone());
-                                            track_pan_ids
-                                                .lock()
-                                                .unwrap()
-                                                .push(app.graph.track_node_ids[idx].pan_id);
+                                            {
+                                                let mut pan_ids = track_pan_ids.lock().unwrap();
+                                                pan_ids.push(app.graph.track_node_ids[idx].pan_id);
+                                                push_solo_mutes(lg_raw, &state, &pan_ids);
+                                            }
                                             record_armed.lock().unwrap().push(false);
                                             rt.set_reactive(
                                                 "SEQ",
@@ -3505,11 +3551,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 build_steps_value(&state, idx),
                                             );
                                             sync_step_param_lists(rt, &state, idx);
-                                            rt.set_reactive(
-                                                "SEQ",
-                                                "track-volumes",
-                                                build_track_volumes(&state),
-                                            );
+                                            sync_track_mixer_state(rt, &state);
                                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                                             rt.set_reactive(
                                                 "SEQ",
@@ -4069,12 +4111,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         track_names = app.tracks.clone();
                         current_track.store(0, Ordering::Relaxed);
-                        *track_pan_ids.lock().unwrap() = app
-                            .graph
-                            .track_node_ids
-                            .iter()
-                            .map(|ids| ids.pan_id)
-                            .collect();
+                        {
+                            let mut pan_ids = track_pan_ids.lock().unwrap();
+                            *pan_ids = app
+                                .graph
+                                .track_node_ids
+                                .iter()
+                                .map(|ids| ids.pan_id)
+                                .collect();
+                            push_solo_mutes(lg_raw, &state, &pan_ids);
+                        }
                         *record_armed.lock().unwrap() = vec![false; track_names.len()];
 
                         let ct = current_track.load(Ordering::Relaxed);
@@ -4144,7 +4190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
                             rt.set_reactive("SEQ", "pans", Value::List(vec![]));
                             rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
-                            rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
+                            sync_track_mixer_empty_state(rt);
                             rt.set_reactive("SEQ", "effects", Value::List(vec![]));
                             rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
@@ -4161,7 +4207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
-                            rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                            sync_track_mixer_state(rt, &state);
                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                             rt.set_reactive(
                                 "SEQ",
@@ -4296,7 +4342,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
-                rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                sync_track_mixer_state(rt, &state);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
                 rt.set_reactive(
                     "SEQ",
@@ -4374,7 +4420,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_track_peak_levels = cached_track_peak_levels.clone();
                 needs_reactive_cycle = true;
             }
-            if playhead != prev_playhead {
+            if playhead != prev_playhead && !app.tracks.is_empty() {
                 sync_playhead_field_delta(
                     editor.runtime_mut(),
                     prev_playhead as usize,
@@ -4396,7 +4442,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
-                rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
+                sync_track_mixer_state(rt, &state);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
@@ -4413,22 +4459,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
                 let rt = editor.runtime_mut();
-                sync_track_name_state(rt, &mut track_names, &app);
-                rt.set_reactive("SEQ", "track-volumes", build_track_volumes(&state));
-                sync_track_peak_fields(rt, &cached_track_peak_levels);
-                *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
-                sync_track_params(rt, &app, &state, ct, &selected_steps);
-                rt.set_reactive(
-                    "SEQ",
-                    "selected-steps",
-                    build_selection_value(&selected_steps),
-                );
-                sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
-                rt.set_reactive(
-                    "SEQ",
-                    "step-has-plocks",
-                    build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
-                );
+                if app.tracks.is_empty() {
+                    sync_track_topology_state(
+                        rt,
+                        &app,
+                        &state,
+                        &mut track_names,
+                        ct,
+                        &selected_steps,
+                        &piano_roll_selection,
+                        &accumulator_names,
+                        &record_armed,
+                        &cached_track_peak_levels,
+                    );
+                } else {
+                    sync_track_name_state(rt, &mut track_names, &app);
+                    sync_track_mixer_state(rt, &state);
+                    sync_track_peak_fields(rt, &cached_track_peak_levels);
+                    *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                    sync_track_params(rt, &app, &state, ct, &selected_steps);
+                    rt.set_reactive(
+                        "SEQ",
+                        "selected-steps",
+                        build_selection_value(&selected_steps),
+                    );
+                    sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
+                    rt.set_reactive(
+                        "SEQ",
+                        "step-has-plocks",
+                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
+                    );
+                }
                 // Sync recording state
                 let rec_on = recording.load(Ordering::Relaxed);
                 rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
@@ -5538,6 +5599,102 @@ fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
+fn build_track_mutes(state: &Arc<SequencerState>) -> Value {
+    let count = state.active_track_count();
+    let items: Vec<Rc<RefCell<Value>>> = (0..count)
+        .map(|t| {
+            Rc::new(RefCell::new(Value::Bool(
+                state.pattern.track_params[t].is_muted(),
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
+fn build_track_solos(state: &Arc<SequencerState>) -> Value {
+    let count = state.active_track_count();
+    let items: Vec<Rc<RefCell<Value>>> = (0..count)
+        .map(|t| {
+            Rc::new(RefCell::new(Value::Bool(
+                state.pattern.track_params[t].is_solo(),
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
+fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
+    let count = state.active_track_count();
+    let has_solo = (0..count).any(|t| state.pattern.track_params[t].is_solo());
+    let items: Vec<Rc<RefCell<Value>>> = (0..count)
+        .map(|t| {
+            Rc::new(RefCell::new(Value::Bool(
+                has_solo && !state.pattern.track_params[t].is_solo(),
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
+fn sync_track_mixer_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
+    rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
+    rt.set_reactive("SEQ", "track-mutes", build_track_mutes(state));
+    rt.set_reactive("SEQ", "track-solos", build_track_solos(state));
+    rt.set_reactive(
+        "SEQ",
+        "track-muted-by-solo",
+        build_track_muted_by_solo(state),
+    );
+}
+
+fn sync_track_mixer_empty_state(rt: &mut Runtime) {
+    rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-muted-by-solo", Value::List(vec![]));
+}
+
+fn push_panner_bool(
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    pan_id: i32,
+    param_idx: u64,
+    value: bool,
+) {
+    if pan_id < 0 {
+        return;
+    }
+    unsafe {
+        sequencer::audiograph::params_push_wrapper(
+            lg_raw,
+            sequencer::audiograph::ParamMsg {
+                idx: param_idx,
+                logical_id: pan_id as u64,
+                fvalue: if value { 1.0 } else { 0.0 },
+            },
+        );
+    }
+}
+
+fn push_solo_mutes(
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    state: &Arc<SequencerState>,
+    pan_ids: &[i32],
+) {
+    let count = state.active_track_count();
+    let has_solo = (0..count).any(|track| state.pattern.track_params[track].is_solo());
+    for track in 0..count {
+        let muted_by_solo = has_solo && !state.pattern.track_params[track].is_solo();
+        if let Some(&pan_id) = pan_ids.get(track) {
+            push_panner_bool(
+                lg_raw,
+                pan_id,
+                sequencer::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+                muted_by_solo,
+            );
+        }
+    }
+}
+
 fn read_track_peak_levels(lg: sequencer::audiograph::LiveGraphPtr, pan_ids: &[i32]) -> Vec<f64> {
     const PANNER_STATE_LEN: usize = sequencer::stereo_panner::STEREO_PANNER_STATE_SIZE;
     const PANNER_STATE_BYTES: usize = PANNER_STATE_LEN * std::mem::size_of::<f32>();
@@ -5681,7 +5838,7 @@ fn sync_track_topology_state(
         rt.set_reactive("SEQ", "auxas", Value::List(vec![]));
         rt.set_reactive("SEQ", "pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
-        rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
+        sync_track_mixer_empty_state(rt);
         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
@@ -5696,7 +5853,7 @@ fn sync_track_topology_state(
     rt.set_reactive("SEQ", "steps", build_steps_value(state, current_track_idx));
     sync_piano_roll_state(rt, state, current_track_idx, piano_roll_selection);
     sync_step_param_lists(rt, state, current_track_idx);
-    rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
+    sync_track_mixer_state(rt, state);
     sync_track_peak_fields(rt, track_peak_levels);
     rt.set_reactive(
         "SEQ",
@@ -6892,6 +7049,14 @@ fn build_track_params(state: &Arc<SequencerState>, track: usize) -> Value {
         Rc::new(RefCell::new(Value::Number(tp.get_pan() as f64))),
     );
     map.insert(
+        "mute".into(),
+        Rc::new(RefCell::new(Value::Bool(tp.is_muted()))),
+    );
+    map.insert(
+        "solo".into(),
+        Rc::new(RefCell::new(Value::Bool(tp.is_solo()))),
+    );
+    map.insert(
         "timebase".into(),
         Rc::new(RefCell::new(Value::String(
             tp.get_timebase().label().to_string(),
@@ -7035,6 +7200,50 @@ mod tests {
         ASTParser::new(tokens)
             .parse()
             .expect("parse metal-seq-grid.lisp");
+    }
+
+    #[test]
+    fn metal_seq_browser_lisp_parses() {
+        let src = std::fs::read_to_string("metal-seq-browser.lisp").expect("read browser lisp");
+        let tokens = Parser::new(src)
+            .parse()
+            .expect("tokenize metal-seq-browser.lisp");
+        let mut pos = 0;
+        while pos < tokens.len() {
+            if let Err(err) = parse_expression_at(&tokens, &mut pos) {
+                let start = pos.saturating_sub(8);
+                let end = (pos + 8).min(tokens.len());
+                panic!(
+                    "parse metal-seq-browser.lisp at token {pos}: {err:?}\ncontext: {:?}",
+                    &tokens[start..end]
+                );
+            }
+        }
+        ASTParser::new(tokens)
+            .parse()
+            .expect("parse metal-seq-browser.lisp");
+    }
+
+    #[test]
+    fn metal_seq_mixer_lisp_parses() {
+        let src = std::fs::read_to_string("metal-seq-mixer.lisp").expect("read mixer lisp");
+        let tokens = Parser::new(src)
+            .parse()
+            .expect("tokenize metal-seq-mixer.lisp");
+        let mut pos = 0;
+        while pos < tokens.len() {
+            if let Err(err) = parse_expression_at(&tokens, &mut pos) {
+                let start = pos.saturating_sub(8);
+                let end = (pos + 8).min(tokens.len());
+                panic!(
+                    "parse metal-seq-mixer.lisp at token {pos}: {err:?}\ncontext: {:?}",
+                    &tokens[start..end]
+                );
+            }
+        }
+        ASTParser::new(tokens)
+            .parse()
+            .expect("parse metal-seq-mixer.lisp");
     }
 
     #[test]

@@ -540,6 +540,44 @@ impl App {
         }
     }
 
+    pub(super) fn push_track_mute(&self, track: usize) {
+        let Some(node) = self.graph.track_node_ids.get(track) else {
+            return;
+        };
+        let tp = &self.state.pattern.track_params[track];
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                self.graph.lg.0,
+                crate::audiograph::ParamMsg {
+                    idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                    logical_id: node.pan_id as u64,
+                    fvalue: if tp.is_muted() { 1.0 } else { 0.0 },
+                },
+            );
+        }
+    }
+
+    pub(super) fn push_track_solo_mutes(&self) {
+        let has_solo = (0..self.state.active_track_count())
+            .any(|track| self.state.pattern.track_params[track].is_solo());
+        for track in 0..self.state.active_track_count() {
+            let Some(node) = self.graph.track_node_ids.get(track) else {
+                continue;
+            };
+            let muted_by_solo = has_solo && !self.state.pattern.track_params[track].is_solo();
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTED_BY_SOLO,
+                        logical_id: node.pan_id as u64,
+                        fvalue: if muted_by_solo { 1.0 } else { 0.0 },
+                    },
+                );
+            }
+        }
+    }
+
     pub(super) fn push_master_volume(&self) {
         let volume = f32::from_bits(self.state.transport.master_volume.load(Ordering::Relaxed));
         for bus_id in [self.graph.bus_l_id, self.graph.bus_r_id] {

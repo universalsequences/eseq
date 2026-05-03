@@ -498,6 +498,8 @@ pub struct TrackParams {
     pub num_steps: AtomicU32,
     pub volume: AtomicU32,
     pub pan: AtomicU32,
+    pub mute: AtomicBool,
+    pub solo: AtomicBool,
     pub send: AtomicU32,
     pub polyphonic: AtomicBool,
     pub timebase: AtomicU32,
@@ -519,6 +521,8 @@ impl TrackParams {
             num_steps: AtomicU32::new(STEPS_PER_PAGE as u32),
             volume: AtomicU32::new(1.0_f32.to_bits()),
             pan: AtomicU32::new(0.0_f32.to_bits()),
+            mute: AtomicBool::new(false),
+            solo: AtomicBool::new(false),
             send: AtomicU32::new(0.0_f32.to_bits()),
             polyphonic: AtomicBool::new(true),
             timebase: AtomicU32::new(Timebase::Sixteenth as u32),
@@ -590,6 +594,24 @@ impl TrackParams {
     pub fn set_pan(&self, val: f32) {
         self.pan
             .store(val.clamp(-1.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+    pub fn is_muted(&self) -> bool {
+        self.mute.load(Ordering::Relaxed)
+    }
+    pub fn set_mute(&self, val: bool) {
+        self.mute.store(val, Ordering::Relaxed);
+    }
+    pub fn toggle_mute(&self) -> bool {
+        self.mute.fetch_xor(true, Ordering::Relaxed) ^ true
+    }
+    pub fn is_solo(&self) -> bool {
+        self.solo.load(Ordering::Relaxed)
+    }
+    pub fn set_solo(&self, val: bool) {
+        self.solo.store(val, Ordering::Relaxed);
+    }
+    pub fn toggle_solo(&self) -> bool {
+        self.solo.fetch_xor(true, Ordering::Relaxed) ^ true
     }
     pub fn get_send(&self) -> f32 {
         f32::from_bits(self.send.load(Ordering::Relaxed))
@@ -667,6 +689,8 @@ pub struct TrackParamsSnapshot {
     pub num_steps: usize,
     pub volume: f32,
     pub pan: f32,
+    pub mute: bool,
+    pub solo: bool,
     pub send: f32,
     pub polyphonic: bool,
     pub timebase: Timebase,
@@ -688,6 +712,8 @@ impl Default for TrackParamsSnapshot {
             num_steps: STEPS_PER_PAGE,
             volume: 1.0,
             pan: 0.0,
+            mute: false,
+            solo: false,
             send: 0.0,
             polyphonic: false,
             timebase: Timebase::Sixteenth,

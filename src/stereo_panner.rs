@@ -8,11 +8,15 @@ const STATE_SMOOTH_R: usize = 3;
 const STATE_SAMPLE_RATE: usize = 4;
 pub const STATE_PEAK_L: usize = 5;
 pub const STATE_PEAK_R: usize = 6;
+const STATE_MUTE: usize = 7;
+const STATE_MUTED_BY_SOLO: usize = 8;
 
-pub const STEREO_PANNER_STATE_SIZE: usize = 7;
+pub const STEREO_PANNER_STATE_SIZE: usize = 9;
 
 pub const STEREO_PANNER_PARAM_VOLUME: u64 = STATE_VOLUME as u64;
 pub const STEREO_PANNER_PARAM_PAN: u64 = STATE_PAN as u64;
+pub const STEREO_PANNER_PARAM_MUTE: u64 = STATE_MUTE as u64;
+pub const STEREO_PANNER_PARAM_MUTED_BY_SOLO: u64 = STATE_MUTED_BY_SOLO as u64;
 
 fn gains_for(volume: f32, pan: f32) -> (f32, f32) {
     let angle = (pan.clamp(-1.0, 1.0) + 1.0) * 0.25 * std::f32::consts::PI;
@@ -38,6 +42,8 @@ unsafe extern "C" fn stereo_panner_init(
     *s.add(STATE_VOLUME) = 1.0;
     *s.add(STATE_PAN) = 0.0;
     *s.add(STATE_SAMPLE_RATE) = sample_rate as f32;
+    *s.add(STATE_MUTE) = 0.0;
+    *s.add(STATE_MUTED_BY_SOLO) = 0.0;
     let (gain_l, gain_r) = gains_for(1.0, 0.0);
     *s.add(STATE_SMOOTH_L) = gain_l;
     *s.add(STATE_SMOOTH_R) = gain_r;
@@ -55,6 +61,7 @@ unsafe extern "C" fn stereo_panner_process(
     let s = state as *mut f32;
     let volume = *s.add(STATE_VOLUME);
     let pan = *s.add(STATE_PAN);
+    let muted = *s.add(STATE_MUTE) >= 0.5 || *s.add(STATE_MUTED_BY_SOLO) >= 0.5;
     let sample_rate = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
     let mut smooth_l = *s.add(STATE_SMOOTH_L);
     let mut smooth_r = *s.add(STATE_SMOOTH_R);
@@ -69,7 +76,11 @@ unsafe extern "C" fn stereo_panner_process(
     let out0 = *out.add(0);
     let out1 = *out.add(1);
 
-    let (target_l, target_r) = balance_gains_for(volume, pan);
+    let (target_l, target_r) = if muted {
+        (0.0, 0.0)
+    } else {
+        balance_gains_for(volume, pan)
+    };
 
     for i in 0..nframes as usize {
         smooth_l += smooth_coeff * (target_l - smooth_l);

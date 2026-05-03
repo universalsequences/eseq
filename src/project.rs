@@ -110,6 +110,10 @@ pub struct ProjectTrackParams {
     pub volume: f32,
     #[serde(default)]
     pub pan: f32,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
+    pub solo: bool,
     pub send: f32,
     pub polyphonic: bool,
     pub timebase: u8,
@@ -226,6 +230,8 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             num_steps: value.num_steps,
             volume: value.volume,
             pan: value.pan,
+            mute: value.mute,
+            solo: value.solo,
             send: value.send,
             polyphonic: value.polyphonic,
             timebase: value.timebase as u8,
@@ -249,6 +255,8 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             num_steps: value.num_steps,
             volume: value.volume,
             pan: value.pan,
+            mute: value.mute,
+            solo: value.solo,
             send: value.send,
             polyphonic: value.polyphonic,
             timebase: Timebase::from_index(value.timebase as u32),
@@ -808,6 +816,8 @@ mod tests {
                         num_steps: 64,
                         volume: 0.8,
                         pan: -0.25,
+                        mute: false,
+                        solo: true,
                         send: 0.25,
                         polyphonic: true,
                         timebase: Timebase::Sixteenth as u8,
@@ -826,6 +836,8 @@ mod tests {
                         num_steps: 128,
                         volume: 1.1,
                         pan: 0.4,
+                        mute: true,
+                        solo: false,
                         send: 0.5,
                         polyphonic: false,
                         timebase: Timebase::Eighth as u8,
@@ -896,6 +908,8 @@ mod tests {
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);
         assert_eq!(restored.patterns[0].track_params[0].accum_mode, 2);
+        assert!(restored.patterns[0].track_params[0].solo);
+        assert!(restored.patterns[0].track_params[1].mute);
     }
 
     #[test]

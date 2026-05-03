@@ -120,6 +120,8 @@ impl PatternSnapshot {
                 num_steps: tp.get_num_steps(),
                 volume: tp.get_volume(),
                 pan: tp.get_pan(),
+                mute: tp.is_muted(),
+                solo: tp.is_solo(),
                 send: tp.get_send(),
                 polyphonic: tp.is_polyphonic(),
                 timebase: tp.get_timebase(),
@@ -212,6 +214,8 @@ impl PatternSnapshot {
             tp.set_num_steps(snap.num_steps);
             tp.set_volume(snap.volume);
             tp.set_pan(snap.pan);
+            tp.set_mute(snap.mute);
+            tp.set_solo(snap.solo);
             tp.set_send(snap.send);
             tp.polyphonic.store(snap.polyphonic, Ordering::Relaxed);
             tp.set_timebase(snap.timebase);
@@ -827,6 +831,8 @@ impl SequencerState {
         params.set_num_steps(defaults.num_steps);
         params.set_volume(defaults.volume);
         params.set_pan(defaults.pan);
+        params.set_mute(defaults.mute);
+        params.set_solo(defaults.solo);
         params.set_send(defaults.send);
         params
             .polyphonic
@@ -1582,6 +1588,8 @@ mod tests {
             num_steps: 8 + id,
             volume: 0.2 * id as f32,
             pan: -1.0 + id as f32,
+            mute: id % 2 == 0,
+            solo: id == 1,
             send: 0.3 * id as f32,
             polyphonic: id % 2 == 1,
             timebase: Timebase::Quarter,

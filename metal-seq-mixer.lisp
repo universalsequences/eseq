@@ -41,6 +41,21 @@
         
         ))))
 
+(def mixer-mute-button-bg (active)
+  (if active
+    (rgba 0.08 0.09 0.10 1.0)
+    (rgba 0.115 0.130 0.144 1.0)))
+
+(def mixer-solo-button-bg (active)
+  (if active
+    (rgba 0.72 0.10 0.10 1.0)
+    (rgba 0.08 0.09 0.10 1.0)))
+
+(def mixer-button-border (active)
+  (if active
+    (rgba 0.58 0.62 0.78 1.0)
+    (rgba 0.28 0.29 0.32 1.0)))
+
 (defwidget mixer-track-meter
   :width 5 :height 0.28
   :paint-margin 0.08
@@ -125,11 +140,23 @@
             :background "rec-arm-dot"
             :active (if (nth SEQ.record-armed i) 1 0)
             :on-click |x y r| (seq-toggle-record-arm i))
-          (box :width 12 :height 1
+          (button (str (+ i 1))
+            :width 1.55 :height 1.2 :padding 0 :font-size 10
+            :background-color (mixer-mute-button-bg (nth SEQ.track-mutes i))
+            :color (if (nth SEQ.track-mutes i) :gray :blue)
+            :on-click |x y r| (seq-toggle-track-mute i))
+          (button "S"
+            :width 1.55 :height 1.2 :padding 0 :font-size 10
+            :background-color (mixer-solo-button-bg (nth SEQ.track-solos i))
+            :color (if (nth SEQ.track-solos i) :white :gray)
+            :on-click |x y r| (seq-toggle-track-solo i))
+          (box :width 8.6 :height 1
             :bg (if (= SEQ.current-track i) :blue :dark-gray)
             :on-click |x y r| (seq-set-track i)
-            (label (substring name 0 16) :font-size 11 :width 12
-              :color (if (= SEQ.current-track i) :white :gray)
+            (label (substring name 0 12) :font-size 11 :width 8.6
+              :color (if (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i))
+                       :dark-gray
+                       (if (= SEQ.current-track i) :white :gray))
               :bg :transparent))
           (box :width 5.2
             (v-stack :gap 0.18
@@ -145,4 +172,4 @@
               :on-click |x y r| (host-command "delete-track" (dict :track i))
               :background "delete-track-icon"
               :active 0)
-            (label "" :width 1.6 :bg :transparent)))))))
+            (label "" :width 1.6 :bg :transparent))))))))

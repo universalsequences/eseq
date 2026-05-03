@@ -906,6 +906,7 @@ impl App {
         for track_idx in 0..self.tracks.len() {
             self.push_track_volume(track_idx);
             self.push_track_pan(track_idx);
+            self.push_track_mute(track_idx);
             self.push_send_gain(track_idx);
             for slot_idx in 0..self.state.pattern.effect_chains[track_idx].len() {
                 let slot = &self.state.pattern.effect_chains[track_idx][slot_idx];
@@ -935,6 +936,7 @@ impl App {
                 }
             }
         }
+        self.push_track_solo_mutes();
         self.push_all_restored_instrument_defaults();
     }
 }
