@@ -1104,15 +1104,28 @@ fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<Pa
     }
 
     let root = Path::new(INSTRUMENTS_DIR);
+    let folder_name = name.trim_end_matches('/');
+    if extension == "lisp" && name.ends_with('/') {
+        let dsp = root.join(folder_name).join("dsp.lisp");
+        if dsp.exists() {
+            return Ok(dsp);
+        }
+    }
     let exact = root.join(format!("{name}.{extension}"));
     if exact.exists() {
         return Ok(exact);
     }
+    if extension == "lisp" {
+        let dsp = root.join(name).join("dsp.lisp");
+        if dsp.exists() {
+            return Ok(dsp);
+        }
+    }
 
-    let basename = Path::new(name)
+    let basename = Path::new(folder_name)
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or(name);
+        .unwrap_or(folder_name);
     let file_name = format!("{basename}.{extension}");
     let mut matches = Vec::new();
     collect_matches(root, &file_name, &mut matches);
@@ -1353,15 +1366,37 @@ pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
 }
 
 pub fn list_saved_instruments() -> Vec<String> {
+    fn is_hidden(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with('.'))
+            .unwrap_or(false)
+    }
+
     fn collect(dir: &Path, root: &Path, out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            if is_hidden(&path) {
+                continue;
+            }
             if path.is_dir() {
+                if path.join("dsp.lisp").exists() {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        out.push(format!("{}/", rel.to_string_lossy().replace('\\', "/")));
+                    }
+                }
                 collect(&path, root, out);
             } else if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
+                let file_stem = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("");
+                if matches!(file_stem, "dsp" | "ui" | "presets") {
+                    continue;
+                }
                 if let Ok(rel) = path.strip_prefix(root) {
                     let without_ext = rel.with_extension("");
                     out.push(without_ext.to_string_lossy().replace('\\', "/"));
@@ -1385,7 +1420,7 @@ pub fn load_instrument_source(name: &str) -> io::Result<String> {
 // ── Instrument compilation ──
 
 const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at compile time.
-; Assumes 44.1 kHz for envelope coefficient conversion.
+; Assumes 44.1 kHz for time-based helpers.
 
 (defmacro mod_unipolar (m)
   (* (+ m 1.0) 0.5))
@@ -1400,15 +1435,49 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
 (defmacro apply_pw_mod_safe (base mod amt)
   (clip (+ base (* mod amt)) 0.03 0.97))
 
+; PolyBLEP transition correction for anti-aliased hard edges.
+; Kept with a polypleb alias because that typo is memorable and fun.
+(defmacro polyblep (phase freq)
+  (def dt (clip (/ freq 44100.0) 0.000001 0.5))
+  (def left_x (/ phase dt))
+  (def left (+ (- (* 2.0 left_x) (* left_x left_x)) -1.0))
+  (def right_x (/ (- phase 1.0) dt))
+  (def right (+ (* right_x right_x) (* 2.0 right_x) 1.0))
+  (+ (* (lt phase dt) left)
+     (* (gt phase (- 1.0 dt)) right)))
+
+(defmacro polypleb (phase freq)
+  (polyblep phase freq))
+
+(defmacro polyblep_saw (phase freq)
+  (- (scale phase 0 1 -1 1)
+     (polyblep phase freq)))
+
+(defmacro polyblep_pulse (phase width freq)
+  (def w (clip width 0.01 0.99))
+  (def falling_phase (wrap (- phase w) 0 1))
+  (+ (scale (lt phase w) 0 1 -1 1)
+     (polyblep phase freq)
+     (* -1.0 (polyblep falling_phase freq))))
+
 (defmacro adsr (gate_sig trigger_sig attack_ms decay_ms sustain release_ms)
   (make-history env)
   (make-history gate_hist)
   (make-history stage_hist)
 
+  ; Retriggers first fade any leftover voice history to silence over a
+  ; short de-click window, then start a linear attack from near zero.
+  ; Decay/release are one-pole curves scaled to settle near the target
+  ; over the requested number of milliseconds.
   (def sr 44100.0)
-  (def attack_coeff (- 1.0 (exp (/ -1.0 (* attack_ms 0.001 sr)))))
-  (def decay_coeff (- 1.0 (exp (/ -1.0 (* decay_ms 0.001 sr)))))
-  (def release_coeff (- 1.0 (exp (/ -1.0 (* release_ms 0.001 sr)))))
+  (def env_time_scale 6.907755)
+  (def reset_samples (* 0.003 sr))
+  (def attack_samples (max 1.0 (* attack_ms 0.001 sr)))
+  (def decay_samples (max 1.0 (* decay_ms 0.001 sr)))
+  (def release_samples (max 1.0 (* release_ms 0.001 sr)))
+  (def reset_coeff (- 1.0 (exp (/ (* -1.0 env_time_scale) reset_samples))))
+  (def decay_coeff (- 1.0 (exp (/ (* -1.0 env_time_scale) decay_samples))))
+  (def release_coeff (- 1.0 (exp (/ (* -1.0 env_time_scale) release_samples))))
 
   (def prev_env (read-history env))
   (def prev_gate (read-history gate_hist))
@@ -1419,29 +1488,42 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
   (def retrigger (max gate_rising trigger_sig))
   (def attack_stage 1.0)
   (def decay_stage 2.0)
+  (def reset_stage 3.0)
   (def attack_done (gte prev_env 0.999))
+  (def reset_done (lte prev_env 0.0001))
 
   (def stage_from_gate
     (gswitch gate_on
-      (gswitch retrigger attack_stage prev_stage)
+      (gswitch retrigger
+        (gswitch (gt prev_env 0.0001) reset_stage attack_stage)
+        prev_stage)
       0.0))
 
   (def stage
-    (gswitch attack_done
-      (gswitch (eq stage_from_gate attack_stage) decay_stage stage_from_gate)
-      stage_from_gate))
+    (gswitch (eq stage_from_gate reset_stage)
+      (gswitch reset_done attack_stage reset_stage)
+      (gswitch attack_done
+        (gswitch (eq stage_from_gate attack_stage) decay_stage stage_from_gate)
+        stage_from_gate)))
 
   (def target
     (gswitch gate_on
-      (gswitch (eq stage attack_stage) 1.0 sustain)
+      (gswitch (eq stage reset_stage)
+        0.0
+        (gswitch (eq stage attack_stage) 1.0 sustain))
       0.0))
 
   (def rate
     (gswitch gate_on
-      (gswitch (eq stage attack_stage) attack_coeff decay_coeff)
+      (gswitch (eq stage reset_stage) reset_coeff decay_coeff)
       release_coeff))
 
-  (def level_raw (+ prev_env (* rate (- target prev_env))))
+  (def one_pole_level (+ prev_env (* rate (- target prev_env))))
+  (def attack_level (+ prev_env (/ 1.0 attack_samples)))
+  (def level_raw
+    (gswitch (eq stage attack_stage)
+      attack_level
+      one_pole_level))
   (def level (clip level_raw 0 1))
   (write-history env level)
   (write-history gate_hist gate_sig)

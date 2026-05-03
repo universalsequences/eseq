@@ -24,6 +24,17 @@ use crate::scheduled_event::{
 use crate::sequencer::{KeyboardTrigger, SequencerState, StepParam, SwingResolution, MAX_TRACKS};
 use crate::voice::{VoicePool, MAX_VOICES};
 
+fn env_flag(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
 /// Per-track chop re-trigger state.
 struct ChopTracker {
     /// How many chop triggers remain (excluding the initial trigger).
@@ -141,6 +152,10 @@ struct AudioCallbackData {
     late_scheduled_events: u64,
     events_heap: BinaryHeap<Reverse<TimedEvent>>,
     event_seq: u64,
+    trace_audio: bool,
+    trace_callback_counter: u64,
+    trace_render_probe_blocks: u32,
+    trace_silent_active_callbacks: u32,
 }
 
 struct CustomVoiceSlot {
@@ -1010,6 +1025,28 @@ fn render_chunk(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
 }
 
+fn interleaved_peak(output: &[f32], num_channels: usize) -> (f32, f32) {
+    let mut peak_l = 0.0f32;
+    let mut peak_r = 0.0f32;
+    if num_channels == 0 {
+        return (peak_l, peak_r);
+    }
+    let nframes = output.len() / num_channels;
+    for i in 0..nframes {
+        let l = output[i * num_channels].abs();
+        if l > peak_l {
+            peak_l = l;
+        }
+        if num_channels > 1 {
+            let r = output[i * num_channels + 1].abs();
+            if r > peak_r {
+                peak_r = r;
+            }
+        }
+    }
+    (peak_l, peak_r)
+}
+
 fn zero_output_frames(output: &mut [f32], start_frame: usize, num_channels: usize) {
     let start = start_frame.saturating_mul(num_channels);
     if start < output.len() {
@@ -1144,6 +1181,14 @@ fn fire_resolved(
                 if lid == 0 || synth_id == 0 || modulator_id == 0 {
                     continue;
                 }
+                if data.trace_audio {
+                    let enabled = data.custom_engine_pools[engine_id].enabled_voice_count;
+                    eprintln!(
+                        "audio-trace: scheduled custom note-on track={track_idx} engine={engine_id} voice={voice_idx} lid={lid} synth={synth_id} mod={modulator_id} chord_note={n} enabled_voices={enabled} poly={track_polyphonic} stolen={}",
+                        allocation.stole_active_voice,
+                    );
+                    data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
+                }
                 let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
                 cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
                 if allocation.stole_active_voice || !track_polyphonic {
@@ -1242,6 +1287,14 @@ fn fire_resolved(
                 .load(Ordering::Relaxed);
             if lid == 0 || synth_id == 0 || modulator_id == 0 {
                 return;
+            }
+            if data.trace_audio {
+                let enabled = data.custom_engine_pools[engine_id].enabled_voice_count;
+                eprintln!(
+                    "audio-trace: scheduled custom note-on track={track_idx} engine={engine_id} voice={voice_idx} lid={lid} synth={synth_id} mod={modulator_id} enabled_voices={enabled} poly={track_polyphonic} stolen={}",
+                    allocation.stole_active_voice,
+                );
+                data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
             }
             let pitch_hz = custom_pitch_hz(transpose, base_note_offset);
             cancel_gate_off_for_lid(&mut data.gate_off_state, lid);
@@ -1355,9 +1408,21 @@ fn fire_resolved(
 fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     let callback_start = Instant::now();
     let nframes = output.len() / data.num_channels;
+    data.trace_callback_counter = data.trace_callback_counter.wrapping_add(1);
     let num_tracks = data.state.active_track_count();
     let topology_epoch = data.state.transport.topology_epoch.load(Ordering::Relaxed);
     if num_tracks != data.last_num_tracks || topology_epoch != data.last_topology_epoch {
+        if data.trace_audio {
+            eprintln!(
+                "audio-trace: topology reset tracks {}->{} epoch {}->{} rendered_samples={}",
+                data.last_num_tracks,
+                num_tracks,
+                data.last_topology_epoch,
+                topology_epoch,
+                data.rendered_samples.load(Ordering::Acquire),
+            );
+            data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
+        }
         reset_audio_runtime_for_track_topology(data, num_tracks);
     }
     if data.state.topology_edit_in_flight() {
@@ -1466,6 +1531,15 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     .load(Ordering::Relaxed);
                 if voice_lid == 0 || synth_id == 0 || modulator_id == 0 {
                     continue;
+                }
+                if data.trace_audio {
+                    let enabled = data.custom_engine_pools[engine_id].enabled_voice_count;
+                    eprintln!(
+                        "audio-trace: keyboard custom note-on track={} engine={engine_id} voice={voice_idx} lid={voice_lid} synth={synth_id} mod={modulator_id} enabled_voices={enabled} poly={track_polyphonic} stolen={}",
+                        kt.track,
+                        allocation.stole_active_voice,
+                    );
+                    data.trace_render_probe_blocks = data.trace_render_probe_blocks.max(12);
                 }
                 let pitch_hz = custom_pitch_hz(resolved_transpose, base_note_offset);
                 cancel_gate_off_for_lid(&mut data.gate_off_state, voice_lid);
@@ -1764,9 +1838,27 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
 
         let start = rendered_frames * data.num_channels;
         let end = (rendered_frames + chunk_frames) * data.num_channels;
+        let probe_render = data.trace_audio && data.trace_render_probe_blocks > 0;
+        if probe_render {
+            eprintln!(
+                "audio-trace: render-start callback={} chunk_frames={chunk_frames} rendered_frames={rendered_frames} tracks={num_tracks} heap_len={} rendered_samples={current_sample}",
+                data.trace_callback_counter,
+                data.events_heap.len(),
+            );
+        }
         let render_start = Instant::now();
         render_chunk(data, &mut output[start..end]);
         let render_elapsed = render_start.elapsed();
+        if probe_render {
+            let (chunk_peak_l, chunk_peak_r) =
+                interleaved_peak(&output[start..end], data.num_channels);
+            eprintln!(
+                "audio-trace: render-done callback={} chunk_frames={chunk_frames} elapsed_us={} peak_l={chunk_peak_l:.6} peak_r={chunk_peak_r:.6}",
+                data.trace_callback_counter,
+                render_elapsed.as_micros(),
+            );
+            data.trace_render_probe_blocks -= 1;
+        }
         if render_elapsed.as_millis() >= 10 {
             eprintln!(
                 "audio: slow render_chunk; chunk_frames={chunk_frames} rendered_frames={rendered_frames} elapsed_ms={} heap_len={} current_sample={current_sample}",
@@ -1782,21 +1874,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     data.master_recorder.capture(output);
 
     // Scan interleaved output for peak levels
-    let mut peak_l: f32 = 0.0;
-    let mut peak_r: f32 = 0.0;
-    let nch = data.num_channels;
-    for i in 0..nframes {
-        let l = output[i * nch].abs();
-        if l > peak_l {
-            peak_l = l;
-        }
-        if nch > 1 {
-            let r = output[i * nch + 1].abs();
-            if r > peak_r {
-                peak_r = r;
-            }
-        }
-    }
+    let (peak_l, peak_r) = interleaved_peak(output, data.num_channels);
     data.state
         .transport
         .peak_l
@@ -1805,6 +1883,66 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         .transport
         .peak_r
         .store(peak_r.to_bits(), Ordering::Relaxed);
+
+    if data.trace_audio {
+        let active_custom_voices: usize = data
+            .custom_engine_pools
+            .iter()
+            .map(|pool| {
+                pool.voices
+                    .iter()
+                    .take(pool.num_voices)
+                    .filter(|v| v.active)
+                    .count()
+            })
+            .sum();
+        let active_sampler_voices: usize = data
+            .voice_pools
+            .iter()
+            .map(|pool| {
+                pool.voices
+                    .iter()
+                    .take(pool.num_voices)
+                    .filter(|v| v.active)
+                    .count()
+            })
+            .sum();
+        let active_voices = active_custom_voices + active_sampler_voices;
+        if active_voices > 0 && peak_l <= 0.000001 && peak_r <= 0.000001 {
+            data.trace_silent_active_callbacks =
+                data.trace_silent_active_callbacks.saturating_add(1);
+            if data.trace_silent_active_callbacks == 16
+                || data.trace_silent_active_callbacks % 128 == 0
+            {
+                eprintln!(
+                    "audio-trace: silent while voices active callbacks={} streak={} tracks={num_tracks} custom_active={active_custom_voices} sampler_active={active_sampler_voices} rendered_samples={} topology_epoch={} playing={} heap_len={} late_events={} dropped_events={}",
+                    data.trace_callback_counter,
+                    data.trace_silent_active_callbacks,
+                    data.rendered_samples.load(Ordering::Acquire),
+                    topology_epoch,
+                    data.state.transport.playing.load(Ordering::Relaxed),
+                    data.events_heap.len(),
+                    data.late_scheduled_events,
+                    data.dropped_scheduled_events,
+                );
+            }
+        } else {
+            data.trace_silent_active_callbacks = 0;
+        }
+
+        let sample_rate = data.sample_rate.max(1.0) as u64;
+        let callbacks_per_second = (sample_rate / nframes.max(1) as u64).max(1);
+        if data.trace_callback_counter % callbacks_per_second == 0 {
+            eprintln!(
+                "audio-trace: heartbeat callbacks={} rendered_samples={} tracks={num_tracks} active_custom={active_custom_voices} active_sampler={active_sampler_voices} peak_l={peak_l:.6} peak_r={peak_r:.6} topology_epoch={} cpu_load_pct={:.1}",
+                data.trace_callback_counter,
+                data.rendered_samples.load(Ordering::Acquire),
+                topology_epoch,
+                f32::from_bits(data.state.transport.cpu_load_pct.load(Ordering::Relaxed)),
+            );
+        }
+    }
+
     publish_active_voice_counts(data, num_tracks);
 
     if nframes > 0 {
@@ -1868,6 +2006,10 @@ pub fn build_output_stream(
     let scheduled_events = Arc::new(ScheduledEventQueue::new());
     let rendered_samples = Arc::new(AtomicU64::new(0));
     let initial_topology_epoch = state.transport.topology_epoch.load(Ordering::Relaxed);
+    let trace_audio = env_flag("TINYSEQ_AUDIO_TRACE", false);
+    if trace_audio {
+        eprintln!("audio-trace: enabled");
+    }
 
     let mut cb_data = AudioCallbackData {
         lg: LiveGraphPtr(lg),
@@ -1895,6 +2037,10 @@ pub fn build_output_stream(
         late_scheduled_events: 0,
         events_heap: BinaryHeap::new(),
         event_seq: 0,
+        trace_audio,
+        trace_callback_counter: 0,
+        trace_render_probe_blocks: 0,
+        trace_silent_active_callbacks: 0,
     };
     crate::scheduler::spawn_scheduler_thread(
         Arc::clone(&cb_data.state),

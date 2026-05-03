@@ -12,7 +12,8 @@
 (defwidget fx-panel-bg
   :width 1 :height 1
   :shader
-  (let ((panel (sdf/rounded-rect (* 1 width) (* 1 height) 0.065))
+  (let ((panel-radius (min (* 8 (fwidth y)) (* 0.5 (min width height))))
+      (panel (sdf/rounded-rect (* 1 width) (* 1 height) (* 2 panel-radius)))
       ;; Use derivatives to convert a real pixel height into the shader's
       ;; normalized/SDF y-space. This keeps the header bar visually constant
       ;; as panels get taller/shorter.
@@ -21,24 +22,21 @@
       (header-shape (max panel (- y header-bottom))))
     (sdf/layer
       
-      (sdf/fill (sdf/rounded-rect width height 0.065)
+      (sdf/fill 
+        (sdf/rounded-rect (* 1 width) (* 1 height) (* 2 panel-radius))
         (material
-          :lighting
-          (lighting
-            :edge-min -0.00852
-            :edge-max 0.1862
-            :light (vec3 -0.313 -0.411531 0.109565)
-            :shininess 71.0)
-          :color
-          (let ((base
-                (mix (rgba 0.5 0.5 0.5 1.0) 
+                 :color
+          (let ((header-aa (max (fwidth header-shape) (fwidth y)))
+              (border-w (max (* 1.5 (fwidth d)) (fwidth y)))
+              (base
+                (mix (rgba 0.3 0.3 0.3 1.0) 
                   (mix 
-                    (rgba 0.16 0.16 0.16 1) 
-                    (rgba 0.2 0.2 0.2 1) 
-                    (smoothstep 0 0.001 header-shape))
-                  (smoothstep 0 -0.01623 d)))
-              (lit (+ 0.5 (* 0.5 diffuse)))
-              (shine (* 1 specular)))
+                    (rgba 0.10 0.10 0.10 1) 
+                    (rgba 0.07 0.07 0.07 1) 
+                    (smoothstep 0 header-aa header-shape))
+                  (smoothstep (- (* -1 border-w)) (* 1 border-w) (- (abs d) border-w))))
+              (lit 1)
+              (shine 0))
             (+ (* base (rgba lit lit lit 1.0)) (rgba shine shine shine 0.0)))))
       )))
   
@@ -98,7 +96,7 @@
                        (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))
                        (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1)))
                 (label (if (> (get p :value) 0.5) "ON" "OFF")
-                       :font-size 13 :width 5.5
+                       :font-size 11 :width 5.5
                        :color :white :bg :transparent))
               (if (get p :options)
               (dropdown :value (get p :text-value)
@@ -109,7 +107,7 @@
                       (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")
                       (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :label v))
                     (fx-set-instrument-option p v)))
-                :width 5.8 :height 1.2 :font-size 13)
+                :width 5.8 :height 1.2 :font-size 11)
               (number-picker :value (get p :value)
                 :min (get p :min) :max (get p :max) :decimals 2
                 :noui true :font-size 12 :text-color :gray
@@ -129,7 +127,7 @@
                        (fx-set-instrument-value p v)))))))))
 
 (def fx-param-grid (params fx)
-  (h-stack :gap 1.5
+  (h-stack :gap 1.5 :padding 0.5
     (each (chunks params 6) |chunk ci|
       (v-stack :gap 0.25
         (each chunk |p pi|
@@ -138,8 +136,54 @@
               (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx))
               (str "instrument-tab-" instrument-panel-tab "-chunk-" ci "-param-" (get p :idx)))))))))
 
+(def instrument-mod-base-name (name)
+  (if (string-ends-with? name " amt")
+    (substring name 0 (- (len name) 4))
+    (if (string-ends-with? name " src")
+      (substring name 0 (- (len name) 4))
+      name)))
+
+(def instrument-mod-source-param (params base)
+  (nth (filter |p| (= (get p :name) (str base " src")) params) 0))
+
+(def instrument-mod-amount-params (params)
+  (filter |p| (string-ends-with? (get p :name) " amt") params))
+
+(def instrument-mod-row (params amount-p subtree-key)
+  (let ((base (instrument-mod-base-name (get amount-p :name)))
+        (source-p (instrument-mod-source-param params base)))
+    (subtree :key subtree-key
+      (box :width 12.6 :height 2.35
+           :background-color (rgba 0.09 0.09 0.09 1)
+           :border-width 1
+           :corner-radius 16
+           :padding 0.25
+        (h-stack :width :fill :gap 0.45 :align :center
+          (if source-p
+            (dropdown :value (get source-p :text-value)
+              :options (get source-p :options)
+              :on-change (lambda (v) (fx-set-instrument-option source-p v))
+              :width 4.8 :height 1.15 :font-size 10)
+            (box :width 5.3 :height 1.15))
+          (knob-number :label (substring base 0 12)
+            :value (get amount-p :value)
+            :min (get amount-p :min) :max (get amount-p :max) :decimals 2
+            :font-size 10.5 :label-font-size 9
+            :text-color :gray :label-color :gray
+            :width 5.2 :height 2.05
+            :on-change (lambda (v) (fx-set-instrument-value amount-p v))))))))
+
+(def instrument-mod-grid (params)
+  (let ((amounts (instrument-mod-amount-params params)))
+    (h-stack :gap 0.45 :padding 0.35
+      (each (chunks amounts 4) |chunk ci|
+        (v-stack :gap 0.18
+          (each chunk |p pi|
+            (instrument-mod-row params p
+              (str "instrument-mod-row-" ci "-param-" (get p :idx)))))))))
+
 (def instrument-sources-grid (sections)
-  (h-stack :gap 2
+  (h-stack :gap 2 
     (each sections |section si|
       (v-stack :gap 0.25
         (label (get section :name) :font-size 14 :color :white :bg :transparent)
@@ -154,7 +198,7 @@
       :compact true
       :gap 0.75
       :tab-padding 0.5
-      :header-height 1.2
+      :header-height 1
       (each (get inst :sources) |section si|
         (fx-param-grid (get section :params) false)))
     (instrument-sources-grid (get inst :sources))))
@@ -164,17 +208,17 @@
   (rgba 1 1 1 1))
 
 (defwidget fx-mini-save-icon
-  :width 2.0 :height 1.0
-  :paint-margin 0.25
+  :width 1.5 :height 0.8
+  :paint-margin 0.2
   :state (active)
   :shader
   (let ((fg-col (rgba 0.92 0.92 0.96 1.0))
         (bg-col (if (= active 1)
           (rgba 0.00 0.35 0.82 1.0)
-          (rgba 0.18 0.18 0.20 1.0))))
+          (rgba 0.28 0.28 0.30 1.0))))
     (sdf/layer
       (sdf/fill
-        (sdf/rounded-rect width height 0.22)
+        (sdf/rounded-rect width height 0.5)
         (material :color bg-col))
       (sdf/fill
         (sdf/translate 0.0 -0.42
@@ -195,7 +239,7 @@
       (box :height 1.0 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0.5 :align :center
           (box :width 0.75 :height 0)
-          (label title :font-size 13 :color :white :bg :transparent)
+          (label title :font-size 11 :color :white :bg :transparent)
           ;; Only show edit button for custom dgenlisp effects (not built-in Filter/Delay)
           (if (and (not (= title "Filter")) (not (= title "Delay")))
             (box :bg :dark-gray :width 4 :height 1.0 :align :center
@@ -211,7 +255,7 @@
   (box :width width :height 1.2 :align :center
     :bg (if (= instrument-panel-tab idx) :dark-gray :transparent)
     :on-click |x y r| (set! instrument-panel-tab idx)
-    (label text :font-size 15
+    (label text :font-size 11
       :color (if (= instrument-panel-tab idx) :white :gray)
       :bg :transparent)))
 
@@ -236,13 +280,10 @@
       (fx-param-row p false (str "custom-ui-" synth-ui-current-name "-base-note"))
       (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
 
-(def custom-instrument-synth-ui (inst)
-  false)
-
 (def instrument-synth-panel-body (inst)
   (let ((custom (custom-instrument-synth-ui inst)))
     (if custom
-      (box :debug-name "custom-synth-wrapper" :padding 0 :h-align :start :v-align :start custom)
+      (box :debug-name "custom-synth-wrapper" :padding 0.5 :h-align :start :v-align :start custom)
       (box :debug-name "fallback-synth-wrapper"
         (fx-param-grid (get inst :synth) false)))))
 
@@ -287,7 +328,7 @@
       (box :height 1 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0 :align :center
           (box :width 0.75 :height 0)
-          (label "Sampler" :font-size 13 :color :white :bg :transparent)))
+          (label "Sampler" :font-size 11 :color :white :bg :transparent)))
       (box :padding 1.5
         (v-stack :gap 0.8
           (if (get inst :buffer)
@@ -320,54 +361,81 @@
     (sampler-panel inst)
     (box :debug-name "instrument-panel" :background "fx-panel-bg" :padding 0
       (v-stack :debug-name "instrument-panel-vstack" :gap 0
-        (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :start :h-align :start
-          (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center
+        (box :debug-name "instrument-header-box" :width :fill :height 1 :padding 0 :v-align :start :h-align :start
+          (h-stack :debug-name "instrument-header-row" :width :fill :gap 0.6 :align :center
             (box :width 0.75 :height 0)
-            (box :debug-name "instrument-name-box" :width 12 :height 1 :v-align :center :h-align :start
-              (label (substring (get inst :display-name) 0 12)
-                :font-size 13 :width 12 :color :white :bg :transparent))
-            (box :debug-name "instrument-edit-button" :bg :dark-gray :width 3.2 :height 0.9 :align :center
+            (box :debug-name "instrument-name-box"  :flex 1 :height 2 :v-align :center :h-align :start :padding .1
+              (h-stack :v-align :center :height 2 :gap 2 :padding 0.1
+                (label (substring (get inst :display-name) 0 12)
+                  :font-size 11  :color :white :bg :transparent)
+                (h-stack :debug-name "instrument-tabs-row" :gap 0.85 :align :center :v-align :center
+                  (instrument-tab-button "synth" 0 4.5)
+                  (instrument-tab-button "mods" 1 4.0)
+                  (instrument-tab-button "sources" 2 5.8))
+                ))
+            
+            (box :debug-name "instrument-edit-button" :bg :dark-gray :width 1.2 :height 0.9 :align :center
               :on-click |x y r|
-                (host-command "enter-edit-instrument"
-                  (dict :name SEQ.sidebar-instrument-name))
-              (label "edit" :font-size 8 :color :gray :bg :transparent))
-            (box :debug-name "instrument-preset-button" :width 2 :height 1 :align :center
-              (fx-mini-save-icon
-                :on-click |x y r| (sbrowser-enter-preset-save)
-                :active 0))))
-        (box :debug-name "instrument-content-box" :padding 0.35
+              (host-command "enter-edit-instrument"
+                (dict :name SEQ.sidebar-instrument-name))
+              (label "edit" :font-size 11 :color :gray :bg :transparent))
+            (box :debug-name "instrument-preset-button" :padding 0.3 :width 4 :align :center
+              (v-stack
+                (box :width 1 :height 0.1)
+                (fx-mini-save-icon
+                  :on-click |x y r| (sbrowser-enter-preset-save)
+                  :active 0)))))
+        (box :debug-name "instrument-content-box" :padding 0.5
           (v-stack :debug-name "instrument-content-vstack" :gap 0.0
-            (h-stack :debug-name "instrument-tabs-row" :gap 0.85 :align :center
-              (instrument-tab-button "synth" 0 4.5)
-              (instrument-tab-button "mods" 1 4.0)
-              (instrument-tab-button "sources" 2 5.8))
+            
             (if (= instrument-panel-tab 0)
               (instrument-synth-panel-body inst)
               (if (= instrument-panel-tab 1)
-                (box :debug-name "mods-wrapper" (fx-param-grid (get inst :mod) false))
-                (box :debug-name "sources-wrapper" (instrument-source-tabs inst))))))))))
+                (box :debug-name "mods-wrapper"  (instrument-mod-grid (get inst :mod)))
+                (box :debug-name "sources-wrapper"  (instrument-source-tabs inst))))))))))
+
+(defwidget black
+  :width 2 :height 2
+  :shader
+  (rgba 0.0 0.0 0 1))
+
+(def fx-empty-track-fallback ()
+  (v-stack :width :fill :padding 1 :gap 0
+    (box :flex 1)
+    (h-stack :width :fill :align :center
+      (box :flex 1)
+      (v-stack :gap 0.4 :align :center
+        (label "Instrument and effects appear here"
+          :font-size 12 :color :gray :bg :transparent)
+        (compile-progress
+          :active (if SEQ.compiling 1 0)
+          :width 12 :height 0.3))
+      (box :flex 1))
+    (box :flex 1)))
 
 (effect-buffer "*fx*"
-  (v-stack :padding 0.5 :gap 1
-    (h-stack :gap 1
-      (each SEQ.instrument-panel |inst inst-idx|
-        (instrument-panel inst))
-      (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
-        (fx-panel (get fx :name) (get fx :params) fx))
-      ;; Add effect
-      (box :background "fx-panel-bg" :padding 1.5
-        (v-stack :gap 0.5 :align :center
-          (label "+" :font-size 15 :color :gray :bg :transparent)
-          (dropdown :value ""
-            :options SEQ.available-effects
-            :placeholder "Add Effect"
-            :on-change (lambda (v)
-              (if (= v "+ New Effect")
-                (do
-                  (set! sbrowser-editor-name "")
-                  (host-command "enter-new-effect-editor" (dict)))
-                (host-command "add-effect" (dict :name v))))
-            :width 12 :height 1.5 :font-size 14)
-          (compile-progress
-            :active (if SEQ.compiling 1 0)
-            :width 12 :height 0.3))))))
+  (if (= SEQ.num-tracks 0)
+    (fx-empty-track-fallback)
+    (v-stack :padding 0.5 :gap 1 
+      (h-stack :gap 1
+        (each SEQ.instrument-panel |inst inst-idx|
+          (instrument-panel inst))
+        (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
+          (fx-panel (get fx :name) (get fx :params) fx))
+        ;; Add effect
+        (box :background "fx-panel-bg" :padding 1.5
+          (v-stack :gap 0.5 :align :center
+            (label "+" :font-size 15 :color :gray :bg :transparent)
+            (dropdown :value ""
+              :options SEQ.available-effects
+              :placeholder "Add Effect"
+              :on-change (lambda (v)
+                (if (= v "+ New Effect")
+                  (do
+                    (set! sbrowser-editor-name "")
+                    (host-command "enter-new-effect-editor" (dict)))
+                  (host-command "add-effect" (dict :name v))))
+              :width 12 :height 1.5 :font-size 14)
+            (compile-progress
+              :active (if SEQ.compiling 1 0)
+              :width 12 :height 0.3)))))))

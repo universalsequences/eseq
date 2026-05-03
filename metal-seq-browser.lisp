@@ -7,18 +7,21 @@
 (def sbrowser-source-buffer "")
 (defstate sbrowser-mode "audition")
 (defstate sbrowser-project-name "")
+(defstate sbrowser-last-track-index -1)
 
 ;; Editor state for inline instrument/effect creation
 (def sbrowser-editor-name (state ""))
 ;; Preset save state
 (defstate sbrowser-preset-name "")
 (defstate sbrowser-preset-save-mode "")  ;; "" or "save-preset"
+(defstate sbrowser-preset-filter "")
 
 (def sbrowser-audition-mode? ()
   (= sbrowser-mode "audition"))
 
 (def sbrowser-track-type-mode? ()
-  (= sbrowser-mode "track-type"))
+  (or (= sbrowser-mode "track-type")
+    (and (= SEQ.num-tracks 0) (= sbrowser-mode "audition"))))
 
 (def sbrowser-create-sampler-mode? ()
   (= sbrowser-mode "create-sampler"))
@@ -38,7 +41,18 @@
 (def sbrowser-mode-label ()
   (if (sbrowser-audition-mode?) "audition" "create"))
 
+(def sbrowser-sync-track-search ()
+  (if (not (= sbrowser-last-track-index SEQ.sidebar-track-index))
+    (do
+      (set! sbrowser-last-track-index SEQ.sidebar-track-index)
+      (if (and (sbrowser-audition-mode?) (= SEQ.sidebar-kind "sampler"))
+        (set! sbrowser-filter "")))))
+
 (def sbrowser-reset-to-audition ()
+  (set! sbrowser-mode (if (= SEQ.num-tracks 0) "track-type" "audition"))
+  (set! sbrowser-filter ""))
+
+(def sbrowser-leave-create-mode ()
   (set! sbrowser-mode "audition")
   (set! sbrowser-filter ""))
 
@@ -75,7 +89,7 @@
 
 (def sbrowser-add-instrument-track (name)
   (host-command "add-track-instrument" (dict :name name))
-  (sbrowser-reset-to-audition)
+  (sbrowser-leave-create-mode)
   (status (str "Add instrument track: " name)))
 
 ;; ── SDF widgets ──
@@ -132,7 +146,7 @@
     (if path
       (do
         (host-command "add-track-sample" (dict :path path))
-        (sbrowser-reset-to-audition)
+        (sbrowser-leave-create-mode)
         (status (str "Add track: " (get item :label))))
       (status "Select a sample file, not a folder"))))
 
@@ -164,13 +178,13 @@
 ;; ── Search bar widget ──
 
 (def sbrowser-header ()
-  (box :padding 0.25
-    (h-stack :gap 0.5 :align :center
+  (box :width :fill :padding 0.25
+    (h-stack :width :fill :gap 0.5 :align :center
       (text-input
+        :flex 1
         :value sbrowser-filter
         :placeholder "Search samples..."
         :on-change (lambda (v) (set! sbrowser-filter v))
-        :width 30
         :height 1.5
         :font-size 12
         (mag-glass))
@@ -181,52 +195,28 @@
           :bg :transparent)))))
 
 (def sbrowser-instrument-header ()
-  (box :padding 0.25
-    (v-stack :gap 0.2
-      (label (if (= SEQ.sidebar-instrument-display-name "") "Instrument" SEQ.sidebar-instrument-display-name)
-        :font-size 12
-        :color :white
-        :bg :transparent)
-      ;; Edit button (only for custom instruments, not Sampler)
-      (if (not (= SEQ.sidebar-instrument-name ""))
-        (box :bg :dark-gray :width 5 :height 1.5 :align :center
-          :on-click |x y r|
-            (host-command "enter-edit-instrument"
-              (dict :name SEQ.sidebar-instrument-name))
-          (label "Edit"
-            :font-size 9
-            :color :white
-            :bg :transparent))
-        (box))
-      (label
-        (str "Current preset: "
-          (if (= SEQ.sidebar-loaded-preset "") "none" SEQ.sidebar-loaded-preset))
-        :font-size 9
-        :color :gray
-        :bg :transparent))))
+  (box :width :fill :padding 0.25
+    (label (if (= SEQ.sidebar-instrument-display-name "") "Instrument" SEQ.sidebar-instrument-display-name)
+      :font-size 12
+      :color :white
+      :bg :transparent)))
 
 (def sbrowser-create-header ()
-  (box :padding 0.25
-    (h-stack :gap 0.5 :align :center
-      (label "Create track"
-        :font-size 12
-        :color :white
-        :bg :transparent)
-      (box :bg :blue :width 8.2 :height 1.5 :align :center
-        (label (sbrowser-mode-label)
-          :font-size 9
-          :color :white
-          :bg :transparent)))))
+  (box :width :fill :padding 0.25
+    (label "Create track"
+      :font-size 12
+      :color :white
+      :bg :transparent)))
 
 (def sbrowser-project-header ()
-  (box :padding 0.25
-    (v-stack :gap 0.2
-      (h-stack :gap 0.5 :align :center
+  (box :width :fill :padding 0.25
+    (v-stack :width :fill :gap 0.2
+      (h-stack :width :fill :gap 0.5 :align :center
         (text-input
+          :flex 1
           :value sbrowser-filter
           :placeholder "Search projects..."
           :on-change (lambda (v) (set! sbrowser-filter v))
-          :width 30
           :height 1.5
           :font-size 12
           (mag-glass))
@@ -243,13 +233,13 @@
         :bg :transparent))))
 
 (def sbrowser-project-save-header ()
-  (box :padding 0.25
-    (v-stack :gap 0.5
+  (box :width :fill :padding 0.25
+    (v-stack :width :fill :gap 0.5
       (text-input
+        :width :fill
         :value sbrowser-project-name
         :placeholder "Project name..."
         :on-change (lambda (v) (set! sbrowser-project-name v))
-        :width 30
         :height 1.5
         :font-size 12
         (mag-glass))
@@ -263,49 +253,111 @@
               :bg :transparent)))))))
 
 (def sbrowser-create-items ()
-  (seq-saved-instrument-tree))
+  (seq-saved-instrument-tree sbrowser-filter))
+
+(def sbrowser-enter-new-instrument-editor ()
+  (set! sbrowser-editor-name "")
+  (host-command "enter-new-instrument-editor" (dict)))
 
 (def sbrowser-select-create-item (item)
   (if (= (get item :kind) "sampler")
     (sbrowser-enter-create-sampler-mode)
     (if (= (get item :kind) "new-instrument")
-      (do
-        (set! sbrowser-editor-name "")
-        (host-command "enter-new-instrument-editor" (dict)))
+      (sbrowser-enter-new-instrument-editor)
       (if (= (get item :kind) "instrument")
         (sbrowser-add-instrument-track (get item :name))
         (status "Open a folder or choose an instrument")))))
 
+(def sbrowser-create-search-bar ()
+  (box :width :fill :padding 0.25
+    (h-stack :width :fill :gap 0.5 :align :center
+      (text-input
+        :flex 1
+        :value sbrowser-filter
+        :placeholder "Search instruments..."
+        :on-change (lambda (v) (set! sbrowser-filter v))
+        :height 1.5
+        :font-size 12
+        (mag-glass)))))
+
+(def sbrowser-create-toolbar ()
+  (box :width :fill :padding 0.25
+    (h-stack :width :fill :gap 0.5 :align :center
+      (button "Sampler"
+        :variant :secondary
+        :icon :sampler
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-enter-create-sampler-mode)
+        :color :white)
+      (button "New"
+        :variant :ghost
+        :icon :plus
+        :flex 1
+        :height 1.3
+        :font-size 10.5
+        :on-click |x y r| (sbrowser-enter-new-instrument-editor)
+        :color :white))))
+
+(def sbrowser-library-label ()
+  (box :width :fill :padding 0.25
+    (label "Library"
+      :font-size 10
+      :color :gray
+      :bg :transparent)))
+
 (def sbrowser-create-picker ()
-  (box :background "browser-panel-bg" :padding 0 :flex 1
-    (scroll :flex 1
-      (tree
-        :items (sbrowser-create-items)
-        :expand-all false
-        :on-select (lambda (item) (sbrowser-select-create-item item))
-        :on-activate (lambda (item) (sbrowser-select-create-item item))))))
+  (v-stack :width :fill :gap 0.5 :flex 1
+    (sbrowser-create-search-bar)
+    (sbrowser-create-toolbar)
+    (sbrowser-library-label)
+    (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+      (scroll :width :fill :flex 1
+        (tree
+          :width :fill
+          :items (sbrowser-create-items)
+          :expand-all (not (= sbrowser-filter ""))
+          :on-select (lambda (item) (sbrowser-select-create-item item))
+          :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
+
+(def sbrowser-preset-search-bar ()
+  (box :width :fill :padding 0.25
+    (h-stack :width :fill :gap 0.5 :align :center
+      (text-input
+        :flex 1
+        :value sbrowser-preset-filter
+        :placeholder "Search presets..."
+        :on-change (lambda (v) (set! sbrowser-preset-filter v))
+        :height 1.5
+        :font-size 12
+        (mag-glass)))))
 
 (def sbrowser-presets-panel ()
-  (box :background "browser-panel-bg" :padding 0 :flex 1
-    (scroll :flex 1
-      (tree
-        :items SEQ.sidebar-preset-tree
-        :selected-label SEQ.sidebar-loaded-preset
-        :expand-all false
-        :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
-        :on-activate (lambda (item) (sbrowser-load-preset (get item :label)))))))
+  (v-stack :width :fill :gap 0.5 :flex 1
+    (sbrowser-preset-search-bar)
+    (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+      (scroll :width :fill :flex 1
+        (tree
+          :width :fill
+          :items (seq-preset-tree SEQ.sidebar-presets sbrowser-preset-filter)
+          :selected-label SEQ.sidebar-loaded-preset
+          :expand-all false
+          :on-select (lambda (item) (sbrowser-load-preset (get item :label)))
+          :on-activate (lambda (item) (sbrowser-load-preset (get item :label))))))))
 
 (def sbrowser-projects-panel ()
   (let ((items (seq-project-tree sbrowser-filter)))
-    (box :background "browser-panel-bg" :padding 0 :flex 1
+    (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
       (if (= (len items) 0)
         (box :padding 1
           (label "No projects found."
             :font-size 10
             :color :gray
             :bg :transparent))
-        (scroll :flex 1
+        (scroll :width :fill :flex 1
           (tree
+            :width :fill
             :items items
             :selected-label SEQ.current-project-name
             :expand-all false
@@ -313,7 +365,7 @@
             :on-activate (lambda (item) (sbrowser-load-project (get item :label)))))))))
 
 (def sbrowser-project-save-panel ()
-  (box :background "browser-panel-bg" :padding 0 :flex 1))
+  (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1))
 
 ;; ── Preset save sidebar ──
 
@@ -328,9 +380,9 @@
   (set! sbrowser-preset-save-mode ""))
 
 (def sbrowser-preset-save-header ()
-  (box :padding 0.25
-    (v-stack :gap 0.4
-      (h-stack :gap 0.5 :align :center
+  (box :width :fill :padding 0.25
+    (v-stack :width :fill :gap 0.4
+      (h-stack :width :fill :gap 0.5 :align :center
         (label "Save Preset"
           :font-size 12
           :color :white
@@ -342,10 +394,10 @@
             :color :gray
             :bg :transparent)))
       (text-input
+        :width :fill
         :value sbrowser-preset-name
         :placeholder "preset name..."
         :on-change (lambda (v) (set! sbrowser-preset-name v))
-        :width 30
         :height 1.5
         :font-size 12)
       ;; Save as New button
@@ -374,14 +426,14 @@
         (box)))))
 
 (def sbrowser-preset-save-panel ()
-  (box :background "browser-panel-bg" :padding 0 :flex 1))
+  (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1))
 
 ;; ── Editor sidebar panels ──
 
 (def sbrowser-editor-header ()
-  (box :padding 0.25
-    (v-stack :gap 0.4
-      (h-stack :gap 0.5 :align :center
+  (box :width :fill :padding 0.25
+    (v-stack :width :fill :gap 0.4
+      (h-stack :width :fill :gap 0.5 :align :center
         (label
           (if (= SEQ.editor-mode "new-instrument") "New Instrument"
             (if (= SEQ.editor-mode "edit-instrument") "Edit Instrument"
@@ -400,10 +452,10 @@
       ;; Name input (only for new-* modes)
       (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "new-effect"))
         (text-input
+          :width :fill
           :value sbrowser-editor-name
           :placeholder (if (= SEQ.editor-mode "new-instrument") "instrument-name" "effect-name")
           :on-change (lambda (v) (set! sbrowser-editor-name v))
-          :width 30
           :height 1.5
           :font-size 12)
         ;; For edit modes, show the file name
@@ -439,11 +491,12 @@
               :bg :transparent)))))))
 
 (def sbrowser-editor-panel ()
-  (box :background "browser-panel-bg" :padding 0 :flex 1))
+  (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1))
 
 ;; ── Build widgets ──
 
 (def sbrowser-build-widgets ()
+  (sbrowser-sync-track-search)
   (if (sbrowser-editor-mode?)
     (list
       (sbrowser-editor-header)
@@ -464,6 +517,19 @@
           (list
             (sbrowser-create-header)
             (sbrowser-create-picker))
+        (if (sbrowser-create-sampler-mode?)
+          (let ((header (sbrowser-header)))
+            (list
+              header
+              (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+                (scroll :width :fill :flex 1
+                  (tree
+                    :width :fill
+                    :items (seq-filter-sample-tree sbrowser-filter)
+                    :selected-path SEQ.sidebar-selected-sample
+                    :expand-all (not (= sbrowser-filter ""))
+                    :on-select (lambda (item) (sbrowser-select-item item))
+                    :on-activate (lambda (item) (sbrowser-select-item item)))))))
         (if (= SEQ.sidebar-kind "instrument")
           (list
             (sbrowser-instrument-header)
@@ -471,19 +537,20 @@
           (let ((header (sbrowser-header)))
             (list
               header
-              (box :background "browser-panel-bg" :padding 0 :flex 1
-                (scroll :flex 1
+              (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+                (scroll :width :fill :flex 1
                   (tree
+                    :width :fill
                     :items (seq-filter-sample-tree sbrowser-filter)
                     :selected-path SEQ.sidebar-selected-sample
                     :expand-all (not (= sbrowser-filter ""))
                     :on-select (lambda (item) (sbrowser-select-item item))
-                    :on-activate (lambda (item) (sbrowser-select-item item))))))))))))))
+                    :on-activate (lambda (item) (sbrowser-select-item item)))))))))))))))
 
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──
 
 (effect-buffer "*samples*"
-  (v-stack :gap 0.5 :padding 1 (sbrowser-build-widgets)))
+  (v-stack :width :fill :gap 0.5 :padding 1 (sbrowser-build-widgets)))
 
 ;; ── Entry point: just switch to the buffer ──
 

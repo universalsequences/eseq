@@ -980,7 +980,8 @@ impl App {
         if rect_contains(l.trigger_row, col, row) {
             if let Some(step) = self.step_from_click_x(col, l.trigger_row.x) {
                 self.handle_step_click(step, modifiers);
-                if modifiers.contains(KeyModifiers::SHIFT) || modifiers.contains(KeyModifiers::SUPER)
+                if modifiers.contains(KeyModifiers::SHIFT)
+                    || modifiers.contains(KeyModifiers::SUPER)
                 {
                     self.ui.step_drag_anchor = Some(step);
                 }

@@ -114,15 +114,18 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
     let mach_rt_default = cfg!(target_os = "macos") && workers > 0;
     let mach_rt = env_flag("TINYSEQ_AUDIOGRAPH_MACH_RT", mach_rt_default);
     let rt_log = env_flag("TINYSEQ_AUDIOGRAPH_RT_LOG", false);
+    let graph_log = env_flag("TINYSEQ_AUDIOGRAPH_TRACE", false);
 
     unsafe {
         audiograph::enable_rt_logging(rt_log);
+        audiograph::enable_graph_logging(graph_log);
         audiograph::enable_rt_time_constraint(mach_rt);
         audiograph::engine_start_workers(workers);
     }
     eprintln!(
-        "audiograph: started {workers} worker(s), Mach RT {}",
-        if mach_rt { "enabled" } else { "disabled" }
+        "audiograph: started {workers} worker(s), Mach RT {}, graph trace {}",
+        if mach_rt { "enabled" } else { "disabled" },
+        if graph_log { "enabled" } else { "disabled" }
     );
 
     // Create shared sequencer state (start with 0 tracks)

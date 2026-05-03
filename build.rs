@@ -16,4 +16,6 @@ fn main() {
         .compile("audiograph");
 
     println!("cargo:rerun-if-changed=audiograph/");
+    println!("cargo:rerun-if-env-changed=CFLAGS");
+    println!("cargo:rerun-if-env-changed=CC");
 }

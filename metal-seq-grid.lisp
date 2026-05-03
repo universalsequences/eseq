@@ -406,49 +406,64 @@
 
 ;; ── Main UI ──
 
+(def metal-empty-track-fallback ()
+  (v-stack :width :fill :padding 1 :gap 0
+    (box :flex 1)
+    (h-stack :width :fill :align :center
+      (box :flex 1)
+      (v-stack :gap 0.35 :align :center
+        (label "Select a sound to create a track"
+          :font-size 14 :color :gray :bg :transparent)
+        (label "Sampler, instruments, and projects are in the left browser."
+          :font-size 10 :color :dark-gray :bg :transparent))
+      (box :flex 1))
+    (box :flex 1)))
+
 (effect-buffer "*metal*"
-  (v-stack
-    :padding 1
-    :gap 1
-    
-    ; Param mode selector
-    (h-stack :gap 0.5
-      (box :width 8 :height 2
-        :bg (if (= param-mode 0) :blue :dark-gray)
-        :on-click |x y r| (set! param-mode 0)
-        (label "vel" :font-size 12
-          :color (if (= param-mode 0) :white :gray)
-          :bg :transparent))
-      (box :width 8 :height 2
-        :bg (if (= param-mode 1) :green :dark-gray)
-        :on-click |x y r| (set! param-mode 1)
-        (label "dur" :font-size 12
-          :color (if (= param-mode 1) :white :gray)
-          :bg :transparent))
-      (box :width 8 :height 2
-        :bg (if (= param-mode 2) :magenta :dark-gray)
-        :on-click |x y r| (set! param-mode 2)
-        (label "aux_a" :font-size 12
-          :color (if (= param-mode 2) :white :gray)
-          :bg :transparent))
-      (box :width 8 :height 2
-        :bg (if (= param-mode 3) :yellow :dark-gray)
-        :on-click |x y r| (set! param-mode 3)
-        (label "xpose" :font-size 12
-          :color (if (= param-mode 3) :white :gray)
-          :bg :transparent))
-      (box :width 8 :height 2
-        :bg (if (= param-mode 4) :red :dark-gray)
-        :on-click |x y r| (set! param-mode 4)
-        (label "pan" :font-size 12
-          :color (if (= param-mode 4) :white :gray)
-          :bg :transparent))
-      (box :width 8 :height 2
-        :bg (if (= param-mode 5) :green :dark-gray)
-        :on-click |x y r| (set! param-mode 5)
-        (label "syn" :font-size 12
-          :color (if (= param-mode 5) :white :gray)
-          :bg :transparent)))
+  (if (= SEQ.num-tracks 0)
+    (metal-empty-track-fallback)
+    (v-stack
+      :padding 1
+      :gap 1
+      
+      ; Param mode selector
+      (h-stack :gap 0.5
+        (box :width 8 :height 2
+          :bg (if (= param-mode 0) :blue :dark-gray)
+          :on-click |x y r| (set! param-mode 0)
+          (label "vel" :font-size 12
+            :color (if (= param-mode 0) :white :gray)
+            :bg :transparent))
+        (box :width 8 :height 2
+          :bg (if (= param-mode 1) :green :dark-gray)
+          :on-click |x y r| (set! param-mode 1)
+          (label "dur" :font-size 12
+            :color (if (= param-mode 1) :white :gray)
+            :bg :transparent))
+        (box :width 8 :height 2
+          :bg (if (= param-mode 2) :magenta :dark-gray)
+          :on-click |x y r| (set! param-mode 2)
+          (label "aux_a" :font-size 12
+            :color (if (= param-mode 2) :white :gray)
+            :bg :transparent))
+        (box :width 8 :height 2
+          :bg (if (= param-mode 3) :yellow :dark-gray)
+          :on-click |x y r| (set! param-mode 3)
+          (label "xpose" :font-size 12
+            :color (if (= param-mode 3) :white :gray)
+            :bg :transparent))
+        (box :width 8 :height 2
+          :bg (if (= param-mode 4) :red :dark-gray)
+          :on-click |x y r| (set! param-mode 4)
+          (label "pan" :font-size 12
+            :color (if (= param-mode 4) :white :gray)
+            :bg :transparent))
+        (box :width 8 :height 2
+          :bg (if (= param-mode 5) :green :dark-gray)
+          :on-click |x y r| (set! param-mode 5)
+          (label "syn" :font-size 12
+            :color (if (= param-mode 5) :white :gray)
+            :bg :transparent)))
     
     ; Step columns: vslider + aqua step toggle + step number
     (grid :cols 16 :col-width 4
@@ -686,7 +701,7 @@
           (hslider :min 0 :max 127
             :value SEQ.tp-accum-limit
             :material (aqua-slider-material)
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))))))))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v))))))))))
 
 ; Layout: samples | metal | mixer on top, fx on bottom
 (set-layout '(:rows
