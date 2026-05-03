@@ -7563,6 +7563,7 @@ mod tests {
             "emulations/hammond-organ/",
             "emulations/minimoog/",
             "emulations/monomachine-digipro/",
+            "emulations/monomachine-dpro-ddrw-v1/",
             "emulations/monomachine-dpro-wave-v2/",
             "emulations/monomachine-fmplus/",
             "emulations/monomachine-sid/",

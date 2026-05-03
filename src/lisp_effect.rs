@@ -5650,4 +5650,41 @@ mod tests {
             "expected audible rms, got report: {report:?}"
         );
     }
+
+    #[test]
+    fn dpro_ddrw_v1_renders_audible_signal() {
+        let name = "emulations/monomachine-dpro-ddrw-v1/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let report = super::render_instrument_source_for_test(
+            &source,
+            asset_base.as_deref(),
+            &super::InstrumentRenderOptions {
+                sample_rate: 44_100,
+                block_size: 128,
+                frames: 4096,
+                midi_note: 69.0,
+                velocity: 1.0,
+                gate_frames: 4096,
+                voice_index: 0,
+                param_overrides: vec![
+                    ("wav1".to_string(), 4.0),
+                    ("wav2".to_string(), 40.0),
+                    ("mix".to_string(), 0.5),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert!(
+            report.peak > 0.01,
+            "expected audible peak, got report: {report:?}"
+        );
+        assert!(
+            report.rms > 0.001,
+            "expected audible rms, got report: {report:?}"
+        );
+    }
 }
