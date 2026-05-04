@@ -243,14 +243,13 @@
         :height 1.5
         :font-size 12
         (mag-glass))
-      (box :background "browser-pill-btn-bg" :width 8.0 :height 1.2
+      (button "Save"
+        :variant :primary
+        :width 8.0
+        :height 1.2
+        :font-size 11
         :on-click |x y r| (sbrowser-save-project)
-        (box :width 8.0 :height 1.2
-          (v-stack :align :center
-            (label " Save "
-              :font-size 11
-              :color :white
-              :bg :transparent)))))))
+        :color :white))))
 
 (def sbrowser-create-items ()
   (seq-saved-instrument-tree sbrowser-filter))
@@ -401,28 +400,28 @@
         :height 1.5
         :font-size 12)
       ;; Save as New button
-      (box :background "browser-pill-btn-bg" :width 10 :height 1.2
+      (button "Save as New"
+        :variant :primary
+        :width 10
+        :height 1.2
+        :font-size 11
         :on-click |x y r|
           (do
             (host-command "save-preset" (dict :name sbrowser-preset-name :overwrite false))
             (sbrowser-exit-preset-save))
-        (box :width 10 :height 1.2
-          (v-stack :align :center
-            (label " Save as New "
-              :font-size 11
-              :color :white
-              :bg :transparent))))
+        :color :white)
       ;; Overwrite button (only if a preset is currently loaded)
       (if (not (= SEQ.sidebar-loaded-preset ""))
-        (box :bg :dark-gray :width 16 :height 1.2 :align :center
+        (button (str "Overwrite: " SEQ.sidebar-loaded-preset)
+          :variant :secondary
+          :width 16
+          :height 1.2
+          :font-size 10
           :on-click |x y r|
             (do
               (host-command "overwrite-preset" (dict))
               (sbrowser-exit-preset-save))
-          (label (str " Overwrite: " SEQ.sidebar-loaded-preset " ")
-            :font-size 10
-            :color :white
-            :bg :transparent))
+          :color :white)
         (box)))))
 
 (def sbrowser-preset-save-panel ()
@@ -471,7 +470,14 @@
           :bg :transparent)
         (box))
       ;; Save button
-      (box :background "browser-pill-btn-bg" :width 10 :height 1.2
+      (button
+        (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "new-effect"))
+          "Save & Add"
+          "Save")
+        :variant :primary
+        :width 10
+        :height 1.2
+        :font-size 11
         :on-click |x y r|
           (if (= SEQ.editor-mode "new-instrument")
             (host-command "save-new-instrument" (dict :name sbrowser-editor-name))
@@ -480,15 +486,7 @@
               (if (= SEQ.editor-mode "new-effect")
                 (host-command "save-new-effect" (dict :name sbrowser-editor-name))
                 (host-command "update-effect" (dict)))))
-        (box :width 10 :height 1.2
-          (v-stack :align :center
-            (label
-              (if (or (= SEQ.editor-mode "new-instrument") (= SEQ.editor-mode "new-effect"))
-                " Save & Add "
-                " Save ")
-              :font-size 11
-              :color :white
-              :bg :transparent)))))))
+        :color :white))))
 
 (def sbrowser-editor-panel ()
   (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1))

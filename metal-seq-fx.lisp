@@ -3,21 +3,36 @@
 
 (defstate instrument-panel-tab 0)
 (defstate instrument-source-tab 0)
+(defstate selected-fx-slot -1)
 ;; These are temporary render-context globals used by generated custom synth UI.
 ;; They must NOT be defstate: custom UI functions set them while rendering, and
 ;; writing reactive state during measurement/layout can perturb the layout.
 (def synth-ui-current-inst false)
 (def synth-ui-current-name "")
 
+(def fx-clear-selected-effect ()
+  (set! selected-fx-slot -1))
+
+(def fx-select-effect (slot)
+  (set! selected-fx-slot slot))
+
+(def fx-delete-selected-effect ()
+  (if (>= selected-fx-slot 2)
+    (do
+      (host-command "delete-effect" (dict :slot selected-fx-slot))
+      (fx-clear-selected-effect))
+    (fx-clear-selected-effect)))
+
 (defwidget fx-panel-bg
   :width 1 :height 1
+  :state (selected)
   :shader
   (let ((panel-radius (min (* 8 (fwidth y)) (* 0.5 (min width height))))
       (panel (sdf/rounded-rect (* 1 width) (* 1 height) (* 2 panel-radius)))
       ;; Use derivatives to convert a real pixel height into the shader's
       ;; normalized/SDF y-space. This keeps the header bar visually constant
       ;; as panels get taller/shorter.
-      (header-h (* 41 (fwidth y)))
+      (header-h (* 45 (fwidth y)))
       (header-bottom (+ (- height) header-h))
       (header-shape (max panel (- y header-bottom))))
     (sdf/layer
@@ -38,6 +53,10 @@
               (lit 1)
               (shine 0))
             (+ (* base (rgba lit lit lit 1.0)) (rgba shine shine shine 0.0)))))
+      (if selected
+        (sdf/fill header-shape
+          (material :color (rgba 0.30 0.30 0.33 1.0)))
+        (rgba 0 0 0 0))
       )))
   
 
@@ -64,21 +83,27 @@
               (smoothstep -0.02 0.02 d-bar))))))))
 
 (def fx-set-instrument-value (p v)
-  (if (= (get p :control) "base-note")
-    (host-command "set-instrument-base-note" (dict :value v))
-    (host-command
-      (if (seq-has-selection?) "set-instrument-plock" "set-instrument-param")
-      (dict :param-idx (get p :idx) :value v))))
+  (do
+    (fx-clear-selected-effect)
+    (if (= (get p :control) "base-note")
+      (host-command "set-instrument-base-note" (dict :value v))
+      (host-command
+        (if (seq-has-selection?) "set-instrument-plock" "set-instrument-param")
+        (dict :param-idx (get p :idx) :value v)))))
 
 (def fx-set-instrument-option (p label)
-  (host-command
-    (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option")
-    (dict :param-idx (get p :idx) :label label)))
+  (do
+    (fx-clear-selected-effect)
+    (host-command
+      (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option")
+      (dict :param-idx (get p :idx) :label label))))
 
 (def fx-set-effect-value (fx p v)
-  (if (seq-has-selection?)
-    (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
-    (seq-set-effect-param (get fx :slot-idx) (get p :idx) v)))
+  (do
+    (fx-clear-selected-effect)
+    (if (seq-has-selection?)
+      (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
+      (seq-set-effect-param (get fx :slot-idx) (get p :idx) v))))
 
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
@@ -102,6 +127,7 @@
               (dropdown :value (get p :text-value)
                 :options (get p :options)
                 :on-change (lambda (v)
+                  (fx-clear-selected-effect)
                   (if fx
                     (host-command
                       (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")
@@ -234,21 +260,30 @@
         (material :color fg-col)))))
 
 (def fx-panel (title params fx)
-  (box :background "fx-panel-bg" :padding 0
+  (box :background "fx-panel-bg"
+       :selected (if (= selected-fx-slot (get fx :slot-idx)) 1 0)
+       :padding 0
     (v-stack :gap 0
-      (box :height 1.0 :padding 0 :v-align :center :h-align :start
-        (h-stack :gap 0.5 :align :center
+      (box :width :fill :height 1.0 :padding 0 :v-align :center :h-align :start
+           :on-click |x y r|
+             (if (>= (get fx :slot-idx) 2)
+               (fx-select-effect (get fx :slot-idx))
+               (fx-clear-selected-effect))
+        (h-stack :width :fill :gap 0.5 :align :center
           (box :width 0.75 :height 0)
           (label title :font-size 11 :color :white :bg :transparent)
           ;; Only show edit button for custom dgenlisp effects (not built-in Filter/Delay)
           (if (and (not (= title "Filter")) (not (= title "Delay")))
             (box :bg :dark-gray :width 4 :height 1.0 :align :center
               :on-click |x y r|
-              (host-command "enter-edit-effect"
-                (dict :name title :slot (get fx :slot-idx)))
+              (do
+                (fx-clear-selected-effect)
+                (host-command "enter-edit-effect"
+                  (dict :name title :slot (get fx :slot-idx))))
               (label "edit" :font-size 8 :color :gray :bg :transparent))
             (box))))
       (box :padding 1
+           :on-click |x y r| (fx-clear-selected-effect)
         (fx-param-grid params fx)))))
 
 (def instrument-tab-button (text idx width)
@@ -323,7 +358,7 @@
     nil))
 
 (def sampler-panel (inst)
-  (box :background "fx-panel-bg" :padding 0
+  (box :background "fx-panel-bg" :selected 0 :padding 0
     (v-stack :gap 0
       (box :height 1 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0 :align :center
@@ -360,6 +395,7 @@
   (if (= (get inst :type) "sampler")
     (sampler-panel inst)
     (box :debug-name "instrument-panel" :background "fx-panel-bg" :padding 0
+         :selected 0
       (v-stack :debug-name "instrument-panel-vstack" :gap 0
         (box :debug-name "instrument-header-box" :width :fill :height 1 :padding 0 :v-align :start :h-align :start
           (h-stack :debug-name "instrument-header-row" :width :fill :gap 0.6 :align :center
@@ -423,13 +459,15 @@
         (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
           (fx-panel (get fx :name) (get fx :params) fx))
         ;; Add effect
-        (box :background "fx-panel-bg" :padding 1.5
+        (box :background "fx-panel-bg" :selected 0 :padding 1.5
+             :on-click |x y r| (fx-clear-selected-effect)
           (v-stack :gap 0.5 :align :center
             (label "+" :font-size 15 :color :gray :bg :transparent)
             (dropdown :value ""
               :options SEQ.available-effects
               :placeholder "Add Effect"
               :on-change (lambda (v)
+                (fx-clear-selected-effect)
                 (if (= v "+ New Effect")
                   (do
                     (set! sbrowser-editor-name "")
@@ -439,3 +477,8 @@
             (compile-progress
               :active (if SEQ.compiling 1 0)
               :width 12 :height 0.3)))))))
+
+(define-mode "seq-fx-mode" :read-only true)
+(mode-bind-key "seq-fx-mode" "BS" "fx-delete-selected-effect")
+(mode-bind-key "seq-fx-mode" "Delete" "fx-delete-selected-effect")
+(set-buffer-mode-for "*fx*" "seq-fx-mode")
