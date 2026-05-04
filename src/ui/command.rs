@@ -18,8 +18,15 @@ use crate::sequencer::{StepParam, StepSnapshot, SwingResolution, Timebase};
 
 use super::App;
 
-fn sanitize_pasted_step_snapshot(snapshot: &StepSnapshot) -> StepSnapshot {
-    snapshot.without_audio_plocks()
+fn sanitize_pasted_step_snapshot(
+    snapshot: &StepSnapshot,
+    preserve_audio_plocks: bool,
+) -> StepSnapshot {
+    if preserve_audio_plocks {
+        snapshot.clone()
+    } else {
+        snapshot.without_audio_plocks()
+    }
 }
 
 /// Every mutation the UI layer can make to sequencer or transport state.
@@ -86,6 +93,7 @@ pub enum AppCommand {
     /// Paste clipboard snapshots into destination positions.
     PasteSteps {
         track: usize,
+        source_track: usize,
         /// (relative_offset_from_dest_start, snapshot)
         clipboard: Vec<(usize, StepSnapshot)>,
         dest_start: usize,
@@ -403,7 +411,7 @@ mod tests {
             },
         };
 
-        let sanitized = sanitize_pasted_step_snapshot(&snapshot);
+        let sanitized = sanitize_pasted_step_snapshot(&snapshot, false);
 
         assert!(sanitized.active);
         assert_eq!(sanitized.params, params);
@@ -421,6 +429,35 @@ mod tests {
             .params
             .iter()
             .all(Option::is_none));
+    }
+
+    #[test]
+    fn paste_sanitizer_preserves_audio_plocks_for_same_track_paste() {
+        let snapshot = StepSnapshot {
+            active: true,
+            params: [0.0; NUM_PARAMS],
+            chord: vec![],
+            timebase: None,
+            swing: None,
+            swing_resolution: None,
+            effect_plocks: vec![StepSlotPlocks {
+                params: vec![Some(0.1), None, Some(0.9)],
+            }],
+            instrument_plocks: StepSlotPlocks {
+                params: vec![Some(0.2), Some(0.8)],
+            },
+        };
+
+        let sanitized = sanitize_pasted_step_snapshot(&snapshot, true);
+
+        assert_eq!(
+            sanitized.effect_plocks[0].params,
+            vec![Some(0.1), None, Some(0.9)]
+        );
+        assert_eq!(
+            sanitized.instrument_plocks.params,
+            vec![Some(0.2), Some(0.8)]
+        );
     }
 }
 
@@ -487,10 +524,12 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
 
         AppCommand::PasteSteps {
             track,
+            source_track,
             clipboard,
             dest_start,
             num_steps,
         } => {
+            let preserve_audio_plocks = source_track == track;
             for (offset, snap) in &clipboard {
                 let dest = dest_start + offset;
                 if dest >= num_steps {
@@ -500,7 +539,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
                 if !snap.active && app.state.pattern.patterns[track].is_active(dest) {
                     continue;
                 }
-                let sanitized = sanitize_pasted_step_snapshot(snap);
+                let sanitized = sanitize_pasted_step_snapshot(snap, preserve_audio_plocks);
                 app.state.restore_step_snapshot(track, dest, &sanitized);
             }
         }

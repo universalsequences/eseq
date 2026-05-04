@@ -917,8 +917,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let selected_steps: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
     let piano_roll_selection: Arc<Mutex<HashSet<u64>>> = Arc::new(Mutex::new(HashSet::new()));
     let piano_roll_move_state: Arc<Mutex<Option<PianoRollMoveState>>> = Arc::new(Mutex::new(None));
-    let step_clipboard: Arc<Mutex<Option<Vec<(usize, sequencer::sequencer::StepSnapshot)>>>> =
-        Arc::new(Mutex::new(None));
+    let step_clipboard: Arc<
+        Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>,
+    > = Arc::new(Mutex::new(None));
     // UI-only counter for changes that shouldn't affect pattern_epoch (e.g. volume, selection)
     let ui_epoch = Arc::new(AtomicUsize::new(0));
     // FX/instrument panel refresh counter for changes that affect *fx* but
@@ -5757,7 +5758,7 @@ fn handle_metal_command_shortcut(
     state: &Arc<SequencerState>,
     current_track: &Arc<AtomicUsize>,
     selected_steps: &Arc<Mutex<HashSet<usize>>>,
-    step_clipboard: &Arc<Mutex<Option<Vec<(usize, sequencer::sequencer::StepSnapshot)>>>>,
+    step_clipboard: &Arc<Mutex<Option<(usize, Vec<(usize, sequencer::sequencer::StepSnapshot)>)>>>,
 ) -> bool {
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
@@ -5797,7 +5798,7 @@ fn handle_metal_command_shortcut(
                     .map(|&s| (s - anchor, state.capture_step_snapshot(track, s)))
                     .collect();
                 let count = clipboard.len();
-                *step_clipboard.lock().unwrap() = Some(clipboard);
+                *step_clipboard.lock().unwrap() = Some((track, clipboard));
                 editor.handle_host_event(HostEvent::Status(format!(
                     "Copied {} step{}",
                     count,
@@ -5814,10 +5815,11 @@ fn handle_metal_command_shortcut(
                     let guard = step_clipboard.lock().unwrap();
                     guard.clone()
                 };
-                let Some(clipboard) = clipboard else {
+                let Some((source_track, clipboard)) = clipboard else {
                     return true;
                 };
                 let track = current_track.load(Ordering::Relaxed);
+                let preserve_audio_plocks = source_track == track;
                 let num_steps = state.pattern.track_params[track].get_num_steps();
                 for (offset, snapshot) in &clipboard {
                     let dest = dest_start + offset;
@@ -5827,7 +5829,11 @@ fn handle_metal_command_shortcut(
                     if !snapshot.active && state.pattern.patterns[track].is_active(dest) {
                         continue;
                     }
-                    let sanitized = snapshot.without_audio_plocks();
+                    let sanitized = if preserve_audio_plocks {
+                        snapshot.clone()
+                    } else {
+                        snapshot.without_audio_plocks()
+                    };
                     state.restore_step_snapshot(track, dest, &sanitized);
                 }
                 state.publish_scheduler_snapshot();
@@ -7850,6 +7856,7 @@ mod tests {
             "emulations/monomachine-dpro-ddrw-v1/",
             "emulations/monomachine-dpro-wave-v2/",
             "emulations/monomachine-fmplus/",
+            "emulations/monomachine-fmplus-stat-v1/",
             "emulations/monomachine-sid/",
             "emulations/monomachine-superwave/",
             "emulations/oberheim-sem/",

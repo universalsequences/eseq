@@ -6586,4 +6586,45 @@ mod tests {
             "expected audible rms, got report: {report:?}"
         );
     }
+
+    #[test]
+    fn fmplus_stat_v1_renders_audible_signal() {
+        let name = "emulations/monomachine-fmplus-stat-v1/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let report = super::render_instrument_source_for_test(
+            &source,
+            asset_base.as_deref(),
+            &super::InstrumentRenderOptions {
+                sample_rate: 44_100,
+                block_size: 128,
+                frames: 4096,
+                midi_note: 69.0,
+                velocity: 1.0,
+                gate_frames: 4096,
+                voice_index: 0,
+                param_overrides: vec![
+                    ("op1_frq".to_string(), 15.0),
+                    ("op1_fin".to_string(), 0.0),
+                    ("op1_fb".to_string(), 0.18),
+                    ("op1_env".to_string(), 0.62),
+                    ("op2_frq".to_string(), 19.0),
+                    ("op2_vol".to_string(), 0.38),
+                    ("tone".to_string(), 0.64),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert!(
+            report.peak > 0.01,
+            "expected audible peak, got report: {report:?}"
+        );
+        assert!(
+            report.rms > 0.001,
+            "expected audible rms, got report: {report:?}"
+        );
+    }
 }

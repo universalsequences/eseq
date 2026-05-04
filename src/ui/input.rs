@@ -369,7 +369,7 @@ impl App {
                             .map(|&s| (s - anchor, self.state.capture_step_snapshot(track, s)))
                             .collect();
                         let count = clipboard.len();
-                        self.ui.step_clipboard = Some(clipboard);
+                        self.ui.step_clipboard = Some((track, clipboard));
                         self.editor.status_message = Some((
                             format!("Copied {} step{}", count, if count == 1 { "" } else { "s" }),
                             Instant::now(),
@@ -381,7 +381,7 @@ impl App {
             // Ctrl+V: paste clipboard at cursor
             KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
                 if !self.tracks.is_empty() && self.ui.focused_region != Region::Sidebar {
-                    if let Some(clipboard) = self.ui.step_clipboard.take() {
+                    if let Some((source_track, clipboard)) = self.ui.step_clipboard.take() {
                         let track = self.ui.cursor_track;
                         let dest_start = self.ui.cursor_step;
                         let num_steps = self.num_steps();
@@ -389,13 +389,14 @@ impl App {
                             self,
                             AppCommand::PasteSteps {
                                 track,
+                                source_track,
                                 clipboard: clipboard.clone(),
                                 dest_start,
                                 num_steps,
                             },
                         );
                         // Put clipboard back so it can be pasted again
-                        self.ui.step_clipboard = Some(clipboard);
+                        self.ui.step_clipboard = Some((source_track, clipboard));
                     }
                 }
                 return;

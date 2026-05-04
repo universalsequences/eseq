@@ -525,8 +525,8 @@ pub struct UiState {
     pub source_scroll_offset: usize,
     pub preset_prompt_kind: PresetPromptKind,
     pub param_mouse_drag: Option<ParamMouseDrag>,
-    /// Step clipboard: list of (relative offset from anchor, snapshot) pairs.
-    pub step_clipboard: Option<Vec<(usize, StepSnapshot)>>,
+    /// Step clipboard: source track plus (relative offset from anchor, snapshot) pairs.
+    pub step_clipboard: Option<(usize, Vec<(usize, StepSnapshot)>)>,
     pub master_recording: bool,
     /// Whether the sidebar search/filter bar has keyboard focus.
     /// When false, char keys are not consumed by the filter so armed tracks can play.
