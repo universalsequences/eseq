@@ -9,7 +9,7 @@ use crate::accumulator::{
     apply_limit_mode, AccumMode, AccumulatorRuntimeState, ResolvedStep, StepAction,
     ACCUMULATOR_REGISTRY,
 };
-use crate::lisp_effect;
+use crate::lisp_effect::{self, AccumulatorNoteSpan};
 use crate::scheduled_event::{
     ScheduledChordData, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
@@ -372,6 +372,194 @@ fn instrument_sound_fingerprint(
     hasher.finish()
 }
 
+fn chord_data_from_parts(
+    notes: &[f32],
+    durations: &[f32],
+    fallback_duration: f32,
+    step_transpose: f32,
+) -> ScheduledChordData {
+    let mut chord = ScheduledChordData {
+        count: notes.len().min(MAX_VOICES),
+        notes: [0.0; MAX_VOICES],
+        durations: [0.0; MAX_VOICES],
+        step_transpose,
+    };
+    for (idx, note) in notes.iter().take(MAX_VOICES).enumerate() {
+        chord.notes[idx] = *note;
+        chord.durations[idx] = durations
+            .get(idx)
+            .copied()
+            .filter(|duration| *duration > 0.0)
+            .unwrap_or(fallback_duration);
+    }
+    chord
+}
+
+fn step_chord_data(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+) -> ScheduledChordData {
+    let step = &snapshot.tracks[track_idx].steps[step_idx];
+    chord_data_from_parts(
+        &step.chord,
+        &step.chord_durations,
+        step.params[StepParam::Duration.index()],
+        step.params[StepParam::Transpose.index()],
+    )
+}
+
+fn track_step_boundaries(track: &crate::sequencer::SequencerTrackSnapshot) -> Vec<f32> {
+    const EPS: f64 = 1e-9;
+    let ns = track.params.num_steps;
+    let mut boundaries = vec![0.0_f32; ns + 1];
+    let mut accum = 0.0_f64;
+    for step in 0..ns {
+        let tb = track.steps[step]
+            .timebase_override
+            .unwrap_or(track.params.timebase);
+        let sync_b = sync_beats(track.steps[step].params[StepParam::Sync.index()]);
+        if sync_b > EPS {
+            accum = ceil_to_grid(accum, sync_b);
+        }
+        boundaries[step] = accum as f32;
+        accum += tb.step_beats(ns);
+    }
+    boundaries[ns] = accum as f32;
+    boundaries
+}
+
+fn track_note_spans_for_trigger(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+) -> Vec<AccumulatorNoteSpan> {
+    const EPS: f32 = 1e-5;
+    let Some(track) = snapshot.tracks.get(track_idx) else {
+        return Vec::new();
+    };
+    let ns = track.params.num_steps;
+    if step_idx >= ns {
+        return Vec::new();
+    }
+    let boundaries = track_step_boundaries(track);
+    let trigger_start = boundaries[step_idx];
+    let mut candidates = Vec::new();
+
+    for step in 0..ns {
+        let step_snapshot = &track.steps[step];
+        if !step_snapshot.active {
+            continue;
+        }
+        let step_start = boundaries[step];
+        let step_beats = step_snapshot
+            .timebase_override
+            .unwrap_or(track.params.timebase)
+            .step_beats(ns) as f32;
+        if step_beats <= 0.0 {
+            continue;
+        }
+        let fallback_duration = step_snapshot.params[StepParam::Duration.index()].max(0.0);
+        if step_snapshot.chord.is_empty() {
+            candidates.push(AccumulatorNoteSpan {
+                transpose: step_snapshot.params[StepParam::Transpose.index()],
+                start_beats: step_start,
+                end_beats: step_start + fallback_duration * step_beats,
+            });
+        } else {
+            for (idx, note) in step_snapshot.chord.iter().enumerate() {
+                let duration = step_snapshot
+                    .chord_durations
+                    .get(idx)
+                    .copied()
+                    .filter(|duration| *duration > 0.0)
+                    .unwrap_or(fallback_duration)
+                    .max(0.0);
+                candidates.push(AccumulatorNoteSpan {
+                    transpose: *note,
+                    start_beats: step_start,
+                    end_beats: step_start + duration * step_beats,
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| {
+        a.start_beats
+            .partial_cmp(&b.start_beats)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if candidates
+        .iter()
+        .any(|note| note.start_beats < trigger_start - EPS && note.end_beats > trigger_start + EPS)
+    {
+        return Vec::new();
+    }
+
+    let mut group_end = candidates
+        .iter()
+        .filter(|note| (note.start_beats - trigger_start).abs() <= EPS)
+        .map(|note| note.end_beats)
+        .fold(trigger_start, f32::max);
+    if group_end <= trigger_start + EPS {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for note in candidates {
+        if note.start_beats < trigger_start - EPS {
+            continue;
+        }
+        if note.start_beats > trigger_start + EPS && note.start_beats >= group_end - EPS {
+            break;
+        }
+        if note.end_beats <= trigger_start + EPS {
+            continue;
+        }
+        group_end = group_end.max(note.end_beats);
+        out.push(AccumulatorNoteSpan {
+            transpose: note.transpose,
+            start_beats: (note.start_beats - trigger_start).max(0.0),
+            end_beats: (note.end_beats - trigger_start).max(0.0),
+        });
+    }
+    out
+}
+
+fn enqueue_resolved_trigger(
+    queue: &ScheduledEventQueue<4096>,
+    snapshot: &SequencerSnapshot,
+    pattern_epoch: u64,
+    sample_time: u64,
+    track_idx: usize,
+    step_idx: usize,
+    samples_per_step: f32,
+    resolved: ResolvedStep,
+    chord: ScheduledChordData,
+    effect_params: Vec<ScheduledEffectParam>,
+    instrument_params: Vec<ScheduledInstrumentParam>,
+) -> bool {
+    let instrument_fingerprint =
+        instrument_sound_fingerprint(snapshot, track_idx, &instrument_params);
+    queue
+        .push(ScheduledEvent {
+            pattern_epoch,
+            sample_time,
+            kind: ScheduledEventKind::ResolvedTrigger {
+                track: track_idx,
+                step: step_idx,
+                samples_per_step,
+                resolved,
+                chord,
+                effect_params,
+                instrument_params,
+                instrument_fingerprint,
+            },
+        })
+        .is_ok()
+}
+
 pub fn spawn_scheduler_thread(
     state: Arc<SequencerState>,
     sample_rate: u32,
@@ -393,6 +581,8 @@ pub fn spawn_scheduler_thread(
             let mut pending_accum_reset = [false; MAX_TRACKS];
             let mut scratch_source_version = u64::MAX;
             let mut scratch_runtime = None;
+            let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
+            let mut debug_accum_invocations = 0_u64;
 
             loop {
                 let snapshot = state.latest_scheduler_snapshot();
@@ -419,15 +609,53 @@ pub fn spawn_scheduler_thread(
 
                 if latest_scratch_source_version != scratch_source_version {
                     let source = state.scratch_source();
+                    if debug_accum {
+                        eprintln!(
+                            "[accum] scratch source version {} -> {} bytes={}",
+                            scratch_source_version,
+                            latest_scratch_source_version,
+                            source.len()
+                        );
+                    }
                     if source.trim().is_empty() {
+                        if debug_accum {
+                            eprintln!("[accum] scratch source empty; clearing runtime");
+                        }
                         scratch_runtime = None;
                     } else {
                         let mut runtime =
                             lisp_effect::scratch_runtime_with_fallbacks(Arc::clone(&state), 0, 0);
-                        if runtime.eval(&source).is_ok() {
-                            scratch_runtime = Some(runtime);
-                        } else {
-                            scratch_runtime = None;
+                        match runtime.eval(&source) {
+                            Ok(_) => {
+                                if debug_accum {
+                                    let status = runtime.take_status_message();
+                                    eprintln!(
+                                        "[accum] scratch eval ok names={:?} status={:?}",
+                                        runtime.accumulator_names(),
+                                        status
+                                    );
+                                    for track_idx in 0..state.active_track_count().min(MAX_TRACKS) {
+                                        let params = &state.pattern.track_params[track_idx];
+                                        eprintln!(
+                                            "[accum] state track={} acc_idx={} script={:?}",
+                                            track_idx,
+                                            params.get_accumulator_idx(),
+                                            params.script_accumulator_name()
+                                        );
+                                    }
+                                }
+                                scratch_runtime = Some(runtime);
+                            }
+                            Err(err) => {
+                                if debug_accum {
+                                    let status = runtime.take_status_message();
+                                    eprintln!(
+                                        "[accum] scratch eval err={} status={:?}",
+                                        err, status
+                                    );
+                                }
+                                scratch_runtime = None;
+                            }
                         }
                     }
                     scratch_source_version = latest_scratch_source_version;
@@ -578,7 +806,7 @@ pub fn spawn_scheduler_thread(
                             sample_time = sample_time.saturating_add(swing_delay.max(0.0) as u64);
                         }
 
-                        let mut resolved = ResolvedStep {
+                        let resolved = ResolvedStep {
                             duration: step_snapshot.params[StepParam::Duration.index()],
                             velocity: step_snapshot.params[StepParam::Velocity.index()],
                             speed: step_snapshot.params[StepParam::Speed.index()],
@@ -631,91 +859,161 @@ pub fn spawn_scheduler_thread(
                             } else {
                                 None
                             };
+                            if debug_accum && debug_accum_invocations < 200 {
+                                let debug_note_spans = track_note_spans_for_trigger(
+                                    &snapshot,
+                                    trigger.track,
+                                    trigger.step,
+                                );
+                                eprintln!(
+                                    "[accum] trigger track={} step={} acc_idx={} script_name={:?} runtime={} script_idx={:?} chord={:?} chord_durs={:?} dur={} note_spans={:?}",
+                                    trigger.track,
+                                    trigger.step,
+                                    track.params.accumulator_idx,
+                                    track.params.script_accumulator_name,
+                                    scratch_runtime.is_some(),
+                                    script_idx,
+                                    step_snapshot.chord,
+                                    step_snapshot.chord_durations,
+                                    resolved.duration,
+                                    debug_note_spans,
+                                );
+                            }
                             if let (Some(runtime), Some(script_idx)) =
                                 (scratch_runtime.as_mut(), script_idx)
                             {
+                                let note_spans = track_note_spans_for_trigger(
+                                    &snapshot,
+                                    trigger.track,
+                                    trigger.step,
+                                );
                                 runtime.set_position(trigger.track, trigger.step);
-                                if let Ok(output) = runtime.invoke_accumulator(
+                                match runtime.invoke_accumulator(
                                     script_idx,
                                     trigger.step,
                                     rs.value,
                                     resolved,
+                                    step_snapshot.chord.clone(),
+                                    step_snapshot.chord_durations.clone(),
+                                    step_snapshot.params[StepParam::Transpose.index()],
+                                    Some(note_spans),
+                                    trigger.samples_per_step
+                                        / (sample_rate as f32 * 60.0
+                                            / snapshot.transport.bpm as f32),
+                                    track.params.num_steps,
                                     track.effect_slots.clone(),
                                     track.instrument_slot.clone(),
                                     effect_params,
                                     instrument_params,
                                 ) {
-                                    resolved = output.resolved;
-                                    let actions = crate::accumulator::ActionBuffer::just(
-                                        StepAction::Play(resolved),
-                                    );
-                                    // Stash script-mutated params in the resolved event path below.
-                                    let script_effect_params = output.effect_params;
-                                    let script_instrument_params = output.instrument_params;
-                                    for action in actions.iter() {
-                                        let (target_track, resolved) = match *action {
-                                            StepAction::Play(resolved) => (trigger.track, resolved),
-                                            StepAction::SendToTrack { track, resolved } => {
-                                                (track, resolved)
-                                            }
-                                            StepAction::Silence => continue,
-                                        };
-                                        if target_track >= snapshot.tracks.len() {
-                                            continue;
-                                        }
-                                        let target_step =
-                                            &snapshot.tracks[target_track].steps[trigger.step];
-                                        let instrument_fingerprint = instrument_sound_fingerprint(
-                                            &snapshot,
-                                            target_track,
-                                            &script_instrument_params,
-                                        );
-                                        let mut chord = ScheduledChordData {
-                                            count: target_step.chord.len().min(MAX_VOICES),
-                                            notes: [0.0; MAX_VOICES],
-                                            durations: [0.0; MAX_VOICES],
-                                            step_transpose: target_step.params
-                                                [StepParam::Transpose.index()],
-                                        };
-                                        for (idx, note) in
-                                            target_step.chord.iter().take(MAX_VOICES).enumerate()
-                                        {
-                                            chord.notes[idx] = *note;
-                                            chord.durations[idx] = target_step
-                                                .chord_durations
-                                                .get(idx)
-                                                .copied()
-                                                .filter(|duration| *duration > 0.0)
-                                                .unwrap_or(
-                                                    target_step.params[StepParam::Duration.index()],
+                                    Ok(output) => {
+                                        if debug_accum && debug_accum_invocations < 200 {
+                                            eprintln!(
+                                                "[accum] invoke ok track={} step={} suppressed={} emitted={} resolved={:?}",
+                                                trigger.track,
+                                                trigger.step,
+                                                output.suppressed,
+                                                output.emitted.len(),
+                                                output.resolved,
+                                            );
+                                            for (idx, emitted) in
+                                                output.emitted.iter().take(12).enumerate()
+                                            {
+                                                eprintln!(
+                                                    "[accum] emitted[{}] offset={} note={} dur={} vel={} chord={:?}",
+                                                    idx,
+                                                    emitted.offset_beats,
+                                                    emitted.resolved.transpose,
+                                                    emitted.resolved.duration,
+                                                    emitted.resolved.velocity,
+                                                    emitted.chord,
                                                 );
+                                            }
                                         }
-                                        if queue
-                                            .push(ScheduledEvent {
+                                        debug_accum_invocations =
+                                            debug_accum_invocations.saturating_add(1);
+                                        if !output.suppressed {
+                                            let chord =
+                                                step_chord_data(&snapshot, trigger.track, trigger.step);
+                                            if !enqueue_resolved_trigger(
+                                                &queue,
+                                                &snapshot,
                                                 pattern_epoch,
                                                 sample_time,
-                                                kind: ScheduledEventKind::ResolvedTrigger {
-                                                    track: target_track,
-                                                    step: trigger.step,
-                                                    samples_per_step: trigger.samples_per_step,
-                                                    resolved,
-                                                    chord,
-                                                    effect_params: script_effect_params.clone(),
-                                                    instrument_params: script_instrument_params
-                                                        .clone(),
-                                                    instrument_fingerprint,
-                                                },
-                                            })
-                                            .is_err()
-                                        {
-                                            chunk_enqueued = false;
+                                                trigger.track,
+                                                trigger.step,
+                                                trigger.samples_per_step,
+                                                output.resolved,
+                                                chord,
+                                                output.effect_params.clone(),
+                                                output.instrument_params.clone(),
+                                            ) {
+                                                chunk_enqueued = false;
+                                            }
                                         }
+                                        let samples_per_quarter =
+                                            sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
+                                        for emitted in output.emitted {
+                                            let target_track = emitted.track.unwrap_or(trigger.track);
+                                            if target_track >= snapshot.tracks.len() {
+                                                continue;
+                                            }
+                                            let emitted_sample_time = sample_time.saturating_add(
+                                                (emitted.offset_beats.max(0.0) * samples_per_quarter)
+                                                    .round()
+                                                    as u64,
+                                            );
+                                            let chord = chord_data_from_parts(
+                                                &emitted.chord,
+                                                &emitted.chord_durations,
+                                                emitted.resolved.duration,
+                                                emitted.chord_step_transpose,
+                                            );
+                                            if !enqueue_resolved_trigger(
+                                                &queue,
+                                                &snapshot,
+                                                pattern_epoch,
+                                                emitted_sample_time,
+                                                target_track,
+                                                trigger.step,
+                                                trigger.samples_per_step,
+                                                emitted.resolved,
+                                                chord,
+                                                emitted.effect_params,
+                                                emitted.instrument_params,
+                                            ) {
+                                                chunk_enqueued = false;
+                                            }
+                                        }
+                                        if !chunk_enqueued {
+                                            break;
+                                        }
+                                        continue;
                                     }
-                                    if !chunk_enqueued {
-                                        break;
+                                    Err(err) => {
+                                        if debug_accum && debug_accum_invocations < 200 {
+                                            eprintln!(
+                                                "[accum] invoke err track={} step={} script_idx={} err={}",
+                                                trigger.track,
+                                                trigger.step,
+                                                script_idx,
+                                                err
+                                            );
+                                        }
+                                        debug_accum_invocations =
+                                            debug_accum_invocations.saturating_add(1);
                                     }
-                                    continue;
                                 }
+                            } else if debug_accum && debug_accum_invocations < 200 {
+                                eprintln!(
+                                    "[accum] no script runtime/index track={} step={} runtime={} script_idx={:?}",
+                                    trigger.track,
+                                    trigger.step,
+                                    scratch_runtime.is_some(),
+                                    script_idx
+                                );
+                                debug_accum_invocations =
+                                    debug_accum_invocations.saturating_add(1);
                             }
                             crate::accumulator::ActionBuffer::just(StepAction::Play(resolved))
                         } else {
@@ -731,50 +1029,24 @@ pub fn spawn_scheduler_thread(
                             if target_track >= snapshot.tracks.len() {
                                 continue;
                             }
-                            let target_step = &snapshot.tracks[target_track].steps[trigger.step];
                             let effect_params =
                                 resolve_effect_params(&snapshot, target_track, trigger.step);
                             let instrument_params =
                                 resolve_instrument_params(&snapshot, target_track, trigger.step);
-                            let instrument_fingerprint = instrument_sound_fingerprint(
+                            let chord = step_chord_data(&snapshot, target_track, trigger.step);
+                            if !enqueue_resolved_trigger(
+                                &queue,
                                 &snapshot,
+                                pattern_epoch,
+                                sample_time,
                                 target_track,
-                                &instrument_params,
-                            );
-                            let mut chord = ScheduledChordData {
-                                count: target_step.chord.len().min(MAX_VOICES),
-                                notes: [0.0; MAX_VOICES],
-                                durations: [0.0; MAX_VOICES],
-                                step_transpose: target_step.params[StepParam::Transpose.index()],
-                            };
-                            for (idx, note) in target_step.chord.iter().take(MAX_VOICES).enumerate()
-                            {
-                                chord.notes[idx] = *note;
-                                chord.durations[idx] = target_step
-                                    .chord_durations
-                                    .get(idx)
-                                    .copied()
-                                    .filter(|duration| *duration > 0.0)
-                                    .unwrap_or(target_step.params[StepParam::Duration.index()]);
-                            }
-
-                            if queue
-                                .push(ScheduledEvent {
-                                    pattern_epoch,
-                                    sample_time,
-                                    kind: ScheduledEventKind::ResolvedTrigger {
-                                        track: target_track,
-                                        step: trigger.step,
-                                        samples_per_step: trigger.samples_per_step,
-                                        resolved,
-                                        chord,
-                                        effect_params,
-                                        instrument_params,
-                                        instrument_fingerprint,
-                                    },
-                                })
-                                .is_err()
-                            {
+                                trigger.step,
+                                trigger.samples_per_step,
+                                resolved,
+                                chord,
+                                effect_params,
+                                instrument_params,
+                            ) {
                                 chunk_enqueued = false;
                                 break;
                             }
@@ -801,8 +1073,8 @@ pub fn spawn_scheduler_thread(
 
 #[cfg(test)]
 mod tests {
-    use super::SnapshotSequencerClock;
-    use crate::sequencer::{default_empty_effect_chain, SequencerState};
+    use super::{track_note_spans_for_trigger, SnapshotSequencerClock};
+    use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
 
     #[test]
     fn snapshot_clock_emits_triggers_for_active_steps() {
@@ -816,5 +1088,92 @@ mod tests {
         assert!(!triggers.is_empty());
         assert_eq!(triggers[0].track, 0);
         assert_eq!(triggers[0].step, 0);
+    }
+
+    #[test]
+    fn track_note_spans_fold_later_notes_into_running_group() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+
+        state.pattern.patterns[track].set_step_active(0, true);
+        state.pattern.chord_data[track].add_note_with_duration(0, 0.0, 8.0);
+        state.pattern.chord_data[track].add_note_with_duration(0, 4.0, 8.0);
+        state.pattern.step_data[track].set(0, StepParam::Duration, 8.0);
+
+        state.pattern.patterns[track].set_step_active(4, true);
+        state.pattern.step_data[track].set(4, StepParam::Transpose, 7.0);
+        state.pattern.step_data[track].set(4, StepParam::Duration, 4.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let first_group = track_note_spans_for_trigger(&snapshot, track, 0);
+        assert_eq!(first_group.len(), 3);
+        assert_eq!(first_group[0].transpose, 0.0);
+        assert_eq!(first_group[1].transpose, 4.0);
+        assert_eq!(first_group[2].transpose, 7.0);
+        assert_eq!(first_group[2].start_beats, 1.0);
+        assert_eq!(first_group[2].end_beats, 2.0);
+
+        let later_group = track_note_spans_for_trigger(&snapshot, track, 4);
+        assert!(later_group.is_empty());
+    }
+
+    #[test]
+    fn scheduler_note_grouping_follows_staggered_piano_roll_pattern() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+
+        state.pattern.patterns[track].set_step_active(0, true);
+        state.pattern.chord_data[track].add_note_with_duration(0, 0.0, 12.0);
+        state.pattern.chord_data[track].add_note_with_duration(0, 7.0, 4.0);
+        state.pattern.step_data[track].set(0, StepParam::Duration, 12.0);
+
+        state.pattern.patterns[track].set_step_active(4, true);
+        state.pattern.step_data[track].set(4, StepParam::Transpose, 12.0);
+        state.pattern.step_data[track].set(4, StepParam::Duration, 8.0);
+
+        state.pattern.patterns[track].set_step_active(8, true);
+        state.pattern.step_data[track].set(8, StepParam::Transpose, 19.0);
+        state.pattern.step_data[track].set(8, StepParam::Duration, 2.0);
+
+        state.pattern.patterns[track].set_step_active(12, true);
+        state.pattern.step_data[track].set(12, StepParam::Transpose, 24.0);
+        state.pattern.step_data[track].set(12, StepParam::Duration, 4.0);
+
+        state.toggle_play();
+        let snapshot = state.publish_scheduler_snapshot();
+        let mut clock = SnapshotSequencerClock::new(48_000);
+        let triggers = clock.process_chunk(84_000, &snapshot, &state);
+        let active_trigger_steps = triggers
+            .iter()
+            .filter(|trigger| snapshot.tracks[trigger.track].steps[trigger.step].active)
+            .map(|trigger| trigger.step)
+            .collect::<Vec<_>>();
+        assert_eq!(active_trigger_steps, vec![0, 4, 8, 12]);
+
+        let first_group = track_note_spans_for_trigger(&snapshot, track, 0);
+        let first_transposes = first_group
+            .iter()
+            .map(|note| note.transpose)
+            .collect::<Vec<_>>();
+        let first_starts = first_group
+            .iter()
+            .map(|note| note.start_beats)
+            .collect::<Vec<_>>();
+        let first_ends = first_group
+            .iter()
+            .map(|note| note.end_beats)
+            .collect::<Vec<_>>();
+        assert_eq!(first_transposes, vec![0.0, 7.0, 12.0, 19.0]);
+        assert_eq!(first_starts, vec![0.0, 0.0, 1.0, 2.0]);
+        assert_eq!(first_ends, vec![3.0, 1.0, 3.0, 2.5]);
+
+        assert!(track_note_spans_for_trigger(&snapshot, track, 4).is_empty());
+        assert!(track_note_spans_for_trigger(&snapshot, track, 8).is_empty());
+
+        let next_group = track_note_spans_for_trigger(&snapshot, track, 12);
+        assert_eq!(next_group.len(), 1);
+        assert_eq!(next_group[0].transpose, 24.0);
+        assert_eq!(next_group[0].start_beats, 0.0);
+        assert_eq!(next_group[0].end_beats, 1.0);
     }
 }

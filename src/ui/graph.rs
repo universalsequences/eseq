@@ -497,6 +497,161 @@ impl GraphController<'_> {
         self.app.graph.track_node_ids[track].filter_id
     }
 
+    fn find_custom_slot_predecessor_with_channels(
+        &self,
+        track: usize,
+        offset: usize,
+    ) -> (i32, usize) {
+        let chain = &self.app.state.pattern.effect_chains[track];
+        for i in (0..offset).rev() {
+            let idx = crate::effects::BUILTIN_SLOT_COUNT + i;
+            if idx < chain.len() {
+                let node_id = chain[idx].node_id.load(Ordering::Relaxed);
+                if node_id != 0 {
+                    let channels = self.app.graph.effect_descriptors[track][idx]
+                        .output_channels
+                        .max(1);
+                    return (node_id as i32, channels);
+                }
+            }
+        }
+        (self.app.graph.track_node_ids[track].pan_id, 2)
+    }
+
+    fn find_custom_slot_successor_with_channels(
+        &self,
+        track: usize,
+        offset: usize,
+    ) -> (i32, usize) {
+        let chain = &self.app.state.pattern.effect_chains[track];
+        for i in (offset + 1)..crate::lisp_effect::MAX_CUSTOM_FX {
+            let idx = crate::effects::BUILTIN_SLOT_COUNT + i;
+            if idx < chain.len() {
+                let node_id = chain[idx].node_id.load(Ordering::Relaxed);
+                if node_id != 0 {
+                    let channels = self.app.graph.effect_descriptors[track][idx]
+                        .input_channels
+                        .max(1);
+                    return (node_id as i32, channels);
+                }
+            }
+        }
+        (self.app.graph.track_node_ids[track].filter_id, 2)
+    }
+
+    fn connect_custom_effect_gap(
+        &self,
+        predecessor_id: i32,
+        predecessor_outputs: usize,
+        successor_id: i32,
+        successor_inputs: usize,
+    ) {
+        let channels = predecessor_outputs.min(successor_inputs).max(1);
+        for ch in 0..channels {
+            unsafe {
+                crate::audiograph::graph_connect(
+                    self.app.graph.lg.0,
+                    predecessor_id,
+                    ch as i32,
+                    successor_id,
+                    ch as i32,
+                );
+            }
+        }
+    }
+
+    pub fn delete_custom_effect_slot(
+        &mut self,
+        track_idx: usize,
+        slot_idx: usize,
+    ) -> Result<(), String> {
+        if track_idx >= self.app.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        if slot_idx < crate::effects::BUILTIN_SLOT_COUNT {
+            return Err("Only custom effects can be deleted".to_string());
+        }
+        let chain_len = self.app.state.pattern.effect_chains[track_idx].len();
+        if slot_idx >= chain_len {
+            return Err("Invalid effect slot".to_string());
+        }
+
+        let node_id = self.app.state.pattern.effect_chains[track_idx][slot_idx]
+            .node_id
+            .load(Ordering::Relaxed);
+        if node_id == 0 {
+            return Err("Effect slot is empty".to_string());
+        }
+
+        let offset = slot_idx - crate::effects::BUILTIN_SLOT_COUNT;
+        let (predecessor_id, predecessor_outputs) =
+            self.find_custom_slot_predecessor_with_channels(track_idx, offset);
+        let (successor_id, successor_inputs) =
+            self.find_custom_slot_successor_with_channels(track_idx, offset);
+
+        {
+            let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+            unsafe {
+                crate::lisp_effect::remove_effect_from_chain(
+                    self.app.graph.lg.0,
+                    node_id as i32,
+                    predecessor_id,
+                    successor_id,
+                );
+            }
+            self.connect_custom_effect_gap(
+                predecessor_id,
+                predecessor_outputs,
+                successor_id,
+                successor_inputs,
+            );
+        }
+
+        for idx in slot_idx..chain_len.saturating_sub(1) {
+            let next_idx = idx + 1;
+            let next_desc = self.app.graph.effect_descriptors[track_idx][next_idx].clone();
+            self.app.graph.effect_descriptors[track_idx][idx] = next_desc;
+            let next_slot = &self.app.state.pattern.effect_chains[track_idx][next_idx];
+            self.app.state.pattern.effect_chains[track_idx][idx].copy_from(next_slot);
+        }
+
+        if let Some(last_desc) = self.app.graph.effect_descriptors[track_idx].last_mut() {
+            *last_desc = EffectDescriptor::empty_custom_slot();
+        }
+        if let Some(last_slot) = self.app.state.pattern.effect_chains[track_idx].last() {
+            last_slot.clear();
+        }
+
+        let current_pattern = self
+            .app
+            .state
+            .pattern
+            .current_pattern
+            .load(Ordering::Relaxed) as usize;
+        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
+            &self.app.state,
+            self.app.tracks.len(),
+            &self.app.graph.track_buffer_ids,
+            &self.app.tracks,
+            &self.app.graph.track_instrument_types,
+        );
+        {
+            let mut bank = self.app.state.pattern.pattern_bank.lock().unwrap();
+            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+                if pattern_idx == current_pattern {
+                    *snapshot = current_snapshot.clone();
+                } else {
+                    snapshot.remove_effect_slot(track_idx, slot_idx);
+                }
+            }
+        }
+
+        self.app.state.publish_scheduler_snapshot();
+        self.app.refresh_effect_sidechain_labels();
+        self.app.push_all_restored_defaults();
+        Ok(())
+    }
+
     fn delete_custom_effect_chain(&mut self, track_idx: usize) {
         for slot_idx in crate::effects::BUILTIN_SLOT_COUNT
             ..self.app.state.pattern.effect_chains[track_idx].len()

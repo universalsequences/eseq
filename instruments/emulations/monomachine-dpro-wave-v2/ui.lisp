@@ -3,9 +3,11 @@
 (def mdp2-select (section)
   (set! monomachine-dpro-wave-v2-selected-section section))
 (def mdp2-panel-bg (section)
-  (if (= monomachine-dpro-wave-v2-selected-section section)
-    (rgba 0.12 0.12 0.12 1)
-    (rgba 0.075 0.075 0.075 1)))
+  (if (= section 0)
+    (rgba 0.075 0.075 0.075 1)
+    (if (= monomachine-dpro-wave-v2-selected-section section)
+      (rgba 0.12 0.12 0.12 1)
+      (rgba 0.075 0.075 0.075 1))))
 (def mdp2-cell-width 4.0)
 (def mdp2-param-cell-step-section-width (name title decimals step section width)
   (let ((p (inst-param synth-ui-current-inst name)))
@@ -77,7 +79,7 @@
     :decay (mdp2-param-value decay 120)
     :sustain (mdp2-param-value sustain 0.78)
     :release (mdp2-param-value release 90)
-    :width 22.0 :height 4.0
+    :width 22.0 :height 3.55
     :background-color (rgba 0.0 0.0 0.0 1)
     :on-change (lambda (env)
       (do
@@ -87,23 +89,28 @@
         (mdp2-set-param sustain (get env :sustain))
         (mdp2-set-param release (get env :release))))))
 (def mdp2-adsr-controls (attack decay sustain release section)
-  (box :width :fill :height 1.95 :padding 0.25
+  (box :width :fill :height 1.75 :padding 0.15
     (h-stack :width :fill :gap 0.20 :align :start
       (mdp2-param-number-section attack "atk" 0 "ms" section)
       (mdp2-param-number-section decay "dec" 0 "ms" section)
       (mdp2-param-number-section sustain "sus" 2 false section)
       (mdp2-param-number-section release "rel" 0 "ms" section))))
-(def mdp2-adsr-panel-for (attack decay sustain release section)
-  (box :width :fill :height 6.35
+
+(def mdp2-adsr-caption (title)
+  (box :width :fill :height 0.35 :h-align :center :v-align :center
+    (label title :font-size 8.5 :color :gray :bg :transparent)))
+(def mdp2-adsr-panel-for (title attack decay sustain release section)
+  (box :width :fill :height 6.55
        :background-color (rgba 0.0 0.0 0.0 1)
        :border-width 1 :corner-radius 8 :padding 0.15
     (v-stack :width :fill :gap 0.10
       (mdp2-adsr-view attack decay sustain release section)
-      (mdp2-adsr-controls attack decay sustain release section))))
+      (mdp2-adsr-controls attack decay sustain release section)
+      (mdp2-adsr-caption title))))
 (def mdp2-adsr-panel ()
   (if (= monomachine-dpro-wave-v2-selected-section 2)
-    (mdp2-adsr-panel-for "filter_attack_ms" "filter_decay_ms" "filter_sustain" "filter_release_ms" 2)
-    (mdp2-adsr-panel-for "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 1)))
+    (mdp2-adsr-panel-for "FILTER ENV" "filter_attack_ms" "filter_decay_ms" "filter_sustain" "filter_release_ms" 2)
+    (mdp2-adsr-panel-for "AMP ENV" "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 1)))
 (def mdp2-row-label (title)
   (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
     (label title :font-size 8.0 :width 2.7 :color :gray :bg :transparent)))

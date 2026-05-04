@@ -3,9 +3,11 @@
 (def oberheim_sem-select (section)
   (set! oberheim-sem-selected-section section))
 (def oberheim_sem-panel-bg (section)
-  (if (= oberheim-sem-selected-section section)
-    (rgba 0.12 0.12 0.12 1)
-    (rgba 0.09 0.09 0.09 1)))
+  (if (= section 0)
+    (rgba 0.09 0.09 0.09 1)
+    (if (= oberheim-sem-selected-section section)
+      (rgba 0.12 0.12 0.12 1)
+      (rgba 0.09 0.09 0.09 1))))
 (def oberheim_sem-cell-width 4.0)
 (def oberheim_sem-param-cell-step-section-width (name title decimals step section width)
   (let ((p (inst-param synth-ui-current-inst name)))
@@ -48,7 +50,7 @@
     (let ((p (inst-param synth-ui-current-inst name)))
       (if p
         (subtree :key (str "oberheim_sem-adsr-number-" name)
-          (v-stack :width 4.35 :height 1.75 :gap 0.0 :align :center
+          (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label title :font-size 10 :color :gray :bg :transparent)
             (number-picker :value (get p :value)
               :min (get p :min) :max (get p :max) :decimals decimals
@@ -56,19 +58,19 @@
               :noui true :font-size 10.5
               :text-align :center
               :text-color :widget_focus_bg :edit-color :yellow
-              :width 4.2 :height 0.95
+              :width 5.0 :height 0.95
               :on-change (lambda (v)
                 (do
                   (oberheim_sem-select section)
                   (fx-set-instrument-value p v))))))
         (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
-    (box :width 4.35 :height 1.75
-      (v-stack :width 4.35 :height 1.75 :gap 0.0 :align :center
+    (box :width 5.2 :height 1.75
+      (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
         (label title :font-size 10 :color :gray :bg :transparent)
         (number-picker :value 0 :min 0 :max 0 :decimals decimals
           :unit unit :noui true :font-size 10.5
           :text-align :center :text-color :gray :edit-color :gray
-          :width 4.2 :height 0.95)))))
+          :width 5.0 :height 0.95)))))
 (def oberheim_sem-param-value (name fallback)
   (if name
     (let ((p (inst-param synth-ui-current-inst name)))
@@ -85,7 +87,7 @@
     :decay (oberheim_sem-param-value decay 400)
     :sustain (oberheim_sem-param-value sustain 0.5)
     :release (oberheim_sem-param-value release 0)
-    :width 18.5 :height 4.0
+    :width 22.0 :height 3.55
     :background-color (rgba 0.0 0.0 0.0 1)
     :on-change (lambda (env)
       (do
@@ -95,26 +97,32 @@
         (oberheim_sem-set-param sustain (get env :sustain))
         (oberheim_sem-set-param release (get env :release))))))
 (def oberheim_sem-adsr-controls (attack decay sustain release section)
-  (box :width :fill :height 1.95 :padding 0.25
+  (box :width :fill :height 1.75 :padding 0.15
     (h-stack :width :fill :gap 0.20 :align :start
       (oberheim_sem-param-number-section attack "atk" 0 "ms" section)
       (oberheim_sem-param-number-section decay "dec" 0 "ms" section)
       (oberheim_sem-param-number-section sustain "sus" 2 false section)
       (oberheim_sem-param-number-section release "rel" 0 "ms" section))))
+
+(def oberheim_sem-adsr-caption (title)
+  (box :width :fill :height 0.35 :h-align :center :v-align :center
+    (label title :font-size 8.5 :color :gray :bg :transparent)))
 (def oberheim_sem-selected-adsr ()
   (if (= oberheim-sem-selected-section 1)
-    (box :width :fill :height 6.35
+    (box :width :fill :height 6.55
        :background-color (rgba 0.0 0.0 0.0 1)
        :border-width 1 :corner-radius 16 :padding 0.15
   (v-stack :width :fill :gap 0.10
     (oberheim_sem-adsr-view "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)
-    (oberheim_sem-adsr-controls "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)))
-    (box :width :fill :height 6.35
+    (oberheim_sem-adsr-controls "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)
+    (oberheim_sem-adsr-caption "FILTER ENV")))
+    (box :width :fill :height 6.55
        :background-color (rgba 0.0 0.0 0.0 1)
        :border-width 1 :corner-radius 16 :padding 0.15
   (v-stack :width :fill :gap 0.10
     (oberheim_sem-adsr-view "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 0)
-    (oberheim_sem-adsr-controls "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 0)))))
+    (oberheim_sem-adsr-controls "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 0)
+    (oberheim_sem-adsr-caption "AMP ENV")))))
 (def oberheim_sem-row-label (title)
   (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
     (label title :font-size 8.0 :width 2.7 :color :gray :bg :transparent)))
@@ -197,7 +205,7 @@
         (oberheim_sem-param-cell-section "osc_b_level" "b" 2 0)
         (oberheim_sem-param-cell-section "noise_level" "noise" 2 0)
         (oberheim_sem-param-cell-section "vintage" "vint" 2 0)))
-    (v-stack :width 19.6 :gap 0.10
+    (v-stack :width 23.1 :gap 0.10
       (oberheim_sem-selected-adsr))
     (v-stack :width 29.0 :gap 0.10
       (oberheim_sem-panel-5 "WAV" 0

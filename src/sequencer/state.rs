@@ -90,6 +90,22 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.instrument_types, track_idx);
     }
 
+    pub fn remove_effect_slot(&mut self, track: usize, slot_idx: usize) {
+        let Some(slots) = self.effect_slots.get_mut(track) else {
+            return;
+        };
+        if slot_idx >= slots.len() {
+            return;
+        }
+
+        for idx in slot_idx..slots.len().saturating_sub(1) {
+            slots[idx] = slots[idx + 1].clone();
+        }
+        if let Some(last) = slots.last_mut() {
+            last.clear();
+        }
+    }
+
     pub fn capture(
         state: &SequencerState,
         num_tracks: usize,
@@ -1800,6 +1816,28 @@ mod tests {
         assert_eq!(snapshot.track_bits[1][0], 3);
         assert_eq!(snapshot.sample_ids[0], (1, "track-1".to_string()));
         assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string()));
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_effect_slot_compacts_slot_plocks() {
+        let mut snapshot = sample_pattern_snapshot(1);
+        snapshot.effect_slots[0] = vec![
+            sample_effect_slot_snapshot(0),
+            sample_effect_slot_snapshot(1),
+            sample_effect_slot_snapshot(2),
+        ];
+
+        snapshot.remove_effect_slot(0, 1);
+
+        assert_eq!(snapshot.effect_slots[0].len(), 3);
+        assert_eq!(snapshot.effect_slots[0][0].node_id, 100);
+        assert_eq!(snapshot.effect_slots[0][1].node_id, 102);
+        assert_eq!(snapshot.effect_slots[0][1].defaults, vec![2.0, 2.5]);
+        assert_eq!(snapshot.effect_slots[0][1].plocks[2][0], Some(2.0));
+        assert_eq!(snapshot.effect_slots[0][2].node_id, 0);
+        assert_eq!(snapshot.effect_slots[0][2].num_params, 0);
+        assert!(snapshot.effect_slots[0][2].defaults.is_empty());
+        assert!(snapshot.effect_slots[0][2].plocks[2].is_empty());
     }
 
     #[test]

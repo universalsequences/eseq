@@ -11,9 +11,11 @@
   (set! digitone-selected-section section))
 
 (def digitone-panel-bg (section)
-  (if (= digitone-selected-section section)
-    (rgba 0.12 0.12 0.12 1)
-    (rgba 0.09 0.09 0.09 1)))
+  (if (= section 0)
+    (rgba 0.09 0.09 0.09 1)
+    (if (= digitone-selected-section section)
+      (rgba 0.12 0.12 0.12 1)
+      (rgba 0.09 0.09 0.09 1))))
 
 (def digitone-cell-width 4.0)
 (def digitone-filter-cell-width 5.15)
@@ -81,7 +83,7 @@
   (let ((p (inst-param synth-ui-current-inst name)))
     (if p
       (subtree :key (str "digitone-adsr-number-" name)
-        (v-stack :width 4.35 :height 1.75 :gap 0.0 :align :center
+        (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
           (label title :font-size 10
                  :color :gray :bg :transparent)
           (number-picker :value (get p :value)
@@ -90,7 +92,7 @@
             :noui true :font-size 10.5
             :text-align :center
             :text-color :widget_focus_bg :edit-color :yellow
-            :width 4.2 :height 0.95
+            :width 5.0 :height 0.95
             :on-change (lambda (v)
               (do
                 (digitone-select section)
@@ -115,7 +117,7 @@
     :decay (digitone-param-value decay 400)
     :sustain (digitone-param-value sustain 0.5)
     :release (digitone-param-value release 0)
-    :width 18.5 :height 4.0
+    :width 22.0 :height 3.55
     :background-color (rgba 0.0 0.0 0.0 1)
     :on-change (lambda (env)
       (do
@@ -126,15 +128,15 @@
         (digitone-set-param release (get env :release))))))
 
 (def digitone-adsr-controls (attack decay sustain release section)
-  (box :width :fill :height 1.95 :padding 0.25
+  (box :width :fill :height 1.75 :padding 0.15
     (h-stack :width :fill :gap 0.20 :align :start
       (digitone-param-number-section attack "atk" 0 "ms" section)
       (digitone-param-number-section decay "dec" 0 "ms" section)
       (digitone-param-number-section sustain "sus" 2 false section)
       (if release
         (digitone-param-number-section release "rel" 0 "ms" section)
-        (box :width 4.35 :height 1.75
-          (v-stack :width 4.35 :height 1.75 :gap 0.0 :align :center
+        (box :width 5.2 :height 1.75
+          (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label "rel" :font-size 10
                    :color :gray :bg :transparent)
             (number-picker :value 0
@@ -143,40 +145,48 @@
               :noui true :font-size 10.5
               :text-align :center
               :text-color :gray :edit-color :gray
-              :width 4.2 :height 0.95)))))))
+              :width 5.0 :height 0.95)))))))
 
+
+(def digitone-adsr-caption (title)
+  (box :width :fill :height 0.35 :h-align :center :v-align :center
+    (label title :font-size 8.5 :color :gray :bg :transparent)))
 (def digitone-selected-adsr ()
   (if (= digitone-selected-section 1)
-    (box :width :fill :height 6.35
+    (box :width :fill :height 6.55
          :background-color (rgba 0.0 0.0 0.0 1)
          :border-width 1 :corner-radius 16 :padding 0.15
       (v-stack :width :fill :gap 0.10
       (digitone-adsr-view "A ENV" "a_env_attack" "a_env_decay" "a_env_sustain" false 1)
-        (digitone-adsr-controls "a_env_attack" "a_env_decay" "a_env_sustain" false 1)))
+        (digitone-adsr-controls "a_env_attack" "a_env_decay" "a_env_sustain" false 1)
+        (digitone-adsr-caption "A ENV")))
     (if (= digitone-selected-section 2)
-      (box :width :fill :height 6.35
+      (box :width :fill :height 6.55
            :background-color (rgba 0.0 0.0 0.0 1)
            :border-width 1 :corner-radius 16 :padding 0.15
         (v-stack :width :fill :gap 0.10
         (digitone-adsr-view "B ENV" "b_env_attack" "b_env_decay" "b_env_sustain" false 2)
-          (digitone-adsr-controls "b_env_attack" "b_env_decay" "b_env_sustain" false 2)))
+          (digitone-adsr-controls "b_env_attack" "b_env_decay" "b_env_sustain" false 2)
+          (digitone-adsr-caption "B ENV")))
       (if (= digitone-selected-section 3)
-        (box :width :fill :height 6.35
+        (box :width :fill :height 6.55
              :background-color (rgba 0.0 0.0 0.0 1)
              :border-width 1 :corner-radius 16 :padding 0.15
           (v-stack :width :fill :gap 0.10
           (digitone-adsr-view "F ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release" 3)
-            (digitone-adsr-controls "filt_attack" "filt_decay" "filt_sustain" "filt_release" 3)))
-        (box :width :fill :height 6.35
+            (digitone-adsr-controls "filt_attack" "filt_decay" "filt_sustain" "filt_release" 3)
+            (digitone-adsr-caption "FILTER ENV")))
+        (box :width :fill :height 6.55
              :background-color (rgba 0.0 0.0 0.0 1)
              :border-width 1 :corner-radius 16 :padding 0.15
           (v-stack :width :fill :gap 0.10
           (digitone-adsr-view "AMP" "amp_attack" "amp_decay" "amp_sustain" "amp_release" 0)
-            (digitone-adsr-controls "amp_attack" "amp_decay" "amp_sustain" "amp_release" 0)))))))
+            (digitone-adsr-controls "amp_attack" "amp_decay" "amp_sustain" "amp_release" 0)
+            (digitone-adsr-caption "AMP ENV")))))))
 
 (def digitone-row-label (title)
   (box :width 1.65 :height 2.1 :h-align :center :v-align :center :padding 0.1
-    (label title :font-size 9.0 :width 1.3
+    (label title :font-size 8.5 :width 1.3
            :color :gray :bg :transparent)))
 
 (def digitone-panel-3-section (section c1 c2 c3)
@@ -257,7 +267,7 @@
         "a_ratio" "a_detune" "a_level" "a_index" "a_harmonics" "a_octave")
       (digitone-op-row "B" 2
         "b_ratio" "b_detune" "b_level" "b_index" "b_harmonics" "b_octave"))
-    (v-stack :width 19.6 :gap 0.10
+    (v-stack :width 23.1 :gap 0.10
       (digitone-selected-adsr))
     (v-stack :width 24.2 :gap 0.10
       (digitone-panel-3-section 0

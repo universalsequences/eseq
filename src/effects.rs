@@ -815,6 +815,15 @@ impl EffectSlotState {
             }
         }
     }
+
+    /// Copy all runtime slot payload from another slot.
+    ///
+    /// Used when compacting custom FX slots after deleting one slot. This moves
+    /// defaults and p-locks along with the node binding so slot-indexed
+    /// automation continues to refer to the same audible effect.
+    pub fn copy_from(&self, other: &EffectSlotState) {
+        EffectSlotSnapshot::capture(other).restore(self);
+    }
 }
 
 // ── EffectSlotSnapshot (for pattern save/restore) ──
@@ -914,6 +923,10 @@ impl EffectSlotSnapshot {
             plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             param_node_indices: Vec::new(),
         }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::new_empty();
     }
 
     pub fn sync_to_descriptor(&mut self, desc: &EffectDescriptor, node_id: u32) {

@@ -3,9 +3,11 @@
 (def rhodes_additive_v2-select (section)
   (set! rhodes-additive-v2-selected-section section))
 (def rhodes_additive_v2-panel-bg (section)
-  (if (= rhodes-additive-v2-selected-section section)
-    (rgba 0.12 0.12 0.12 1)
-    (rgba 0.09 0.09 0.09 1)))
+  (if (= section 0)
+    (rgba 0.09 0.09 0.09 1)
+    (if (= rhodes-additive-v2-selected-section section)
+      (rgba 0.12 0.12 0.12 1)
+      (rgba 0.09 0.09 0.09 1))))
 (def rhodes_additive_v2-cell-width 4.0)
 (def rhodes_additive_v2-param-cell-step-section-width (name title decimals step section width)
   (let ((p (inst-param synth-ui-current-inst name)))
@@ -48,7 +50,7 @@
     (let ((p (inst-param synth-ui-current-inst name)))
       (if p
         (subtree :key (str "rhodes_additive_v2-adsr-number-" name)
-          (v-stack :width 4.35 :height 1.75 :gap 0.0 :align :center
+          (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label title :font-size 10 :color :gray :bg :transparent)
             (number-picker :value (get p :value)
               :min (get p :min) :max (get p :max) :decimals decimals
@@ -56,19 +58,19 @@
               :noui true :font-size 10.5
               :text-align :center
               :text-color :widget_focus_bg :edit-color :yellow
-              :width 4.2 :height 0.95
+              :width 5.0 :height 0.95
               :on-change (lambda (v)
                 (do
                   (rhodes_additive_v2-select section)
                   (fx-set-instrument-value p v))))))
         (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
-    (box :width 4.35 :height 1.75
-      (v-stack :width 4.35 :height 1.75 :gap 0.0 :align :center
+    (box :width 5.2 :height 1.75
+      (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
         (label title :font-size 10 :color :gray :bg :transparent)
         (number-picker :value 0 :min 0 :max 0 :decimals decimals
           :unit unit :noui true :font-size 10.5
           :text-align :center :text-color :gray :edit-color :gray
-          :width 4.2 :height 0.95)))))
+          :width 5.0 :height 0.95)))))
 (def rhodes_additive_v2-row-label (title)
   (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
     (label title :font-size 8.0 :width 2.7 :color :gray :bg :transparent)))

@@ -939,6 +939,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Set up eseqlisp runtime with sequencer natives
     let mut runtime = Runtime::new();
+    let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
 
     let track_count = track_names.len();
     let accumulator_names = Arc::new(Mutex::new(build_accumulator_names(&app)));
@@ -1861,6 +1862,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(Value::String(names[idx].clone()))
     });
 
+    let accumulator_names_for_native = accumulator_names.clone();
+    let debug_accum_preview = debug_accum;
+    runtime.register_native("__register-accumulator-preview", move |args, _ctx| {
+        let label = match args.first() {
+            Some(Value::String(s)) => s.clone(),
+            _ => return Err("__register-accumulator-preview: expected string label".into()),
+        };
+        let mut names = accumulator_names_for_native.lock().unwrap();
+        if !names.iter().any(|name| name.eq_ignore_ascii_case(&label)) {
+            names.push(label.clone());
+        }
+        if debug_accum_preview {
+            eprintln!("[accum-ui] preview register label={label} names={names:?}");
+        }
+        Ok(Value::String(label))
+    });
+    let _ = runtime.eval_str(
+        r#"
+        (defmacro def-accumulator (name body)
+          `(__register-accumulator-preview ,name))
+        "#,
+    );
+
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    let accumulator_names_for_native = accumulator_names.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    let debug_accum_use = debug_accum;
+    runtime.register_native("seq-use-accumulator", move |args, _ctx| {
+        let (track, label) = match args.as_slice() {
+            [Value::String(label)] => (ct.load(Ordering::Relaxed), label.clone()),
+            [Value::Number(track), Value::String(label)] if *track >= 0.0 => {
+                (*track as usize, label.clone())
+            }
+            _ => {
+                return Err(
+                    "seq-use-accumulator: expected string label or track/string label".into(),
+                )
+            }
+        };
+        if track >= st.active_track_count() {
+            return Err("seq-use-accumulator: track out of range".into());
+        }
+
+        let mut names = accumulator_names_for_native.lock().unwrap();
+        if !names.iter().any(|name| name.eq_ignore_ascii_case(&label)) {
+            names.push(label.clone());
+        }
+        let idx = names
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(&label))
+            .ok_or_else(|| format!("seq-use-accumulator: unknown accumulator '{label}'"))?;
+
+        let tp = &st.pattern.track_params[track];
+        tp.set_accumulator_idx(idx);
+        if idx < BUILTIN_ACCUMULATOR_NAMES.len() {
+            tp.set_script_accumulator_name(None);
+            tp.set_accum_limit(builtin_accumulator_default_limit(idx));
+        } else {
+            tp.set_script_accumulator_name(Some(names[idx].clone()));
+        }
+        st.request_accumulator_reset(track);
+        st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        if debug_accum_use {
+            eprintln!(
+                "[accum-ui] seq-use track={} label={} idx={} script={:?} names={:?}",
+                track,
+                label,
+                idx,
+                tp.script_accumulator_name(),
+                *names
+            );
+        }
+        Ok(Value::String(names[idx].clone()))
+    });
+
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
@@ -2209,6 +2289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            vim_mode: true,
         },
     );
 
@@ -3307,6 +3388,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         ));
                                     }
                                 }
+                            }
+                        }
+                    }
+                    "delete-effect" => {
+                        let slot_idx = match &payload {
+                            Value::Map(map) => {
+                                map.get("slot").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                            }
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        };
+                        let Some(slot_idx) = slot_idx else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "No effect selected".to_string(),
+                            ));
+                            continue;
+                        };
+                        let track = current_track.load(Ordering::Relaxed);
+                        match app
+                            .graph_controller()
+                            .delete_custom_effect_slot(track, slot_idx)
+                        {
+                            Ok(()) => {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "effects",
+                                    build_effects_value(
+                                        &state,
+                                        track,
+                                        &app.graph.effect_descriptors,
+                                        &selected_steps,
+                                    ),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "step-has-plocks",
+                                    build_step_has_plocks(
+                                        &state,
+                                        track,
+                                        &app.graph.effect_descriptors,
+                                    ),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Deleted effect slot {}",
+                                    slot_idx + 1
+                                )));
+                            }
+                            Err(e) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error deleting effect: {e}"
+                                )));
                             }
                         }
                     }
@@ -5120,13 +5260,30 @@ fn apply_piano_roll_action(
         "delete-items" => {
             *move_state.lock().unwrap() = None;
             let ids = parse_piano_roll_ids(action.get("ids"));
-            for id in &ids {
-                if let Some((step, voice_idx)) = piano_roll_item_parts(*id) {
-                    let mut notes = piano_roll_step_note_entries(state, track, step);
-                    if voice_idx < notes.len() {
-                        notes.remove(voice_idx);
-                        set_piano_roll_step_note_entries(state, track, step, &notes);
-                    }
+            let mut by_step: HashMap<usize, Vec<usize>> = HashMap::new();
+            for id in ids.iter().copied() {
+                if let Some((step, voice_idx)) = piano_roll_item_parts(id) {
+                    by_step.entry(step).or_default().push(voice_idx);
+                }
+            }
+            for (step, mut voice_indices) in by_step {
+                let notes = piano_roll_step_note_entries(state, track, step);
+                let original_len = notes.len();
+                voice_indices.sort_unstable();
+                voice_indices.dedup();
+                let remaining = notes
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(idx, note)| {
+                        if voice_indices.binary_search(&idx).is_ok() {
+                            None
+                        } else {
+                            Some(note)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                if remaining.len() != original_len {
+                    set_piano_roll_step_note_entries(state, track, step, &remaining);
                 }
             }
             selection.lock().unwrap().clear();
@@ -5203,16 +5360,41 @@ fn apply_piano_roll_action(
                 return Ok("piano roll start resize ignored".to_string());
             }
             let time = value_as_number(action.get("time")).unwrap_or(0.0) as f32;
-            if let Some((step, voice_idx)) = piano_roll_item_parts(id) {
-                let duration = piano_roll_sanitize_duration(time - step as f32);
-                let mut notes = piano_roll_step_note_entries(state, track, step);
-                if let Some(note) = notes.get_mut(voice_idx) {
-                    note.duration = duration;
-                    set_piano_roll_step_note_entries(state, track, step, &notes);
-                } else {
-                    state.pattern.step_data[track].set(step, StepParam::Duration, duration);
+            let ids = parse_piano_roll_ids(action.get("ids"));
+            let duration_delta = value_as_number(action.get("duration-delta")).map(|n| n as f32);
+            if let Some((step, _voice_idx)) = piano_roll_item_parts(id) {
+                let resize_ids = if ids.is_empty() { vec![id] } else { ids };
+                let mut resized = 0;
+                for resize_id in resize_ids {
+                    let Some((resize_step, resize_voice_idx)) = piano_roll_item_parts(resize_id)
+                    else {
+                        continue;
+                    };
+                    let mut notes = piano_roll_step_note_entries(state, track, resize_step);
+                    let duration = if resize_id == id {
+                        piano_roll_sanitize_duration(time - step as f32)
+                    } else if let Some(delta) = duration_delta {
+                        let Some(note) = notes.get(resize_voice_idx) else {
+                            continue;
+                        };
+                        piano_roll_sanitize_duration(note.duration + delta)
+                    } else {
+                        continue;
+                    };
+                    if let Some(note) = notes.get_mut(resize_voice_idx) {
+                        note.duration = duration;
+                        set_piano_roll_step_note_entries(state, track, resize_step, &notes);
+                        resized += 1;
+                    } else if resize_id == id {
+                        state.pattern.step_data[track].set(
+                            resize_step,
+                            StepParam::Duration,
+                            duration,
+                        );
+                        resized += 1;
+                    }
                 }
-                Ok(format!("duration step {} = {:.2}", step + 1, duration))
+                Ok(format!("resized {} note(s)", resized))
             } else {
                 Ok("resize ignored".to_string())
             }
@@ -5479,7 +5661,7 @@ fn held_note_for_key(
     key: &crossterm::event::KeyEvent,
 ) -> bool {
     let c = match key.code {
-        crossterm::event::KeyCode::Char(c) => c,
+        crossterm::event::KeyCode::Char(c) => c.to_ascii_lowercase(),
         _ => return false,
     };
     held_notes.lock().unwrap().iter().any(|note| note.key == c)
@@ -7451,6 +7633,106 @@ mod tests {
     }
 
     #[test]
+    fn piano_roll_resize_selected_notes_by_same_delta() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+        state.pattern.patterns[track].set_step_active(2, true);
+        state.pattern.step_data[track].set(2, StepParam::Duration, 1.0);
+        state.pattern.patterns[track].set_step_active(5, true);
+        state.pattern.step_data[track].set(5, StepParam::Duration, 2.0);
+
+        let action = map_value([
+            ("type", Value::Keyword("resize-item-absolute".to_string())),
+            ("id", Value::Number(piano_roll_item_id(2, 0) as f64)),
+            (
+                "ids",
+                list_value(vec![
+                    Value::Number(piano_roll_item_id(2, 0) as f64),
+                    Value::Number(piano_roll_item_id(5, 0) as f64),
+                ]),
+            ),
+            ("time", Value::Number(4.0)),
+            ("duration-delta", Value::Number(1.0)),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            .expect("resize action");
+
+        assert_eq!(
+            state.pattern.step_data[track].get(2, StepParam::Duration),
+            2.0
+        );
+        assert_eq!(
+            state.pattern.step_data[track].get(5, StepParam::Duration),
+            3.0
+        );
+    }
+
+    #[test]
+    fn piano_roll_delete_multiple_chord_notes_uses_original_voice_indices() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+        let step = 2;
+        state.pattern.chord_data[track].add_note_with_duration(step, 0.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 4.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 7.0, 1.0);
+        state.pattern.patterns[track].set_step_active(step, true);
+
+        let action = map_value([
+            ("type", Value::Keyword("delete-items".to_string())),
+            (
+                "ids",
+                list_value(vec![
+                    Value::Number(piano_roll_item_id(step, 0) as f64),
+                    Value::Number(piano_roll_item_id(step, 1) as f64),
+                ]),
+            ),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            .expect("delete action");
+
+        assert_eq!(state.pattern.chord_data[track].count(step), 0);
+        assert!(state.pattern.patterns[track].is_active(step));
+        assert_eq!(
+            state.pattern.step_data[track].get(step, StepParam::Transpose),
+            7.0
+        );
+    }
+
+    #[test]
+    fn piano_roll_delete_one_chord_note_leaves_other_notes() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+        let step = 2;
+        state.pattern.chord_data[track].add_note_with_duration(step, 0.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 4.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 7.0, 1.0);
+        state.pattern.patterns[track].set_step_active(step, true);
+
+        let action = map_value([
+            ("type", Value::Keyword("delete-items".to_string())),
+            (
+                "ids",
+                list_value(vec![Value::Number(piano_roll_item_id(step, 1) as f64)]),
+            ),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            .expect("delete action");
+
+        assert_eq!(state.pattern.chord_data[track].count(step), 2);
+        assert_eq!(state.pattern.chord_data[track].get(step, 0), 0.0);
+        assert_eq!(state.pattern.chord_data[track].get(step, 1), 7.0);
+    }
+
+    #[test]
     fn piano_roll_preserves_half_step_duration_resolution() {
         let state = Arc::new(SequencerState::new(1, vec![]));
         let selection = Arc::new(Mutex::new(HashSet::new()));
@@ -7563,6 +7845,8 @@ mod tests {
             "emulations/hammond-organ/",
             "emulations/minimoog/",
             "emulations/monomachine-digipro/",
+            "emulations/monomachine-dpro-bbox-v1/",
+            "emulations/monomachine-dpro-dens-v1/",
             "emulations/monomachine-dpro-ddrw-v1/",
             "emulations/monomachine-dpro-wave-v2/",
             "emulations/monomachine-fmplus/",
@@ -7625,7 +7909,7 @@ fn handle_recording_key(
     use crossterm::event::{KeyCode, KeyEventKind};
 
     let c = match key.code {
-        KeyCode::Char(c) => c,
+        KeyCode::Char(c) => c.to_ascii_lowercase(),
         _ => return false,
     };
 
@@ -7736,5 +8020,33 @@ fn handle_recording_key(
             true
         }
         _ => true, // consume Repeat events too
+    }
+}
+
+#[cfg(test)]
+mod live_keyboard_tests {
+    use super::{held_note_for_key, note_from_key, HeldKeyboardNote};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    #[test]
+    fn held_note_lookup_is_case_insensitive_for_release_matching() {
+        let held = Arc::new(Mutex::new(vec![HeldKeyboardNote {
+            key: 'a',
+            transpose: 0.0,
+            step_at_press: 0,
+            press_time: Instant::now(),
+            tracks: vec![0],
+        }]));
+        let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+
+        assert!(held_note_for_key(&held, &key));
+    }
+
+    #[test]
+    fn live_note_map_uses_lowercase_keys() {
+        assert_eq!(note_from_key('a'), Some(0));
+        assert_eq!(note_from_key('A'), None);
     }
 }

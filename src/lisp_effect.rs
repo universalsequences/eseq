@@ -1652,7 +1652,7 @@ pub fn compile_instrument_with_asset_base(
     let seq = COMPILE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let dylib_name = format!("instrument_{}", seq);
 
-    let src_path = dir.join("instrument.lisp");
+    let src_path = dir.join(format!("instrument_{seq}.lisp"));
     let source_with_preamble = format!("{INSTRUMENT_PREAMBLE}\n\n{source}");
     std::fs::write(&src_path, source_with_preamble)
         .map_err(|e| format!("Failed to write source: {e}"))?;
@@ -1967,17 +1967,46 @@ type SharedRegisteredAccumulators = Arc<Mutex<Vec<RegisteredAccumulator>>>;
 #[derive(Clone)]
 pub(crate) struct AccumulatorEvalContext {
     resolved: ResolvedStep,
+    chord: Vec<f32>,
+    chord_durations: Vec<f32>,
+    chord_step_transpose: f32,
+    note_spans: Option<Vec<AccumulatorNoteSpan>>,
+    step_beats: f32,
+    num_steps: usize,
+    suppressed: bool,
     effect_slots: Vec<EffectSlotSnapshot>,
     instrument_slot: EffectSlotSnapshot,
     effect_params: Vec<ScheduledEffectParam>,
     instrument_params: Vec<ScheduledInstrumentParam>,
+    emitted: Vec<EmittedAccumulatorEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmittedAccumulatorEvent {
+    pub offset_beats: f32,
+    pub track: Option<usize>,
+    pub resolved: ResolvedStep,
+    pub chord: Vec<f32>,
+    pub chord_durations: Vec<f32>,
+    pub chord_step_transpose: f32,
+    pub effect_params: Vec<ScheduledEffectParam>,
+    pub instrument_params: Vec<ScheduledInstrumentParam>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AccumulatorNoteSpan {
+    pub transpose: f32,
+    pub start_beats: f32,
+    pub end_beats: f32,
 }
 
 #[derive(Clone)]
 pub struct AccumulatorEvalOutput {
     pub resolved: ResolvedStep,
+    pub suppressed: bool,
     pub effect_params: Vec<ScheduledEffectParam>,
     pub instrument_params: Vec<ScheduledInstrumentParam>,
+    pub emitted: Vec<EmittedAccumulatorEvent>,
 }
 
 type SharedAccumulatorEvalContext = Arc<Mutex<Option<AccumulatorEvalContext>>>;
@@ -2007,6 +2036,7 @@ impl ScratchControlRuntime {
         let accumulators = Arc::new(Mutex::new(Vec::new()));
         let accumulator_eval = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::new();
+        runtime.set_theme_sync_enabled(false);
         register_sequencer_natives_with_accumulators(
             &mut runtime,
             state,
@@ -2023,6 +2053,7 @@ impl ScratchControlRuntime {
             accumulator_eval,
             runtime_globals: Vec::new(),
         };
+        this.install_accumulator_macro();
         this.refresh_runtime_globals();
         this
     }
@@ -2072,6 +2103,16 @@ impl ScratchControlRuntime {
         );
     }
 
+    fn install_accumulator_macro(&mut self) {
+        let _ = self.runtime.eval_str(
+            r#"
+            (defmacro def-accumulator (name body)
+              `(__register-accumulator ,name
+                 (lambda (acc-step acc-value) ,body)))
+            "#,
+        );
+    }
+
     pub fn accumulator_names(&self) -> Vec<String> {
         self.accumulators
             .lock()
@@ -2085,6 +2126,12 @@ impl ScratchControlRuntime {
         step: usize,
         value: f32,
         resolved: ResolvedStep,
+        chord: Vec<f32>,
+        chord_durations: Vec<f32>,
+        chord_step_transpose: f32,
+        note_spans: Option<Vec<AccumulatorNoteSpan>>,
+        step_beats: f32,
+        num_steps: usize,
         effect_slots: Vec<EffectSlotSnapshot>,
         instrument_slot: EffectSlotSnapshot,
         effect_params: Vec<ScheduledEffectParam>,
@@ -2104,10 +2151,18 @@ impl ScratchControlRuntime {
                 .map_err(|_| "failed to lock accumulator eval context".to_string())?;
             *eval_ctx = Some(AccumulatorEvalContext {
                 resolved,
+                chord,
+                chord_durations,
+                chord_step_transpose,
+                note_spans,
+                step_beats,
+                num_steps,
+                suppressed: false,
                 effect_slots,
                 instrument_slot,
                 effect_params,
                 instrument_params,
+                emitted: Vec::new(),
             });
         }
         self.runtime
@@ -2122,9 +2177,10 @@ impl ScratchControlRuntime {
             }
             RegisteredAccumulatorCallback::Closure(callback) => {
                 self.runtime
-                    .set_global_value("__accumulator_callback", callback);
-                self.runtime
-                    .eval_str(&format!("(__accumulator_callback {} {})", step, value))
+                    .invoke(
+                        callback,
+                        vec![EValue::Number(step as f64), EValue::Number(value as f64)],
+                    )
                     .map_err(|e| format!("{e:?}"))?;
             }
         }
@@ -2136,8 +2192,10 @@ impl ScratchControlRuntime {
             .ok_or_else(|| "accumulator did not produce an evaluation context".to_string())?;
         Ok(AccumulatorEvalOutput {
             resolved: output.resolved,
+            suppressed: output.suppressed,
             effect_params: output.effect_params,
             instrument_params: output.instrument_params,
+            emitted: output.emitted,
         })
     }
 
@@ -2174,6 +2232,7 @@ impl ScratchControlRuntime {
             accumulator_eval,
             runtime_globals: Vec::new(),
         };
+        this.install_accumulator_macro();
         this.refresh_runtime_globals();
         this
     }
@@ -2212,9 +2271,9 @@ fn register_sequencer_natives_with_accumulators(
 
     let accumulators_for_register = Arc::clone(&accumulators);
     runtime.register_native_with_docs(
-        "def-accumulator",
-        "(def-accumulator name callback-or-form)",
-        "Register a named scratch accumulator callback for scheduler-side trigger mutation. Accepts either a closure or a source form/string.",
+        "__register-accumulator",
+        "(__register-accumulator name callback)",
+        "Internal helper used by def-accumulator to register a named scheduler-side trigger mutation callback.",
         move |args, ctx| {
             let Some(name) = args.first() else {
                 return Err("expected accumulator name".to_string());
@@ -2274,6 +2333,249 @@ fn register_sequencer_natives_with_accumulators(
                 }
                 _ => Err("reset-acc expects no args, a 0-based track index, or :all".to_string()),
             }
+        },
+    );
+
+    let state_for_use_acc = Arc::clone(&state);
+    let context_for_use_acc = Arc::clone(&context);
+    let accumulators_for_use_acc = Arc::clone(&accumulators);
+    runtime.register_native_with_docs(
+        "seq-use-accumulator",
+        "(seq-use-accumulator name) | (seq-use-accumulator track name)",
+        "Assign a built-in or scratch accumulator to the current track, or to a specific 0-based track.",
+        move |args, ctx| {
+            let (track_idx, label) = match args.as_slice() {
+                [EValue::String(label)] => (current_track(&context_for_use_acc), label.clone()),
+                [EValue::Number(track), EValue::String(label)] if *track >= 0.0 => {
+                    (*track as usize, label.clone())
+                }
+                _ => {
+                    return Err(
+                        "seq-use-accumulator expects a name string or track/name".to_string()
+                    )
+                }
+            };
+            if track_idx >= state_for_use_acc.active_track_count() {
+                return Err("track out of range".to_string());
+            }
+
+            let mut names = crate::accumulator::ACCUMULATOR_REGISTRY
+                .iter()
+                .map(|def| def.name.to_string())
+                .collect::<Vec<_>>();
+            let builtin_count = names.len();
+            names.extend(
+                accumulators_for_use_acc
+                    .lock()
+                    .map_err(|_| "failed to lock accumulator registry".to_string())?
+                    .iter()
+                    .map(|entry| entry.name.clone()),
+            );
+            let Some(idx) = names
+                .iter()
+                .position(|name| name.eq_ignore_ascii_case(&label))
+            else {
+                return Err(format!("unknown accumulator '{label}'"));
+            };
+
+            let tp = &state_for_use_acc.pattern.track_params[track_idx];
+            tp.set_accumulator_idx(idx);
+            if idx < builtin_count {
+                tp.set_script_accumulator_name(None);
+                if let Some(def) = crate::accumulator::ACCUMULATOR_REGISTRY.get(idx) {
+                    tp.set_accum_limit(def.default_limit);
+                }
+            } else {
+                tp.set_script_accumulator_name(Some(names[idx].clone()));
+            }
+            state_for_use_acc.request_accumulator_reset(track_idx);
+            state_for_use_acc.publish_scheduler_snapshot();
+            ctx.set_status(format!("track {track_idx} accumulator {}", names[idx]));
+            Ok(EValue::String(names[idx].clone()))
+        },
+    );
+
+    let acc_eval_for_suppress = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-suppress",
+        "(acc-suppress)",
+        "Suppress the source trigger for the current accumulator evaluation.",
+        move |_args, _ctx| {
+            let mut guard = acc_eval_for_suppress
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            eval.suppressed = true;
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_chord = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-chord",
+        "(acc-chord)",
+        "Return the current trigger chord as a list of transpose values.",
+        move |_args, _ctx| {
+            let guard = acc_eval_for_chord
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_ref() else {
+                return Err("accumulator context not active".to_string());
+            };
+            Ok(lisp_list(
+                eval.chord
+                    .iter()
+                    .map(|note| EValue::Number(*note as f64))
+                    .collect(),
+            ))
+        },
+    );
+
+    let acc_eval_for_chord_durations = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-chord-durations",
+        "(acc-chord-durations)",
+        "Return the current trigger chord note durations in source step units.",
+        move |_args, _ctx| {
+            let guard = acc_eval_for_chord_durations
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_ref() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let durations = accumulator_chord_notes(eval)
+                .into_iter()
+                .map(|note| EValue::Number(note.duration_steps as f64))
+                .collect();
+            Ok(lisp_list(durations))
+        },
+    );
+
+    let acc_eval_for_arp_count = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-arp-count",
+        "(acc-arp-count :16)",
+        "Return the number of arp ticks needed to cover the current chord durations at a timebase.",
+        move |args, _ctx| {
+            let guard = acc_eval_for_arp_count
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_ref() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let timebase = parse_timebase_arg(&args, 0)?;
+            let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
+            Ok(EValue::Number(
+                accumulator_arp_count(eval, rate_beats) as f64
+            ))
+        },
+    );
+
+    let acc_eval_for_arp_note = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-arp-note",
+        "(acc-arp-note :16 tick)",
+        "Return the chord note for an arp tick at a timebase, or nil once that note's duration has ended.",
+        move |args, _ctx| {
+            let guard = acc_eval_for_arp_note
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_ref() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let timebase = parse_timebase_arg(&args, 0)?;
+            let Some(EValue::Number(tick)) = args.get(1) else {
+                return Err("acc-arp-note expects numeric tick".to_string());
+            };
+            if *tick < 0.0 {
+                return Ok(EValue::Nil);
+            }
+            let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
+            Ok(accumulator_arp_note(eval, rate_beats, *tick as usize)
+                .map(|note| EValue::Number(note as f64))
+                .unwrap_or(EValue::Nil))
+        },
+    );
+
+    let acc_eval_for_arp_emit = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-arp-emit",
+        "(acc-arp-emit :16 tick :vel 0.8 ...)",
+        "Emit one duration-aware arpeggiated note for a tick. Returns false when that note lane has ended.",
+        move |args, _ctx| {
+            let mut guard = acc_eval_for_arp_emit
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let timebase = parse_timebase_arg(&args, 0)?;
+            let Some(EValue::Number(tick)) = args.get(1) else {
+                return Err("acc-arp-emit expects numeric tick".to_string());
+            };
+            if *tick < 0.0 {
+                return Ok(EValue::Bool(false));
+            }
+            let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
+            let Some(note) = accumulator_arp_note(eval, rate_beats, *tick as usize) else {
+                return Ok(EValue::Bool(false));
+            };
+
+            let mut resolved = eval.resolved;
+            resolved.transpose = note;
+            if eval.step_beats > 0.0 {
+                resolved.duration = (rate_beats / eval.step_beats).max(0.0);
+            }
+            let mut chord = Vec::new();
+            let mut chord_durations = Vec::new();
+            let target_track =
+                apply_acc_emit_overrides(&args, 2, &mut resolved, &mut chord, &mut chord_durations)?;
+            eval.emitted.push(EmittedAccumulatorEvent {
+                offset_beats: *tick as f32 * rate_beats,
+                track: target_track,
+                resolved,
+                chord,
+                chord_durations,
+                chord_step_transpose: eval.chord_step_transpose,
+                effect_params: eval.effect_params.clone(),
+                instrument_params: eval.instrument_params.clone(),
+            });
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let acc_eval_for_emit = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "acc-emit",
+        "(acc-emit offset :vel value :note transpose ...) | (acc-emit :16 value ...)",
+        "Emit a derived trigger at a musical offset. Numeric offsets use the source step's timebase; an initial timebase keyword overrides that unit.",
+        move |args, _ctx| {
+            let mut guard = acc_eval_for_emit
+                .lock()
+                .map_err(|_| "failed to lock accumulator eval context".to_string())?;
+            let Some(eval) = guard.as_mut() else {
+                return Err("accumulator context not active".to_string());
+            };
+            let (offset_beats, idx) = parse_acc_emit_offset(&args, eval.step_beats, eval.num_steps)?;
+            let mut resolved = eval.resolved;
+            let mut chord = eval.chord.clone();
+            let mut chord_durations = eval.chord_durations.clone();
+            let chord_step_transpose = eval.chord_step_transpose;
+            let target_track =
+                apply_acc_emit_overrides(&args, idx, &mut resolved, &mut chord, &mut chord_durations)?;
+            eval.emitted.push(EmittedAccumulatorEvent {
+                offset_beats,
+                track: target_track,
+                resolved,
+                chord,
+                chord_durations,
+                chord_step_transpose,
+                effect_params: eval.effect_params.clone(),
+                instrument_params: eval.instrument_params.clone(),
+            });
+            Ok(EValue::Bool(true))
         },
     );
 
@@ -3398,6 +3700,180 @@ fn parse_value_arg(args: &[EValue], idx: usize, label: &str) -> Result<f32, Stri
 
 fn parse_normalized_arg(args: &[EValue], idx: usize, label: &str) -> Result<f32, String> {
     Ok(parse_value_arg(args, idx, label)?.clamp(0.0, 1.0))
+}
+
+fn acc_emit_number(value: &EValue, label: &str) -> Result<f32, String> {
+    match value {
+        EValue::Number(value) => Ok(*value as f32),
+        _ => Err(format!("acc-emit expected numeric {label}")),
+    }
+}
+
+fn apply_acc_emit_overrides(
+    args: &[EValue],
+    mut idx: usize,
+    resolved: &mut ResolvedStep,
+    chord: &mut Vec<f32>,
+    chord_durations: &mut Vec<f32>,
+) -> Result<Option<usize>, String> {
+    let mut target_track = None;
+    while idx < args.len() {
+        let key = match &args[idx] {
+            EValue::Keyword(name) | EValue::String(name) | EValue::Symbol(name) => {
+                name.to_ascii_lowercase()
+            }
+            _ => return Err("acc-emit expects keyword/value override pairs".to_string()),
+        };
+        idx += 1;
+        let Some(value) = args.get(idx) else {
+            return Err(format!("acc-emit missing value for :{key}"));
+        };
+        match key.as_str() {
+            "vel" | "velocity" => {
+                resolved.velocity = acc_emit_number(value, "velocity")?.clamp(0.0, 1.0);
+            }
+            "transpose" | "trn" => {
+                resolved.transpose = acc_emit_number(value, "transpose")?;
+            }
+            "note" => {
+                resolved.transpose = acc_emit_number(value, "note")?;
+                chord.clear();
+                chord_durations.clear();
+            }
+            "duration" | "dur" => {
+                resolved.duration = acc_emit_number(value, "duration")?.max(0.0);
+            }
+            "speed" | "spd" => {
+                resolved.speed = acc_emit_number(value, "speed")?.max(0.0);
+            }
+            "pan" => {
+                resolved.pan = acc_emit_number(value, "pan")?.clamp(-1.0, 1.0);
+            }
+            "chop" | "chp" => {
+                resolved.chop = acc_emit_number(value, "chop")?.max(1.0);
+            }
+            "track" => {
+                let track = acc_emit_number(value, "track")?;
+                if track < 0.0 {
+                    return Err("acc-emit :track must be >= 0".to_string());
+                }
+                target_track = Some(track as usize);
+            }
+            _ => return Err(format!("acc-emit unknown override :{key}")),
+        }
+        idx += 1;
+    }
+    Ok(target_track)
+}
+
+#[derive(Clone, Copy)]
+struct AccumulatorChordNote {
+    transpose: f32,
+    duration_steps: f32,
+}
+
+fn accumulator_chord_notes(eval: &AccumulatorEvalContext) -> Vec<AccumulatorChordNote> {
+    if eval.chord.is_empty() {
+        return vec![AccumulatorChordNote {
+            transpose: eval.resolved.transpose,
+            duration_steps: eval.resolved.duration.max(0.0),
+        }];
+    }
+    eval.chord
+        .iter()
+        .enumerate()
+        .map(|(idx, note)| AccumulatorChordNote {
+            transpose: *note,
+            duration_steps: eval
+                .chord_durations
+                .get(idx)
+                .copied()
+                .filter(|duration| *duration > 0.0)
+                .unwrap_or(eval.resolved.duration)
+                .max(0.0),
+        })
+        .collect()
+}
+
+fn accumulator_arp_count(eval: &AccumulatorEvalContext, rate_beats: f32) -> usize {
+    if rate_beats <= 0.0 {
+        return 0;
+    }
+    if let Some(note_spans) = eval.note_spans.as_ref() {
+        let max_end = note_spans
+            .iter()
+            .map(|note| note.end_beats)
+            .fold(0.0_f32, f32::max);
+        return (max_end / rate_beats).ceil().max(0.0) as usize;
+    }
+    let notes = accumulator_chord_notes(eval);
+    if notes.is_empty() || eval.step_beats <= 0.0 {
+        return 0;
+    }
+    let max_duration_beats = notes
+        .iter()
+        .map(|note| note.duration_steps * eval.step_beats)
+        .fold(0.0_f32, f32::max);
+    (max_duration_beats / rate_beats).ceil().max(0.0) as usize
+}
+
+fn accumulator_arp_note(
+    eval: &AccumulatorEvalContext,
+    rate_beats: f32,
+    tick: usize,
+) -> Option<f32> {
+    if rate_beats <= 0.0 {
+        return None;
+    }
+    let elapsed = tick as f32 * rate_beats;
+    if let Some(note_spans) = eval.note_spans.as_ref() {
+        let active = note_spans
+            .iter()
+            .filter(|note| {
+                elapsed >= note.start_beats - f32::EPSILON
+                    && elapsed < note.end_beats - f32::EPSILON
+            })
+            .collect::<Vec<_>>();
+        if active.is_empty() {
+            return None;
+        }
+        return Some(active[tick % active.len()].transpose);
+    }
+    let notes = accumulator_chord_notes(eval);
+    if notes.is_empty() || eval.step_beats <= 0.0 {
+        return None;
+    }
+    let note_idx = tick % notes.len();
+    let duration_beats = notes[note_idx].duration_steps * eval.step_beats;
+    if elapsed < duration_beats - f32::EPSILON {
+        Some(notes[note_idx].transpose)
+    } else {
+        None
+    }
+}
+
+fn parse_acc_emit_offset(
+    args: &[EValue],
+    default_step_beats: f32,
+    num_steps: usize,
+) -> Result<(f32, usize), String> {
+    let Some(first) = args.first() else {
+        return Err("acc-emit expects an offset".to_string());
+    };
+    match first {
+        EValue::Number(offset) => Ok((*offset as f32 * default_step_beats, 1)),
+        EValue::Keyword(_) | EValue::String(_) => {
+            let timebase = parse_timebase_arg(args, 0)?;
+            let Some(EValue::Number(offset)) = args.get(1) else {
+                return Err("acc-emit explicit timebase expects numeric offset".to_string());
+            };
+            Ok((
+                *offset as f32 * timebase.step_beats(num_steps).max(0.0) as f32,
+                2,
+            ))
+        }
+        _ => Err("acc-emit expects numeric offset or timebase keyword".to_string()),
+    }
 }
 
 fn apply_step_param_set(resolved: &mut ResolvedStep, param: StepParam, value: f32) {
@@ -4703,7 +5179,7 @@ mod tests {
         compile_instrument_with_asset_base, fallback_effect_descriptors,
         fallback_instrument_descriptors, new_eval_context, parse_manifest,
         register_sequencer_natives, scratch_runtime_with_fallbacks, shared_native_metadata,
-        DGenParam, ScratchControlRuntime,
+        AccumulatorNoteSpan, DGenParam, ScratchControlRuntime,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};
@@ -5305,12 +5781,12 @@ mod tests {
             .eval(
                 r#"
                 (def-accumulator "test-acc"
-                  "(do
+                  (do
                      (acc-add-step-param :transpose acc-value)
                      (acc-scale-step-param :velocity 0.5)
                      (acc-set-step-param :pan 0.25)
                      (acc-add-effect-param FILTER.cutoff 0.25)
-                     (acc-add-instrument-param 0 0.25))")
+                     (acc-add-instrument-param 0 0.25)))
                 "#,
             )
             .unwrap();
@@ -5339,6 +5815,12 @@ mod tests {
                     pan: 0.0,
                     chop: 1.0,
                 },
+                vec![0.0, 4.0, 7.0],
+                vec![1.0, 1.0, 1.0],
+                2.0,
+                None,
+                0.25,
+                16,
                 vec![EffectSlotSnapshot::new_default(
                     &EffectDescriptor::builtin_filter(),
                     42,
@@ -5386,9 +5868,9 @@ mod tests {
             .eval(
                 r#"
                 (def-accumulator "clip-acc"
-                  "(do
+                  (do
                      (acc-add-effect-param FILTER.cutoff 0.75)
-                     (acc-add-instrument-param 0 0.75))")
+                     (acc-add-instrument-param 0 0.75)))
                 "#,
             )
             .unwrap();
@@ -5415,6 +5897,12 @@ mod tests {
                     pan: 0.0,
                     chop: 1.0,
                 },
+                Vec::new(),
+                Vec::new(),
+                0.0,
+                None,
+                0.25,
+                16,
                 vec![EffectSlotSnapshot::new_default(&effect_desc, 42)],
                 EffectSlotSnapshot::new_default(&instrument_desc, 7),
                 vec![ScheduledEffectParam {
@@ -5443,8 +5931,335 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "documents current closure-based def-accumulator failure"]
-    fn scratch_control_runtime_closure_accumulator_regression() {
+    fn scratch_control_runtime_accumulator_can_emit_arp_events() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-accumulator "arp"
+                  (do
+                     (acc-suppress)
+                     (acc-emit 0 :note 0 :vel 0.9)
+                     (acc-emit 1 :note 4 :vel 0.8)
+                     (acc-emit :8t 1 :note 7 :track 0)))
+                "#,
+            )
+            .unwrap();
+
+        let output = runtime
+            .invoke_accumulator(
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 1.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![0.0, 4.0, 7.0],
+                vec![1.0, 1.0, 1.0],
+                0.0,
+                None,
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert!(output.suppressed);
+        assert_eq!(output.emitted.len(), 3);
+        assert_eq!(output.emitted[0].offset_beats, 0.0);
+        assert_eq!(output.emitted[0].resolved.transpose, 0.0);
+        assert_eq!(output.emitted[0].resolved.velocity, 0.9);
+        assert!(output.emitted[0].chord.is_empty());
+        assert_eq!(output.emitted[1].offset_beats, 0.25);
+        assert_eq!(output.emitted[1].resolved.transpose, 4.0);
+        assert!((output.emitted[2].offset_beats - (1.0 / 3.0)).abs() < 0.0001);
+        assert_eq!(output.emitted[2].track, Some(0));
+    }
+
+    #[test]
+    fn scratch_control_runtime_def_accumulator_wrong_arity_errors() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        assert!(runtime.eval(r#"(def-accumulator "missing-body")"#).is_err());
+        assert!(runtime
+            .eval(
+                r#"
+                (def-accumulator "multi-body"
+                  (acc-suppress)
+                  (acc-emit 0))
+                "#
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn scratch_control_runtime_arp_helpers_follow_chord_durations() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-accumulator "arp-held"
+                  (do
+                    (acc-suppress)
+                    (for-each |i|
+                      (acc-arp-emit :16 i :vel 0.8)
+                      (range 0 (acc-arp-count :16)))))
+                "#,
+            )
+            .unwrap();
+
+        let output = runtime
+            .invoke_accumulator(
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 6.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![0.0, 4.0, 7.0],
+                vec![6.0, 6.0, 6.0],
+                0.0,
+                None,
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        let notes = output
+            .emitted
+            .iter()
+            .map(|event| event.resolved.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(notes, vec![0.0, 4.0, 7.0, 0.0, 4.0, 7.0]);
+        assert_eq!(output.emitted.len(), 6);
+        assert_eq!(output.emitted[5].offset_beats, 1.25);
+        assert_eq!(output.emitted[5].resolved.duration, 1.0);
+    }
+
+    #[test]
+    fn scratch_control_runtime_arp_helpers_fall_back_to_step_duration() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-accumulator "arp-held"
+                  (do
+                    (acc-suppress)
+                    (for-each |i|
+                      (acc-arp-emit :16 i :vel 0.8)
+                      (range 0 (acc-arp-count :16)))))
+                "#,
+            )
+            .unwrap();
+
+        let output = runtime
+            .invoke_accumulator(
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 6.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![0.0, 4.0, 7.0],
+                vec![0.0, 0.0, 0.0],
+                0.0,
+                None,
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert_eq!(output.emitted.len(), 6);
+    }
+
+    #[test]
+    fn scratch_control_runtime_arp_helpers_use_joined_note_pool() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-accumulator "arp-held"
+                  (do
+                    (acc-suppress)
+                    (for-each |i|
+                      (acc-arp-emit :16 i :vel 0.8)
+                      (range 0 (acc-arp-count :16)))))
+                "#,
+            )
+            .unwrap();
+
+        let output = runtime
+            .invoke_accumulator(
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 8.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                Vec::new(),
+                Vec::new(),
+                0.0,
+                Some(vec![
+                    AccumulatorNoteSpan {
+                        transpose: 0.0,
+                        start_beats: 0.0,
+                        end_beats: 2.0,
+                    },
+                    AccumulatorNoteSpan {
+                        transpose: 4.0,
+                        start_beats: 0.0,
+                        end_beats: 2.0,
+                    },
+                    AccumulatorNoteSpan {
+                        transpose: 7.0,
+                        start_beats: 1.0,
+                        end_beats: 2.0,
+                    },
+                ]),
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        let notes = output
+            .emitted
+            .iter()
+            .map(|event| event.resolved.transpose)
+            .collect::<Vec<_>>();
+        assert_eq!(notes, vec![0.0, 4.0, 0.0, 4.0, 4.0, 7.0, 0.0, 4.0]);
+        assert_eq!(output.emitted.len(), 8);
+    }
+
+    #[test]
+    fn scratch_control_runtime_arp_source_assigns_track() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-accumulator "arp-16"
+                  (do
+                    (acc-suppress)
+                    (for-each |i|
+                      (acc-arp-emit :16 i :vel 0.8)
+                      (range 0 (acc-arp-count :16)))))
+
+                (seq-use-accumulator 0 "arp-16")
+                "#,
+            )
+            .unwrap();
+
+        let params = &state.pattern.track_params[0];
+        assert_eq!(params.script_accumulator_name(), Some("arp-16".to_string()));
+        assert_eq!(
+            params.get_accumulator_idx(),
+            crate::accumulator::ACCUMULATOR_REGISTRY.len()
+        );
+    }
+
+    #[test]
+    fn scratch_control_runtime_can_register_closure_accumulator_directly() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(
             Arc::clone(&state),
@@ -5457,7 +6272,7 @@ mod tests {
         let result = runtime
             .eval(
                 r#"
-                (def-accumulator "closure-acc"
+                (__register-accumulator "closure-acc"
                   (lambda (step value)
                     (do
                       (acc-add-step-param :transpose value)
@@ -5492,6 +6307,12 @@ mod tests {
                     pan: 0.0,
                     chop: 1.0,
                 },
+                Vec::new(),
+                Vec::new(),
+                2.0,
+                None,
+                0.25,
+                16,
                 vec![EffectSlotSnapshot::new_default(
                     &EffectDescriptor::builtin_filter(),
                     42,
@@ -5673,6 +6494,84 @@ mod tests {
                     ("wav1".to_string(), 4.0),
                     ("wav2".to_string(), 40.0),
                     ("mix".to_string(), 0.5),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert!(
+            report.peak > 0.01,
+            "expected audible peak, got report: {report:?}"
+        );
+        assert!(
+            report.rms > 0.001,
+            "expected audible rms, got report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn dpro_dens_v1_renders_audible_signal() {
+        let name = "emulations/monomachine-dpro-dens-v1/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let report = super::render_instrument_source_for_test(
+            &source,
+            asset_base.as_deref(),
+            &super::InstrumentRenderOptions {
+                sample_rate: 44_100,
+                block_size: 128,
+                frames: 4096,
+                midi_note: 69.0,
+                velocity: 1.0,
+                gate_frames: 4096,
+                voice_index: 0,
+                param_overrides: vec![
+                    ("wave".to_string(), 16.0),
+                    ("pch2".to_string(), 4.0),
+                    ("pch3".to_string(), 7.0),
+                    ("pch4".to_string(), 12.0),
+                    ("chrl".to_string(), 0.35),
+                    ("chrw".to_string(), 0.4),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert!(
+            report.peak > 0.01,
+            "expected audible peak, got report: {report:?}"
+        );
+        assert!(
+            report.rms > 0.001,
+            "expected audible rms, got report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn dpro_bbox_v1_renders_audible_signal() {
+        let name = "emulations/monomachine-dpro-bbox-v1/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let report = super::render_instrument_source_for_test(
+            &source,
+            asset_base.as_deref(),
+            &super::InstrumentRenderOptions {
+                sample_rate: 44_100,
+                block_size: 128,
+                frames: 4096,
+                midi_note: 48.0,
+                velocity: 1.0,
+                gate_frames: 4096,
+                voice_index: 0,
+                param_overrides: vec![
+                    ("ptch".to_string(), 0.0),
+                    ("start".to_string(), 0.0),
+                    ("rtrg".to_string(), 0.0),
+                    ("rtim".to_string(), 72.0),
                 ],
             },
         )
