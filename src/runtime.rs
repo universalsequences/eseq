@@ -959,6 +959,7 @@ impl Runtime {
             perf_stats: RuntimePerfStats::new(),
             last_ui_invalidation_trace: None,
         };
+        runtime.document_builtin_symbols();
         runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
         register_audio_natives(&mut runtime);
         // (load path) — read and evaluate a Lisp file; relative paths resolve from CWD.
@@ -1207,6 +1208,148 @@ impl Runtime {
         F: Fn(Vec<Value>, &mut NativeContext) -> NativeResult + 'static,
     {
         self.register_native_impl(name, Some(signature.into()), Some(docs.into()), f);
+    }
+
+    pub fn document_symbol(
+        &mut self,
+        name: impl Into<String>,
+        signature: impl Into<String>,
+        docs: impl Into<String>,
+    ) {
+        self.symbol_metadata.insert(
+            name.into(),
+            SymbolMetadata {
+                signature: signature.into(),
+                docs: docs.into(),
+            },
+        );
+        self.invalidate_symbol_cache();
+    }
+
+    pub fn document_symbols(
+        &mut self,
+        metadata: impl IntoIterator<Item = (&'static str, &'static str, &'static str)>,
+    ) {
+        for (name, signature, docs) in metadata {
+            self.symbol_metadata.insert(
+                name.to_string(),
+                SymbolMetadata {
+                    signature: signature.to_string(),
+                    docs: docs.to_string(),
+                },
+            );
+        }
+        self.invalidate_symbol_cache();
+    }
+
+    fn document_builtin_symbols(&mut self) {
+        self.document_symbols([
+            ("dict", "(dict :key value ...)", "Return a map from keyword/value pairs."),
+            (
+                "ui/style",
+                "(ui/style :state style-map ...)",
+                "Return a widget style map, commonly keyed by :pressed, :hover, or :focused.",
+            ),
+            (
+                "get",
+                "(get collection :key)",
+                "Return a value from a map or keyword/value list, or nil when missing.",
+            ),
+            (
+                "reactive-get",
+                "(reactive-get namespace field)",
+                "Read a reactive namespace field and track it as a dependency.",
+            ),
+            (
+                "subtree-owner",
+                "(subtree-owner key callback)",
+                "Evaluate callback while assigning stable ownership to the generated widget subtree.",
+            ),
+            ("merge", "(merge map :key value ...)", "Return a copy of map with keyword/value overrides applied."),
+            ("keys", "(keys map)", "Return the map keys as keywords."),
+            ("first", "(first list)", "Return the first list item, or nil."),
+            ("rest", "(rest list)", "Return a list without its first item."),
+            ("cons", "(cons value list)", "Return a new list with value prepended."),
+            ("len", "(len list-or-string)", "Return the length of a list or string."),
+            ("append", "(append list ...)", "Concatenate lists."),
+            ("list", "(list value ...)", "Return a list containing the arguments."),
+            ("empty?", "(empty? value)", "Return whether a list, string, map, or nil is empty."),
+            ("set-nth", "(set-nth list index value)", "Return a copy of list with the 0-based item replaced."),
+            ("each", "(each list owner-path callback)", "Map over a list with item index and optional widget ownership metadata."),
+            ("map", "(map callback list)", "Return a list containing callback applied to each item."),
+            ("filter", "(filter callback list)", "Return list items for which callback is truthy."),
+            ("reduce", "(reduce callback initial list)", "Reduce list by calling callback with accumulator and item."),
+            ("for-each", "(for-each callback list)", "Call callback for each item and return nil."),
+            ("zip", "(zip list ...)", "Return rows formed from the corresponding items of each list."),
+            ("nth", "(nth list index)", "Return the 0-based list item, or nil."),
+            ("reverse", "(reverse list)", "Return a reversed copy of list."),
+            ("chunks", "(chunks list size)", "Split list into sub-lists of up to size items."),
+            ("range", "(range end) or (range start end)", "Return integer numbers in the half-open range."),
+            ("rand-int", "(rand-int end) or (rand-int start end)", "Return a pseudo-random integer in the half-open range."),
+            ("not", "(not value)", "Return true when value is nil, false, or missing."),
+            ("str", "(str value ...)", "Concatenate values as display strings."),
+            ("substring", "(substring string start [end])", "Return a character-indexed substring."),
+            ("source", "(source value ...)", "Concatenate values as Lisp source text."),
+            ("fmt", "(fmt template value ...)", "Format values into {} placeholders in template."),
+            ("abs", "(abs x)", "Return the absolute value."),
+            ("sqrt", "(sqrt x)", "Return the square root."),
+            ("sin", "(sin x)", "Return sine in radians."),
+            ("cos", "(cos x)", "Return cosine in radians."),
+            ("floor", "(floor x)", "Round down to an integer value."),
+            ("ceil", "(ceil x)", "Round up to an integer value."),
+            ("round", "(round x)", "Round to the nearest integer value."),
+            ("fract", "(fract x)", "Return the fractional part."),
+            ("pow", "(pow base exponent)", "Return base raised to exponent."),
+            ("atan2", "(atan2 y x)", "Return the angle of vector x/y in radians."),
+            ("mod", "(mod a b)", "Return the floating-point remainder of a divided by b."),
+            ("clamp", "(clamp value low high)", "Clamp value to the inclusive numeric range."),
+            ("mix", "(mix a b t)", "Linearly interpolate between a and b by t."),
+            ("smoothstep", "(smoothstep edge0 edge1 x)", "Return smooth Hermite interpolation between two edges."),
+            ("vec2", "(vec2 x y)", "Return a two-number vector list."),
+            ("length", "(length vec2)", "Return the length of a two-number vector."),
+            ("dot", "(dot a b)", "Return the dot product of two vec2 lists."),
+            ("load", "(load path)", "Read and evaluate a Lisp file from path."),
+            ("sdf->metal", "(sdf->metal sdf-expr)", "Compile a quoted SDF expression to Metal shader source."),
+            ("defwidget", "(defwidget name :width w :height h :shader expr ...)", "Register an SDF-backed widget constructor."),
+            ("vec3", "(vec3 x y z)", "Return a tagged SDF vec3 expression."),
+            ("vec4", "(vec4 x y z w)", "Return a tagged SDF vec4 expression."),
+            ("rgba", "(rgba r g b a)", "Return a tagged SDF color expression."),
+            ("material", "(material :key value ...)", "Return a tagged SDF material expression."),
+            ("lighting", "(lighting :key value ...)", "Return a tagged SDF lighting expression."),
+            ("shadow", "(shadow :key value ...)", "Return a tagged SDF shadow expression."),
+        ]);
+
+        for widget in [
+            "label",
+            "button",
+            "slider",
+            "hslider",
+            "vslider",
+            "toggle",
+            "knob",
+            "knob-number",
+            "adsr-editor",
+            "meter",
+            "text-input",
+            "number-picker",
+            "dropdown",
+            "select",
+            "v-stack",
+            "h-stack",
+            "box",
+            "grid",
+            "tabs",
+            "timeline",
+            "waveform",
+            "scroll",
+            "tree",
+        ] {
+            self.document_symbol(
+                widget,
+                format!("({widget} [children-or-props ...])"),
+                format!("Construct a {widget} UI widget map."),
+            );
+        }
     }
 
     fn register_native_impl<F>(
