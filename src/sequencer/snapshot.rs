@@ -88,6 +88,8 @@ impl SequencerSnapshot {
                 mute: tp.is_muted(),
                 solo: tp.is_solo(),
                 send: tp.get_send(),
+                output: tp.output(),
+                sends: tp.sends(),
                 polyphonic: tp.is_polyphonic(),
                 timebase: tp.get_timebase(),
                 accumulator_idx: tp.get_accumulator_idx(),

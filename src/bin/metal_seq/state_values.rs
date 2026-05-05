@@ -212,11 +212,39 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, state: &Arc<SequencerStat
     );
 }
 
+pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
+    let names: Vec<String> = app.buses.iter().map(|bus| bus.name.clone()).collect();
+    let volumes: Vec<Rc<RefCell<Value>>> = app
+        .buses
+        .iter()
+        .map(|bus| Rc::new(RefCell::new(Value::Number(bus.volume as f64))))
+        .collect();
+    let mutes: Vec<Rc<RefCell<Value>>> = app
+        .buses
+        .iter()
+        .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.mute))))
+        .collect();
+    let solos: Vec<Rc<RefCell<Value>>> = app
+        .buses
+        .iter()
+        .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.solo))))
+        .collect();
+    rt.set_reactive("SEQ", "bus-names", build_track_names(&names));
+    rt.set_reactive("SEQ", "bus-volumes", Value::List(volumes));
+    rt.set_reactive("SEQ", "bus-mutes", Value::List(mutes));
+    rt.set_reactive("SEQ", "bus-solos", Value::List(solos));
+    rt.set_reactive("SEQ", "bus-effects", build_bus_effects_value(app));
+}
+
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-by-solo", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-names", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-volumes", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-mutes", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-solos", Value::List(vec![]));
 }
 
 pub(crate) fn push_panner_bool(
@@ -383,6 +411,7 @@ pub(crate) fn sync_track_topology_state(
     track_peak_levels: &[f64],
 ) {
     sync_track_name_state(rt, track_names, app);
+    sync_bus_mixer_state(rt, app);
     sync_pattern_state(rt, state);
     rt.set_reactive(
         "SEQ",
@@ -406,7 +435,8 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "auxas", Value::List(vec![]));
         rt.set_reactive("SEQ", "pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
-        sync_track_mixer_empty_state(rt);
+        sync_track_mixer_state(rt, state);
+        sync_bus_mixer_state(rt, app);
         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
@@ -423,6 +453,7 @@ pub(crate) fn sync_track_topology_state(
     sync_piano_roll_state(rt, state, current_track_idx, piano_roll_selection);
     sync_step_param_lists(rt, state, current_track_idx);
     sync_track_mixer_state(rt, state);
+    sync_bus_mixer_state(rt, app);
     sync_track_peak_fields(rt, track_peak_levels);
     rt.set_reactive(
         "SEQ",
@@ -631,6 +662,114 @@ pub(crate) fn build_effects_value(
         .collect();
 
     Value::List(slots)
+}
+
+pub(crate) fn build_bus_effects_value(app: &ui::App) -> Value {
+    use sequencer::effects::ParamKind;
+    use std::collections::HashMap;
+
+    let buses: Vec<Rc<RefCell<Value>>> = app
+        .buses
+        .iter()
+        .enumerate()
+        .map(|(bus_idx, bus)| {
+            let slots: Vec<Rc<RefCell<Value>>> = bus
+                .effect_descriptors
+                .iter()
+                .enumerate()
+                .map(|(slot_idx, desc)| {
+                    let mut slot_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                    slot_map.insert(
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String(desc.name.clone()))),
+                    );
+                    slot_map.insert(
+                        "slot-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+                    );
+                    slot_map.insert(
+                        "bus-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
+                    );
+                    slot_map.insert(
+                        "bus-fx".to_string(),
+                        Rc::new(RefCell::new(Value::Bool(true))),
+                    );
+
+                    let params: Vec<Rc<RefCell<Value>>> = desc
+                        .params
+                        .iter()
+                        .enumerate()
+                        .map(|(param_idx, pdesc)| {
+                            let current_val = bus
+                                .effect_slots
+                                .get(slot_idx)
+                                .and_then(|slot| slot.defaults.get(param_idx).copied())
+                                .unwrap_or(pdesc.default);
+                            let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                            pmap.insert(
+                                "name".to_string(),
+                                Rc::new(RefCell::new(Value::String(pdesc.name.clone()))),
+                            );
+                            pmap.insert(
+                                "idx".to_string(),
+                                Rc::new(RefCell::new(Value::Number(param_idx as f64))),
+                            );
+                            pmap.insert(
+                                "value".to_string(),
+                                Rc::new(RefCell::new(Value::Number(current_val as f64))),
+                            );
+                            pmap.insert(
+                                "min".to_string(),
+                                Rc::new(RefCell::new(Value::Number(pdesc.min as f64))),
+                            );
+                            pmap.insert(
+                                "max".to_string(),
+                                Rc::new(RefCell::new(Value::Number(pdesc.max as f64))),
+                            );
+                            match &pdesc.kind {
+                                ParamKind::Boolean => {
+                                    pmap.insert(
+                                        "boolean".to_string(),
+                                        Rc::new(RefCell::new(Value::Bool(true))),
+                                    );
+                                }
+                                ParamKind::Enum { labels } => {
+                                    let selected = labels
+                                        .get(current_val.round() as usize)
+                                        .cloned()
+                                        .unwrap_or_default();
+                                    let option_values = labels
+                                        .iter()
+                                        .cloned()
+                                        .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                                        .collect();
+                                    pmap.insert(
+                                        "text-value".to_string(),
+                                        Rc::new(RefCell::new(Value::String(selected))),
+                                    );
+                                    pmap.insert(
+                                        "options".to_string(),
+                                        Rc::new(RefCell::new(Value::List(option_values))),
+                                    );
+                                }
+                                ParamKind::Continuous { .. } => {}
+                            }
+                            Rc::new(RefCell::new(Value::Map(pmap)))
+                        })
+                        .collect();
+                    slot_map.insert(
+                        "params".to_string(),
+                        Rc::new(RefCell::new(Value::List(params))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(slot_map)))
+                })
+                .collect();
+            Rc::new(RefCell::new(Value::List(slots)))
+        })
+        .collect();
+
+    Value::List(buses)
 }
 
 pub(crate) fn build_midi_effects_value(
@@ -1590,6 +1729,13 @@ pub(crate) fn sync_track_params(
         .unwrap_or_else(|| tp.get_swing());
     rt.set_reactive("SEQ", "tp-swing", Value::Number(swing as f64));
     rt.set_reactive("SEQ", "tp-send", Value::Number(tp.get_send() as f64));
+    rt.set_reactive("SEQ", "tp-output", build_track_output_label(app, tp));
+    rt.set_reactive(
+        "SEQ",
+        "track-output-options",
+        build_track_output_options(app),
+    );
+    rt.set_reactive("SEQ", "tp-bus-sends", build_track_bus_sends(app, tp));
     rt.set_reactive(
         "SEQ",
         "tp-num-steps",
@@ -1641,6 +1787,68 @@ pub(crate) fn sync_track_params(
     rt.set_reactive("SEQ", "accumulator-options", build_accumulator_options(app));
     rt.set_reactive("SEQ", "fts-options", build_fts_options());
     rt.set_reactive("SEQ", "accum-mode-options", build_accum_mode_options());
+}
+
+fn build_track_output_label(app: &ui::App, tp: &sequencer::sequencer::TrackParams) -> Value {
+    let label = match tp.output() {
+        sequencer::sequencer::TrackOutput::Mix => "main".to_string(),
+        sequencer::sequencer::TrackOutput::None => "sends only".to_string(),
+        sequencer::sequencer::TrackOutput::Bus(id) => app
+            .buses
+            .iter()
+            .find(|bus| bus.id == id)
+            .map(|bus| bus.name.clone())
+            .unwrap_or_else(|| "main".to_string()),
+    };
+    Value::String(label)
+}
+
+fn build_track_output_options(app: &ui::App) -> Value {
+    let mut labels = vec![
+        Rc::new(RefCell::new(Value::String("main".to_string()))),
+        Rc::new(RefCell::new(Value::String("sends only".to_string()))),
+    ];
+    labels.extend(
+        app.buses
+            .iter()
+            .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
+            .map(|bus| Rc::new(RefCell::new(Value::String(bus.name.clone())))),
+    );
+    Value::List(labels)
+}
+
+fn build_track_bus_sends(app: &ui::App, tp: &sequencer::sequencer::TrackParams) -> Value {
+    use std::collections::HashMap;
+
+    let sends = tp.sends();
+    let items = app
+        .buses
+        .iter()
+        .enumerate()
+        .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
+        .map(|(bus_idx, bus)| {
+            let amount = sends
+                .iter()
+                .find(|send| send.destination == bus.id)
+                .map(|send| send.amount)
+                .unwrap_or(0.0);
+            let mut map = HashMap::new();
+            map.insert(
+                "bus-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
+            );
+            map.insert(
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String(bus.name.clone()))),
+            );
+            map.insert(
+                "amount".to_string(),
+                Rc::new(RefCell::new(Value::Number(amount as f64))),
+            );
+            Rc::new(RefCell::new(Value::Map(map)))
+        })
+        .collect();
+    Value::List(items)
 }
 
 /// Build a Lisp Value::Map of track parameters for the current track.
@@ -1890,6 +2098,524 @@ mod tests {
         ASTParser::new(tokens)
             .parse()
             .expect("parse metal-seq-mixer.lisp");
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_parses() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let tokens = Parser::new(src)
+            .parse()
+            .expect("tokenize metal-seq-fx.lisp");
+        let mut pos = 0;
+        while pos < tokens.len() {
+            if let Err(err) = parse_expression_at(&tokens, &mut pos) {
+                let start = pos.saturating_sub(8);
+                let end = (pos + 8).min(tokens.len());
+                panic!(
+                    "parse metal-seq-fx.lisp at token {pos}: {err:?}\ncontext: {:?}",
+                    &tokens[start..end]
+                );
+            }
+        }
+        ASTParser::new(tokens)
+            .parse()
+            .expect("parse metal-seq-fx.lisp");
+    }
+
+    fn test_list(values: Vec<Value>) -> Value {
+        Value::List(
+            values
+                .into_iter()
+                .map(|value| Rc::new(RefCell::new(value)))
+                .collect(),
+        )
+    }
+
+    fn value_contains_string(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::String(text) => text.contains(needle),
+            Value::List(items) => items
+                .iter()
+                .any(|item| value_contains_string(&item.borrow(), needle)),
+            Value::Map(map) => map
+                .values()
+                .any(|item| value_contains_string(&item.borrow(), needle)),
+            _ => false,
+        }
+    }
+
+    fn test_param_map(
+        name: &str,
+        idx: usize,
+        value: f64,
+        min: f64,
+        max: f64,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut param = std::collections::HashMap::new();
+        param.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name.to_string()))),
+        );
+        param.insert(
+            "idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(idx as f64))),
+        );
+        param.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(value))),
+        );
+        param.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(min))));
+        param.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(max))));
+        param
+    }
+
+    fn test_fx_map(
+        name: &str,
+        slot_idx: usize,
+        params: Vec<Value>,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name.to_string()))),
+        );
+        map.insert(
+            "slot-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+        );
+        map.insert(
+            "params".to_string(),
+            Rc::new(RefCell::new(test_list(params))),
+        );
+        map
+    }
+
+    fn test_bus_fx_map(
+        name: &str,
+        bus_idx: usize,
+        slot_idx: usize,
+        mut params: Vec<Value>,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut sidechain = test_param_map("sidechain signal", params.len(), 0.0, 0.0, 3.0);
+        sidechain.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String("off".to_string()))),
+        );
+        sidechain.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::String("off".to_string()),
+                Value::String("kick".to_string()),
+                Value::String("snare".to_string()),
+                Value::String("hat".to_string()),
+            ]))),
+        );
+        params.push(Value::Map(sidechain));
+
+        let mut map = test_fx_map(name, slot_idx, params);
+        map.insert(
+            "bus-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
+        );
+        map.insert(
+            "bus-fx".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        map
+    }
+
+    fn test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut inst = std::collections::HashMap::new();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("test-instrument".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("test-instrument".to_string()))),
+        );
+        inst.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("synth".to_string()))),
+        );
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Map(test_param_map(
+                "cutoff", 0, 0.5, 0.0, 1.0,
+            ))]))),
+        );
+        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst
+    }
+
+    #[test]
+    fn metal_seq_mixer_lisp_loads_and_builds_widget_tree() {
+        let src = std::fs::read_to_string("metal-seq-mixer.lisp").expect("read mixer lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                (
+                    "track-names",
+                    test_list(vec![Value::String("kick".to_string())]),
+                ),
+                ("num-tracks", Value::Number(1.0)),
+                ("current-track", Value::Number(0.0)),
+                ("record-armed", test_list(vec![Value::Bool(false)])),
+                ("track-mutes", test_list(vec![Value::Bool(false)])),
+                ("track-solos", test_list(vec![Value::Bool(false)])),
+                ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
+                ("track-volumes", test_list(vec![Value::Number(1.0)])),
+                ("track-peak-0", Value::Number(0.0)),
+                (
+                    "bus-names",
+                    test_list(vec![
+                        Value::String("Bus A".to_string()),
+                        Value::String("Bus B".to_string()),
+                    ]),
+                ),
+                (
+                    "bus-volumes",
+                    test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
+                ),
+                (
+                    "bus-mutes",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
+                (
+                    "bus-solos",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
+            )
+            .expect("install test slider material macro");
+        editor
+            .runtime_mut()
+            .eval_str("(defstate selected-bus -1)")
+            .expect("install shared mixer selection state");
+        editor
+            .runtime_mut()
+            .eval_str(&src)
+            .expect("load mixer lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("mixer lisp status after refresh: {status}");
+        }
+        let mixer = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer lisp should create the *mixer* buffer");
+        assert!(
+            mixer.widget_tree.is_some(),
+            "mixer buffer should have a widget tree"
+        );
+        let tree = mixer.widget_tree.as_ref().unwrap();
+        assert!(
+            value_contains_string(tree, "kick"),
+            "mixer widget tree should contain the track row"
+        );
+        assert!(
+            value_contains_string(tree, "Bus A") && value_contains_string(tree, "Bus B"),
+            "mixer widget tree should contain bus rows"
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_renders_track_and_bus_panels() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![Value::String("limiter".to_string())])),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![
+                        Value::String("Mix".to_string()),
+                        Value::String("Bus A".to_string()),
+                        Value::String("Bus B".to_string()),
+                    ]),
+                ),
+                ("effects", test_list(vec![Value::Map(test_fx_map(
+                    "track-fx",
+                    2,
+                    vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
+                ))])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(test_instrument_map())])),
+                (
+                    "bus-effects",
+                    test_list(vec![
+                        test_list(vec![]),
+                        test_list(vec![Value::Map(test_bus_fx_map(
+                            "bus-fx",
+                            1,
+                            0,
+                            vec![
+                                Value::Map(test_param_map("rate", 0, 0.32, 0.05, 1.2)),
+                                Value::Map(test_param_map("depth", 1, 8.5, 1.0, 20.0)),
+                                Value::Map(test_param_map("base", 2, 12.5, 6.0, 28.0)),
+                                Value::Map(test_param_map("spread", 3, 6.0, 0.0, 14.0)),
+                                Value::Map(test_param_map("mix", 4, 0.68, 0.0, 1.0)),
+                                Value::Map(test_param_map("tone", 5, 10500.0, 2000.0, 18000.0)),
+                                Value::Map(test_param_map("width", 6, 1.0, 0.0, 1.0)),
+                                Value::Map(test_param_map("shimmer", 7, 0.28, 0.0, 1.0)),
+                            ],
+                        ))]),
+                    test_list(vec![]),
+                    ]),
+                ),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("track fx lisp status after refresh: {status}");
+        }
+        let fx = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer");
+        let tree = fx.widget_tree.as_ref().expect("track fx tree");
+        assert!(value_contains_string(tree, "track-fx"));
+        assert!(value_contains_string(tree, "test-instru"));
+        assert!(value_contains_string(tree, "Add Effect"));
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! selected-bus 1)")
+            .expect("select bus");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("bus fx lisp status after refresh: {status}");
+        }
+        let fx = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer exists");
+        let tree = fx.widget_tree.as_ref().expect("bus fx tree");
+        assert!(value_contains_string(tree, "bus-fx"));
+        assert!(value_contains_string(tree, "Add Bus FX"));
+    }
+
+    #[test]
+    fn metal_seq_mixer_clicks_dispatch_to_matching_track_and_bus_controls() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use eseqlisp::layout::LayoutNode;
+        use std::sync::{Arc, Mutex};
+
+        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        fn node_text(node: &LayoutNode) -> Option<String> {
+            match node.props.get("text") {
+                Some(Value::String(text)) => Some(text.clone()),
+                _ => None,
+            }
+        }
+
+        fn find_button_by_text<'a>(node: &'a LayoutNode, text: &str) -> Option<&'a LayoutNode> {
+            if node.widget_type == "button" && node_text(node).as_deref() == Some(text) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_button_by_text(child, text))
+        }
+
+        fn find_bus_solo_button(node: &LayoutNode) -> Option<&LayoutNode> {
+            fn walk<'a>(
+                node: &'a LayoutNode,
+                seen_first_solo: &mut bool,
+            ) -> Option<&'a LayoutNode> {
+                if node.widget_type == "button" && node_text(node).as_deref() == Some("S") {
+                    if *seen_first_solo {
+                        return Some(node);
+                    }
+                    *seen_first_solo = true;
+                }
+                node.children
+                    .iter()
+                    .find_map(|child| walk(child, seen_first_solo))
+            }
+            walk(node, &mut false)
+        }
+
+        fn find_track_solo_button(node: &LayoutNode) -> Option<&LayoutNode> {
+            find_button_by_text(node, "S")
+        }
+
+        fn click_node(editor: &mut eseqlisp::Editor, node: &LayoutNode) {
+            let col = (1.0 + node.rect.col + node.rect.width * 0.5).ceil() as u16;
+            let row = (1.0 + node.rect.row + node.rect.height * 0.5).ceil() as u16;
+            editor.handle_mouse(
+                mouse_event(MouseEventKind::Down(MouseButton::Left), col, row),
+                1,
+                1,
+                80,
+                12,
+            );
+        }
+
+        let src = std::fs::read_to_string("metal-seq-mixer.lisp").expect("read mixer lisp");
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(80, 12);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                (
+                    "track-names",
+                    test_list(vec![Value::String("kick".to_string())]),
+                ),
+                ("num-tracks", Value::Number(1.0)),
+                ("current-track", Value::Number(0.0)),
+                ("record-armed", test_list(vec![Value::Bool(false)])),
+                ("track-mutes", test_list(vec![Value::Bool(false)])),
+                ("track-solos", test_list(vec![Value::Bool(false)])),
+                ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
+                ("track-volumes", test_list(vec![Value::Number(1.0)])),
+                ("track-peak-0", Value::Number(0.0)),
+                (
+                    "bus-names",
+                    test_list(vec![
+                        Value::String("Bus A".to_string()),
+                        Value::String("Bus B".to_string()),
+                    ]),
+                ),
+                (
+                    "bus-volumes",
+                    test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
+                ),
+                (
+                    "bus-mutes",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
+                (
+                    "bus-solos",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))",
+            )
+            .expect("install test slider material macro");
+        editor
+            .runtime_mut()
+            .eval_str("(defstate selected-bus -1)")
+            .expect("install shared mixer selection state");
+
+        for name in [
+            "seq-toggle-record-arm",
+            "seq-toggle-track-mute",
+            "seq-toggle-track-solo",
+            "seq-set-track",
+            "seq-set-track-volume",
+            "seq-toggle-bus-mute",
+            "seq-toggle-bus-solo",
+            "seq-set-bus-volume",
+        ] {
+            let calls = Arc::clone(&calls);
+            editor
+                .runtime_mut()
+                .register_native(name, move |args, _ctx| {
+                    calls.lock().unwrap().push(format!("{name}:{args:?}"));
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(&src)
+            .expect("load mixer lisp");
+        editor.refresh_runtime_side_effects();
+        let mixer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*mixer*")
+            .expect("mixer lisp should create the *mixer* buffer")
+            .id;
+        editor.set_active_buffer(mixer_id);
+        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        editor.set_layout_viewport(80, 12);
+        editor.refresh_runtime_side_effects();
+
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("mixer layout should be available");
+        let track_mute = find_button_by_text(&layout, "1").expect("track mute button");
+        click_node(&mut editor, track_mute);
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-toggle-track-mute:[0]")
+        );
+
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("mixer layout should still be available");
+        let track_solo = find_track_solo_button(&layout).expect("track solo button");
+        click_node(&mut editor, track_solo);
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-toggle-track-solo:[0]")
+        );
+
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("mixer layout should still be available");
+        let bus_solo = find_bus_solo_button(&layout).expect("bus solo button");
+        click_node(&mut editor, bus_solo);
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-toggle-bus-solo:[0]")
+        );
     }
 
     #[test]

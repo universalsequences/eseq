@@ -486,6 +486,53 @@ impl App {
         desc
     }
 
+    fn build_bus_effect_descriptor(
+        &self,
+        name: &str,
+        manifest: &lisp_effect::DGenManifest,
+    ) -> EffectDescriptor {
+        let mut desc = EffectDescriptor::from_lisp_manifest(
+            name,
+            &manifest.params,
+            manifest.n_inputs,
+            manifest.n_outputs,
+        );
+
+        let sidechain_labels = self.bus_effect_sidechain_labels();
+        let mut modulators = manifest.modulators.clone();
+        modulators.sort_by_key(|m| m.slot);
+        desc.params
+            .extend(modulators.into_iter().map(|modulator| ParamDescriptor {
+                name: format!("sidechain {}", modulator.name),
+                min: 0.0,
+                max: sidechain_labels.len().saturating_sub(1) as f32,
+                default: 0.0,
+                kind: ParamKind::Enum {
+                    labels: sidechain_labels.clone(),
+                },
+                scaling: ParamScaling::Linear,
+                node_param_idx: u32::MAX,
+                host_control: Some(HostControl::FxSidechain {
+                    input_channel: modulator.input_channel,
+                }),
+            }));
+        desc
+    }
+
+    fn bus_effect_sidechain_labels(&self) -> Vec<String> {
+        let mut labels = vec!["off".to_string()];
+        labels.extend(self.tracks.iter().cloned());
+        labels
+    }
+
+    fn bus_effect_sidechain_source_track(&self, selection_idx: usize) -> Option<usize> {
+        if selection_idx == 0 {
+            None
+        } else {
+            Some(selection_idx - 1).filter(|idx| *idx < self.tracks.len())
+        }
+    }
+
     pub(super) fn refresh_effect_sidechain_labels(&mut self) {
         for track in 0..self.graph.effect_descriptors.len() {
             let labels = self.effect_sidechain_labels(track);
@@ -495,6 +542,20 @@ impl App {
                         param.max = labels.len().saturating_sub(1) as f32;
                         param.kind = ParamKind::Enum {
                             labels: labels.clone(),
+                        };
+                    }
+                }
+            }
+        }
+
+        let bus_labels = self.bus_effect_sidechain_labels();
+        for bus in &mut self.buses {
+            for desc in &mut bus.effect_descriptors {
+                for param in &mut desc.params {
+                    if matches!(param.host_control, Some(HostControl::FxSidechain { .. })) {
+                        param.max = bus_labels.len().saturating_sub(1) as f32;
+                        param.kind = ParamKind::Enum {
+                            labels: bus_labels.clone(),
                         };
                     }
                 }
@@ -584,6 +645,72 @@ impl App {
                     source_port,
                     *input_channel as i32,
                 );
+            }
+        }
+    }
+
+    pub fn apply_bus_effect_sidechain_selection(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        selection: usize,
+    ) {
+        let Some(bus) = self.buses.get(bus_idx) else {
+            return;
+        };
+        let Some(desc) = bus.effect_descriptors.get(slot_idx) else {
+            return;
+        };
+        let Some(param_desc) = desc.params.get(param_idx) else {
+            return;
+        };
+        let Some(HostControl::FxSidechain { input_channel }) = param_desc.host_control.as_ref()
+        else {
+            return;
+        };
+        let Some(slot) = bus.effect_slots.get(slot_idx) else {
+            return;
+        };
+        let node_id = slot.node_id as i32;
+        if node_id == 0 {
+            return;
+        }
+
+        let old_selection = slot
+            .defaults
+            .get(param_idx)
+            .copied()
+            .unwrap_or_default()
+            .round()
+            .max(0.0) as usize;
+        if let Some(old_track) = self.bus_effect_sidechain_source_track(old_selection) {
+            if let Some(nodes) = self.graph.track_node_ids.get(old_track) {
+                let source_port = (*input_channel).min(1) as i32;
+                unsafe {
+                    crate::audiograph::graph_disconnect(
+                        self.graph.lg.0,
+                        nodes.delay_id,
+                        source_port,
+                        node_id,
+                        *input_channel as i32,
+                    );
+                }
+            }
+        }
+
+        if let Some(new_track) = self.bus_effect_sidechain_source_track(selection) {
+            if let Some(nodes) = self.graph.track_node_ids.get(new_track) {
+                let source_port = (*input_channel).min(1) as i32;
+                unsafe {
+                    crate::audiograph::graph_connect(
+                        self.graph.lg.0,
+                        nodes.delay_id,
+                        source_port,
+                        node_id,
+                        *input_channel as i32,
+                    );
+                }
             }
         }
     }
@@ -825,6 +952,289 @@ impl App {
         self.apply_effect_to_slot(track, slot_idx, node_id, name, &result.manifest);
         self.editor.lisp_libs.push(result.lib);
         Ok(())
+    }
+
+    pub fn next_free_bus_effect_slot(&self, bus_idx: usize) -> Option<usize> {
+        self.buses.get(bus_idx).and_then(|bus| {
+            bus.effect_descriptors
+                .iter()
+                .position(|desc| desc.params.is_empty())
+        })
+    }
+
+    pub fn add_bus_effect_sync(&mut self, bus_idx: usize, name: &str) -> Result<usize, String> {
+        let slot_idx = self
+            .next_free_bus_effect_slot(bus_idx)
+            .ok_or_else(|| "No free bus effect slots available".to_string())?;
+        self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, name)?;
+        Ok(slot_idx)
+    }
+
+    pub fn load_bus_effect_to_slot_sync(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        if bus_idx >= lisp_effect::MAX_BUS_FX_CHAINS {
+            return Err(format!(
+                "Bus {} is outside the current bus FX registry limit",
+                bus_idx + 1
+            ));
+        }
+        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
+        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
+            self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
+        let node_id = unsafe {
+            lisp_effect::add_effect_to_chain_at(
+                self.graph.lg.0,
+                slot_id,
+                &result.manifest,
+                &result.lib,
+                pred,
+                pred_outputs,
+                succ,
+                succ_inputs,
+                existing,
+            )
+        }?;
+        let desc = self.build_bus_effect_descriptor(name, &result.manifest);
+        let bus = self
+            .buses
+            .get_mut(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        bus.effect_descriptors[slot_idx] = desc;
+        let slot = &mut bus.effect_slots[slot_idx];
+        *slot = crate::effects::EffectSlotSnapshot::new_default(
+            &bus.effect_descriptors[slot_idx],
+            node_id as u32,
+        );
+        if slot_idx < bus.custom_effect_names.len() {
+            bus.custom_effect_names[slot_idx] = Some(name.to_string());
+        }
+        self.editor.lisp_libs.push(result.lib);
+        Ok(())
+    }
+
+    pub fn delete_bus_effect_slot(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+    ) -> Result<(), String> {
+        let (node_id, pred, pred_outputs, succ, succ_inputs) = {
+            let bus = self
+                .buses
+                .get(bus_idx)
+                .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+            let node_id = bus
+                .effect_slots
+                .get(slot_idx)
+                .map(|slot| slot.node_id)
+                .unwrap_or(0);
+            if node_id == 0 {
+                (0, 0, 0, 0, 0)
+            } else {
+                let (_, pred, pred_outputs, succ, succ_inputs, _) =
+                    self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
+                (node_id, pred, pred_outputs, succ, succ_inputs)
+            }
+        };
+        if node_id != 0 {
+            unsafe {
+                lisp_effect::remove_effect_from_chain(self.graph.lg.0, node_id as i32, pred, succ);
+            }
+            self.connect_bus_effect_gap(pred, pred_outputs, succ, succ_inputs);
+        }
+        let bus = self
+            .buses
+            .get_mut(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        if slot_idx >= bus.effect_descriptors.len() || slot_idx >= bus.effect_slots.len() {
+            return Err(format!("Bus effect slot {} out of range", slot_idx + 1));
+        }
+        bus.effect_descriptors[slot_idx] = EffectDescriptor::empty_custom_slot();
+        bus.effect_slots[slot_idx] = crate::effects::EffectSlotSnapshot::new_empty();
+        if slot_idx < bus.custom_effect_names.len() {
+            bus.custom_effect_names[slot_idx] = None;
+        }
+        Ok(())
+    }
+
+    fn connect_bus_effect_gap(
+        &self,
+        predecessor_id: i32,
+        predecessor_outputs: usize,
+        successor_id: i32,
+        successor_inputs: usize,
+    ) {
+        let channels = predecessor_outputs.min(successor_inputs).max(1).min(2);
+        for ch in 0..channels {
+            unsafe {
+                crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    predecessor_id,
+                    ch as i32,
+                    successor_id,
+                    ch as i32,
+                );
+            }
+        }
+    }
+
+    pub fn set_bus_effect_param(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        value: f32,
+    ) -> Result<(), String> {
+        let bus = self
+            .buses
+            .get_mut(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        let desc = bus
+            .effect_descriptors
+            .get(slot_idx)
+            .ok_or_else(|| format!("Bus effect slot {} out of range", slot_idx + 1))?;
+        let param = desc
+            .params
+            .get(param_idx)
+            .ok_or_else(|| format!("Bus effect param {} out of range", param_idx + 1))?;
+        let slot = bus
+            .effect_slots
+            .get_mut(slot_idx)
+            .ok_or_else(|| format!("Bus effect slot {} out of range", slot_idx + 1))?;
+        if param_idx < slot.defaults.len() {
+            slot.defaults[param_idx] = value.clamp(param.min, param.max);
+        }
+        let node_id = slot.node_id;
+        let node_param_idx = param.node_param_idx;
+        if node_id != 0 && node_param_idx != u32::MAX {
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        logical_id: node_id as u64,
+                        idx: node_param_idx as u64,
+                        fvalue: value.clamp(param.min, param.max),
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_bus_effect_slot_wiring(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+    ) -> Result<(usize, i32, usize, i32, usize, Option<i32>), String> {
+        let bus_nodes = self
+            .graph
+            .bus_node_ids
+            .get(bus_idx)
+            .ok_or_else(|| format!("Bus {} graph nodes not found", bus_idx + 1))?;
+        let bus = self
+            .buses
+            .get(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        if slot_idx >= bus.effect_descriptors.len() || slot_idx >= bus.effect_slots.len() {
+            return Err(format!("Bus effect slot {} out of range", slot_idx + 1));
+        }
+
+        let slot_id = (crate::sequencer::MAX_TRACKS + bus_idx) * MAX_CUSTOM_FX + slot_idx;
+        let mut predecessor_id = bus_nodes.merge_id;
+        let mut predecessor_outputs = 2;
+        for idx in (0..slot_idx).rev() {
+            let node_id = bus.effect_slots[idx].node_id;
+            if node_id != 0 {
+                predecessor_id = node_id as i32;
+                predecessor_outputs = bus.effect_descriptors[idx].output_channels.max(1);
+                break;
+            }
+        }
+
+        let mut successor_id = bus_nodes.volume_id;
+        let mut successor_inputs = 2;
+        for idx in (slot_idx + 1)..bus.effect_slots.len() {
+            let node_id = bus.effect_slots[idx].node_id;
+            if node_id != 0 {
+                successor_id = node_id as i32;
+                successor_inputs = bus.effect_descriptors[idx].input_channels.max(1);
+                break;
+            }
+        }
+
+        let existing_node = bus.effect_slots[slot_idx].node_id;
+        let existing = (existing_node != 0).then_some(existing_node as i32);
+        Ok((
+            slot_id,
+            predecessor_id,
+            predecessor_outputs,
+            successor_id,
+            successor_inputs,
+            existing,
+        ))
+    }
+
+    pub fn bus_effect_param_option_index(
+        &self,
+        bus_idx: usize,
+        slot_idx: usize,
+        param_idx: usize,
+        label: &str,
+    ) -> Option<usize> {
+        self.buses
+            .get(bus_idx)?
+            .effect_descriptors
+            .get(slot_idx)?
+            .params
+            .get(param_idx)
+            .and_then(|p| match &p.kind {
+                ParamKind::Enum { labels } => labels.iter().position(|item| item == label),
+                _ => None,
+            })
+    }
+
+    pub fn push_bus_effect_slot_defaults(&self, bus_idx: usize, slot_idx: usize) {
+        let Some(bus) = self.buses.get(bus_idx) else {
+            return;
+        };
+        let Some(slot) = bus.effect_slots.get(slot_idx) else {
+            return;
+        };
+        let Some(desc) = bus.effect_descriptors.get(slot_idx) else {
+            return;
+        };
+        if slot.node_id == 0 {
+            return;
+        }
+        for (param_idx, param) in desc.params.iter().enumerate() {
+            if param.node_param_idx == u32::MAX || param_idx >= slot.defaults.len() {
+                if matches!(param.host_control, Some(HostControl::FxSidechain { .. }))
+                    && param_idx < slot.defaults.len()
+                {
+                    self.apply_bus_effect_sidechain_selection(
+                        bus_idx,
+                        slot_idx,
+                        param_idx,
+                        slot.defaults[param_idx].round().max(0.0) as usize,
+                    );
+                }
+                continue;
+            }
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        logical_id: slot.node_id as u64,
+                        idx: param.node_param_idx as u64,
+                        fvalue: slot.defaults[param_idx],
+                    },
+                );
+            }
+        }
     }
 
     pub(super) fn replace_current_effect_sync(

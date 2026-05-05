@@ -9,6 +9,37 @@ pub const STEPS_PER_PAGE: usize = 16;
 pub const NUM_PARAMS: usize = 9;
 pub const DEFAULT_BPM: u32 = 120;
 pub const TRACK_PATTERN_WORDS: usize = MAX_STEPS / 64;
+pub const MIX_BUS_ID: u64 = 0;
+pub const DEFAULT_BUS_A_ID: u64 = 1;
+pub const DEFAULT_BUS_B_ID: u64 = 2;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct BusId(pub u64);
+
+impl BusId {
+    pub const MIX: Self = Self(MIX_BUS_ID);
+    pub const DEFAULT_A: Self = Self(DEFAULT_BUS_A_ID);
+    pub const DEFAULT_B: Self = Self(DEFAULT_BUS_B_ID);
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TrackOutput {
+    Mix,
+    Bus(BusId),
+    None,
+}
+
+impl Default for TrackOutput {
+    fn default() -> Self {
+        Self::Mix
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackSendSnapshot {
+    pub destination: BusId,
+    pub amount: f32,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InstrumentType {
@@ -501,6 +532,8 @@ pub struct TrackParams {
     pub mute: AtomicBool,
     pub solo: AtomicBool,
     pub send: AtomicU32,
+    pub output: Mutex<TrackOutput>,
+    pub sends: Mutex<Vec<TrackSendSnapshot>>,
     pub polyphonic: AtomicBool,
     pub timebase: AtomicU32,
     pub accumulator_idx: AtomicU32,
@@ -526,6 +559,8 @@ impl TrackParams {
             mute: AtomicBool::new(false),
             solo: AtomicBool::new(false),
             send: AtomicU32::new(0.0_f32.to_bits()),
+            output: Mutex::new(TrackOutput::Mix),
+            sends: Mutex::new(Vec::new()),
             polyphonic: AtomicBool::new(true),
             timebase: AtomicU32::new(Timebase::Sixteenth as u32),
             accumulator_idx: AtomicU32::new(0),
@@ -623,6 +658,24 @@ impl TrackParams {
     pub fn set_send(&self, val: f32) {
         self.send
             .store(val.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+    pub fn output(&self) -> TrackOutput {
+        self.output.lock().unwrap().clone()
+    }
+    pub fn set_output(&self, output: TrackOutput) {
+        *self.output.lock().unwrap() = output;
+    }
+    pub fn sends(&self) -> Vec<TrackSendSnapshot> {
+        self.sends.lock().unwrap().clone()
+    }
+    pub fn set_sends(&self, sends: Vec<TrackSendSnapshot>) {
+        *self.sends.lock().unwrap() = sends
+            .into_iter()
+            .map(|mut send| {
+                send.amount = send.amount.clamp(0.0, 1.0);
+                send
+            })
+            .collect();
     }
     pub fn is_polyphonic(&self) -> bool {
         self.polyphonic.load(Ordering::Relaxed)
@@ -724,6 +777,8 @@ pub struct TrackParamsSnapshot {
     pub mute: bool,
     pub solo: bool,
     pub send: f32,
+    pub output: TrackOutput,
+    pub sends: Vec<TrackSendSnapshot>,
     pub polyphonic: bool,
     pub timebase: Timebase,
     pub accumulator_idx: usize,
@@ -749,6 +804,8 @@ impl Default for TrackParamsSnapshot {
             mute: false,
             solo: false,
             send: 0.0,
+            output: TrackOutput::Mix,
+            sends: Vec::new(),
             polyphonic: false,
             timebase: Timebase::Sixteenth,
             accumulator_idx: 0,

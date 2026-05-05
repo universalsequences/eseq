@@ -6,14 +6,127 @@ use crossterm::event::KeyCode;
 
 use crate::effects::BUILTIN_SLOT_COUNT;
 use crate::project::{
-    self, chord_snapshot_from_steps_and_durations, project_file_version, ProjectFile,
-    ProjectPattern, ProjectReverbState, ProjectScratchState, ProjectTrack,
+    self, chord_snapshot_from_steps_and_durations, project_file_version, ProjectBusChannel,
+    ProjectFile, ProjectPattern, ProjectReverbState, ProjectScratchState, ProjectTrack,
 };
-use crate::sequencer::{InstrumentType, PatternSnapshot, MAX_STEPS};
+use crate::sequencer::{BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS};
 
-use super::{App, InputMode, Region, SidebarMode, SidebarTab};
+use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
+
+impl From<BusChannelState> for ProjectBusChannel {
+    fn from(value: BusChannelState) -> Self {
+        Self {
+            id: value.id.0,
+            name: value.name,
+            volume: value.volume,
+            mute: value.mute,
+            solo: value.solo,
+            custom_effects: value.custom_effect_names,
+            effect_slots: value
+                .effect_slots
+                .iter()
+                .map(crate::project::ProjectEffectSlot::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<ProjectBusChannel> for BusChannelState {
+    fn from(value: ProjectBusChannel) -> Self {
+        let mut bus = Self::new(BusId(value.id), value.name);
+        bus.volume = value.volume.clamp(0.0, 2.0);
+        bus.mute = value.mute;
+        bus.solo = value.solo;
+        for (idx, name) in value.custom_effects.into_iter().enumerate() {
+            if idx < bus.custom_effect_names.len() {
+                bus.custom_effect_names[idx] = name;
+            }
+        }
+        for (idx, slot) in value.effect_slots.into_iter().enumerate() {
+            if idx < bus.effect_slots.len() {
+                bus.effect_slots[idx] = slot.into_snapshot_with_node_id(0);
+            }
+        }
+        bus
+    }
+}
 
 impl App {
+    pub fn add_bus_channel(&mut self, name: impl Into<String>) -> BusId {
+        let next_id = self
+            .buses
+            .iter()
+            .map(|bus| bus.id.0)
+            .max()
+            .unwrap_or(crate::sequencer::DEFAULT_BUS_B_ID)
+            .saturating_add(1);
+        let id = BusId(next_id.max(crate::sequencer::DEFAULT_BUS_B_ID + 1));
+        self.buses.push(BusChannelState::new(id, name));
+        if let Some(bus) = self.buses.iter().find(|bus| bus.id == id).cloned() {
+            self.graph_controller()
+                .ensure_bus_graph_node(bus.id, &bus.name);
+        }
+        id
+    }
+
+    pub fn delete_bus_channel(&mut self, id: BusId) -> bool {
+        if id == BusId::MIX {
+            return false;
+        }
+
+        if let Some(bus) = self.buses.iter().find(|bus| bus.id == id) {
+            for slot in &bus.effect_slots {
+                if slot.node_id != 0 {
+                    unsafe {
+                        crate::audiograph::delete_node(self.graph.lg.0, slot.node_id as i32);
+                    }
+                }
+            }
+        }
+
+        let before = self.buses.len();
+        self.buses.retain(|bus| bus.id != id);
+        if self.buses.len() == before {
+            return false;
+        }
+
+        self.remove_bus_references_from_live_pattern(id);
+        {
+            let track_count = self.tracks.len();
+            let mut graph = self.graph_controller();
+            for track_idx in 0..track_count {
+                graph.apply_track_output_routing(track_idx);
+                graph.apply_track_bus_sends(track_idx);
+            }
+        }
+        self.graph_controller().delete_bus_graph_node(id);
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for pattern in bank.iter_mut() {
+            for params in &mut pattern.track_params {
+                if params.output == TrackOutput::Bus(id) {
+                    params.output = TrackOutput::Mix;
+                }
+                params.sends.retain(|send| send.destination != id);
+            }
+        }
+        true
+    }
+
+    fn remove_bus_references_from_live_pattern(&self, id: BusId) {
+        for track in 0..self.state.active_track_count() {
+            let params = &self.state.pattern.track_params[track];
+            if params.output() == TrackOutput::Bus(id) {
+                params.set_output(TrackOutput::Mix);
+            }
+            let sends = params
+                .sends()
+                .into_iter()
+                .filter(|send| send.destination != id)
+                .collect();
+            params.set_sends(sends);
+        }
+    }
+
     pub fn save_project_with_name(
         &mut self,
         requested_name: Option<&str>,
@@ -258,6 +371,12 @@ impl App {
                 brightness: self.ui.reverb_brightness,
                 replace: self.ui.reverb_replace,
             },
+            buses: self
+                .buses
+                .iter()
+                .cloned()
+                .map(ProjectBusChannel::from)
+                .collect(),
             tracks,
             custom_effects,
             scratch: ProjectScratchState {
@@ -517,6 +636,7 @@ impl App {
             master_volume,
             current_pattern: saved_current_pattern,
             reverb,
+            buses,
             scratch,
             tracks: _,
             custom_effects: _,
@@ -554,6 +674,81 @@ impl App {
             .transport
             .master_volume
             .store(master_volume.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+        self.buses = if buses.is_empty() {
+            BusChannelState::default_buses()
+        } else {
+            buses.into_iter().map(BusChannelState::from).collect()
+        };
+        if !self.buses.iter().any(|bus| bus.id == BusId::MIX) {
+            self.buses
+                .insert(0, BusChannelState::new(BusId::MIX, "Mix"));
+        }
+        for bus in self.buses.clone() {
+            self.graph_controller()
+                .ensure_bus_graph_node(bus.id, &bus.name);
+        }
+        let saved_bus_effects: Vec<(usize, usize, String, crate::effects::EffectSlotSnapshot)> =
+            self.buses
+                .iter()
+                .enumerate()
+                .flat_map(|(bus_idx, bus)| {
+                    bus.custom_effect_names.iter().enumerate().filter_map(
+                        move |(slot_idx, name)| {
+                            let name = name.as_ref()?.trim();
+                            if name.is_empty() {
+                                return None;
+                            }
+                            let slot = bus
+                                .effect_slots
+                                .get(slot_idx)
+                                .cloned()
+                                .unwrap_or_else(crate::effects::EffectSlotSnapshot::new_empty);
+                            Some((bus_idx, slot_idx, name.to_string(), slot))
+                        },
+                    )
+                })
+                .collect();
+        for (bus_idx, slot_idx, name, saved_slot) in saved_bus_effects {
+            self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, &name)?;
+            if let Some(slot) = self
+                .buses
+                .get_mut(bus_idx)
+                .and_then(|bus| bus.effect_slots.get_mut(slot_idx))
+            {
+                let live_node_id = slot.node_id;
+                *slot = saved_slot;
+                slot.node_id = live_node_id;
+            }
+            self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+        }
+        for bus in &self.buses {
+            let Some(nodes) = self
+                .graph
+                .bus_node_ids
+                .iter()
+                .find(|nodes| nodes.id == bus.id)
+            else {
+                continue;
+            };
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: bus.volume,
+                    },
+                );
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: if bus.mute { 1.0 } else { 0.0 },
+                    },
+                );
+            }
+        }
 
         self.ui.cursor_track = 0;
         self.ui.cursor_step = 0;
@@ -588,6 +783,14 @@ impl App {
         self.state.publish_scheduler_snapshot();
         self.graph_controller()
             .apply_sample_ids(&current_sample_ids);
+        {
+            let track_count = self.tracks.len();
+            let mut graph = self.graph_controller();
+            for track_idx in 0..track_count {
+                graph.apply_track_output_routing(track_idx);
+                graph.apply_track_bus_sends(track_idx);
+            }
+        }
         self.set_reverb_param(0, reverb.size);
         self.set_reverb_param(1, reverb.brightness);
         self.set_reverb_param(2, reverb.replace);

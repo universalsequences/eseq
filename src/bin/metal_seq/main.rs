@@ -53,10 +53,37 @@ use eseqlisp::{BufferMode, Editor, HostCommand, HostEvent, Runtime};
 use sequencer::engine;
 use sequencer::sequencer::{
     KeyboardTrigger, MidiFxPosition, SequencerState, StepParam, SwingResolution, Timebase,
-    MAX_STEPS, SYNC_RESOLUTIONS,
+    TrackOutput, TrackSendSnapshot, MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
+
+fn pull_shared_bus_state(
+    app: &mut ui::App,
+    bus_state: &Arc<Mutex<Vec<ui::BusChannelState>>>,
+) -> bool {
+    let latest = bus_state.lock().unwrap().clone();
+    if app.buses.len() != latest.len()
+        || app
+            .buses
+            .iter()
+            .zip(latest.iter())
+            .any(|(a, b)| a.volume != b.volume || a.mute != b.mute || a.solo != b.solo)
+    {
+        if app.buses.len() == latest.len() {
+            for (bus, latest_bus) in app.buses.iter_mut().zip(latest.iter()) {
+                bus.volume = latest_bus.volume;
+                bus.mute = latest_bus.mute;
+                bus.solo = latest_bus.solo;
+            }
+        } else {
+            app.buses = latest;
+        }
+        true
+    } else {
+        false
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     sequencer::crash::install()?;
@@ -84,6 +111,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let track_pan_ids: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(
         app.graph.track_node_ids.iter().map(|n| n.pan_id).collect(),
     ));
+    let bus_state: Arc<Mutex<Vec<ui::BusChannelState>>> = Arc::new(Mutex::new(app.buses.clone()));
+    let bus_node_ids: Arc<Mutex<Vec<ui::BusNodeIds>>> =
+        Arc::new(Mutex::new(app.graph.bus_node_ids.clone()));
     let lg_raw = lg_ptr.0;
 
     // Shared current track index
@@ -122,6 +152,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state.clone(),
         &track_names,
         track_pan_ids.clone(),
+        bus_state.clone(),
+        bus_node_ids.clone(),
         current_track.clone(),
         selected_steps.clone(),
         piano_roll_selection.clone(),
@@ -148,6 +180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut editor_mode: Option<String> = None;
     let mut editor_effect_name: Option<String> = None; // original effect name (without .lisp)
     let mut editor_effect_slot: Option<usize> = None; // effect slot index for hot-swap
+    let mut editor_effect_bus: Option<usize> = None; // bus index for bus effect hot-swap
 
     let mut prev_playing = false;
     let mut prev_bpm: u32 = 0;
@@ -178,6 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ui_loop_stats = UiLoopStats::new();
 
     loop {
+        pull_shared_bus_state(&mut app, &bus_state);
         pull_named_scratch_buffer_into_project(&editor, &mut app);
         editor.update_timers();
         let (cols, rows) = backend.viewport_size();
@@ -466,6 +500,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
                                     sync_step_param_lists(rt, &state, idx);
                                     sync_track_mixer_state(rt, &state);
+                                    sync_bus_mixer_state(rt, &app);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     rt.set_reactive(
                                         "SEQ",
@@ -1011,6 +1046,184 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-track-output" => {
+                        if let Value::Map(ref map) = payload {
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            if let Some(label) = label {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let output = if label == "main" {
+                                    Some(TrackOutput::Mix)
+                                } else if label == "sends only" {
+                                    Some(TrackOutput::None)
+                                } else {
+                                    app.buses
+                                        .iter()
+                                        .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
+                                        .find(|bus| bus.name == label)
+                                        .map(|bus| TrackOutput::Bus(bus.id))
+                                };
+                                if let Some(output) = output {
+                                    ui::apply_command(
+                                        &mut app,
+                                        ui::AppCommand::SetTrackOutput { track, output },
+                                    );
+                                    let rt = editor.runtime_mut();
+                                    sync_track_params(rt, &app, &state, track, &selected_steps);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-track-bus-send" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let amount = map.get("amount").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
+                            if let (Some(bus_idx), Some(amount)) = (bus_idx, amount) {
+                                let Some(bus) = app.buses.get(bus_idx) else {
+                                    continue;
+                                };
+                                let track = current_track.load(Ordering::Relaxed);
+                                let mut sends = app.state.pattern.track_params[track].sends();
+                                if let Some(send) =
+                                    sends.iter_mut().find(|send| send.destination == bus.id)
+                                {
+                                    send.amount = amount;
+                                } else {
+                                    sends.push(TrackSendSnapshot {
+                                        destination: bus.id,
+                                        amount,
+                                    });
+                                }
+                                sends.retain(|send| send.amount > 0.0);
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetTrackSends { track, sends },
+                                );
+                                let rt = editor.runtime_mut();
+                                sync_track_params(rt, &app, &state, track, &selected_steps);
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    "set-bus-effect-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
+                            if let (Some(bus_idx), Some(slot_idx), Some(param_idx), Some(value)) =
+                                (bus_idx, slot_idx, param_idx, value)
+                            {
+                                match app.set_bus_effect_param(bus_idx, slot_idx, param_idx, value)
+                                {
+                                    Ok(()) => {
+                                        *bus_state.lock().unwrap() = app.buses.clone();
+                                        let rt = editor.runtime_mut();
+                                        sync_bus_mixer_state(rt, &app);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error setting bus effect param: {error}"),
+                                    )),
+                                }
+                            }
+                        }
+                    }
+                    "set-bus-effect-param-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            if let (Some(bus_idx), Some(slot_idx), Some(param_idx), Some(label)) =
+                                (bus_idx, slot_idx, param_idx, label)
+                            {
+                                if let Some(selected_idx) = app.bus_effect_param_option_index(
+                                    bus_idx, slot_idx, param_idx, &label,
+                                ) {
+                                    let is_host_sidechain = matches!(
+                                        app.buses
+                                            .get(bus_idx)
+                                            .and_then(|bus| bus.effect_descriptors.get(slot_idx))
+                                            .and_then(|desc| desc.params.get(param_idx))
+                                            .and_then(|param| param.host_control.as_ref()),
+                                        Some(sequencer::effects::HostControl::FxSidechain { .. })
+                                    );
+                                    if is_host_sidechain {
+                                        app.apply_bus_effect_sidechain_selection(
+                                            bus_idx,
+                                            slot_idx,
+                                            param_idx,
+                                            selected_idx,
+                                        );
+                                    }
+                                    match app.set_bus_effect_param(
+                                        bus_idx,
+                                        slot_idx,
+                                        param_idx,
+                                        selected_idx as f32,
+                                    ) {
+                                        Ok(()) => {
+                                            *bus_state.lock().unwrap() = app.buses.clone();
+                                            let rt = editor.runtime_mut();
+                                            sync_bus_mixer_state(rt, &app);
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(error) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Error setting bus effect option: {error}"),
+                                        )),
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "set-effect-plock-option" => {
                         if let Value::Map(ref map) = payload {
                             let slot_idx =
@@ -1300,6 +1513,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "add-bus-effect" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let effect_name =
+                                map.get("name").and_then(|cell| match &*cell.borrow() {
+                                    Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                });
+                            if let (Some(bus_idx), Some(effect_name)) = (bus_idx, effect_name) {
+                                match app.add_bus_effect_sync(bus_idx, &effect_name) {
+                                    Ok(slot_idx) => {
+                                        *bus_state.lock().unwrap() = app.buses.clone();
+                                        let rt = editor.runtime_mut();
+                                        sync_bus_mixer_state(rt, &app);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        editor.reset_widget_scroll_for_buffer_named("*fx*");
+                                        let fx_render_status =
+                                            editor.runtime_mut().take_status_message();
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        if let Some(status) = fx_render_status {
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "FX UI error after adding bus effect: {status}"
+                                            )));
+                                        } else {
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Added bus effect '{}' to slot {}",
+                                                effect_name,
+                                                slot_idx + 1
+                                            )));
+                                        }
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error adding bus effect: {error}"),
+                                    )),
+                                }
+                            }
+                        }
+                    }
                     "add-effect" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(cell) = map.get("name") {
@@ -1364,6 +1620,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )),
                                     }
                                 }
+                            }
+                        }
+                    }
+                    "delete-bus-effect" => {
+                        let bus_idx = match &payload {
+                            Value::Map(map) => {
+                                map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                            }
+                            _ => None,
+                        };
+                        let slot_idx = match &payload {
+                            Value::Map(map) => {
+                                map.get("slot").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let (Some(bus_idx), Some(slot_idx)) = (bus_idx, slot_idx) {
+                            match app.delete_bus_effect_slot(bus_idx, slot_idx) {
+                                Ok(()) => {
+                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Deleted bus effect slot {}",
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error deleting bus effect: {error}"
+                                ))),
                             }
                         }
                     }
@@ -1504,6 +1800,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                                     sync_step_param_lists(rt, &state, ct);
                                     sync_track_mixer_state(rt, &state);
+                                    sync_bus_mixer_state(rt, &app);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     rt.set_reactive(
                                         "SEQ",
@@ -1615,6 +1912,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
                             sync_track_mixer_state(rt, &state);
+                            sync_bus_mixer_state(rt, &app);
                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                             rt.set_reactive(
                                 "SEQ",
@@ -1788,6 +2086,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             );
                                             sync_step_param_lists(rt, &state, idx);
                                             sync_track_mixer_state(rt, &state);
+                                            sync_bus_mixer_state(rt, &app);
                                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                                             rt.set_reactive(
                                                 "SEQ",
@@ -2187,6 +2486,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Value::Number(n) => Some(*n as usize),
                                             _ => None,
                                         });
+                                    let bus_idx =
+                                        map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                            Value::Number(n) => Some(*n as usize),
+                                            _ => None,
+                                        });
                                     let file_path = std::path::PathBuf::from(format!(
                                         "effects/{effect_name}.lisp"
                                     ));
@@ -2213,6 +2517,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     editor_mode = Some("edit-effect".to_string());
                                     editor_effect_name = Some(effect_name.clone());
                                     editor_effect_slot = slot_idx;
+                                    editor_effect_bus = bus_idx;
                                     let rt = editor.runtime_mut();
                                     rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
                                     rt.set_reactive(
@@ -2300,14 +2605,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             // Recompile at the stored slot
                             if let Some(slot_idx) = slot_idx {
-                                app.ui.cursor_track = current_track.load(Ordering::Relaxed);
-                                app.start_effect_compile(&effect_name, slot_idx);
-                                editor.runtime_mut().set_reactive(
-                                    "SEQ",
-                                    "compiling",
-                                    Value::Bool(true),
-                                );
+                                if let Some(bus_idx) = editor_effect_bus.take() {
+                                    match app.load_bus_effect_to_slot_sync(
+                                        bus_idx,
+                                        slot_idx,
+                                        &effect_name,
+                                    ) {
+                                        Ok(()) => {
+                                            *bus_state.lock().unwrap() = app.buses.clone();
+                                            let rt = editor.runtime_mut();
+                                            sync_bus_mixer_state(rt, &app);
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Updated bus effect '{effect_name}'"
+                                            )));
+                                        }
+                                        Err(error) => {
+                                            editor.handle_host_event(HostEvent::Error(format!(
+                                                "Failed to reload bus effect: {error}"
+                                            )));
+                                        }
+                                    }
+                                } else {
+                                    app.ui.cursor_track = current_track.load(Ordering::Relaxed);
+                                    app.start_effect_compile(&effect_name, slot_idx);
+                                    editor.runtime_mut().set_reactive(
+                                        "SEQ",
+                                        "compiling",
+                                        Value::Bool(true),
+                                    );
+                                }
                             } else {
+                                editor_effect_bus = None;
                                 editor.handle_host_event(HostEvent::Status(format!(
                                     "Saved effect '{effect_name}'"
                                 )));
@@ -2333,6 +2665,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         editor_mode = None;
                         editor_effect_name = None;
                         editor_effect_slot = None;
+                        editor_effect_bus = None;
 
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
@@ -2582,6 +2915,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Track switch — rebuild everything
             if ct != prev_current_track && !app.tracks.is_empty() {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
+                let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
@@ -2600,6 +2934,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
                 sync_track_mixer_state(rt, &state);
+                sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
                 rt.set_reactive(
                     "SEQ",
@@ -2707,6 +3042,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
                 sync_track_mixer_state(rt, &state);
+                sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
@@ -2722,6 +3058,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
+                pull_shared_bus_state(&mut app, &bus_state);
                 let rt = editor.runtime_mut();
                 if app.tracks.is_empty() {
                     sync_track_topology_state(
@@ -2739,6 +3076,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     sync_track_name_state(rt, &mut track_names, &app);
                     sync_track_mixer_state(rt, &state);
+                    sync_bus_mixer_state(rt, &app);
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                     sync_track_params(rt, &app, &state, ct, &selected_steps);
@@ -2771,6 +3109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let fx_ep = fx_epoch.load(Ordering::Relaxed);
             if fx_ep != prev_fx_epoch {
+                editor.reset_widget_scroll_for_buffer_named("*fx*");
                 let rt = editor.runtime_mut();
                 rt.set_reactive(
                     "SEQ",

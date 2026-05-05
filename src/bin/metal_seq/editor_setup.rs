@@ -26,6 +26,8 @@ pub(crate) fn create_editor_and_backend(
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
     editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
     editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    editor.refresh_runtime_side_effects();
+    log_lisp_ui_load_diagnostics(&mut editor);
     reload_custom_instrument_ui(&mut editor);
     push_project_scratch_to_named_buffer(&mut editor, &app);
 
@@ -43,4 +45,29 @@ pub(crate) fn create_editor_and_backend(
     }
 
     Ok((editor, backend))
+}
+
+fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
+    if let Some(status) = editor.runtime_mut().take_status_message() {
+        eprintln!("metal_seq: Lisp UI status during startup: {status}");
+    }
+
+    for name in [
+        "*metal*",
+        "*samples*",
+        "*fx*",
+        "*piano-roll*",
+        "*mixer*",
+        "*transport*",
+    ] {
+        match editor.buffers.iter().find(|buffer| buffer.name == name) {
+            Some(buffer) if buffer.widget_tree.is_some() => {}
+            Some(_) => {
+                eprintln!("metal_seq: Lisp UI buffer {name} exists but has no widget tree");
+            }
+            None => {
+                eprintln!("metal_seq: Lisp UI buffer {name} was not created");
+            }
+        }
+    }
 }

@@ -11,10 +11,11 @@ mod state;
 pub use clock::{SequencerClock, TrackClockState};
 #[allow(unused_imports)]
 pub use data::{
-    sync_beats, ChordData, ChordSnapshot, InstrumentType, KeyboardTrigger, MidiFxPosition,
-    StepData, StepParam, SwingResolution, Timebase, TimebasePLockData, TrackParams,
-    TrackParamsSnapshot, TrackPattern, TrackSoundState, Trigger, DEFAULT_BPM, MAX_STEPS,
-    MAX_TRACKS, NUM_PARAMS, STEPS_PER_PAGE, SYNC_COUNT, SYNC_RESOLUTIONS, TRACK_PATTERN_WORDS,
+    sync_beats, BusId, ChordData, ChordSnapshot, InstrumentType, KeyboardTrigger, MidiFxPosition,
+    StepData, StepParam, SwingResolution, Timebase, TimebasePLockData, TrackOutput, TrackParams,
+    TrackParamsSnapshot, TrackPattern, TrackSendSnapshot, TrackSoundState, Trigger, DEFAULT_BPM,
+    DEFAULT_BUS_A_ID, DEFAULT_BUS_B_ID, MAX_STEPS, MAX_TRACKS, MIX_BUS_ID, NUM_PARAMS,
+    STEPS_PER_PAGE, SYNC_COUNT, SYNC_RESOLUTIONS, TRACK_PATTERN_WORDS,
 };
 #[allow(unused_imports)]
 pub use snapshot::{

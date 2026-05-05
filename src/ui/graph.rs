@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 
 use crate::effects::EffectDescriptor;
 use crate::lisp_effect::{self, DGenManifest, LoadedDGenLib};
-use crate::sequencer::{InstrumentType, MAX_TRACKS};
+use crate::sequencer::{BusId, InstrumentType, TrackOutput, MAX_TRACKS};
 use crate::voice::MAX_VOICES;
 
 use super::{App, EngineNodeIds, TrackNodeIds};
@@ -81,6 +81,292 @@ impl App {
 }
 
 impl GraphController<'_> {
+    pub fn ensure_bus_graph_node(&mut self, id: BusId, name: &str) {
+        if id == BusId::MIX || self.app.graph.bus_node_ids.iter().any(|bus| bus.id == id) {
+            return;
+        }
+
+        let safe_name: String = name
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let left_name = CString::new(format!("{safe_name}_L")).unwrap();
+        let right_name = CString::new(format!("{safe_name}_R")).unwrap();
+        let merge_name = CString::new(format!("{safe_name}_merge")).unwrap();
+        let volume_name = CString::new(format!("{safe_name}_volume")).unwrap();
+        let left_id = unsafe {
+            crate::audiograph::live_add_gain(self.app.graph.lg.0, 1.0, left_name.as_ptr())
+        };
+        let right_id = unsafe {
+            crate::audiograph::live_add_gain(self.app.graph.lg.0, 1.0, right_name.as_ptr())
+        };
+        let merge_id = unsafe {
+            crate::audiograph::add_node(
+                self.app.graph.lg.0,
+                crate::stereo_panner::stereo_panner_vtable(),
+                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                merge_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        let volume_id = unsafe {
+            crate::audiograph::add_node(
+                self.app.graph.lg.0,
+                crate::stereo_panner::stereo_panner_vtable(),
+                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                volume_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        unsafe {
+            crate::audiograph::graph_connect(self.app.graph.lg.0, left_id, 0, merge_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, right_id, 0, merge_id, 1);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 0, volume_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 1, volume_id, 1);
+            crate::audiograph::graph_connect(
+                self.app.graph.lg.0,
+                volume_id,
+                0,
+                self.app.graph.bus_l_id,
+                0,
+            );
+            crate::audiograph::graph_connect(
+                self.app.graph.lg.0,
+                volume_id,
+                1,
+                self.app.graph.bus_r_id,
+                0,
+            );
+        }
+        self.app.graph.bus_node_ids.push(super::BusNodeIds {
+            id,
+            left_id,
+            right_id,
+            merge_id,
+            volume_id,
+        });
+    }
+
+    pub fn delete_bus_graph_node(&mut self, id: BusId) {
+        let Some(pos) = self
+            .app
+            .graph
+            .bus_node_ids
+            .iter()
+            .position(|bus| bus.id == id)
+        else {
+            return;
+        };
+        let bus = self.app.graph.bus_node_ids.remove(pos);
+        unsafe {
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.volume_id,
+                0,
+                self.app.graph.bus_l_id,
+                0,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.volume_id,
+                1,
+                self.app.graph.bus_r_id,
+                0,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.left_id,
+                0,
+                bus.merge_id,
+                0,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.right_id,
+                0,
+                bus.merge_id,
+                1,
+            );
+            crate::audiograph::delete_node(self.app.graph.lg.0, bus.merge_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, bus.volume_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, bus.left_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, bus.right_id);
+        }
+    }
+
+    fn disconnect_delay_output_from_all(&self, delay_id: i32) {
+        unsafe {
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                delay_id,
+                0,
+                self.app.graph.bus_l_id,
+                0,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                delay_id,
+                1,
+                self.app.graph.bus_r_id,
+                0,
+            );
+            for bus in &self.app.graph.bus_node_ids {
+                crate::audiograph::graph_disconnect(
+                    self.app.graph.lg.0,
+                    delay_id,
+                    0,
+                    bus.left_id,
+                    0,
+                );
+                crate::audiograph::graph_disconnect(
+                    self.app.graph.lg.0,
+                    delay_id,
+                    1,
+                    bus.right_id,
+                    0,
+                );
+            }
+        }
+    }
+
+    fn connect_delay_output_to(&self, delay_id: i32, output: &TrackOutput) {
+        unsafe {
+            match output {
+                TrackOutput::Mix => {
+                    crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        delay_id,
+                        0,
+                        self.app.graph.bus_l_id,
+                        0,
+                    );
+                    crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        delay_id,
+                        1,
+                        self.app.graph.bus_r_id,
+                        0,
+                    );
+                }
+                TrackOutput::Bus(id) => {
+                    if let Some(bus) = self.app.graph.bus_node_ids.iter().find(|bus| bus.id == *id)
+                    {
+                        crate::audiograph::graph_connect(
+                            self.app.graph.lg.0,
+                            delay_id,
+                            0,
+                            bus.left_id,
+                            0,
+                        );
+                        crate::audiograph::graph_connect(
+                            self.app.graph.lg.0,
+                            delay_id,
+                            1,
+                            bus.right_id,
+                            0,
+                        );
+                    } else {
+                        crate::audiograph::graph_connect(
+                            self.app.graph.lg.0,
+                            delay_id,
+                            0,
+                            self.app.graph.bus_l_id,
+                            0,
+                        );
+                        crate::audiograph::graph_connect(
+                            self.app.graph.lg.0,
+                            delay_id,
+                            1,
+                            self.app.graph.bus_r_id,
+                            0,
+                        );
+                    }
+                }
+                TrackOutput::None => {}
+            }
+        }
+    }
+
+    pub fn apply_track_output_routing(&mut self, track_idx: usize) {
+        let Some(nodes) = self.app.graph.track_node_ids.get(track_idx) else {
+            return;
+        };
+        let output = self.app.state.pattern.track_params[track_idx].output();
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        self.disconnect_delay_output_from_all(nodes.delay_id);
+        self.connect_delay_output_to(nodes.delay_id, &output);
+    }
+
+    pub fn apply_track_bus_sends(&mut self, track_idx: usize) {
+        let Some(nodes) = self.app.graph.track_node_ids.get_mut(track_idx) else {
+            return;
+        };
+        let delay_id = nodes.delay_id;
+        let old_sends = std::mem::take(&mut nodes.bus_send_ids);
+        let requested_sends = self.app.state.pattern.track_params[track_idx].sends();
+        let bus_nodes = self.app.graph.bus_node_ids.clone();
+        let lg = self.app.graph.lg.0;
+
+        let _batch = GraphEditBatchGuard::new(lg);
+        for send in old_sends {
+            if let Some(bus) = bus_nodes.iter().find(|bus| bus.id == send.destination) {
+                unsafe {
+                    crate::audiograph::graph_disconnect(lg, delay_id, 0, send.left_id, 0);
+                    crate::audiograph::graph_disconnect(lg, delay_id, 1, send.right_id, 0);
+                    crate::audiograph::graph_disconnect(lg, send.left_id, 0, bus.left_id, 0);
+                    crate::audiograph::graph_disconnect(lg, send.right_id, 0, bus.right_id, 0);
+                }
+            }
+            unsafe {
+                crate::audiograph::delete_node(lg, send.left_id);
+                crate::audiograph::delete_node(lg, send.right_id);
+            }
+        }
+
+        let Some(nodes) = self.app.graph.track_node_ids.get_mut(track_idx) else {
+            return;
+        };
+        for send in requested_sends {
+            if send.amount <= 0.0 {
+                continue;
+            }
+            let Some(bus) = bus_nodes.iter().find(|bus| bus.id == send.destination) else {
+                continue;
+            };
+            let left_name =
+                CString::new(format!("track_{track_idx}_send_{}_L", send.destination.0)).unwrap();
+            let right_name =
+                CString::new(format!("track_{track_idx}_send_{}_R", send.destination.0)).unwrap();
+            let left_id =
+                unsafe { crate::audiograph::live_add_gain(lg, send.amount, left_name.as_ptr()) };
+            let right_id =
+                unsafe { crate::audiograph::live_add_gain(lg, send.amount, right_name.as_ptr()) };
+            unsafe {
+                crate::audiograph::graph_connect(lg, delay_id, 0, left_id, 0);
+                crate::audiograph::graph_connect(lg, delay_id, 1, right_id, 0);
+                crate::audiograph::graph_connect(lg, left_id, 0, bus.left_id, 0);
+                crate::audiograph::graph_connect(lg, right_id, 0, bus.right_id, 0);
+            }
+            nodes.bus_send_ids.push(super::BusSendNodeIds {
+                destination: send.destination,
+                left_id,
+                right_id,
+            });
+        }
+    }
+
     pub fn add_track(&mut self, wav_path: &Path) -> Result<usize, String> {
         let idx = self.app.state.active_track_count();
         if idx >= MAX_TRACKS {
@@ -89,7 +375,7 @@ impl GraphController<'_> {
 
         let (buffer_id, track_name) =
             crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
-        let shell = self.create_track_shell(&track_name);
+        let shell = self.create_track_shell(idx, &track_name);
         let voices = self.build_sampler_voices(
             &track_name,
             buffer_id,
@@ -127,7 +413,7 @@ impl GraphController<'_> {
         }
 
         let track_name = instrument_display_name(name);
-        let shell = self.create_track_shell(&track_name);
+        let shell = self.create_track_shell(idx, &track_name);
         self.ensure_custom_engine_runtime(engine_id, name, manifest, lib)?;
         self.connect_engine_to_track(
             engine_id,
@@ -880,7 +1166,7 @@ impl GraphController<'_> {
         }
     }
 
-    fn create_track_shell(&mut self, name: &str) -> TrackShell {
+    fn create_track_shell(&mut self, idx: usize, name: &str) -> TrackShell {
         let sum_name = CString::new(format!("{}_sum_l", name)).unwrap();
         let voice_sum_id = unsafe {
             crate::audiograph::live_add_gain(self.app.graph.lg.0, 1.0, sum_name.as_ptr())
@@ -947,30 +1233,9 @@ impl GraphController<'_> {
             crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 1, filter_id, 1);
             crate::audiograph::graph_connect(self.app.graph.lg.0, filter_id, 0, delay_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, filter_id, 1, delay_id, 1);
-            crate::audiograph::graph_connect(
-                self.app.graph.lg.0,
-                delay_id,
-                0,
-                self.app.graph.bus_l_id,
-                0,
-            );
-            crate::audiograph::graph_connect(
-                self.app.graph.lg.0,
-                delay_id,
-                1,
-                self.app.graph.bus_r_id,
-                0,
-            );
-            crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 0, send_id, 0);
-            crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 1, send_id, 0);
-            crate::audiograph::graph_connect(
-                self.app.graph.lg.0,
-                send_id,
-                0,
-                self.app.graph.reverb_bus_id,
-                0,
-            );
         }
+        let output = self.app.state.pattern.track_params[idx].output();
+        self.connect_delay_output_to(delay_id, &output);
 
         TrackShell {
             voice_sum_id,
@@ -1616,6 +1881,7 @@ impl GraphController<'_> {
                     filter_id: shell.filter_id,
                     delay_id: shell.delay_id,
                     send_id: shell.send_id,
+                    bus_send_ids: Vec::new(),
                 });
                 self.app.graph.track_synth_node_ids.push(Vec::new());
                 self.app.graph.track_gatepitch_node_ids.push(Vec::new());
@@ -1650,6 +1916,7 @@ impl GraphController<'_> {
                     filter_id: shell.filter_id,
                     delay_id: shell.delay_id,
                     send_id: shell.send_id,
+                    bus_send_ids: Vec::new(),
                 });
                 let engine = self.app.graph.engine_node_ids[engine_id]
                     .as_ref()

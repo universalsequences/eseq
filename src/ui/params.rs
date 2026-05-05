@@ -3,7 +3,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use std::sync::atomic::Ordering;
 
-use crate::sequencer::{SwingResolution, Timebase, MAX_STEPS};
+use crate::sequencer::{BusId, SwingResolution, Timebase, MAX_STEPS};
 
 use super::command::{apply_command, AppCommand};
 use super::effects_draw::draw_effects_column;
@@ -580,13 +580,18 @@ impl App {
 
     pub(super) fn push_master_volume(&self) {
         let volume = f32::from_bits(self.state.transport.master_volume.load(Ordering::Relaxed));
-        for bus_id in [self.graph.bus_l_id, self.graph.bus_r_id] {
+        if let Some(nodes) = self
+            .graph
+            .bus_node_ids
+            .iter()
+            .find(|nodes| nodes.id == BusId::MIX)
+        {
             unsafe {
                 crate::audiograph::params_push_wrapper(
                     self.graph.lg.0,
                     crate::audiograph::ParamMsg {
-                        idx: 0,
-                        logical_id: bus_id as u64,
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                        logical_id: nodes.volume_id as u64,
                         fvalue: volume,
                     },
                 );

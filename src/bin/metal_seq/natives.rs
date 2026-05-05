@@ -11,6 +11,8 @@ pub(crate) fn init_runtime(
     state: Arc<SequencerState>,
     track_names: &[String],
     track_pan_ids: Arc<Mutex<Vec<i32>>>,
+    buses: Arc<Mutex<Vec<ui::BusChannelState>>>,
+    bus_node_ids: Arc<Mutex<Vec<ui::BusNodeIds>>>,
     current_track: Arc<AtomicUsize>,
     selected_steps: Arc<Mutex<HashSet<usize>>>,
     piano_roll_selection: Arc<Mutex<HashSet<u64>>>,
@@ -128,6 +130,43 @@ pub(crate) fn init_runtime(
                 ("track-solos", build_track_solos(&state)),
                 ("track-muted-by-solo", build_track_muted_by_solo(&state)),
                 (
+                    "bus-names",
+                    build_track_names(
+                        &app.buses
+                            .iter()
+                            .map(|bus| bus.name.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                ),
+                (
+                    "bus-volumes",
+                    Value::List(
+                        app.buses
+                            .iter()
+                            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.volume as f64))))
+                            .collect(),
+                    ),
+                ),
+                (
+                    "bus-mutes",
+                    Value::List(
+                        app.buses
+                            .iter()
+                            .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.mute))))
+                            .collect(),
+                    ),
+                ),
+                (
+                    "bus-solos",
+                    Value::List(
+                        app.buses
+                            .iter()
+                            .map(|bus| Rc::new(RefCell::new(Value::Bool(bus.solo))))
+                            .collect(),
+                    ),
+                ),
+                ("bus-effects", build_bus_effects_value(&app)),
+                (
                     "effects",
                     if track_count == 0 {
                         Value::List(vec![])
@@ -168,6 +207,68 @@ pub(crate) fn init_runtime(
                     "tp-send",
                     Value::Number(state.pattern.track_params[0].get_send() as f64),
                 ),
+                ("tp-output", {
+                    let tp = &state.pattern.track_params[0];
+                    let label = match tp.output() {
+                        sequencer::sequencer::TrackOutput::Mix => "main".to_string(),
+                        sequencer::sequencer::TrackOutput::None => "sends only".to_string(),
+                        sequencer::sequencer::TrackOutput::Bus(id) => app
+                            .buses
+                            .iter()
+                            .find(|bus| bus.id == id)
+                            .map(|bus| bus.name.clone())
+                            .unwrap_or_else(|| "main".to_string()),
+                    };
+                    Value::String(label)
+                }),
+                (
+                    "track-output-options",
+                    Value::List(
+                        std::iter::once("main".to_string())
+                            .chain(std::iter::once("sends only".to_string()))
+                            .chain(
+                                app.buses
+                                    .iter()
+                                    .filter(|bus| bus.id != sequencer::sequencer::BusId::MIX)
+                                    .map(|bus| bus.name.clone()),
+                            )
+                            .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                            .collect(),
+                    ),
+                ),
+                ("tp-bus-sends", {
+                    use std::collections::HashMap;
+                    let tp = &state.pattern.track_params[0];
+                    let sends = tp.sends();
+                    Value::List(
+                        app.buses
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, bus)| bus.id != sequencer::sequencer::BusId::MIX)
+                            .map(|(bus_idx, bus)| {
+                                let amount = sends
+                                    .iter()
+                                    .find(|send| send.destination == bus.id)
+                                    .map(|send| send.amount)
+                                    .unwrap_or(0.0);
+                                let mut map = HashMap::new();
+                                map.insert(
+                                    "bus-idx".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(bus_idx as f64))),
+                                );
+                                map.insert(
+                                    "name".to_string(),
+                                    Rc::new(RefCell::new(Value::String(bus.name.clone()))),
+                                );
+                                map.insert(
+                                    "amount".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(amount as f64))),
+                                );
+                                Rc::new(RefCell::new(Value::Map(map)))
+                            })
+                            .collect(),
+                    )
+                }),
                 (
                     "tp-num-steps",
                     Value::Number(state.pattern.track_params[0].get_num_steps() as f64),
@@ -449,6 +550,98 @@ pub(crate) fn init_runtime(
         ui_ep.fetch_add(1, Ordering::Relaxed);
         let pan_ids_lock = pan_ids.lock().unwrap();
         push_solo_mutes(lg_raw, &st, &pan_ids_lock);
+        Ok(Value::Bool(solo))
+    });
+
+    let bus_state = buses.clone();
+    let bus_nodes = bus_node_ids.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-bus-volume", move |args, _ctx| {
+        let (Some(Value::Number(bus_idx)), Some(Value::Number(vol))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-set-bus-volume: expected (bus volume)".into());
+        };
+        let bus_idx = *bus_idx as usize;
+        let vol = (*vol as f32).clamp(0.0, 1.0);
+        {
+            let mut buses = bus_state.lock().unwrap();
+            let Some(bus) = buses.get_mut(bus_idx) else {
+                return Err(format!("seq-set-bus-volume: bus {bus_idx} out of range").into());
+            };
+            bus.volume = vol;
+        }
+        if let Some(nodes) = bus_nodes.lock().unwrap().get(bus_idx).cloned() {
+            unsafe {
+                sequencer::audiograph::params_push_wrapper(
+                    lg_raw,
+                    sequencer::audiograph::ParamMsg {
+                        idx: sequencer::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: vol,
+                    },
+                );
+            }
+        }
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Number(vol as f64))
+    });
+
+    let bus_state = buses.clone();
+    let bus_nodes = bus_node_ids.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-bus-mute", move |args, _ctx| {
+        let Some(Value::Number(bus_idx)) = args.first() else {
+            return Err("seq-toggle-bus-mute: expected bus".into());
+        };
+        let bus_idx = *bus_idx as usize;
+        let (muted, volume) = {
+            let mut buses = bus_state.lock().unwrap();
+            let Some(bus) = buses.get_mut(bus_idx) else {
+                return Err(format!("seq-toggle-bus-mute: bus {bus_idx} out of range").into());
+            };
+            bus.mute = !bus.mute;
+            (bus.mute, bus.volume)
+        };
+        if let Some(nodes) = bus_nodes.lock().unwrap().get(bus_idx).cloned() {
+            unsafe {
+                sequencer::audiograph::params_push_wrapper(
+                    lg_raw,
+                    sequencer::audiograph::ParamMsg {
+                        idx: sequencer::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: volume,
+                    },
+                );
+                sequencer::audiograph::params_push_wrapper(
+                    lg_raw,
+                    sequencer::audiograph::ParamMsg {
+                        idx: sequencer::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: if muted { 1.0 } else { 0.0 },
+                    },
+                );
+            }
+        }
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(muted))
+    });
+
+    let bus_state = buses.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-bus-solo", move |args, _ctx| {
+        let Some(Value::Number(bus_idx)) = args.first() else {
+            return Err("seq-toggle-bus-solo: expected bus".into());
+        };
+        let bus_idx = *bus_idx as usize;
+        let solo = {
+            let mut buses = bus_state.lock().unwrap();
+            let Some(bus) = buses.get_mut(bus_idx) else {
+                return Err(format!("seq-toggle-bus-solo: bus {bus_idx} out of range").into());
+            };
+            bus.solo = !bus.solo;
+            bus.solo
+        };
+        ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(solo))
     });
 
@@ -1548,6 +1741,21 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-track-solo",
             "(seq-toggle-track-solo track)",
             "Toggle a track's solo state and update solo mute routing.",
+        ),
+        (
+            "seq-set-bus-volume",
+            "(seq-set-bus-volume bus volume)",
+            "Set a bus mixer volume and update its bus gain nodes.",
+        ),
+        (
+            "seq-toggle-bus-mute",
+            "(seq-toggle-bus-mute bus)",
+            "Toggle a bus mute state.",
+        ),
+        (
+            "seq-toggle-bus-solo",
+            "(seq-toggle-bus-solo bus)",
+            "Toggle a bus solo state.",
         ),
         (
             "seq-set-effect-param",

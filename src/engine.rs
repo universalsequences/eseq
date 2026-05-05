@@ -7,8 +7,8 @@ use crate::audio;
 use crate::audiograph::{self, LiveGraphPtr};
 use crate::recorder::MasterRecorder;
 use crate::reverb;
-use crate::sequencer::{KeyboardTrigger, SequencerState};
-use crate::ui::AudioBuses;
+use crate::sequencer::{BusId, KeyboardTrigger, SequencerState};
+use crate::ui::{AudioBuses, BusNodeIds};
 
 pub struct Engine {
     pub state: Arc<SequencerState>,
@@ -72,15 +72,100 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
     let bus_r_name = CString::new("bus_R").unwrap();
     let bus_l_id = unsafe { audiograph::live_add_gain(lg, 1.0, bus_l_name.as_ptr()) };
     let bus_r_id = unsafe { audiograph::live_add_gain(lg, 1.0, bus_r_name.as_ptr()) };
+    let mix_merge_name = CString::new("mix_merge").unwrap();
+    let mix_volume_name = CString::new("mix_volume").unwrap();
+    let mix_merge_id = unsafe {
+        audiograph::add_node(
+            lg,
+            crate::stereo_panner::stereo_panner_vtable(),
+            crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+            mix_merge_name.as_ptr(),
+            2,
+            2,
+            std::ptr::null(),
+            0,
+        )
+    };
+    let mix_volume_id = unsafe {
+        audiograph::add_node(
+            lg,
+            crate::stereo_panner::stereo_panner_vtable(),
+            crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+            mix_volume_name.as_ptr(),
+            2,
+            2,
+            std::ptr::null(),
+            0,
+        )
+    };
 
-    // bus_L → DAC channel 0, bus_R → DAC channel 1
+    // bus_L / bus_R collect the mix, then the Mix bus FX chain feeds the DAC.
     unsafe {
-        audiograph::graph_connect(lg, bus_l_id, 0, 0, 0);
+        audiograph::graph_connect(lg, bus_l_id, 0, mix_merge_id, 0);
+        audiograph::graph_connect(lg, bus_r_id, 0, mix_merge_id, 1);
+        audiograph::graph_connect(lg, mix_merge_id, 0, mix_volume_id, 0);
+        audiograph::graph_connect(lg, mix_merge_id, 1, mix_volume_id, 1);
+        audiograph::graph_connect(lg, mix_volume_id, 0, 0, 0);
         if channels > 1 {
-            audiograph::graph_connect(lg, bus_r_id, 0, 0, 1);
+            audiograph::graph_connect(lg, mix_volume_id, 1, 0, 1);
         } else {
-            audiograph::graph_connect(lg, bus_r_id, 0, 0, 0);
+            audiograph::graph_connect(lg, mix_volume_id, 1, 0, 0);
         }
+    }
+
+    let mut default_bus_nodes = vec![BusNodeIds {
+        id: BusId::MIX,
+        left_id: bus_l_id,
+        right_id: bus_r_id,
+        merge_id: mix_merge_id,
+        volume_id: mix_volume_id,
+    }];
+    for (id, label) in [(BusId::DEFAULT_A, "bus_A"), (BusId::DEFAULT_B, "bus_B")] {
+        let left_name = CString::new(format!("{label}_L")).unwrap();
+        let right_name = CString::new(format!("{label}_R")).unwrap();
+        let merge_name = CString::new(format!("{label}_merge")).unwrap();
+        let volume_name = CString::new(format!("{label}_volume")).unwrap();
+        let left_id = unsafe { audiograph::live_add_gain(lg, 1.0, left_name.as_ptr()) };
+        let right_id = unsafe { audiograph::live_add_gain(lg, 1.0, right_name.as_ptr()) };
+        let merge_id = unsafe {
+            audiograph::add_node(
+                lg,
+                crate::stereo_panner::stereo_panner_vtable(),
+                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                merge_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        let volume_id = unsafe {
+            audiograph::add_node(
+                lg,
+                crate::stereo_panner::stereo_panner_vtable(),
+                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                volume_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
+        unsafe {
+            audiograph::graph_connect(lg, left_id, 0, merge_id, 0);
+            audiograph::graph_connect(lg, right_id, 0, merge_id, 1);
+            audiograph::graph_connect(lg, merge_id, 0, volume_id, 0);
+            audiograph::graph_connect(lg, merge_id, 1, volume_id, 1);
+            audiograph::graph_connect(lg, volume_id, 0, bus_l_id, 0);
+            audiograph::graph_connect(lg, volume_id, 1, bus_r_id, 0);
+        }
+        default_bus_nodes.push(BusNodeIds {
+            id,
+            left_id,
+            right_id,
+            merge_id,
+            volume_id,
+        });
     }
 
     // Create global reverb bus and reverb node
@@ -150,6 +235,7 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
     let buses = AudioBuses {
         bus_l_id,
         bus_r_id,
+        default_bus_nodes,
         reverb_bus_id,
         reverb_node_id,
     };

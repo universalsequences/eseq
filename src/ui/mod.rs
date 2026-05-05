@@ -12,11 +12,11 @@ use crate::agent::network::{AgentTurnError, AgentTurnResult};
 use crate::agent::protocol::{AgentToolRuntime, ToolCallOutcome};
 use crate::agent::providers::{AgentMessage, AgentMessageRole, AgentProviderState};
 use crate::audiograph::LiveGraphPtr;
-use crate::effects::{EffectDescriptor, ParamKind, ParamScaling};
+use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScaling};
 use crate::lisp_effect::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
-    InstrumentType, KeyboardTrigger, SequencerState, StepParam, StepSnapshot, STEPS_PER_PAGE,
+    BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, StepSnapshot, STEPS_PER_PAGE,
 };
 
 mod browser;
@@ -359,6 +359,7 @@ pub struct GraphState {
     pub sample_rate: u32,
     pub bus_l_id: i32,
     pub bus_r_id: i32,
+    pub bus_node_ids: Vec<BusNodeIds>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
     pub track_buffer_ids: Vec<i32>,
@@ -461,14 +462,79 @@ pub struct TrackNodeIds {
     pub filter_id: i32,
     pub delay_id: i32,
     pub send_id: i32,
+    pub bus_send_ids: Vec<BusSendNodeIds>,
+}
+
+#[derive(Clone)]
+pub struct BusSendNodeIds {
+    pub destination: BusId,
+    pub left_id: i32,
+    pub right_id: i32,
 }
 
 /// Audio bus node IDs, passed to App::new to reduce parameter count.
 pub struct AudioBuses {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
+    pub default_bus_nodes: Vec<BusNodeIds>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
+}
+
+#[derive(Clone)]
+pub struct BusNodeIds {
+    pub id: BusId,
+    pub left_id: i32,
+    pub right_id: i32,
+    pub merge_id: i32,
+    pub volume_id: i32,
+}
+
+#[derive(Clone)]
+pub struct BusChannelState {
+    pub id: BusId,
+    pub name: String,
+    pub volume: f32,
+    pub mute: bool,
+    pub solo: bool,
+    pub effect_descriptors: Vec<EffectDescriptor>,
+    pub effect_slots: Vec<EffectSlotSnapshot>,
+    pub custom_effect_names: Vec<Option<String>>,
+}
+
+impl BusChannelState {
+    pub fn new(id: BusId, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            volume: 1.0,
+            mute: false,
+            solo: false,
+            effect_descriptors: Self::default_effect_descriptors(),
+            effect_slots: Self::default_effect_slots(),
+            custom_effect_names: vec![None; crate::lisp_effect::MAX_CUSTOM_FX],
+        }
+    }
+
+    pub fn default_effect_descriptors() -> Vec<EffectDescriptor> {
+        (0..crate::lisp_effect::MAX_CUSTOM_FX)
+            .map(|_| EffectDescriptor::empty_custom_slot())
+            .collect()
+    }
+
+    pub fn default_effect_slots() -> Vec<EffectSlotSnapshot> {
+        (0..crate::lisp_effect::MAX_CUSTOM_FX)
+            .map(|_| EffectSlotSnapshot::new_empty())
+            .collect()
+    }
+
+    pub fn default_buses() -> Vec<Self> {
+        vec![
+            Self::new(BusId::MIX, "Mix"),
+            Self::new(BusId::DEFAULT_A, "Bus A"),
+            Self::new(BusId::DEFAULT_B, "Bus B"),
+        ]
+    }
 }
 
 pub struct UiState {
@@ -536,6 +602,7 @@ pub struct UiState {
 pub struct App {
     pub state: Arc<SequencerState>,
     pub tracks: Vec<String>,
+    pub buses: Vec<BusChannelState>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub current_project_name: Option<String>,
@@ -584,6 +651,7 @@ impl App {
         Self {
             state,
             tracks: Vec::new(),
+            buses: BusChannelState::default_buses(),
             sampler_paths: Vec::new(),
             sample_path_registry: HashMap::new(),
             current_project_name: None,
@@ -697,6 +765,7 @@ impl App {
                 sample_rate,
                 bus_l_id: buses.bus_l_id,
                 bus_r_id: buses.bus_r_id,
+                bus_node_ids: buses.default_bus_nodes,
                 reverb_bus_id: buses.reverb_bus_id,
                 reverb_node_id: buses.reverb_node_id,
                 track_buffer_ids: Vec::new(),

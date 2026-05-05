@@ -4,8 +4,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::EffectSlotSnapshot;
 use crate::sequencer::{
-    ChordSnapshot, InstrumentType, MidiFxPosition, PatternSnapshot, SwingResolution, Timebase,
-    TrackParamsSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    BusId, ChordSnapshot, InstrumentType, MidiFxPosition, PatternSnapshot, SwingResolution,
+    Timebase, TrackOutput, TrackParamsSnapshot, TrackSendSnapshot, TrackSoundState, MAX_STEPS,
+    NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 
 const PROJECTS_DIR: &str = "projects";
@@ -20,6 +21,8 @@ pub struct ProjectFile {
     pub master_volume: f32,
     pub current_pattern: usize,
     pub reverb: ProjectReverbState,
+    #[serde(default = "default_project_buses")]
+    pub buses: Vec<ProjectBusChannel>,
     pub tracks: Vec<ProjectTrack>,
     pub custom_effects: Vec<Vec<Option<String>>>,
     #[serde(default)]
@@ -42,6 +45,54 @@ pub struct ProjectReverbState {
     pub size: f32,
     pub brightness: f32,
     pub replace: f32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectBusChannel {
+    pub id: u64,
+    pub name: String,
+    #[serde(default = "default_track_volume")]
+    pub volume: f32,
+    #[serde(default)]
+    pub mute: bool,
+    #[serde(default)]
+    pub solo: bool,
+    #[serde(default)]
+    pub custom_effects: Vec<Option<String>>,
+    #[serde(default)]
+    pub effect_slots: Vec<ProjectEffectSlot>,
+}
+
+pub fn default_project_buses() -> Vec<ProjectBusChannel> {
+    vec![
+        ProjectBusChannel {
+            id: crate::sequencer::MIX_BUS_ID,
+            name: "Mix".to_string(),
+            volume: 1.0,
+            mute: false,
+            solo: false,
+            custom_effects: Vec::new(),
+            effect_slots: Vec::new(),
+        },
+        ProjectBusChannel {
+            id: crate::sequencer::DEFAULT_BUS_A_ID,
+            name: "Bus A".to_string(),
+            volume: 1.0,
+            mute: false,
+            solo: false,
+            custom_effects: Vec::new(),
+            effect_slots: Vec::new(),
+        },
+        ProjectBusChannel {
+            id: crate::sequencer::DEFAULT_BUS_B_ID,
+            name: "Bus B".to_string(),
+            volume: 1.0,
+            mute: false,
+            solo: false,
+            custom_effects: Vec::new(),
+            effect_slots: Vec::new(),
+        },
+    ]
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -117,6 +168,10 @@ pub struct ProjectTrackParams {
     #[serde(default)]
     pub solo: bool,
     pub send: f32,
+    #[serde(default)]
+    pub output: ProjectTrackOutput,
+    #[serde(default)]
+    pub sends: Vec<ProjectTrackSend>,
     pub polyphonic: bool,
     pub timebase: u8,
     #[serde(default)]
@@ -133,6 +188,26 @@ pub struct ProjectTrackParams {
     pub accum_mode: u32,
     #[serde(default)]
     pub fts_scale: usize,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ProjectTrackOutput {
+    Mix,
+    Bus { id: u64 },
+    None,
+}
+
+impl Default for ProjectTrackOutput {
+    fn default() -> Self {
+        Self::Mix
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectTrackSend {
+    pub destination: u64,
+    pub amount: f32,
 }
 
 #[derive(Clone)]
@@ -255,6 +330,12 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             mute: value.mute,
             solo: value.solo,
             send: value.send,
+            output: ProjectTrackOutput::from(value.output),
+            sends: value
+                .sends
+                .into_iter()
+                .map(ProjectTrackSend::from)
+                .collect(),
             polyphonic: value.polyphonic,
             timebase: value.timebase as u8,
             accumulator_idx: value.accumulator_idx,
@@ -282,6 +363,12 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             mute: value.mute,
             solo: value.solo,
             send: value.send,
+            output: TrackOutput::from(value.output),
+            sends: value
+                .sends
+                .into_iter()
+                .map(TrackSendSnapshot::from)
+                .collect(),
             polyphonic: value.polyphonic,
             timebase: Timebase::from_index(value.timebase as u32),
             accumulator_idx: value.accumulator_idx,
@@ -291,6 +378,44 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
+        }
+    }
+}
+
+impl From<TrackOutput> for ProjectTrackOutput {
+    fn from(value: TrackOutput) -> Self {
+        match value {
+            TrackOutput::Mix => Self::Mix,
+            TrackOutput::Bus(id) => Self::Bus { id: id.0 },
+            TrackOutput::None => Self::None,
+        }
+    }
+}
+
+impl From<ProjectTrackOutput> for TrackOutput {
+    fn from(value: ProjectTrackOutput) -> Self {
+        match value {
+            ProjectTrackOutput::Mix => Self::Mix,
+            ProjectTrackOutput::Bus { id } => Self::Bus(BusId(id)),
+            ProjectTrackOutput::None => Self::None,
+        }
+    }
+}
+
+impl From<TrackSendSnapshot> for ProjectTrackSend {
+    fn from(value: TrackSendSnapshot) -> Self {
+        Self {
+            destination: value.destination.0,
+            amount: value.amount,
+        }
+    }
+}
+
+impl From<ProjectTrackSend> for TrackSendSnapshot {
+    fn from(value: ProjectTrackSend) -> Self {
+        Self {
+            destination: BusId(value.destination),
+            amount: value.amount.clamp(0.0, 1.0),
         }
     }
 }
@@ -833,6 +958,7 @@ mod tests {
                 brightness: 0.8,
                 replace: 0.3,
             },
+            buses: default_project_buses(),
             tracks: vec![
                 ProjectTrack::Custom {
                     instrument_name: "prophet-5".to_string(),
@@ -863,6 +989,13 @@ mod tests {
                         mute: false,
                         solo: true,
                         send: 0.25,
+                        output: ProjectTrackOutput::Bus {
+                            id: crate::sequencer::DEFAULT_BUS_A_ID,
+                        },
+                        sends: vec![ProjectTrackSend {
+                            destination: crate::sequencer::DEFAULT_BUS_B_ID,
+                            amount: 0.4,
+                        }],
                         polyphonic: true,
                         timebase: Timebase::Sixteenth as u8,
                         accumulator_idx: 1,
@@ -885,6 +1018,8 @@ mod tests {
                         mute: true,
                         solo: false,
                         send: 0.5,
+                        output: ProjectTrackOutput::Mix,
+                        sends: Vec::new(),
                         polyphonic: false,
                         timebase: Timebase::Eighth as u8,
                         accumulator_idx: 0,
@@ -959,6 +1094,16 @@ mod tests {
         assert_eq!(restored.patterns[0].track_params[0].accum_mode, 2);
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);
+        assert_eq!(restored.buses.len(), 2);
+        assert_eq!(restored.buses[0].id, crate::sequencer::DEFAULT_BUS_A_ID);
+        assert!(matches!(
+            restored.patterns[0].track_params[0].output,
+            ProjectTrackOutput::Bus { id } if id == crate::sequencer::DEFAULT_BUS_A_ID
+        ));
+        assert_eq!(
+            restored.patterns[0].track_params[0].sends[0].destination,
+            crate::sequencer::DEFAULT_BUS_B_ID
+        );
     }
 
     #[test]

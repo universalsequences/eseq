@@ -130,7 +130,7 @@ unsafe fn init_param_defaults(s: *mut f32) {
     *s.add(PARAM_LFO1_DIV) = 2.0;
     *s.add(PARAM_LFO1_SHAPE) = SHAPE_TRIANGLE as f32;
     *s.add(PARAM_LFO1_PW) = 0.5;
-    *s.add(PARAM_LFO1_RETRIGGER) = 1.0;
+    *s.add(PARAM_LFO1_RETRIGGER) = 0.0;
 
     *s.add(PARAM_LFO2_RATE_HZ) = 1.7;
     *s.add(PARAM_LFO2_SYNC) = 0.0;
@@ -217,7 +217,7 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
             "mod_lfo1",
             5.0,
             2.0,
-            1.0,
+            0.0,
         ),
         (
             PARAM_LFO2_RATE_HZ,
@@ -488,7 +488,7 @@ pub fn ui_param_descriptors() -> Vec<ParamDescriptor> {
         PARAM_LFO1_RETRIGGER,
         5.0,
         2.0,
-        1.0,
+        0.0,
     )] {
         push_param(
             &mut out,
@@ -1037,4 +1037,32 @@ pub fn is_bar_resync_param(node_param_idx: u32) -> bool {
         MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32,
     ];
     timed_params.contains(&node_param_idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synced_lfo_divisions_are_calibrated_to_quarter_note_beats() {
+        let bpm = 120.0;
+
+        // div index 0 maps to 1/16 = 0.25 beats, so one cycle is 0.125s at 120 BPM.
+        assert!((synced_rate_hz(0, bpm) - 8.0).abs() < f32::EPSILON);
+        // div index 3 maps to 1/2 bar = 2 beats, so one cycle is 1s at 120 BPM.
+        assert!((synced_rate_hz(3, bpm) - 1.0).abs() < f32::EPSILON);
+        // div index 4 maps to 1 bar = 4 beats, so one cycle is 2s at 120 BPM.
+        assert!((synced_rate_hz(4, bpm) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn lfo1_does_not_retrigger_by_default() {
+        let desc = param_descriptors();
+        let retrigger = desc
+            .iter()
+            .find(|param| param.node_param_idx == MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
+            .expect("LFO 1 retrigger descriptor");
+
+        assert_eq!(retrigger.default, 0.0);
+    }
 }

@@ -5,6 +5,7 @@
 (defstate instrument-source-tab 0)
 (defstate selected-fx-slot -1)
 (defstate selected-midi-fx-slot -1)
+(defstate selected-bus-fx-slot -1)
 ;; These are temporary render-context globals used by generated custom synth UI.
 ;; They must NOT be defstate: custom UI functions set them while rendering, and
 ;; writing reactive state during measurement/layout can perturb the layout.
@@ -16,19 +17,38 @@
 (def fx-clear-selected-effect ()
   (do
     (set! selected-fx-slot -1)
-    (set! selected-midi-fx-slot -1)))
+    (set! selected-midi-fx-slot -1)
+    (set! selected-bus-fx-slot -1)))
 
 (def fx-select-effect (slot)
   (do
     (set! selected-fx-slot slot)
-    (set! selected-midi-fx-slot -1)))
+    (set! selected-midi-fx-slot -1)
+    (set! selected-bus-fx-slot -1)))
 
 (def fx-select-midi-effect (slot)
   (do
     (set! selected-midi-fx-slot slot)
-    (set! selected-fx-slot -1)))
+    (set! selected-fx-slot -1)
+    (set! selected-bus-fx-slot -1)))
+
+(def fx-select-bus-effect (slot)
+  (do
+    (set! selected-bus-fx-slot slot)
+    (set! selected-fx-slot -1)
+    (set! selected-midi-fx-slot -1)))
+
+(def fx-has-selected-bus? ()
+  (and (>= selected-bus 0)
+       (< selected-bus (len SEQ.bus-names))
+       (< selected-bus (len SEQ.bus-effects))))
 
 (def fx-delete-selected-effect ()
+  (if (and (fx-has-selected-bus?) (>= selected-bus-fx-slot 0))
+    (do
+      (host-command "delete-bus-effect"
+        (dict :bus selected-bus :slot selected-bus-fx-slot))
+      (fx-clear-selected-effect))
   (if (>= selected-midi-fx-slot 0)
     (do
       (host-command "delete-midi-fx" (dict :slot selected-midi-fx-slot))
@@ -37,7 +57,7 @@
     (do
       (host-command "delete-effect" (dict :slot selected-fx-slot))
       (fx-clear-selected-effect))
-    (fx-clear-selected-effect))))
+    (fx-clear-selected-effect)))))
 
 (defwidget fx-panel-bg
   :width 1 :height 1
@@ -117,13 +137,17 @@
 (def fx-set-effect-value (fx p v)
   (do
     (fx-clear-selected-effect)
+    (if (get fx :bus-fx)
+      (host-command "set-bus-effect-param"
+        (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
+              :param-idx (get p :idx) :value v))
     (if (get fx :midi-fx)
       (host-command
         (if (seq-has-selection?) "set-midi-fx-plock" "set-midi-fx-param")
         (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v))
       (if (seq-has-selection?)
         (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
-        (seq-set-effect-param (get fx :slot-idx) (get p :idx) v)))))
+        (seq-set-effect-param (get fx :slot-idx) (get p :idx) v))))))
 
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
@@ -150,10 +174,13 @@
                   (fx-clear-selected-effect)
                   (if fx
                     (host-command
-                      (if (get fx :midi-fx)
+                      (if (get fx :bus-fx)
+                        "set-bus-effect-param-option"
+                        (if (get fx :midi-fx)
                         (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
-                        (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option"))
-                      (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :label v))
+                        (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")))
+                      (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
+                            :param-idx (get p :idx) :label v))
                     (fx-set-instrument-option p v)))
                 :width 5.8 :height 1.2 :font-size 11)
               (number-picker :value (get p :value)
@@ -183,7 +210,9 @@
             (if fx
               (if (get fx :midi-fx)
                 (str "midi-fx-slot-" (get fx :slot-idx) "-param-" (get p :idx))
-                (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx)))
+                (if (get fx :bus-fx)
+                  (str "bus-fx-slot-" (get fx :bus-idx) "-" (get fx :slot-idx) "-param-" (get p :idx))
+                  (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx))))
               (str "instrument-tab-" instrument-panel-tab "-chunk-" ci "-param-" (get p :idx)))))))))
 
 (def instrument-mod-base-name (name)
@@ -287,21 +316,27 @@
   (box :background "fx-panel-bg"
        :debug-name (if (get fx :midi-fx)
          (str "midi-fx-panel-root-" (get fx :slot-idx) "-" (get fx :name))
-         (str "audio-fx-panel-root-" (get fx :slot-idx) "-" title))
+         (if (get fx :bus-fx)
+           (str "bus-fx-panel-root-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" title)
+           (str "audio-fx-panel-root-" (get fx :slot-idx) "-" title)))
        :selected (if (get fx :midi-fx)
          (if (= selected-midi-fx-slot (get fx :slot-idx)) 1 0)
-         (if (= selected-fx-slot (get fx :slot-idx)) 1 0))
+         (if (get fx :bus-fx)
+           (if (= selected-bus-fx-slot (get fx :slot-idx)) 1 0)
+           (if (= selected-fx-slot (get fx :slot-idx)) 1 0)))
        :padding 0
     (v-stack :gap 0
-      (box :width :fill :height 1.0 :padding 0 :v-align :center :h-align :start
+      (box :height 1.0 :padding 0 :v-align :center :h-align :start
            :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
            :on-click |x y r|
              (if (get fx :midi-fx)
                (fx-select-midi-effect (get fx :slot-idx))
+               (if (get fx :bus-fx)
+                 (fx-select-bus-effect (get fx :slot-idx))
                (if (>= (get fx :slot-idx) 2)
                  (fx-select-effect (get fx :slot-idx))
-                 (fx-clear-selected-effect)))
-        (h-stack :width :fill :gap 0.5 :align :center
+                 (fx-clear-selected-effect))))
+        (h-stack :gap 0.5 :align :center
           (box :width 0.75 :height 0)
           (label title :font-size 11 :color :white :bg :transparent)
           ;; Only show edit button for custom dgenlisp effects (not built-in Filter/Delay)
@@ -311,7 +346,9 @@
               (do
                 (fx-clear-selected-effect)
                 (host-command "enter-edit-effect"
-                  (dict :name title :slot (get fx :slot-idx))))
+                  (if (get fx :bus-fx)
+                    (dict :name title :slot (get fx :slot-idx) :bus (get fx :bus-idx))
+                    (dict :name title :slot (get fx :slot-idx)))))
               (label "edit" :font-size 8 :color :gray :bg :transparent))
             (box))))
       (box :padding 1
@@ -327,10 +364,10 @@
        :selected (if (= selected-midi-fx-slot (get fx :slot-idx)) 1 0)
        :padding 0
     (v-stack :gap 0
-      (box :width :fill :height 1.0 :padding 0 :v-align :center :h-align :start
+      (box :height 1.0 :padding 0 :v-align :center :h-align :start
            :debug-name "midi-fx-panel-header"
            :on-click |x y r| (fx-select-midi-effect (get fx :slot-idx))
-        (h-stack :width :fill :gap 0.5 :align :center
+        (h-stack :gap 0.5 :align :center
           (box :width 0.75 :height 0)
           (label title :font-size 11 :color :white :bg :transparent)))
       (box :padding 1
@@ -468,10 +505,10 @@
     (box :debug-name "instrument-panel" :background "fx-panel-bg" :padding 0
          :selected 0
       (v-stack :debug-name "instrument-panel-vstack" :gap 0
-        (box :debug-name "instrument-header-box" :width :fill :height 1 :padding 0 :v-align :start :h-align :start
-          (h-stack :debug-name "instrument-header-row" :width :fill :gap 0.6 :align :center
+        (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :start :h-align :start
+          (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center
             (box :width 0.75 :height 0)
-            (box :debug-name "instrument-name-box"  :flex 1 :height 2 :v-align :center :h-align :start :padding .1
+            (box :debug-name "instrument-name-box" :height 2 :v-align :center :h-align :start :padding .1
               (h-stack :v-align :center :height 2 :gap 2 :padding 0.1
                 (label (substring (get inst :display-name) 0 12)
                   :font-size 11  :color :white :bg :transparent)
@@ -520,8 +557,40 @@
       (box :flex 1))
     (box :flex 1)))
 
+(def selected-bus-effects ()
+  (if (fx-has-selected-bus?)
+    (nth SEQ.bus-effects selected-bus)
+    '()))
+
+(def fx-bus-selection-panel ()
+  (v-stack :padding 0.5 :gap 1
+    (h-stack :gap 1
+      (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
+        (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
+          (fx-panel (get fx :name) (get fx :params) fx)))
+      (box :background "fx-panel-bg" :selected 0 :padding 1.5
+           :on-click |x y r| (fx-clear-selected-effect)
+        (v-stack :gap 0.5 :align :center
+          (label "+" :font-size 15 :color :gray :bg :transparent)
+          (dropdown :value ""
+            :options SEQ.available-effects
+            :placeholder "Add Bus FX"
+            :on-change (lambda (v)
+              (fx-clear-selected-effect)
+              (if (= v "+ New Effect")
+                (do
+                  (set! sbrowser-editor-name "")
+                  (host-command "enter-new-effect-editor" (dict)))
+                (host-command "add-bus-effect" (dict :bus selected-bus :name v))))
+            :width 12 :height 1.5 :font-size 14)
+          (compile-progress
+            :active (if SEQ.compiling 1 0)
+            :width 12 :height 0.3))))))
+
 (effect-buffer "*fx*"
-  (if (= SEQ.num-tracks 0)
+  (if (fx-has-selected-bus?)
+    (fx-bus-selection-panel)
+    (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
     (v-stack :padding 0.5 :gap 1 
       (h-stack :gap 1
@@ -562,7 +631,7 @@
               :width 12 :height 1.5 :font-size 14)
             (compile-progress
               :active (if SEQ.compiling 1 0)
-              :width 12 :height 0.3)))))))
+              :width 12 :height 0.3))))))))
 
 (define-mode "seq-fx-mode" :read-only true)
 (mode-bind-key "seq-fx-mode" "BS" "fx-delete-selected-effect")

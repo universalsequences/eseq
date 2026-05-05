@@ -3,14 +3,30 @@
 
 (load "../eseqlisp/themes.lisp")
 (mac-osx-theme)
+
+(defstate selected-bus -1)
+
+(def selected-bus-name ()
+  (if (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names)))
+    (nth SEQ.bus-names selected-bus)
+    "Bus"))
+
+(def seq-has-selected-bus? ()
+  (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names))))
+
 (load "metal-seq-browser.lisp")
 (load "metal-seq-fx.lisp")
 (load "metal-seq-piano-roll.lisp")
 (load "metal-seq-mixer.lisp")
 (load "metal-seq-transport.lisp")
 
+(def seq-clear-ui-selection ()
+  (do
+    (set! selected-bus -1)
+    (seq-clear-selection)))
+
 (bind-key "C-p" "seq-toggle-play")
-(bind-key "ESC" "seq-clear-selection")
+(bind-key "ESC" "seq-clear-ui-selection")
 
 (defstate lower-panel-buffer "*fx*")
 
@@ -419,8 +435,45 @@
       (box :flex 1))
     (box :flex 1)))
 
+(def metal-bus-selection-panel ()
+  (v-stack :width :fill :padding 1 :gap 0
+    (box :flex 1)
+    (h-stack :width :fill :align :center
+      (box :flex 1)
+      (v-stack :gap 0.4 :align :center
+        (label (selected-bus-name)
+          :font-size 13 :color :white :bg :transparent)
+        (label "Bus sequencing"
+          :font-size 12 :color :gray :bg :transparent))
+      (box :flex 1))
+    (box :flex 1)))
+
+(def track-bus-send-control (send)
+  (v-stack :align :center :gap 0.25
+    (h-stack :gap 0.25 :align :baseline
+      (label (substring (get send :name) 0 8) :font-size 9 :color :gray :bg :transparent)
+      (number-picker :value (get send :amount) :min 0 :max 1 :decimals 2
+        :noui true :font-size 9 :text-color :gray
+        :on-change (lambda (v)
+          (do
+            (cool-off-follow)
+            (host-command "set-track-bus-send"
+              (dict :bus (get send :bus-idx) :amount v))))
+        :width 4 :height 1))
+    (box :width 8 :height 2
+      (hslider :min 0 :max 1
+        :value (get send :amount)
+        :material (aqua-slider-material)
+        :on-change (lambda (v)
+          (do
+            (cool-off-follow)
+            (host-command "set-track-bus-send"
+              (dict :bus (get send :bus-idx) :amount v))))))))
+
 (effect-buffer "*metal*"
-  (if (= SEQ.num-tracks 0)
+  (if (seq-has-selected-bus?)
+    (metal-bus-selection-panel)
+    (if (= SEQ.num-tracks 0)
     (metal-empty-track-fallback)
     (v-stack
       :padding 1
@@ -660,21 +713,20 @@
             :material (aqua-slider-material)
             :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))))))
 
-    ; Track parameters — row 2: send, acc fn, acc mode, acc lim
+    ; Track parameters — row 2: output, bus sends, acc fn/mode/limit
     (h-stack :gap 1.5
-      ; Send
+      ; Output routing
       (v-stack :align :center :gap 0.25
-        (h-stack :gap 0.25 :align :baseline
-          (label "send" :font-size 9 :color :gray :bg :transparent)
-          (number-picker :value SEQ.tp-send :min 0 :max 1 :decimals 2
-            :noui true :font-size 9 :text-color :gray
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :send v)))
-            :width 4 :height 1))
-        (box :width 8 :height 2
-          (hslider :min 0 :max 1
-            :value SEQ.tp-send
-            :material (aqua-slider-material)
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :send v))))))
+        (label "out" :font-size 9 :color :gray :bg :transparent)
+        (dropdown :value SEQ.tp-output
+          :options SEQ.track-output-options
+          :on-change (lambda (v)
+            (do
+              (cool-off-follow)
+              (host-command "set-track-output" (dict :label v))))
+          :width 10 :height 1.5 :font-size 10))
+      (each SEQ.tp-bus-sends |send idx|
+        (track-bus-send-control send))
       ; Accumulator function
       (v-stack :align :center :gap 0.25
         (label "acc fn" :font-size 9 :color :gray :bg :transparent)
@@ -701,7 +753,7 @@
           (hslider :min 0 :max 127
             :value SEQ.tp-accum-limit
             :material (aqua-slider-material)
-            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v))))))))))
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))))))))))
 
 ; Layout: samples | metal | mixer on top, fx on bottom
 (set-layout '(:rows

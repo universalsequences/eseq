@@ -14,7 +14,9 @@
 
 use std::sync::atomic::Ordering;
 
-use crate::sequencer::{StepParam, StepSnapshot, SwingResolution, Timebase};
+use crate::sequencer::{
+    StepParam, StepSnapshot, SwingResolution, Timebase, TrackOutput, TrackSendSnapshot,
+};
 
 use super::App;
 
@@ -256,6 +258,15 @@ pub enum AppCommand {
     AdjustTrackSend {
         track: usize,
         delta: f32,
+    },
+
+    SetTrackOutput {
+        track: usize,
+        output: TrackOutput,
+    },
+    SetTrackSends {
+        track: usize,
+        sends: Vec<TrackSendSnapshot>,
     },
 
     /// Set master volume; also pushes to the live audio graph.
@@ -723,6 +734,16 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             let tp = &app.state.pattern.track_params[track];
             tp.set_send(tp.get_send() + delta);
             app.push_send_gain(track);
+        }
+
+        AppCommand::SetTrackOutput { track, output } => {
+            app.state.pattern.track_params[track].set_output(output);
+            app.graph_controller().apply_track_output_routing(track);
+        }
+
+        AppCommand::SetTrackSends { track, sends } => {
+            app.state.pattern.track_params[track].set_sends(sends);
+            app.graph_controller().apply_track_bus_sends(track);
         }
 
         AppCommand::SetMasterVolume { value } => {

@@ -53,7 +53,8 @@ type DGenProcessFn = unsafe extern "C" fn(
 use crate::sequencer::MAX_TRACKS;
 pub const MAX_CUSTOM_FX: usize = 8;
 pub const MAX_MIDI_FX_SLOTS: usize = 4;
-const REGISTRY_SIZE: usize = MAX_TRACKS * MAX_CUSTOM_FX;
+pub const MAX_BUS_FX_CHAINS: usize = 64;
+const REGISTRY_SIZE: usize = (MAX_TRACKS + MAX_BUS_FX_CHAINS) * MAX_CUSTOM_FX;
 static DGEN_PROCESS_FNS: [AtomicUsize; REGISTRY_SIZE] = {
     const INIT: AtomicUsize = AtomicUsize::new(0);
     [INIT; REGISTRY_SIZE]

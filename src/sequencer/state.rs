@@ -180,6 +180,8 @@ impl PatternSnapshot {
                 mute: tp.is_muted(),
                 solo: tp.is_solo(),
                 send: tp.get_send(),
+                output: tp.output(),
+                sends: tp.sends(),
                 polyphonic: tp.is_polyphonic(),
                 timebase: tp.get_timebase(),
                 accumulator_idx: tp.get_accumulator_idx(),
@@ -283,6 +285,8 @@ impl PatternSnapshot {
             tp.set_mute(snap.mute);
             tp.set_solo(snap.solo);
             tp.set_send(snap.send);
+            tp.set_output(snap.output.clone());
+            tp.set_sends(snap.sends.clone());
             tp.polyphonic.store(snap.polyphonic, Ordering::Relaxed);
             tp.set_timebase(snap.timebase);
             tp.set_accumulator_idx(snap.accumulator_idx);
@@ -938,6 +942,8 @@ impl SequencerState {
         params.set_mute(defaults.mute);
         params.set_solo(defaults.solo);
         params.set_send(defaults.send);
+        params.set_output(defaults.output);
+        params.set_sends(defaults.sends);
         params
             .polyphonic
             .store(defaults.polyphonic, Ordering::Relaxed);
@@ -1700,6 +1706,11 @@ mod tests {
             mute: id % 2 == 0,
             solo: id == 1,
             send: 0.3 * id as f32,
+            output: crate::sequencer::TrackOutput::Mix,
+            sends: vec![crate::sequencer::TrackSendSnapshot {
+                destination: crate::sequencer::BusId::DEFAULT_A,
+                amount: 0.1 * id as f32,
+            }],
             polyphonic: id % 2 == 1,
             timebase: Timebase::Quarter,
             accumulator_idx: id,
