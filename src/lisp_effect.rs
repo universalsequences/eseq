@@ -4526,13 +4526,13 @@ fn eval_emit_current_event(
     let Some(eval) = guard.as_mut() else {
         return Err(format!("{label} context not active"));
     };
-    let (offset_beats, idx) = parse_acc_emit_offset(&args, eval.step_beats, eval.num_steps)?;
+    let (offset_beats, idx) = parse_acc_emit_offset(args, eval.step_beats, eval.num_steps)?;
     let mut resolved = eval.resolved;
     let mut chord = eval.chord.clone();
     let mut chord_durations = eval.chord_durations.clone();
     let chord_step_transpose = eval.chord_step_transpose;
     let target_track =
-        apply_acc_emit_overrides(&args, idx, &mut resolved, &mut chord, &mut chord_durations)?;
+        apply_acc_emit_overrides(args, idx, &mut resolved, &mut chord, &mut chord_durations)?;
     eval.emitted.push(EmittedAccumulatorEvent {
         offset_beats,
         track: target_track,

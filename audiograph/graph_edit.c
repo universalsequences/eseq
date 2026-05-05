@@ -259,8 +259,6 @@ static void rebuild_dependency_links_from_edges(LiveGraph *lg) {
 
 // Forward declarations
 bool apply_delete_node_internal(LiveGraph *lg, int node_id);
-static bool apply_add_watchlist(LiveGraph *lg, int node_id);
-static bool apply_remove_watchlist(LiveGraph *lg, int node_id);
 static bool grow_node_capacity(LiveGraph *lg, int required_capacity);
 
 // Internal version that skips update_orphaned_status for batched operations
@@ -295,14 +293,6 @@ static bool apply_add_watchlist_internal(LiveGraph *lg, int node_id) {
   return true;
 }
 
-static bool apply_add_watchlist(LiveGraph *lg, int node_id) {
-  bool result = apply_add_watchlist_internal(lg, node_id);
-  if (result) {
-    update_orphaned_status(lg);
-  }
-  return result;
-}
-
 // Internal version that skips update_orphaned_status for batched operations
 static bool apply_remove_watchlist_internal(LiveGraph *lg, int node_id) {
   if (!lg || node_id < 0) {
@@ -333,14 +323,6 @@ static bool apply_remove_watchlist_internal(LiveGraph *lg, int node_id) {
 
   pthread_mutex_unlock(&lg->watch.mutex);
   return false;
-}
-
-static bool apply_remove_watchlist(LiveGraph *lg, int node_id) {
-  bool result = apply_remove_watchlist_internal(lg, node_id);
-  if (result) {
-    update_orphaned_status(lg);
-  }
-  return result;
 }
 
 // Recursive function to mark nodes reachable from DAC (port-based only)
@@ -897,7 +879,6 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
       D->fanin_sum_node_id[dst_port] = -1;
 
       // Wire source to new edge and update successor relationships
-      bool added = false;
       if (remaining_src >= 0) {
         // Check if source already has an outgoing edge
         int existing_out_eid =
@@ -919,7 +900,6 @@ bool apply_disconnect_internal(LiveGraph *lg, int src_node, int src_port,
 
         if (!has_successor(&lg->nodes[remaining_src], dst_node)) {
           add_successor_port(&lg->nodes[remaining_src], dst_node);
-          added = true;
         } else {
           // remaining_src was ALREADY a predecessor of dst_node (via another port).
           // SUM contributed 1 to dst_node's indegree, but remaining_src taking over
@@ -1619,7 +1599,6 @@ bool apply_connect_internal(LiveGraph *lg, int src_node, int src_port,
 
       // Find old source of existing_eid
       int old_src = lg->edges[existing_eid].src_node;
-      int old_src_port = lg->edges[existing_eid].src_port;
 
       // Disconnect old_src → D:dst_port (lightweight local form)
       D->inEdgeId[dst_port] = -1;

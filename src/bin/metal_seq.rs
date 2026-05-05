@@ -1,3 +1,14 @@
+#![allow(
+    dead_code,
+    clippy::inspect_for_each,
+    clippy::manual_clamp,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::useless_conversion,
+    clippy::useless_format
+)]
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -1994,11 +2005,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),
         }
-        .map(|v| {
+        .inspect(|_| {
             st.publish_scheduler_snapshot();
             *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
             ui_ep.fetch_add(1, Ordering::Relaxed);
-            v
         })
     });
 

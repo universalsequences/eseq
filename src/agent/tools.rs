@@ -283,11 +283,7 @@ impl AgentToolRegistry {
                 continue;
             }
 
-            let mut paths = std::fs::read_dir(base)
-                .map_err(|error| format!("Failed to read '{}': {error}", base.display()))?
-                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-                .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("lisp"))
-                .collect::<Vec<_>>();
+            let mut paths = collect_lisp_files(base)?;
             paths.sort();
 
             for path in paths {
@@ -296,6 +292,28 @@ impl AgentToolRegistry {
         }
         Ok(examples)
     }
+}
+
+fn collect_lisp_files(base: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    collect_lisp_files_into(base, &mut paths)?;
+    Ok(paths)
+}
+
+fn collect_lisp_files_into(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in std::fs::read_dir(dir)
+        .map_err(|error| format!("Failed to read '{}': {error}", dir.display()))?
+    {
+        let path = entry
+            .map_err(|error| format!("Failed to read entry in '{}': {error}", dir.display()))?
+            .path();
+        if path.is_dir() {
+            collect_lisp_files_into(&path, paths)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("lisp") {
+            paths.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn build_live_example(path: PathBuf, kind: &str) -> Result<DocExample, String> {
@@ -393,7 +411,7 @@ mod tests {
     #[test]
     fn list_instrument_examples_returns_known_example() {
         let tools = AgentToolRegistry::load_default().expect("load tools");
-        let result = tools.list_examples(ExampleKind::Instrument, 50);
+        let result = tools.list_examples(ExampleKind::Instrument, 200);
         assert!(result.content.contains("prophet-5"));
         assert!(result.content.contains("flute"));
     }
