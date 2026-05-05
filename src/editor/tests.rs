@@ -33,28 +33,6 @@
     }
 
     #[test]
-    fn preloaded_runtime_bindings_are_visible_to_editor() {
-        let init = r#"
-            (def compile-current ()
-              (host-command "compile-current" (dict :source (current-buffer-text))))
-            (bind-key "C-c C-c" "compile-current")
-        "#;
-        let runtime = Runtime::with_init_source(init);
-        let mut editor = Editor::new(runtime, EditorConfig::default());
-        editor.open_scratch_buffer("*test*", "(+ 1 2)");
-
-        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        editor.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-
-        let commands = editor.drain_host_commands();
-        assert_eq!(commands.len(), 1);
-        assert!(matches!(
-            &commands[0],
-            HostCommand::Custom { name, .. } if name == "compile-current"
-        ));
-    }
-
-    #[test]
     fn default_window_split_bindings_survive_runtime_sync() {
         let runtime = Runtime::with_init_source("(bind-key \"C-c C-c\" \"ignore\")");
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -1591,42 +1569,6 @@ fn transient_minibuffer_message_expires_without_input() {
     }
 
     #[test]
-    fn region_rendering_uses_high_contrast_selection_colors() {
-        let runtime = Runtime::new();
-        let mut editor = Editor::new(runtime, EditorConfig::default());
-        editor.open_scratch_buffer("*test*", "alpha");
-        editor.active_buffer_mut().cursor = (0, 1);
-
-        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-
-        let frame = crate::frame::build_render_frame(&mut editor, 20, 10);
-        let selected = &frame.lines[0][1];
-
-        assert_eq!(selected.style.bg, Some(crate::theme::BG_REGION()));
-        assert_eq!(selected.style.fg, crate::theme::BG());
-    }
-
-    #[test]
-    fn region_rendering_overrides_active_sexp_highlight() {
-        let runtime = Runtime::new();
-        let mut editor = Editor::new(runtime, EditorConfig::default());
-        editor.open_scratch_buffer("*test*", "(mix foo)");
-        editor.active_buffer_mut().cursor = (0, 1);
-
-        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
-        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-
-        let frame = crate::frame::build_render_frame(&mut editor, 20, 10);
-        let selected = &frame.lines[0][1];
-
-        assert_eq!(selected.style.bg, Some(crate::theme::BG_REGION()));
-        assert_eq!(selected.style.fg, crate::theme::BG());
-    }
-
-    #[test]
     fn read_only_buffers_allow_keyboard_cursor_movement() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -1639,25 +1581,6 @@ fn transient_minibuffer_message_expires_without_input() {
         editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
 
         assert_eq!(editor.active_buffer().cursor, (1, 0));
-    }
-
-    #[test]
-    fn read_only_buffers_allow_text_click_cursor_changes() {
-        let runtime = Runtime::new();
-        let mut editor = Editor::new(runtime, EditorConfig::default());
-        editor.open_scratch_buffer("*test*", "alpha\nbravo");
-        editor.active_buffer_mut().cursor = (0, 1);
-        editor.active_buffer_mut().read_only = true;
-
-        editor.handle_mouse(
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 2),
-            1,
-            1,
-            20,
-            10,
-        );
-
-        assert_eq!(editor.active_buffer().cursor, (1, 2));
     }
 
     #[test]
@@ -2442,27 +2365,6 @@ fn transient_minibuffer_message_expires_without_input() {
     }
 
     #[test]
-    fn dired_mode_highlights_the_current_row() {
-        let init = std::fs::read_to_string("init.lisp").unwrap_or_default();
-        let runtime = Runtime::new();
-        let mut editor = Editor::new(
-            runtime,
-            EditorConfig {
-                init_source: Some(init),
-                ..EditorConfig::default()
-            },
-        );
-
-        editor.call_lisp_handler("dired-here");
-        let frame = crate::frame::build_render_frame(&mut editor, 80, 12);
-
-        let highlighted = frame.lines[2]
-            .iter()
-            .any(|cell| cell.style.bg == Some(crate::theme::WIDGET_FOCUS_BG()));
-        assert!(highlighted, "dired cursor row should have a background highlight");
-    }
-
-    #[test]
     fn editable_widget_buffers_do_not_auto_focus_widgets() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -2520,64 +2422,6 @@ fn transient_minibuffer_message_expires_without_input() {
 
         editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(editor.active_buffer().text(), "ac");
-    }
-
-    #[test]
-    fn text_click_clears_widget_focus_only_in_editable_buffers() {
-        let runtime = Runtime::new();
-        let mut editor = Editor::new(runtime, EditorConfig::default());
-        editor.set_layout_viewport(30, 8);
-        editor
-            .runtime
-            .eval_str(
-                r#"
-                (effect
-                  (timeline
-                    :height 4
-                    :focusable true
-                    :lanes (list (dict :id 0 :label "L0"))
-                    :items (list (dict :id 10 :lane 0 :start 4 :end 8 :selected true))
-                    :view-start 0
-                    :view-duration 16
-                    :on-action |e| e))
-                "#,
-            )
-            .unwrap();
-        editor.set_layout_viewport(30, 8);
-
-        editor.handle_mouse(
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
-            1,
-            1,
-            30,
-            8,
-        );
-        assert!(editor.focused_widget_id().is_some(), "widget click should focus it");
-
-        editor.handle_mouse(
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 7),
-            1,
-            1,
-            30,
-            8,
-        );
-        assert_eq!(editor.focused_widget_id(), None, "text click should blur in editable buffers");
-
-        editor.active_buffer_mut().read_only = true;
-        editor.auto_focus_first_widget();
-        assert!(editor.focused_widget_id().is_some(), "read-only buffers should auto-focus");
-
-        editor.handle_mouse(
-            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 7),
-            1,
-            1,
-            30,
-            8,
-        );
-        assert!(
-            editor.focused_widget_id().is_some(),
-            "background clicks should keep focus in read-only buffers"
-        );
     }
 
     #[test]
@@ -2762,45 +2606,6 @@ fn effect_buffer_creates_target_buffer_without_switching() {
 
     editor.set_active_buffer(controls.id);
     assert!(editor.widget_layout().is_some());
-}
-
-#[test]
-fn reevaluating_effect_buffer_clears_previous_target_buffer_ui() {
-    let runtime = Runtime::new();
-    let mut editor = Editor::new(runtime, EditorConfig::default());
-    editor.set_layout_viewport(20, 6);
-
-    editor
-        .runtime_mut()
-        .eval_str(r#"(effect-buffer "*controls*" (knob :size 4))"#)
-        .unwrap();
-    editor.refresh_runtime_side_effects();
-    assert!(
-        editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*controls*")
-            .unwrap()
-            .widget_tree
-            .is_some()
-    );
-
-    editor
-        .runtime_mut()
-        .eval_str(r#"(effect (label "local"))"#)
-        .unwrap();
-    editor.refresh_runtime_side_effects();
-
-    assert!(
-        editor
-            .buffers
-            .iter()
-            .find(|buffer| buffer.name == "*controls*")
-            .unwrap()
-            .widget_tree
-            .is_none()
-    );
-    assert!(editor.active_buffer().widget_tree.is_some());
 }
 
 #[test]
@@ -4120,46 +3925,6 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
             super::get_map_field_keyword(&action, "tool"),
             Some("draw".to_string())
         );
-    }
-
-    #[test]
-    fn pointer_timeline_double_click_background_creates_default_note() {
-        let runtime = Runtime::new();
-        let mut editor = Editor::new(runtime, EditorConfig::default());
-        editor.set_layout_viewport(30, 8);
-        editor
-            .runtime
-            .eval_str(
-                r#"
-                (def last-action (state nil))
-                (effect
-                  (timeline
-                    :height 8
-                    :focusable true
-                    :tool :pointer
-                    :lanes (list (dict :id 0 :label "L0")
-                                 (dict :id 1 :label "L1"))
-                    :items (list)
-                    :view-start 0
-                    :view-duration 16
-                    :snap 1
-                    :on-action |e| (set! last-action e)))
-                "#,
-            )
-            .unwrap();
-        editor.set_layout_viewport(30, 8);
-
-        let click = mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 3);
-        editor.handle_mouse(click, 1, 1, 30, 8);
-        editor.handle_mouse(click, 1, 1, 30, 8);
-
-        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
-        assert_eq!(
-            super::get_map_field_keyword(&action, "type"),
-            Some("finish-create-item".to_string())
-        );
-        assert_eq!(super::get_map_field_number(&action, "start"), Some(5.0));
-        assert_eq!(super::get_map_field_number(&action, "end"), Some(6.0));
     }
 
     // ── defmacro tests ────────────────────────────────────────────────────

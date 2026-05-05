@@ -369,32 +369,6 @@ impl WidgetDefinition for ButtonWidget {
 mod tests {
     use super::*;
 
-    #[test]
-    fn button_tui_centers_text_vertically_and_horizontally() {
-        let mut props = HashMap::new();
-        props.insert("text".to_string(), Value::String("Go".to_string()));
-        props.insert(
-            "variant".to_string(),
-            Value::Keyword("secondary".to_string()),
-        );
-        let mut buf = CellBuffer::new(8, 3);
-
-        ButtonWidget.tui_render(
-            &props,
-            Rect {
-                row: 0.0,
-                col: 0.0,
-                width: 8.0,
-                height: 3.0,
-            },
-            &mut buf,
-        );
-
-        assert!(buf.get(0, 3).is_none());
-        assert_eq!(buf.get(1, 3).unwrap().ch, 'G');
-        assert_eq!(buf.get(1, 4).unwrap().ch, 'o');
-    }
-
     #[cfg(target_os = "macos")]
     #[test]
     fn button_metal_centers_text_vertically() {

@@ -1037,7 +1037,7 @@ fragment float4 waveform_frag(
                 }) else {
                     continue;
                 };
-                enc.setRenderPipelineState(&pipeline);
+                enc.setRenderPipelineState(pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(&instance_buffer), 0, 0);
                     enc.setFragmentBuffer_offset_atIndex(Some(&waveform_buffer), 0, 1);
@@ -1129,7 +1129,7 @@ fragment float4 waveform_frag(
                 }) else {
                     return;
                 };
-                enc.setRenderPipelineState(&pipeline);
+                enc.setRenderPipelineState(pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(&vbuf), 0, 0);
                     enc.setFragmentTexture_atIndex(Some(atlas_tex), 0);
@@ -1652,9 +1652,10 @@ fragment float4 waveform_frag(
                     let doc_pad_x = 3usize;
                     let doc_pad_top = 1usize;
                     let doc_text_w = pane_w.saturating_sub(doc_pad_x * 2);
-                    let doc_body = comp.doc.as_ref().map(|(_, body)| {
-                        wrap_completion_doc_lines(body, doc_text_w)
-                    });
+                    let doc_body = comp
+                        .doc
+                        .as_ref()
+                        .map(|(_, body)| wrap_completion_doc_lines(body, doc_text_w));
                     let doc_content_h = if show_doc {
                         doc_pad_top + 3 + doc_body.as_ref().map(|body| body.len()).unwrap_or(0)
                     } else {
@@ -1733,12 +1734,7 @@ fragment float4 waveform_frag(
                         );
                     }
                     if let Some(wpipe) = self.widget_pipelines.get("dropdown") {
-                        draw_widget_instances(
-                            &enc,
-                            &self.device,
-                            wpipe,
-                            rounded.as_slice(),
-                        );
+                        draw_widget_instances(&enc, &self.device, wpipe, rounded.as_slice());
                     }
                     for (i, entry) in comp.entries.iter().enumerate() {
                         let row = panel_row + list_pad_top + i * row_step;
@@ -1762,12 +1758,7 @@ fragment float4 waveform_frag(
                         if entry.selected
                             && let Some(wpipe) = self.widget_pipelines.get("dropdown")
                         {
-                            draw_widget_instances(
-                                &enc,
-                                &self.device,
-                                wpipe,
-                                selected.as_slice(),
-                            );
+                            draw_widget_instances(&enc, &self.device, wpipe, selected.as_slice());
                         }
                         let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
                         push_text_cells(
@@ -1823,16 +1814,16 @@ fragment float4 waveform_frag(
                                     }
                                     push_text_cells(
                                         &mut popup_verts,
-                                            atlas,
-                                            line,
-                                            doc_col + doc_pad_x,
-                                            row,
-                                            doc_text_w,
-                                            doc_fg,
-                                            doc_bg_rgba,
-                                            cell_w,
-                                            cell_h,
-                                            vp_w,
+                                        atlas,
+                                        line,
+                                        doc_col + doc_pad_x,
+                                        row,
+                                        doc_text_w,
+                                        doc_fg,
+                                        doc_bg_rgba,
+                                        cell_w,
+                                        cell_h,
+                                        vp_w,
                                         vp_h,
                                     );
                                 }

@@ -546,7 +546,7 @@ pub fn reuse_layout_node_for_subtree_path(
     reuse_layout_node_at_path(
         existing,
         tree,
-        &child_path,
+        child_path,
         dirty_widget_ids,
         &mut trace_path,
     )

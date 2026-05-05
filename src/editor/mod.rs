@@ -1240,7 +1240,11 @@ impl Editor {
         let buffer = self.active_buffer();
         let cursor_row = buffer.cursor.0;
         let cursor_col = buffer.cursor.1;
-        let line = buffer.lines.get(cursor_row).map(String::as_str).unwrap_or("");
+        let line = buffer
+            .lines
+            .get(cursor_row)
+            .map(String::as_str)
+            .unwrap_or("");
         let prefix = debug_symbol_prefix(line, cursor_col)
             .map(|(start, prefix)| format!("prefix='{prefix}' start_col={start}"))
             .unwrap_or_else(|| "prefix=<none>".to_string());

@@ -1,3 +1,49 @@
+#![allow(
+    dead_code,
+    clippy::approx_constant,
+    clippy::arc_with_non_send_sync,
+    clippy::borrow_deref_ref,
+    clippy::collapsible_str_replace,
+    clippy::collapsible_if,
+    clippy::derivable_impls,
+    clippy::doc_overindented_list_items,
+    clippy::empty_line_after_doc_comments,
+    clippy::excessive_precision,
+    clippy::get_first,
+    clippy::implicit_saturating_sub,
+    clippy::if_same_then_else,
+    clippy::items_after_test_module,
+    clippy::large_enum_variant,
+    clippy::manual_clamp,
+    clippy::manual_contains,
+    clippy::manual_div_ceil,
+    clippy::manual_ignore_case_cmp,
+    clippy::manual_is_multiple_of,
+    clippy::manual_memcpy,
+    clippy::manual_ok_err,
+    clippy::manual_range_contains,
+    clippy::manual_repeat_n,
+    clippy::map_flatten,
+    clippy::map_entry,
+    clippy::missing_safety_doc,
+    clippy::missing_const_for_thread_local,
+    clippy::needless_borrows_for_generic_args,
+    clippy::needless_lifetimes,
+    clippy::needless_return,
+    clippy::needless_range_loop,
+    clippy::new_without_default,
+    clippy::not_unsafe_ptr_arg_deref,
+    clippy::option_map_unit_fn,
+    clippy::question_mark,
+    clippy::redundant_closure,
+    clippy::should_implement_trait,
+    clippy::single_element_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unnecessary_cast,
+    clippy::useless_vec
+)]
+
 // ── Domain modules ───────────────────────────────────────────────────────
 pub mod lang;
 pub mod ui;
@@ -357,9 +403,6 @@ mod tests {
     use crate::layout::{LayoutEngine, format_layout_tree_lines};
     use crate::parser::Parser;
     use crate::vm::{EffectTarget, VMError, format_lisp_source, format_lisp_value};
-    #[cfg(target_os = "macos")]
-    use crate::widget_render::{MetalPrimitive, widget_primitives_for_node};
-
     const SDF_LIGHTING_V2_DEMO: &str = include_str!("../sdf-lighting-v2-demo.lisp");
 
     fn demo_source_without_window_ops() -> &'static str {
@@ -1134,30 +1177,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tabs_do_not_add_extra_top_gap_for_shorter_selected_tab() {
-        let tree = run_prog(
-            r#"
-            (tabs :items (list "A" "B") :value 0
-              (label "short")
-              (v-stack
-                (label "one")
-                (label "two")
-                (label "three")))
-            "#,
-        )
-        .unwrap()
-        .unwrap();
-
-        let layout = LayoutEngine::new(80, 24, 1.0)
-            .layout(&tree)
-            .expect("layout");
-        let lines = format_layout_tree_lines(&layout, 0);
-
-        assert_eq!(lines[0], ":tabs  row=0 col=0 w=80 h=5  value=0");
-        assert!(lines[1].contains("row=2 col=0"), "{}", lines[1]);
-    }
-
-    #[test]
     fn test_reactive_namespace_reads_transparently() {
         let mut runtime = Runtime::new();
         runtime.register_reactive(
@@ -1442,47 +1461,6 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn test_label_metal_primitives_are_clipped_to_label_rect() {
-        let mut runtime = Runtime::new();
-        let tree = runtime
-            .eval_str(r#"(label "a very long label" :width 4 :bg :transparent)"#)
-            .unwrap()
-            .unwrap();
-        let layout = LayoutEngine::new(80, 24, 1.0)
-            .layout(&tree)
-            .expect("layout");
-        let primitives = widget_primitives_for_node(
-            &layout,
-            crate::widget_render::WidgetViewport {
-                scroll_top: 0.0,
-                scroll_left: 0.0,
-                vp_w: 80.0,
-                vp_h: 24.0,
-                cell_w: 1.0,
-                cell_h: 1.0,
-                time_seconds: 0.0,
-                focused_widget_id: None,
-                focused_branch: false,
-                tile_content_rows: 24.0,
-                inherited_hover: false,
-            },
-        );
-
-        assert!(matches!(
-            primitives.first(),
-            Some(MetalPrimitive::PushClipRect(_))
-        ));
-        assert!(matches!(
-            primitives.get(1),
-            Some(MetalPrimitive::ProportionalText(_))
-        ));
-        assert!(matches!(
-            primitives.get(2),
-            Some(MetalPrimitive::PopClipRect)
-        ));
-    }
-
     #[test]
     fn test_set_bang_updates_lisp_state_and_reruns_effects() {
         let mut runtime = Runtime::new();

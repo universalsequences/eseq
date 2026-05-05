@@ -1,3 +1,5 @@
+#![allow(clippy::needless_return)]
+
 fn main() {
     let metal = std::env::args().any(|a| a == "--metal");
 

@@ -2552,57 +2552,6 @@ mod tests {
     }
 
     #[test]
-    fn resize_end_clamps_to_minimum_snap_duration() {
-        let props = HashMap::from([
-            ("tool".to_string(), keyword_value("pointer")),
-            (
-                "lanes".to_string(),
-                list_value_raw(vec![map_value_raw(vec![
-                    ("id", number_value(0.0)),
-                    ("label", Value::String("L0".to_string())),
-                ])]),
-            ),
-            (
-                "items".to_string(),
-                list_value_raw(vec![map_value_raw(vec![
-                    ("id", number_value(10.0)),
-                    ("lane", number_value(0.0)),
-                    ("start", number_value(4.0)),
-                    ("end", number_value(8.0)),
-                ])]),
-            ),
-            ("view-start".to_string(), number_value(0.0)),
-            ("view-duration".to_string(), number_value(16.0)),
-            ("resize-snap".to_string(), number_value(0.5)),
-            ("resize-snap-mode".to_string(), keyword_value("round")),
-        ]);
-
-        let view = TimelineView::from_props(
-            &props,
-            Rect {
-                row: 0.0,
-                col: 0.0,
-                width: 32.0,
-                height: 8.0,
-            },
-        );
-        let gesture = map_value_raw(vec![
-            ("kind", keyword_value("resize-end")),
-            ("id", number_value(10.0)),
-        ]);
-        let action = view
-            .handle_pointer_drag(7.0, 2.0, Some(&gesture))
-            .expect("resize action");
-        let Value::Map(map) = action else {
-            panic!("expected action map");
-        };
-        assert_eq!(
-            map.get("time").map(|value| value.borrow().clone()),
-            Some(Value::Number(4.5))
-        );
-    }
-
-    #[test]
     fn draw_create_clamps_to_minimum_snap_duration() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("draw")),

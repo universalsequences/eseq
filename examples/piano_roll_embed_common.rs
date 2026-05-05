@@ -173,18 +173,18 @@ pub fn run_metal() -> Result<(), eseqlisp::backend::BackendError> {
             editor.handle_touchpad_scroll(0, 0, precise_col, precise_row, delta_x, delta_y);
         }
 
-        if last_render_at.elapsed() >= frame_interval {
-            if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
-                editor.handle_mouse_precise(
-                    mouse,
-                    0,
-                    0,
-                    cols as u16,
-                    rows.saturating_sub(1) as u16,
-                    precise_col,
-                    precise_row,
-                );
-            }
+        if last_render_at.elapsed() >= frame_interval
+            && let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take()
+        {
+            editor.handle_mouse_precise(
+                mouse,
+                0,
+                0,
+                cols as u16,
+                rows.saturating_sub(1) as u16,
+                precise_col,
+                precise_row,
+            );
         }
 
         sync_pattern_state(&mut editor, &host);
@@ -601,7 +601,7 @@ impl PatternHost {
     fn lanes_value(&self) -> Value {
         let mut lanes = Vec::with_capacity(88);
         for pitch in 0..88 {
-            let midi = 21 + pitch as i32;
+            let midi = 21 + pitch;
             let is_black = is_black_key(midi);
             lanes.push(map_value(vec![
                 ("id", Value::Number(pitch as f64)),
