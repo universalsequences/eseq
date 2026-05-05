@@ -731,6 +731,96 @@ fn midi_fx_event_from_step(
     }
 }
 
+fn midi_fx_window_events_from_step(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+    samples_per_step: f32,
+    step_beats: f32,
+    samples_per_quarter: f32,
+    arp_phase_beats: f32,
+    resolved: ResolvedStep,
+    effect_params: Vec<ScheduledEffectParam>,
+    instrument_params: Vec<ScheduledInstrumentParam>,
+) -> Vec<MidiFxEvent> {
+    const EPS: f32 = 1e-5;
+    const MAX_WINDOWS: usize = 1024;
+
+    let note_spans = track_note_spans_for_trigger(snapshot, track_idx, step_idx);
+    if note_spans.is_empty() {
+        return vec![midi_fx_event_from_step(
+            snapshot,
+            track_idx,
+            step_idx,
+            samples_per_step,
+            step_beats,
+            arp_phase_beats,
+            resolved,
+            effect_params,
+            instrument_params,
+        )];
+    }
+
+    let window_beats = live_midi_fx_tick_beats(snapshot, track_idx, step_idx).max(EPS);
+    let window_samples = (samples_per_quarter * window_beats).round().max(1.0);
+    let end_beats = note_spans
+        .iter()
+        .map(|span| span.end_beats)
+        .fold(0.0_f32, f32::max);
+    if end_beats <= EPS {
+        return Vec::new();
+    }
+
+    let window_count = ((end_beats / window_beats).ceil() as usize).min(MAX_WINDOWS);
+    let mut events = Vec::with_capacity(window_count);
+    for window_idx in 0..window_count {
+        let window_start = window_idx as f32 * window_beats;
+        let window_end = window_start + window_beats;
+        let window_spans = note_spans
+            .iter()
+            .filter(|span| {
+                span.end_beats > window_start + EPS && span.start_beats < window_end - EPS
+            })
+            .map(|span| AccumulatorNoteSpan {
+                transpose: span.transpose,
+                start_beats: (span.start_beats - window_start).max(0.0),
+                end_beats: (span.end_beats - window_start).min(window_beats).max(0.0),
+            })
+            .filter(|span| span.end_beats > span.start_beats + EPS)
+            .collect::<Vec<_>>();
+        if window_spans.is_empty() {
+            continue;
+        }
+
+        let chord = window_spans
+            .iter()
+            .map(|span| span.transpose)
+            .collect::<Vec<_>>();
+        let first_transpose = chord.first().copied().unwrap_or(resolved.transpose);
+        let mut window_resolved = resolved;
+        window_resolved.duration = 1.0;
+        window_resolved.transpose = first_transpose;
+
+        events.push(MidiFxEvent {
+            offset_beats: window_start,
+            track: track_idx,
+            step: step_idx,
+            samples_per_step: window_samples,
+            step_beats: window_beats,
+            resolved: window_resolved,
+            chord_durations: vec![1.0; chord.len()],
+            chord,
+            chord_step_transpose: 0.0,
+            note_spans: Some(window_spans),
+            arp_phase_beats: arp_phase_beats + window_start,
+            effect_params: effect_params.clone(),
+            instrument_params: instrument_params.clone(),
+        });
+    }
+
+    events
+}
+
 fn run_midi_fx_chain_for_track(
     runtime: &mut lisp_effect::ScratchControlRuntime,
     snapshot: &SequencerSnapshot,
@@ -1705,12 +1795,13 @@ pub fn spawn_scheduler_thread(
                                 && !snapshot.tracks[target_track].params.midi_fx_chain.is_empty()
                             {
                                 if let Some(runtime) = scratch_runtime.as_mut() {
-                                    let event = midi_fx_event_from_step(
+                                    let events = midi_fx_window_events_from_step(
                                         &snapshot,
                                         target_track,
                                         trigger.step,
                                         trigger.samples_per_step,
                                         trigger.samples_per_step / samples_per_quarter,
+                                        samples_per_quarter,
                                         trigger.absolute_beats as f32,
                                         resolved,
                                         effect_params,
@@ -1720,7 +1811,7 @@ pub fn spawn_scheduler_thread(
                                         runtime,
                                         &snapshot,
                                         target_track,
-                                        vec![event],
+                                        events,
                                         0,
                                         debug_accum,
                                     );
@@ -1798,9 +1889,10 @@ pub fn spawn_scheduler_thread(
 #[cfg(test)]
 mod tests {
     use super::{
-        quantized_live_tick_sample, track_active_note_spans_at_beat, track_note_spans_for_trigger,
-        SnapshotSequencerClock,
+        midi_fx_window_events_from_step, quantized_live_tick_sample,
+        track_active_note_spans_at_beat, track_note_spans_for_trigger, SnapshotSequencerClock,
     };
+    use crate::accumulator::ResolvedStep;
     use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
 
     #[test]
@@ -1925,6 +2017,55 @@ mod tests {
         assert_eq!(transposes, vec![0.0, 12.0]);
         assert!(spans.iter().all(|span| span.start_beats == 0.0));
         assert!(spans.iter().all(|span| span.end_beats <= 0.25));
+    }
+
+    #[test]
+    fn midi_fx_window_events_clip_recorded_notes_to_tick_windows() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+
+        state.pattern.patterns[track].set_step_active(0, true);
+        state.pattern.chord_data[track].add_note_with_duration(0, 0.0, 8.0);
+        state.pattern.chord_data[track].add_note_with_duration(0, 4.0, 8.0);
+        state.pattern.chord_data[track].add_note_with_duration(0, 7.0, 8.0);
+        state.pattern.step_data[track].set(0, StepParam::Duration, 8.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let events = midi_fx_window_events_from_step(
+            &snapshot,
+            track,
+            0,
+            6_000.0,
+            0.25,
+            24_000.0,
+            0.0,
+            ResolvedStep {
+                duration: 8.0,
+                velocity: 0.8,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: 0.0,
+                pan: 0.0,
+                chop: 1.0,
+            },
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(events.len(), 8);
+        for (idx, event) in events.iter().enumerate() {
+            assert_eq!(event.offset_beats, idx as f32 * 0.25);
+            assert_eq!(event.samples_per_step, 6_000.0);
+            assert_eq!(event.step_beats, 0.25);
+            assert_eq!(event.resolved.duration, 1.0);
+            assert_eq!(event.chord, vec![0.0, 4.0, 7.0]);
+            let spans = event.note_spans.as_ref().expect("window spans");
+            assert_eq!(spans.len(), 3);
+            assert!(spans.iter().all(|span| span.start_beats == 0.0));
+            assert!(spans.iter().all(|span| span.end_beats <= 0.25));
+            assert_eq!(event.arp_phase_beats, idx as f32 * 0.25);
+        }
     }
 
     #[test]
