@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::effects::{
     EffectDescriptor, HostControl, ParamDescriptor, ParamKind, ParamScaling, BUILTIN_SLOT_COUNT,
 };
-use crate::lisp_effect::{self, MAX_CUSTOM_FX};
+use crate::lisp_effect::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
 use crate::sequencer::InstrumentType;
 use eseqlisp::vm::{format_lisp_source, Value as LispValue};
 use eseqlisp::Editor as LispEditor;
@@ -53,8 +53,10 @@ impl App {
             track,
             cursor_step,
         );
-        if !self.editor.scratch_buffer.trim().is_empty() {
-            runtime.eval(&self.editor.scratch_buffer)?;
+        let scratch_source =
+            lisp_effect::midi_fx_library_source_with_user_source(&self.editor.scratch_buffer);
+        if !scratch_source.trim().is_empty() {
+            runtime.eval(&scratch_source)?;
         }
         self.editor.scratch_runtime = Some(runtime);
         Ok(())
@@ -268,6 +270,92 @@ impl App {
             }
         }
         None
+    }
+
+    pub fn next_free_midi_fx_slot(&self, track: usize) -> Option<usize> {
+        if track >= self.tracks.len() {
+            return None;
+        }
+        let chain = self.state.pattern.track_params[track].midi_fx_chain();
+        if chain.len() < MAX_MIDI_FX_SLOTS {
+            Some(chain.len())
+        } else {
+            None
+        }
+    }
+
+    pub fn add_midi_fx_to_track_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {
+        let slot_idx = self
+            .next_free_midi_fx_slot(track)
+            .ok_or_else(|| "No free MIDI FX slots available".to_string())?;
+        let desc = lisp_effect::load_midi_fx_descriptor(name)
+            .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
+
+        let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
+        chain.push(desc.name.clone());
+        self.state.pattern.track_params[track].set_midi_fx_chain(chain);
+        self.state.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(&desc, 0);
+
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
+            &self.state,
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        );
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+            if pattern_idx == current_pattern {
+                *snapshot = current_snapshot.clone();
+            }
+        }
+
+        self.state.publish_scheduler_snapshot();
+        Ok(slot_idx)
+    }
+
+    pub fn delete_midi_fx_slot(&mut self, track: usize, slot_idx: usize) -> Result<(), String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
+        if slot_idx >= chain.len() {
+            return Err("Invalid MIDI FX slot".to_string());
+        }
+        chain.remove(slot_idx);
+        self.state.pattern.track_params[track].set_midi_fx_chain(chain);
+
+        let slots = &self.state.pattern.midi_fx_slots[track];
+        for idx in slot_idx..slots.len().saturating_sub(1) {
+            let next_idx = idx + 1;
+            slots[idx].copy_from(&slots[next_idx]);
+        }
+        if let Some(last_slot) = slots.last() {
+            last_slot.clear();
+        }
+
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
+            &self.state,
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        );
+        {
+            let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+            for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+                if pattern_idx == current_pattern {
+                    *snapshot = current_snapshot.clone();
+                } else {
+                    snapshot.remove_midi_fx_slot(track, slot_idx);
+                }
+            }
+        }
+
+        self.state.publish_scheduler_snapshot();
+        Ok(())
     }
 
     fn find_custom_slot_predecessor(&self, track: usize, offset: usize) -> (i32, usize) {
@@ -951,6 +1039,10 @@ impl App {
             self.graph.effect_descriptors.clone(),
             self.graph.instrument_descriptors.clone(),
         );
+        let midi_fx_library = lisp_effect::load_midi_fx_library_source();
+        if !midi_fx_library.trim().is_empty() {
+            let _ = runtime.eval(&midi_fx_library);
+        }
         if let Some((text, cursor, runtime)) = lisp_effect::run_embedded_scratch_flow(
             track,
             cursor_step,

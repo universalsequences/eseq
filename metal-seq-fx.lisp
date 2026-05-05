@@ -4,24 +4,40 @@
 (defstate instrument-panel-tab 0)
 (defstate instrument-source-tab 0)
 (defstate selected-fx-slot -1)
+(defstate selected-midi-fx-slot -1)
 ;; These are temporary render-context globals used by generated custom synth UI.
 ;; They must NOT be defstate: custom UI functions set them while rendering, and
 ;; writing reactive state during measurement/layout can perturb the layout.
 (def synth-ui-current-inst false)
 (def synth-ui-current-name "")
+(def midi-fx-ui-current-fx false)
+(def midi-fx-ui-current-name "")
 
 (def fx-clear-selected-effect ()
-  (set! selected-fx-slot -1))
+  (do
+    (set! selected-fx-slot -1)
+    (set! selected-midi-fx-slot -1)))
 
 (def fx-select-effect (slot)
-  (set! selected-fx-slot slot))
+  (do
+    (set! selected-fx-slot slot)
+    (set! selected-midi-fx-slot -1)))
+
+(def fx-select-midi-effect (slot)
+  (do
+    (set! selected-midi-fx-slot slot)
+    (set! selected-fx-slot -1)))
 
 (def fx-delete-selected-effect ()
-  (if (>= selected-fx-slot 2)
+  (if (>= selected-midi-fx-slot 0)
+    (do
+      (host-command "delete-midi-fx" (dict :slot selected-midi-fx-slot))
+      (fx-clear-selected-effect))
+    (if (>= selected-fx-slot 2)
     (do
       (host-command "delete-effect" (dict :slot selected-fx-slot))
       (fx-clear-selected-effect))
-    (fx-clear-selected-effect)))
+    (fx-clear-selected-effect))))
 
 (defwidget fx-panel-bg
   :width 1 :height 1
@@ -101,9 +117,13 @@
 (def fx-set-effect-value (fx p v)
   (do
     (fx-clear-selected-effect)
-    (if (seq-has-selection?)
-      (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
-      (seq-set-effect-param (get fx :slot-idx) (get p :idx) v))))
+    (if (get fx :midi-fx)
+      (host-command
+        (if (seq-has-selection?) "set-midi-fx-plock" "set-midi-fx-param")
+        (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v))
+      (if (seq-has-selection?)
+        (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
+        (seq-set-effect-param (get fx :slot-idx) (get p :idx) v)))))
 
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
@@ -130,7 +150,9 @@
                   (fx-clear-selected-effect)
                   (if fx
                     (host-command
-                      (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")
+                      (if (get fx :midi-fx)
+                        (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
+                        (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option"))
                       (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :label v))
                     (fx-set-instrument-option p v)))
                 :width 5.8 :height 1.2 :font-size 11)
@@ -159,7 +181,9 @@
         (each chunk |p pi|
           (fx-param-row p fx
             (if fx
-              (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx))
+              (if (get fx :midi-fx)
+                (str "midi-fx-slot-" (get fx :slot-idx) "-param-" (get p :idx))
+                (str "fx-slot-" (get fx :slot-idx) "-param-" (get p :idx)))
               (str "instrument-tab-" instrument-panel-tab "-chunk-" ci "-param-" (get p :idx)))))))))
 
 (def instrument-mod-base-name (name)
@@ -261,19 +285,27 @@
 
 (def fx-panel (title params fx)
   (box :background "fx-panel-bg"
-       :selected (if (= selected-fx-slot (get fx :slot-idx)) 1 0)
+       :debug-name (if (get fx :midi-fx)
+         (str "midi-fx-panel-root-" (get fx :slot-idx) "-" (get fx :name))
+         (str "audio-fx-panel-root-" (get fx :slot-idx) "-" title))
+       :selected (if (get fx :midi-fx)
+         (if (= selected-midi-fx-slot (get fx :slot-idx)) 1 0)
+         (if (= selected-fx-slot (get fx :slot-idx)) 1 0))
        :padding 0
     (v-stack :gap 0
       (box :width :fill :height 1.0 :padding 0 :v-align :center :h-align :start
+           :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
            :on-click |x y r|
-             (if (>= (get fx :slot-idx) 2)
-               (fx-select-effect (get fx :slot-idx))
-               (fx-clear-selected-effect))
+             (if (get fx :midi-fx)
+               (fx-select-midi-effect (get fx :slot-idx))
+               (if (>= (get fx :slot-idx) 2)
+                 (fx-select-effect (get fx :slot-idx))
+                 (fx-clear-selected-effect)))
         (h-stack :width :fill :gap 0.5 :align :center
           (box :width 0.75 :height 0)
           (label title :font-size 11 :color :white :bg :transparent)
           ;; Only show edit button for custom dgenlisp effects (not built-in Filter/Delay)
-          (if (and (not (= title "Filter")) (not (= title "Delay")))
+          (if (and (not (get fx :midi-fx)) (not (= title "Filter")) (not (= title "Delay")))
             (box :bg :dark-gray :width 4 :height 1.0 :align :center
               :on-click |x y r|
               (do
@@ -283,8 +315,29 @@
               (label "edit" :font-size 8 :color :gray :bg :transparent))
             (box))))
       (box :padding 1
+           :debug-name (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
            :on-click |x y r| (fx-clear-selected-effect)
-        (fx-param-grid params fx)))))
+        (if (get fx :midi-fx)
+          (midi-fx-panel-body fx)
+          (fx-param-grid params fx))))))
+
+(def midi-fx-panel (title params fx)
+  (box :background "fx-panel-bg"
+       :debug-name (str "midi-fx-panel-bg-" (get fx :slot-idx) "-" (get fx :name))
+       :selected (if (= selected-midi-fx-slot (get fx :slot-idx)) 1 0)
+       :padding 0
+    (v-stack :gap 0
+      (box :width :fill :height 1.0 :padding 0 :v-align :center :h-align :start
+           :debug-name "midi-fx-panel-header"
+           :on-click |x y r| (fx-select-midi-effect (get fx :slot-idx))
+        (h-stack :width :fill :gap 0.5 :align :center
+          (box :width 0.75 :height 0)
+          (label title :font-size 11 :color :white :bg :transparent)))
+      (box :padding 1
+           :debug-name "midi-fx-panel-content"
+           :on-click |x y r| (fx-clear-selected-effect)
+        (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
+          (midi-fx-panel-body fx))))))
 
 (def instrument-tab-button (text idx width)
   (box :width width :height 1.2 :align :center
@@ -315,12 +368,30 @@
       (fx-param-row p false (str "custom-ui-" synth-ui-current-name "-base-note"))
       (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
 
+(def midi-fx-ui-param (fx name)
+  (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
+
+(def midi-fx-ui-param-control (name)
+  (let ((p (midi-fx-ui-param midi-fx-ui-current-fx name)))
+    (if p
+      (fx-param-row p midi-fx-ui-current-fx
+        (str "custom-midi-fx-ui-" midi-fx-ui-current-name "-" name))
+      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
+
 (def instrument-synth-panel-body (inst)
   (let ((custom (custom-instrument-synth-ui inst)))
     (if custom
       (box :debug-name "custom-synth-wrapper" :padding 0.5 :h-align :start :v-align :start custom)
       (box :debug-name "fallback-synth-wrapper"
         (fx-param-grid (get inst :synth) false)))))
+
+(def midi-fx-panel-body (fx)
+  (let ((custom (custom-midi-fx-ui fx)))
+    (if custom
+      (box :debug-name "custom-midi-fx-wrapper" :padding 0.5 :h-align :start :v-align :start
+        (v-stack :gap 0.25 custom))
+      (box :debug-name "fallback-midi-fx-wrapper"
+        (fx-param-grid (get fx :params) fx)))))
 
 (defstate sampler-view-start 0.0)
 (defstate sampler-view-duration 0)
@@ -456,9 +527,24 @@
       (h-stack :gap 1
         (each SEQ.instrument-panel |inst inst-idx|
           (instrument-panel inst))
+        (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
+          (midi-fx-panel (get fx :name) (get fx :params) fx))
         (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
-          (fx-panel (get fx :name) (get fx :params) fx))
-        ;; Add effect
+          (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
+            (fx-panel (get fx :name) (get fx :params) fx)))
+        ;; Add MIDI FX
+        (box :background "fx-panel-bg" :selected 0 :padding 1.5
+             :on-click |x y r| (fx-clear-selected-effect)
+          (v-stack :gap 0.5 :align :center
+            (label "+" :font-size 15 :color :gray :bg :transparent)
+            (dropdown :value ""
+              :options SEQ.available-midi-effects
+              :placeholder "Add MIDI FX"
+              :on-change (lambda (v)
+                (fx-clear-selected-effect)
+                (host-command "add-midi-fx" (dict :name v)))
+              :width 12 :height 1.5 :font-size 14)))
+        ;; Add audio effect
         (box :background "fx-panel-bg" :selected 0 :padding 1.5
              :on-click |x y r| (fx-clear-selected-effect)
           (v-stack :gap 0.5 :align :center

@@ -36,6 +36,7 @@ pub struct SequencerTrackSnapshot {
     pub instrument_base_note_offset: f32,
     pub engine_id: Option<usize>,
     pub effect_slots: Vec<EffectSlotSnapshot>,
+    pub midi_fx_slots: Vec<EffectSlotSnapshot>,
     pub instrument_slot: EffectSlotSnapshot,
     pub steps: Vec<SequencerStepSnapshot>,
 }
@@ -91,6 +92,8 @@ impl SequencerSnapshot {
                 timebase: tp.get_timebase(),
                 accumulator_idx: tp.get_accumulator_idx(),
                 script_accumulator_name: tp.script_accumulator_name(),
+                midi_fx_chain: tp.midi_fx_chain(),
+                midi_fx_position: tp.get_midi_fx_position(),
                 accum_limit: tp.get_accum_limit(),
                 accum_mode: tp.get_accum_mode(),
                 fts_scale: tp.get_fts_scale(),
@@ -110,6 +113,10 @@ impl SequencerSnapshot {
                 id => Some(id as usize),
             };
             let effect_slots = state.pattern.effect_chains[track_idx]
+                .iter()
+                .map(EffectSlotSnapshot::capture)
+                .collect();
+            let midi_fx_slots = state.pattern.midi_fx_slots[track_idx]
                 .iter()
                 .map(EffectSlotSnapshot::capture)
                 .collect();
@@ -151,6 +158,7 @@ impl SequencerSnapshot {
                 instrument_base_note_offset,
                 engine_id,
                 effect_slots,
+                midi_fx_slots,
                 instrument_slot,
                 steps,
             });

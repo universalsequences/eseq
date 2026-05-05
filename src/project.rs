@@ -4,8 +4,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::EffectSlotSnapshot;
 use crate::sequencer::{
-    ChordSnapshot, InstrumentType, PatternSnapshot, SwingResolution, Timebase, TrackParamsSnapshot,
-    TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
+    ChordSnapshot, InstrumentType, MidiFxPosition, PatternSnapshot, SwingResolution, Timebase,
+    TrackParamsSnapshot, TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 
 const PROJECTS_DIR: &str = "projects";
@@ -61,6 +61,8 @@ pub struct ProjectPattern {
     pub step_data: Vec<Vec<[f32; NUM_PARAMS]>>,
     pub track_params: Vec<ProjectTrackParams>,
     pub effect_slots: Vec<Vec<ProjectEffectSlot>>,
+    #[serde(default)]
+    pub midi_fx_slots: Vec<Vec<ProjectEffectSlot>>,
     pub instrument_slots: Vec<ProjectEffectSlot>,
     pub instrument_base_note_offsets: Vec<f32>,
     pub track_sound_states: Vec<ProjectTrackSoundState>,
@@ -121,6 +123,10 @@ pub struct ProjectTrackParams {
     pub accumulator_idx: usize,
     #[serde(default)]
     pub script_accumulator_name: Option<String>,
+    #[serde(default)]
+    pub midi_fx_chain: Vec<String>,
+    #[serde(default = "default_midi_fx_position")]
+    pub midi_fx_position: ProjectMidiFxPosition,
     #[serde(default = "default_accum_limit")]
     pub accum_limit: f32,
     #[serde(default)]
@@ -150,6 +156,17 @@ pub enum ProjectInstrumentType {
     Custom,
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProjectMidiFxPosition {
+    PreAccumulator,
+    PostAccumulator,
+}
+
+fn default_midi_fx_position() -> ProjectMidiFxPosition {
+    ProjectMidiFxPosition::PostAccumulator
+}
+
 impl ProjectPattern {
     pub fn from_snapshot(
         snapshot: &PatternSnapshot,
@@ -167,6 +184,11 @@ impl ProjectPattern {
                 .collect(),
             effect_slots: snapshot
                 .effect_slots
+                .iter()
+                .map(|slots| slots.iter().map(ProjectEffectSlot::from).collect())
+                .collect(),
+            midi_fx_slots: snapshot
+                .midi_fx_slots
                 .iter()
                 .map(|slots| slots.iter().map(ProjectEffectSlot::from).collect())
                 .collect(),
@@ -237,6 +259,8 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
             timebase: value.timebase as u8,
             accumulator_idx: value.accumulator_idx,
             script_accumulator_name: value.script_accumulator_name,
+            midi_fx_chain: value.midi_fx_chain,
+            midi_fx_position: ProjectMidiFxPosition::from(value.midi_fx_position),
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
@@ -262,9 +286,29 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
             timebase: Timebase::from_index(value.timebase as u32),
             accumulator_idx: value.accumulator_idx,
             script_accumulator_name: value.script_accumulator_name,
+            midi_fx_chain: value.midi_fx_chain,
+            midi_fx_position: MidiFxPosition::from(value.midi_fx_position),
             accum_limit: value.accum_limit,
             accum_mode: value.accum_mode,
             fts_scale: value.fts_scale,
+        }
+    }
+}
+
+impl From<MidiFxPosition> for ProjectMidiFxPosition {
+    fn from(value: MidiFxPosition) -> Self {
+        match value {
+            MidiFxPosition::PreAccumulator => Self::PreAccumulator,
+            MidiFxPosition::PostAccumulator => Self::PostAccumulator,
+        }
+    }
+}
+
+impl From<ProjectMidiFxPosition> for MidiFxPosition {
+    fn from(value: ProjectMidiFxPosition) -> Self {
+        match value {
+            ProjectMidiFxPosition::PreAccumulator => Self::PreAccumulator,
+            ProjectMidiFxPosition::PostAccumulator => Self::PostAccumulator,
         }
     }
 }
@@ -823,6 +867,8 @@ mod tests {
                         timebase: Timebase::Sixteenth as u8,
                         accumulator_idx: 1,
                         script_accumulator_name: None,
+                        midi_fx_chain: Vec::new(),
+                        midi_fx_position: ProjectMidiFxPosition::PostAccumulator,
                         accum_limit: 24.0,
                         accum_mode: 2,
                         fts_scale: 0,
@@ -843,12 +889,15 @@ mod tests {
                         timebase: Timebase::Eighth as u8,
                         accumulator_idx: 0,
                         script_accumulator_name: None,
+                        midi_fx_chain: Vec::new(),
+                        midi_fx_position: ProjectMidiFxPosition::PostAccumulator,
                         accum_limit: 48.0,
                         accum_mode: 0,
                         fts_scale: 0,
                     },
                 ],
                 effect_slots: vec![vec![], vec![]],
+                midi_fx_slots: vec![vec![], vec![]],
                 instrument_slots: vec![
                     ProjectEffectSlot {
                         num_params: 2,

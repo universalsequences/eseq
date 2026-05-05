@@ -2005,6 +2005,32 @@ pub fn build_output_stream(
     let gate_off_state = (0..MAX_TRACKS).map(|_| GateOffTracker::new()).collect();
     let scheduled_events = Arc::new(ScheduledEventQueue::new());
     let rendered_samples = Arc::new(AtomicU64::new(0));
+    let (audio_keyboard_tx, audio_keyboard_rx) = std::sync::mpsc::channel();
+    let (live_keyboard_tx, live_keyboard_rx) = std::sync::mpsc::channel();
+    {
+        let state_for_keyboard_router = Arc::clone(&state);
+        let _ = std::thread::Builder::new()
+            .name("keyboard-midi-fx-router".to_string())
+            .spawn(move || {
+                while let Ok(trigger) = keyboard_rx.recv() {
+                    if trigger.note_off {
+                        let _ = live_keyboard_tx.send(trigger);
+                        let _ = audio_keyboard_tx.send(trigger);
+                        continue;
+                    }
+                    let use_midi_fx = trigger.track
+                        < state_for_keyboard_router.active_track_count()
+                        && !state_for_keyboard_router.pattern.track_params[trigger.track]
+                            .midi_fx_chain()
+                            .is_empty();
+                    if use_midi_fx {
+                        let _ = live_keyboard_tx.send(trigger);
+                    } else {
+                        let _ = audio_keyboard_tx.send(trigger);
+                    }
+                }
+            });
+    }
     let initial_topology_epoch = state.transport.topology_epoch.load(Ordering::Relaxed);
     let trace_audio = env_flag("TINYSEQ_AUDIO_TRACE", false);
     if trace_audio {
@@ -2023,7 +2049,7 @@ pub fn build_output_stream(
         voice_pools,
         custom_engine_pools,
         active_keyboard_notes: [[None; MAX_VOICES]; MAX_TRACKS],
-        keyboard_rx,
+        keyboard_rx: audio_keyboard_rx,
         master_recorder,
         accumulator_states: [crate::accumulator::AccumulatorRuntimeState::default(); MAX_TRACKS],
         last_playing: false,
@@ -2048,6 +2074,7 @@ pub fn build_output_stream(
         block_size,
         rendered_samples,
         scheduled_events,
+        live_keyboard_rx,
     );
 
     let host = cpal::default_host();

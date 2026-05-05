@@ -52,6 +52,7 @@ type DGenProcessFn = unsafe extern "C" fn(
 
 use crate::sequencer::MAX_TRACKS;
 pub const MAX_CUSTOM_FX: usize = 8;
+pub const MAX_MIDI_FX_SLOTS: usize = 4;
 const REGISTRY_SIZE: usize = MAX_TRACKS * MAX_CUSTOM_FX;
 static DGEN_PROCESS_FNS: [AtomicUsize; REGISTRY_SIZE] = {
     const INIT: AtomicUsize = AtomicUsize::new(0);
@@ -1954,6 +1955,7 @@ type SharedSequencerNativeMetadata = Arc<Mutex<SequencerNativeMetadata>>;
 pub(crate) struct RegisteredAccumulator {
     name: String,
     callback: RegisteredAccumulatorCallback,
+    params: Vec<crate::effects::ParamDescriptor>,
 }
 
 #[derive(Clone)]
@@ -1963,14 +1965,22 @@ enum RegisteredAccumulatorCallback {
 }
 
 type SharedRegisteredAccumulators = Arc<Mutex<Vec<RegisteredAccumulator>>>;
+type SharedRegisteredMidiFx = Arc<Mutex<Vec<RegisteredAccumulator>>>;
+type SharedPendingMidiFxParams = Arc<Mutex<Vec<crate::effects::ParamDescriptor>>>;
+type SharedMidiFxState = Arc<Mutex<HashMap<String, EValue>>>;
 
 #[derive(Clone)]
 pub(crate) struct AccumulatorEvalContext {
+    step_index: usize,
     resolved: ResolvedStep,
     chord: Vec<f32>,
     chord_durations: Vec<f32>,
     chord_step_transpose: f32,
     note_spans: Option<Vec<AccumulatorNoteSpan>>,
+    midi_fx_scope: Option<(usize, String)>,
+    midi_fx_slot: EffectSlotSnapshot,
+    midi_fx_param_names: Vec<String>,
+    arp_phase_beats: f32,
     step_beats: f32,
     num_steps: usize,
     suppressed: bool,
@@ -2016,6 +2026,9 @@ pub struct ScratchControlRuntime {
     context: SharedSequencerEvalContext,
     metadata: SharedSequencerNativeMetadata,
     accumulators: SharedRegisteredAccumulators,
+    midi_fx: SharedRegisteredMidiFx,
+    pending_midi_fx_params: SharedPendingMidiFxParams,
+    midi_fx_state: SharedMidiFxState,
     accumulator_eval: SharedAccumulatorEvalContext,
     runtime_globals: Vec<String>,
 }
@@ -2034,6 +2047,9 @@ impl ScratchControlRuntime {
             instrument_descriptors,
         }));
         let accumulators = Arc::new(Mutex::new(Vec::new()));
+        let midi_fx = Arc::new(Mutex::new(Vec::new()));
+        let pending_midi_fx_params = Arc::new(Mutex::new(Vec::new()));
+        let midi_fx_state = Arc::new(Mutex::new(HashMap::new()));
         let accumulator_eval = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::new();
         runtime.set_theme_sync_enabled(false);
@@ -2043,6 +2059,9 @@ impl ScratchControlRuntime {
             Arc::clone(&context),
             Arc::clone(&metadata),
             Arc::clone(&accumulators),
+            Arc::clone(&midi_fx),
+            Arc::clone(&pending_midi_fx_params),
+            Arc::clone(&midi_fx_state),
             Arc::clone(&accumulator_eval),
         );
         let mut this = Self {
@@ -2050,10 +2069,14 @@ impl ScratchControlRuntime {
             context,
             metadata,
             accumulators,
+            midi_fx,
+            pending_midi_fx_params,
+            midi_fx_state,
             accumulator_eval,
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
+        this.install_midi_fx_macro();
         this.refresh_runtime_globals();
         this
     }
@@ -2113,10 +2136,44 @@ impl ScratchControlRuntime {
         );
     }
 
+    fn install_midi_fx_macro(&mut self) {
+        let _ = self.runtime.eval_str(
+            r#"
+            (defmacro def-midi-fx (name body)
+              `(__register-midi-fx ,name
+                 (lambda (fx-step fx-value) ,body)))
+            "#,
+        );
+    }
+
     pub fn accumulator_names(&self) -> Vec<String> {
         self.accumulators
             .lock()
             .map(|registry| registry.iter().map(|entry| entry.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn midi_fx_names(&self) -> Vec<String> {
+        self.midi_fx
+            .lock()
+            .map(|registry| registry.iter().map(|entry| entry.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn midi_fx_descriptors(&self) -> Vec<EffectDescriptor> {
+        self.midi_fx
+            .lock()
+            .map(|registry| {
+                registry
+                    .iter()
+                    .map(|entry| {
+                        let mut desc = EffectDescriptor::empty_custom_slot();
+                        desc.name = entry.name.clone();
+                        desc.params = entry.params.clone();
+                        desc
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2150,11 +2207,16 @@ impl ScratchControlRuntime {
                 .lock()
                 .map_err(|_| "failed to lock accumulator eval context".to_string())?;
             *eval_ctx = Some(AccumulatorEvalContext {
+                step_index: step,
                 resolved,
                 chord,
                 chord_durations,
                 chord_step_transpose,
                 note_spans,
+                midi_fx_scope: None,
+                midi_fx_slot: EffectSlotSnapshot::new_empty(),
+                midi_fx_param_names: Vec::new(),
+                arp_phase_beats: 0.0,
                 step_beats,
                 num_steps,
                 suppressed: false,
@@ -2199,6 +2261,150 @@ impl ScratchControlRuntime {
         })
     }
 
+    pub fn invoke_midi_fx(
+        &mut self,
+        registry_index: usize,
+        track: usize,
+        step: usize,
+        value: f32,
+        resolved: ResolvedStep,
+        chord: Vec<f32>,
+        chord_durations: Vec<f32>,
+        chord_step_transpose: f32,
+        note_spans: Option<Vec<AccumulatorNoteSpan>>,
+        midi_fx_slot: EffectSlotSnapshot,
+        step_beats: f32,
+        num_steps: usize,
+        effect_slots: Vec<EffectSlotSnapshot>,
+        instrument_slot: EffectSlotSnapshot,
+        effect_params: Vec<ScheduledEffectParam>,
+        instrument_params: Vec<ScheduledInstrumentParam>,
+    ) -> Result<AccumulatorEvalOutput, String> {
+        self.invoke_midi_fx_with_arp_phase_beats(
+            registry_index,
+            track,
+            step,
+            value,
+            resolved,
+            chord,
+            chord_durations,
+            chord_step_transpose,
+            note_spans,
+            midi_fx_slot,
+            0.0,
+            step_beats,
+            num_steps,
+            effect_slots,
+            instrument_slot,
+            effect_params,
+            instrument_params,
+        )
+    }
+
+    pub fn invoke_midi_fx_with_arp_phase_beats(
+        &mut self,
+        registry_index: usize,
+        track: usize,
+        step: usize,
+        value: f32,
+        resolved: ResolvedStep,
+        chord: Vec<f32>,
+        chord_durations: Vec<f32>,
+        chord_step_transpose: f32,
+        note_spans: Option<Vec<AccumulatorNoteSpan>>,
+        midi_fx_slot: EffectSlotSnapshot,
+        arp_phase_beats: f32,
+        step_beats: f32,
+        num_steps: usize,
+        effect_slots: Vec<EffectSlotSnapshot>,
+        instrument_slot: EffectSlotSnapshot,
+        effect_params: Vec<ScheduledEffectParam>,
+        instrument_params: Vec<ScheduledInstrumentParam>,
+    ) -> Result<AccumulatorEvalOutput, String> {
+        let entry = self
+            .midi_fx
+            .lock()
+            .map_err(|_| "failed to lock MIDI FX registry".to_string())?
+            .get(registry_index)
+            .cloned()
+            .ok_or_else(|| "registered MIDI FX out of range".to_string())?;
+        let midi_fx_slot = if midi_fx_slot.num_params == 0 && !entry.params.is_empty() {
+            EffectSlotSnapshot::new_default(
+                &EffectDescriptor {
+                    name: entry.name.clone(),
+                    params: entry.params.clone(),
+                    input_channels: 0,
+                    output_channels: 0,
+                },
+                0,
+            )
+        } else {
+            midi_fx_slot
+        };
+        {
+            let mut eval_ctx = self
+                .accumulator_eval
+                .lock()
+                .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+            *eval_ctx = Some(AccumulatorEvalContext {
+                step_index: step,
+                resolved,
+                chord,
+                chord_durations,
+                chord_step_transpose,
+                note_spans,
+                midi_fx_scope: Some((track, entry.name.clone())),
+                midi_fx_slot,
+                midi_fx_param_names: entry
+                    .params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect(),
+                arp_phase_beats,
+                step_beats,
+                num_steps,
+                suppressed: false,
+                effect_slots,
+                instrument_slot,
+                effect_params,
+                instrument_params,
+                emitted: Vec::new(),
+            });
+        }
+        self.runtime
+            .set_global_value("fx-step", EValue::Number(step as f64));
+        self.runtime
+            .set_global_value("fx-value", EValue::Number(value as f64));
+        match entry.callback {
+            RegisteredAccumulatorCallback::Source(source) => {
+                self.runtime
+                    .eval_str(&source)
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+            RegisteredAccumulatorCallback::Closure(callback) => {
+                self.runtime
+                    .invoke(
+                        callback,
+                        vec![EValue::Number(step as f64), EValue::Number(value as f64)],
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+            }
+        }
+        let output = self
+            .accumulator_eval
+            .lock()
+            .map_err(|_| "failed to lock MIDI FX eval context".to_string())?
+            .take()
+            .ok_or_else(|| "MIDI FX did not produce an evaluation context".to_string())?;
+        Ok(AccumulatorEvalOutput {
+            resolved: output.resolved,
+            suppressed: output.suppressed,
+            effect_params: output.effect_params,
+            instrument_params: output.instrument_params,
+            emitted: output.emitted,
+        })
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -2206,6 +2412,9 @@ impl ScratchControlRuntime {
         SharedSequencerEvalContext,
         SharedSequencerNativeMetadata,
         SharedRegisteredAccumulators,
+        SharedRegisteredMidiFx,
+        SharedPendingMidiFxParams,
+        SharedMidiFxState,
         SharedAccumulatorEvalContext,
     ) {
         (
@@ -2213,6 +2422,9 @@ impl ScratchControlRuntime {
             self.context,
             self.metadata,
             self.accumulators,
+            self.midi_fx,
+            self.pending_midi_fx_params,
+            self.midi_fx_state,
             self.accumulator_eval,
         )
     }
@@ -2222,6 +2434,9 @@ impl ScratchControlRuntime {
         context: SharedSequencerEvalContext,
         metadata: SharedSequencerNativeMetadata,
         accumulators: SharedRegisteredAccumulators,
+        midi_fx: SharedRegisteredMidiFx,
+        pending_midi_fx_params: SharedPendingMidiFxParams,
+        midi_fx_state: SharedMidiFxState,
         accumulator_eval: SharedAccumulatorEvalContext,
     ) -> Self {
         let mut this = Self {
@@ -2229,10 +2444,14 @@ impl ScratchControlRuntime {
             context,
             metadata,
             accumulators,
+            midi_fx,
+            pending_midi_fx_params,
+            midi_fx_state,
             accumulator_eval,
             runtime_globals: Vec::new(),
         };
         this.install_accumulator_macro();
+        this.install_midi_fx_macro();
         this.refresh_runtime_globals();
         this
     }
@@ -2250,6 +2469,9 @@ fn register_sequencer_natives(
         context,
         metadata,
         Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(Vec::new())),
+        Arc::new(Mutex::new(HashMap::new())),
         Arc::new(Mutex::new(None)),
     );
 }
@@ -2260,6 +2482,9 @@ fn register_sequencer_natives_with_accumulators(
     context: SharedSequencerEvalContext,
     metadata: SharedSequencerNativeMetadata,
     accumulators: SharedRegisteredAccumulators,
+    midi_fx: SharedRegisteredMidiFx,
+    pending_midi_fx_params: SharedPendingMidiFxParams,
+    midi_fx_state: SharedMidiFxState,
     accumulator_eval: SharedAccumulatorEvalContext,
 ) {
     let current_track =
@@ -2299,9 +2524,86 @@ fn register_sequencer_natives_with_accumulators(
                 registry.push(RegisteredAccumulator {
                     name: name.clone(),
                     callback: callback.clone(),
+                    params: Vec::new(),
                 });
             }
             ctx.set_status(format!("registered accumulator '{name}'"));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let midi_fx_for_register = Arc::clone(&midi_fx);
+    let pending_params_for_register = Arc::clone(&pending_midi_fx_params);
+    runtime.register_native_with_docs(
+        "__register-midi-fx",
+        "(__register-midi-fx name callback)",
+        "Internal helper used by def-midi-fx to register a named scheduler-side MIDI FX callback.",
+        move |args, ctx| {
+            let Some(name) = args.first() else {
+                return Err("expected MIDI FX name".to_string());
+            };
+            let name = match name {
+                EValue::String(name) => name.clone(),
+                _ => return Err("expected MIDI FX name string".to_string()),
+            };
+            let Some(callback) = args.get(1) else {
+                return Err("expected MIDI FX callback".to_string());
+            };
+            let callback = match callback {
+                EValue::Closure(_, _) => RegisteredAccumulatorCallback::Closure(callback.clone()),
+                EValue::String(source) => RegisteredAccumulatorCallback::Source(source.clone()),
+                other => {
+                    RegisteredAccumulatorCallback::Source(eseqlisp::vm::format_lisp_source(other))
+                }
+            };
+            let params = pending_params_for_register
+                .lock()
+                .map_err(|_| "failed to lock pending MIDI FX params".to_string())?
+                .drain(..)
+                .enumerate()
+                .map(|(idx, mut param)| {
+                    param.node_param_idx = idx as u32;
+                    param
+                })
+                .collect::<Vec<_>>();
+            let mut registry = midi_fx_for_register
+                .lock()
+                .map_err(|_| "failed to lock MIDI FX registry".to_string())?;
+            if let Some(existing) = registry.iter_mut().find(|entry| entry.name == name) {
+                existing.callback = callback.clone();
+                existing.params = params.clone();
+            } else {
+                registry.push(RegisteredAccumulator {
+                    name: name.clone(),
+                    callback: callback.clone(),
+                    params: params.clone(),
+                });
+            }
+            ctx.set_status(format!("registered MIDI FX '{name}'"));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let pending_params_for_param = Arc::clone(&pending_midi_fx_params);
+    runtime.register_native_with_docs(
+        "midi-fx-param",
+        "(midi-fx-param \"name\" :default value :min value :max value :enum \"a\" \"b\" ...)",
+        "Declare a plockable parameter for the next def-midi-fx in a folder MIDI FX source.",
+        move |args, _ctx| {
+            let Some(name_value) = args.first() else {
+                return Err("midi-fx-param expects a name".to_string());
+            };
+            let name = match name_value {
+                EValue::String(name) | EValue::Keyword(name) | EValue::Symbol(name) => {
+                    name.trim_start_matches('@').to_string()
+                }
+                _ => return Err("midi-fx-param name must be string/symbol/keyword".to_string()),
+            };
+            let param = parse_midi_fx_param_descriptor(&name, &args[1..])?;
+            pending_params_for_param
+                .lock()
+                .map_err(|_| "failed to lock pending MIDI FX params".to_string())?
+                .push(param);
             Ok(EValue::Bool(true))
         },
     );
@@ -2392,6 +2694,278 @@ fn register_sequencer_natives_with_accumulators(
             state_for_use_acc.publish_scheduler_snapshot();
             ctx.set_status(format!("track {track_idx} accumulator {}", names[idx]));
             Ok(EValue::String(names[idx].clone()))
+        },
+    );
+
+    let state_for_use_midi_fx = Arc::clone(&state);
+    let context_for_use_midi_fx = Arc::clone(&context);
+    let midi_fx_for_use = Arc::clone(&midi_fx);
+    runtime.register_native_with_docs(
+        "seq-use-midi-fx",
+        "(seq-use-midi-fx name...) | (seq-use-midi-fx track name...)",
+        "Assign a scratch MIDI FX chain to the current track, or to a specific 0-based track.",
+        move |args, ctx| {
+            if args.is_empty() {
+                return Err("seq-use-midi-fx expects at least one MIDI FX name".to_string());
+            }
+            let (track_idx, labels_start) = match args.first() {
+                Some(EValue::Number(track)) if *track >= 0.0 => (*track as usize, 1),
+                _ => (current_track(&context_for_use_midi_fx), 0),
+            };
+            if track_idx >= state_for_use_midi_fx.active_track_count() {
+                return Err("track out of range".to_string());
+            }
+            let mut chain = Vec::new();
+            for arg in args.iter().skip(labels_start) {
+                match arg {
+                    EValue::String(label) => chain.push(label.clone()),
+                    _ => return Err("seq-use-midi-fx expects string MIDI FX names".to_string()),
+                }
+            }
+            if chain.is_empty() {
+                return Err("seq-use-midi-fx expects at least one MIDI FX name".to_string());
+            }
+            let registry = midi_fx_for_use
+                .lock()
+                .map_err(|_| "failed to lock MIDI FX registry".to_string())?
+                .clone();
+            let names = registry
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect::<Vec<_>>();
+            for label in &chain {
+                if !names.iter().any(|name| name.eq_ignore_ascii_case(label)) {
+                    return Err(format!("unknown MIDI FX '{label}'"));
+                }
+            }
+            state_for_use_midi_fx.pattern.track_params[track_idx].set_midi_fx_chain(chain.clone());
+            for slot in &state_for_use_midi_fx.pattern.midi_fx_slots[track_idx] {
+                slot.clear();
+            }
+            for (slot_idx, label) in chain.iter().enumerate() {
+                if slot_idx >= state_for_use_midi_fx.pattern.midi_fx_slots[track_idx].len() {
+                    break;
+                }
+                if let Some(entry) = registry
+                    .iter()
+                    .find(|entry| entry.name.eq_ignore_ascii_case(label))
+                {
+                    let desc = EffectDescriptor {
+                        name: entry.name.clone(),
+                        params: entry.params.clone(),
+                        input_channels: 0,
+                        output_channels: 0,
+                    };
+                    state_for_use_midi_fx.pattern.midi_fx_slots[track_idx][slot_idx]
+                        .sync_descriptor(&desc, 0);
+                }
+            }
+            state_for_use_midi_fx.publish_scheduler_snapshot();
+            ctx.set_status(format!("track {track_idx} MIDI FX {:?}", chain));
+            Ok(lisp_list(chain.into_iter().map(EValue::String).collect()))
+        },
+    );
+
+    let state_for_clear_midi_fx = Arc::clone(&state);
+    let context_for_clear_midi_fx = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "seq-clear-midi-fx",
+        "(seq-clear-midi-fx) | (seq-clear-midi-fx track)",
+        "Clear the MIDI FX chain for the current track or a specific 0-based track.",
+        move |args, ctx| {
+            let track_idx = match args.first() {
+                Some(EValue::Number(track)) if *track >= 0.0 => *track as usize,
+                None => current_track(&context_for_clear_midi_fx),
+                _ => return Err("seq-clear-midi-fx expects no args or a track index".to_string()),
+            };
+            if track_idx >= state_for_clear_midi_fx.active_track_count() {
+                return Err("track out of range".to_string());
+            }
+            state_for_clear_midi_fx.pattern.track_params[track_idx].set_midi_fx_chain(Vec::new());
+            for slot in &state_for_clear_midi_fx.pattern.midi_fx_slots[track_idx] {
+                slot.clear();
+            }
+            state_for_clear_midi_fx.publish_scheduler_snapshot();
+            ctx.set_status(format!("track {track_idx} MIDI FX cleared"));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_midi_fx_chain = Arc::clone(&state);
+    let context_for_midi_fx_chain = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "seq-midi-fx-chain",
+        "(seq-midi-fx-chain) | (seq-midi-fx-chain track)",
+        "Return the MIDI FX chain for the current track or a specific 0-based track.",
+        move |args, _ctx| {
+            let track_idx = match args.first() {
+                Some(EValue::Number(track)) if *track >= 0.0 => *track as usize,
+                None => current_track(&context_for_midi_fx_chain),
+                _ => return Err("seq-midi-fx-chain expects no args or a track index".to_string()),
+            };
+            if track_idx >= state_for_midi_fx_chain.active_track_count() {
+                return Err("track out of range".to_string());
+            }
+            Ok(lisp_list(
+                state_for_midi_fx_chain.pattern.track_params[track_idx]
+                    .midi_fx_chain()
+                    .into_iter()
+                    .map(EValue::String)
+                    .collect(),
+            ))
+        },
+    );
+
+    let state_for_set_midi_fx_param = Arc::clone(&state);
+    let context_for_set_midi_fx_param = Arc::clone(&context);
+    let midi_fx_for_set_param = Arc::clone(&midi_fx);
+    runtime.register_native_with_docs(
+        "seq-set-midi-fx-param",
+        "(seq-set-midi-fx-param slot param value) | (seq-set-midi-fx-param track slot param value)",
+        "Set a MIDI FX slot default parameter on the current track or a specific track.",
+        move |args, ctx| {
+            let (track_idx, idx) = match args.first() {
+                Some(EValue::Number(track)) if args.len() >= 4 && *track >= 0.0 => {
+                    (*track as usize, 1)
+                }
+                _ => (current_track(&context_for_set_midi_fx_param), 0),
+            };
+            if track_idx >= state_for_set_midi_fx_param.active_track_count() {
+                return Err("track out of range".to_string());
+            }
+            let Some(EValue::Number(slot)) = args.get(idx) else {
+                return Err("seq-set-midi-fx-param expects numeric slot".to_string());
+            };
+            let slot_idx = *slot as usize;
+            let Some(param_ref) = args.get(idx + 1) else {
+                return Err("seq-set-midi-fx-param expects param".to_string());
+            };
+            let value = parse_value_arg(&args, idx + 2, "MIDI FX param")?;
+            let registry = midi_fx_for_set_param
+                .lock()
+                .map_err(|_| "failed to lock MIDI FX registry".to_string())?
+                .clone();
+            let param_desc = midi_fx_param_descriptor_for_slot(
+                &state_for_set_midi_fx_param,
+                &registry,
+                track_idx,
+                slot_idx,
+                param_ref,
+            )?;
+            let param_idx = param_desc.node_param_idx as usize;
+            let slot = state_for_set_midi_fx_param
+                .pattern
+                .midi_fx_slots
+                .get(track_idx)
+                .and_then(|slots| slots.get(slot_idx))
+                .ok_or_else(|| "MIDI FX slot out of range".to_string())?;
+            slot.defaults.set(param_idx, param_desc.clamp(value));
+            state_for_set_midi_fx_param.publish_scheduler_snapshot();
+            ctx.set_status(format!(
+                "track {track_idx} MIDI FX slot {slot_idx} param {param_idx}"
+            ));
+            Ok(EValue::Number(slot.defaults.get(param_idx) as f64))
+        },
+    );
+
+    let state_for_plock_midi_fx = Arc::clone(&state);
+    let context_for_plock_midi_fx = Arc::clone(&context);
+    let midi_fx_for_plock = Arc::clone(&midi_fx);
+    runtime.register_native_with_docs(
+        "seq-plock-midi-fx",
+        "(seq-plock-midi-fx step slot param value) | (seq-plock-midi-fx track step slot param value)",
+        "Set a MIDI FX parameter p-lock on a step.",
+        move |args, ctx| {
+            let (track_idx, idx) = match args.first() {
+                Some(EValue::Number(track)) if args.len() >= 5 && *track >= 0.0 => {
+                    (*track as usize, 1)
+                }
+                _ => (current_track(&context_for_plock_midi_fx), 0),
+            };
+            if track_idx >= state_for_plock_midi_fx.active_track_count() {
+                return Err("track out of range".to_string());
+            }
+            let Some(EValue::Number(step)) = args.get(idx) else {
+                return Err("seq-plock-midi-fx expects numeric step".to_string());
+            };
+            let Some(EValue::Number(slot)) = args.get(idx + 1) else {
+                return Err("seq-plock-midi-fx expects numeric slot".to_string());
+            };
+            let step_idx = (*step as usize).min(crate::sequencer::MAX_STEPS - 1);
+            let slot_idx = *slot as usize;
+            let Some(param_ref) = args.get(idx + 2) else {
+                return Err("seq-plock-midi-fx expects param".to_string());
+            };
+            let value = parse_value_arg(&args, idx + 3, "MIDI FX p-lock")?;
+            let registry = midi_fx_for_plock
+                .lock()
+                .map_err(|_| "failed to lock MIDI FX registry".to_string())?
+                .clone();
+            let param_desc = midi_fx_param_descriptor_for_slot(
+                &state_for_plock_midi_fx,
+                &registry,
+                track_idx,
+                slot_idx,
+                param_ref,
+            )?;
+            let param_idx = param_desc.node_param_idx as usize;
+            let slot = state_for_plock_midi_fx
+                .pattern
+                .midi_fx_slots
+                .get(track_idx)
+                .and_then(|slots| slots.get(slot_idx))
+                .ok_or_else(|| "MIDI FX slot out of range".to_string())?;
+            slot.plocks.set(step_idx, param_idx, param_desc.clamp(value));
+            state_for_plock_midi_fx.publish_scheduler_snapshot();
+            ctx.set_status(format!(
+                "track {track_idx} step {step_idx} MIDI FX slot {slot_idx} param {param_idx}"
+            ));
+            Ok(EValue::Bool(true))
+        },
+    );
+
+    let state_for_midi_fx_position = Arc::clone(&state);
+    let context_for_midi_fx_position = Arc::clone(&context);
+    runtime.register_native_with_docs(
+        "seq-set-midi-fx-position",
+        "(seq-set-midi-fx-position :post-accumulator) | (seq-set-midi-fx-position track :post-accumulator)",
+        "Set whether the track MIDI FX chain runs before or after the visible accumulator slot.",
+        move |args, ctx| {
+            if args.is_empty() {
+                return Err("seq-set-midi-fx-position expects a position".to_string());
+            }
+            let (track_idx, pos_idx) = match args.first() {
+                Some(EValue::Number(track)) if *track >= 0.0 => (*track as usize, 1),
+                _ => (current_track(&context_for_midi_fx_position), 0),
+            };
+            if track_idx >= state_for_midi_fx_position.active_track_count() {
+                return Err("track out of range".to_string());
+            }
+            let position = match args.get(pos_idx) {
+                Some(EValue::Keyword(name)) | Some(EValue::String(name))
+                    if name == "post-accumulator" || name == "post" =>
+                {
+                    crate::sequencer::MidiFxPosition::PostAccumulator
+                }
+                Some(EValue::Keyword(name)) | Some(EValue::String(name))
+                    if name == "pre-accumulator" || name == "pre" =>
+                {
+                    return Err(
+                        "pre-accumulator MIDI FX position is not implemented yet".to_string()
+                    );
+                }
+                _ => {
+                    return Err(
+                        "seq-set-midi-fx-position expects :pre-accumulator or :post-accumulator"
+                            .to_string(),
+                    )
+                }
+            };
+            state_for_midi_fx_position.pattern.track_params[track_idx]
+                .set_midi_fx_position(position);
+            state_for_midi_fx_position.publish_scheduler_snapshot();
+            ctx.set_status(format!("track {track_idx} MIDI FX position {position:?}"));
+            Ok(EValue::Bool(true))
         },
     );
 
@@ -2577,6 +3151,151 @@ fn register_sequencer_natives_with_accumulators(
             });
             Ok(EValue::Bool(true))
         },
+    );
+
+    let fx_eval_for_suppress = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-suppress",
+        "(fx-suppress)",
+        "Suppress the input event for the current MIDI FX evaluation.",
+        move |_args, _ctx| eval_suppress_current_event(&fx_eval_for_suppress, "MIDI FX"),
+    );
+
+    let fx_eval_for_emit = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-emit",
+        "(fx-emit offset :vel value :note transpose ...) | (fx-emit :16 value ...)",
+        "Emit a derived MIDI FX event at a musical offset.",
+        move |args, _ctx| eval_emit_current_event(&fx_eval_for_emit, &args, "MIDI FX"),
+    );
+
+    let fx_eval_for_arp_count = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-arp-count",
+        "(fx-arp-count :16)",
+        "Return the number of arp ticks for the current MIDI FX note spans at a timebase.",
+        move |args, _ctx| eval_arp_count_current_event(&fx_eval_for_arp_count, &args, "MIDI FX"),
+    );
+
+    let fx_eval_for_arp_note = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-arp-note",
+        "(fx-arp-note :16 tick)",
+        "Return the note for an arp tick at a timebase, or nil once that note lane has ended.",
+        move |args, _ctx| eval_arp_note_current_event(&fx_eval_for_arp_note, &args, "MIDI FX"),
+    );
+
+    let fx_eval_for_arp_emit = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-arp-emit",
+        "(fx-arp-emit :16 tick :vel 0.8 ...)",
+        "Emit one duration-aware arpeggiated MIDI FX event for a tick.",
+        move |args, _ctx| eval_arp_emit_current_event(&fx_eval_for_arp_emit, &args, "MIDI FX"),
+    );
+
+    let fx_eval_for_time = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-time",
+        "(fx-time :16) | (fx-time :8t units)",
+        "Return a duration in beats for a MIDI FX timebase and optional unit count.",
+        move |args, _ctx| eval_fx_time(&fx_eval_for_time, &args),
+    );
+
+    let fx_eval_for_source_time = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-source-time",
+        "(fx-source-time) | (fx-source-time units)",
+        "Return a duration in beats for the current source step and optional unit count.",
+        move |args, _ctx| eval_fx_source_time(&fx_eval_for_source_time, &args),
+    );
+
+    let fx_eval_for_param = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-param",
+        "(fx-param \"name\") | (fx-param index)",
+        "Read the current MIDI FX slot parameter value, resolving the current step's p-lock over the slot default.",
+        move |args, _ctx| eval_midi_fx_param(&fx_eval_for_param, &args),
+    );
+
+    let fx_eval_for_arp_emit_directed = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-arp-emit-directed",
+        "(fx-arp-emit-directed rate tick direction :vel 0.8 ...)",
+        "Emit one arpeggiated MIDI FX note with direction 0=up, 1=down, 2=up-down, 3=random.",
+        move |args, _ctx| {
+            eval_arp_emit_directed_current_event(&fx_eval_for_arp_emit_directed, &args, "MIDI FX")
+        },
+    );
+
+    let fx_eval_for_note_count = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-note-count",
+        "(fx-note-count)",
+        "Return the number of notes available to the current MIDI FX event.",
+        move |_args, _ctx| {
+            let guard = fx_eval_for_note_count
+                .lock()
+                .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+            let Some(eval) = guard.as_ref() else {
+                return Err("MIDI FX context not active".to_string());
+            };
+            let count = eval
+                .note_spans
+                .as_ref()
+                .map(|spans| spans.len())
+                .unwrap_or_else(|| accumulator_chord_notes(eval).len());
+            Ok(EValue::Number(count as f64))
+        },
+    );
+
+    let fx_eval_for_note = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-note",
+        "(fx-note index)",
+        "Return the transpose value for a note in the current MIDI FX event.",
+        move |args, _ctx| eval_note_span_field(&fx_eval_for_note, &args, FxNoteField::Transpose),
+    );
+
+    let fx_eval_for_note_start = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-note-start",
+        "(fx-note-start index)",
+        "Return a note start time in beats relative to the current MIDI FX event.",
+        move |args, _ctx| eval_note_span_field(&fx_eval_for_note_start, &args, FxNoteField::Start),
+    );
+
+    let fx_eval_for_note_end = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-note-end",
+        "(fx-note-end index)",
+        "Return a note end time in beats relative to the current MIDI FX event.",
+        move |args, _ctx| eval_note_span_field(&fx_eval_for_note_end, &args, FxNoteField::End),
+    );
+
+    let fx_eval_for_notes = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-notes",
+        "(fx-notes)",
+        "Return all notes for the current MIDI FX event as maps with :note, :start, and :end fields.",
+        move |_args, _ctx| eval_note_spans_as_list(&fx_eval_for_notes),
+    );
+
+    let fx_eval_for_state_get = Arc::clone(&accumulator_eval);
+    let fx_state_for_get = Arc::clone(&midi_fx_state);
+    runtime.register_native_with_docs(
+        "fx-state-get",
+        "(fx-state-get key) | (fx-state-get key default)",
+        "Read persistent per-track/per-MIDI-FX state for the current MIDI FX callback.",
+        move |args, _ctx| eval_midi_fx_state_get(&fx_eval_for_state_get, &fx_state_for_get, &args),
+    );
+
+    let fx_eval_for_state_set = Arc::clone(&accumulator_eval);
+    let fx_state_for_set = Arc::clone(&midi_fx_state);
+    runtime.register_native_with_docs(
+        "fx-state-set",
+        "(fx-state-set key value)",
+        "Write persistent per-track/per-MIDI-FX state for the current MIDI FX callback.",
+        move |args, _ctx| eval_midi_fx_state_set(&fx_eval_for_state_set, &fx_state_for_set, &args),
     );
 
     let acc_eval_for_set_step = Arc::clone(&accumulator_eval);
@@ -3759,11 +4478,448 @@ fn apply_acc_emit_overrides(
                 }
                 target_track = Some(track as usize);
             }
+            "octave" | "octaves" => {
+                // Consumed by arp helpers before normal event overrides are applied.
+            }
             _ => return Err(format!("acc-emit unknown override :{key}")),
         }
         idx += 1;
     }
     Ok(target_track)
+}
+
+fn parse_arp_octaves_arg(args: &[EValue], mut idx: usize) -> Result<usize, String> {
+    let mut octaves = 1usize;
+    while idx < args.len() {
+        let key = match &args[idx] {
+            EValue::Keyword(name) | EValue::String(name) | EValue::Symbol(name) => {
+                name.to_ascii_lowercase()
+            }
+            _ => return Err("arp helper expects keyword/value override pairs".to_string()),
+        };
+        idx += 1;
+        let Some(value) = args.get(idx) else {
+            return Err(format!("arp helper missing value for :{key}"));
+        };
+        if matches!(key.as_str(), "octave" | "octaves") {
+            let value = acc_emit_number(value, "octave")?;
+            octaves = value.round().clamp(1.0, 8.0) as usize;
+        }
+        idx += 1;
+    }
+    Ok(octaves)
+}
+
+fn eval_suppress_current_event(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    label: &str,
+) -> Result<EValue, String> {
+    let mut guard = accumulator_eval
+        .lock()
+        .map_err(|_| format!("failed to lock {label} eval context"))?;
+    let Some(eval) = guard.as_mut() else {
+        return Err(format!("{label} context not active"));
+    };
+    eval.suppressed = true;
+    Ok(EValue::Bool(true))
+}
+
+fn eval_emit_current_event(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+    label: &str,
+) -> Result<EValue, String> {
+    let mut guard = accumulator_eval
+        .lock()
+        .map_err(|_| format!("failed to lock {label} eval context"))?;
+    let Some(eval) = guard.as_mut() else {
+        return Err(format!("{label} context not active"));
+    };
+    let (offset_beats, idx) = parse_acc_emit_offset(&args, eval.step_beats, eval.num_steps)?;
+    let mut resolved = eval.resolved;
+    let mut chord = eval.chord.clone();
+    let mut chord_durations = eval.chord_durations.clone();
+    let chord_step_transpose = eval.chord_step_transpose;
+    let target_track =
+        apply_acc_emit_overrides(&args, idx, &mut resolved, &mut chord, &mut chord_durations)?;
+    eval.emitted.push(EmittedAccumulatorEvent {
+        offset_beats,
+        track: target_track,
+        resolved,
+        chord,
+        chord_durations,
+        chord_step_transpose,
+        effect_params: eval.effect_params.clone(),
+        instrument_params: eval.instrument_params.clone(),
+    });
+    Ok(EValue::Bool(true))
+}
+
+fn eval_arp_count_current_event(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+    label: &str,
+) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| format!("failed to lock {label} eval context"))?;
+    let Some(eval) = guard.as_ref() else {
+        return Err(format!("{label} context not active"));
+    };
+    let timebase = parse_timebase_arg(args, 0)?;
+    let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
+    Ok(EValue::Number(
+        accumulator_arp_count(eval, rate_beats) as f64
+    ))
+}
+
+fn eval_arp_note_current_event(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+    label: &str,
+) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| format!("failed to lock {label} eval context"))?;
+    let Some(eval) = guard.as_ref() else {
+        return Err(format!("{label} context not active"));
+    };
+    let timebase = parse_timebase_arg(args, 0)?;
+    let Some(EValue::Number(tick)) = args.get(1) else {
+        return Err("arp note helper expects numeric tick".to_string());
+    };
+    if *tick < 0.0 {
+        return Ok(EValue::Nil);
+    }
+    let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
+    Ok(accumulator_arp_note(eval, rate_beats, *tick as usize)
+        .map(|note| EValue::Number(note as f64))
+        .unwrap_or(EValue::Nil))
+}
+
+fn eval_arp_emit_current_event(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+    label: &str,
+) -> Result<EValue, String> {
+    let mut guard = accumulator_eval
+        .lock()
+        .map_err(|_| format!("failed to lock {label} eval context"))?;
+    let Some(eval) = guard.as_mut() else {
+        return Err(format!("{label} context not active"));
+    };
+    let timebase = parse_timebase_arg(args, 0)?;
+    let Some(EValue::Number(tick)) = args.get(1) else {
+        return Err("arp emit helper expects numeric tick".to_string());
+    };
+    if *tick < 0.0 {
+        return Ok(EValue::Bool(false));
+    }
+    let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
+    let Some(note) = accumulator_arp_note(eval, rate_beats, *tick as usize) else {
+        return Ok(EValue::Bool(false));
+    };
+
+    let mut resolved = eval.resolved;
+    resolved.transpose = note;
+    if eval.step_beats > 0.0 {
+        resolved.duration = (rate_beats / eval.step_beats).max(0.0);
+    }
+    let mut chord = Vec::new();
+    let mut chord_durations = Vec::new();
+    let target_track =
+        apply_acc_emit_overrides(args, 2, &mut resolved, &mut chord, &mut chord_durations)?;
+    eval.emitted.push(EmittedAccumulatorEvent {
+        offset_beats: *tick as f32 * rate_beats,
+        track: target_track,
+        resolved,
+        chord,
+        chord_durations,
+        chord_step_transpose: eval.chord_step_transpose,
+        effect_params: eval.effect_params.clone(),
+        instrument_params: eval.instrument_params.clone(),
+    });
+    Ok(EValue::Bool(true))
+}
+
+fn eval_arp_emit_directed_current_event(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+    label: &str,
+) -> Result<EValue, String> {
+    let mut guard = accumulator_eval
+        .lock()
+        .map_err(|_| format!("failed to lock {label} eval context"))?;
+    let Some(eval) = guard.as_mut() else {
+        return Err(format!("{label} context not active"));
+    };
+    let timebase = parse_timebase_arg(args, 0)?;
+    let Some(EValue::Number(tick)) = args.get(1) else {
+        return Err("directed arp emit expects numeric tick".to_string());
+    };
+    let Some(EValue::Number(direction)) = args.get(2) else {
+        return Err("directed arp emit expects numeric direction".to_string());
+    };
+    if *tick < 0.0 {
+        return Ok(EValue::Bool(false));
+    }
+    let octaves = parse_arp_octaves_arg(args, 3)?;
+    let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
+    let Some(note) = accumulator_arp_note_directed_octaves(
+        eval,
+        rate_beats,
+        *tick as usize,
+        *direction as i32,
+        octaves,
+    ) else {
+        return Ok(EValue::Bool(false));
+    };
+
+    let mut resolved = eval.resolved;
+    resolved.transpose = note;
+    if eval.step_beats > 0.0 {
+        resolved.duration = (rate_beats / eval.step_beats).max(0.0);
+    }
+    let mut chord = Vec::new();
+    let mut chord_durations = Vec::new();
+    let target_track =
+        apply_acc_emit_overrides(args, 3, &mut resolved, &mut chord, &mut chord_durations)?;
+    eval.emitted.push(EmittedAccumulatorEvent {
+        offset_beats: *tick as f32 * rate_beats,
+        track: target_track,
+        resolved,
+        chord,
+        chord_durations,
+        chord_step_transpose: eval.chord_step_transpose,
+        effect_params: eval.effect_params.clone(),
+        instrument_params: eval.instrument_params.clone(),
+    });
+    Ok(EValue::Bool(true))
+}
+
+fn eval_fx_time(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    let timebase = parse_timebase_arg(args, 0)?;
+    let units = match args.get(1) {
+        Some(EValue::Number(units)) => *units as f32,
+        None => 1.0,
+        _ => return Err("fx-time units must be numeric".to_string()),
+    };
+    Ok(EValue::Number(
+        (timebase.step_beats(eval.num_steps).max(0.0) as f32 * units) as f64,
+    ))
+}
+
+fn eval_fx_source_time(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    let units = match args.first() {
+        Some(EValue::Number(units)) => *units as f32,
+        None => 1.0,
+        _ => return Err("fx-source-time units must be numeric".to_string()),
+    };
+    Ok(EValue::Number((eval.step_beats * units) as f64))
+}
+
+fn parse_midi_fx_param_ref(eval: &AccumulatorEvalContext, value: &EValue) -> Result<usize, String> {
+    match value {
+        EValue::Number(index) if *index >= 0.0 => Ok(*index as usize),
+        EValue::String(name) | EValue::Keyword(name) | EValue::Symbol(name) => eval
+            .midi_fx_param_names
+            .iter()
+            .position(|param| param.eq_ignore_ascii_case(name))
+            .ok_or_else(|| format!("unknown MIDI FX param '{name}'")),
+        _ => Err("MIDI FX param ref must be a name or index".to_string()),
+    }
+}
+
+fn eval_midi_fx_param(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+) -> Result<EValue, String> {
+    let Some(param_ref) = args.first() else {
+        return Err("fx-param expects a name or index".to_string());
+    };
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    let param_idx = parse_midi_fx_param_ref(eval, param_ref)?;
+    if param_idx >= eval.midi_fx_slot.num_params as usize {
+        return Err("MIDI FX param index out of range".to_string());
+    }
+    let value = eval
+        .midi_fx_slot
+        .plocks
+        .get(eval.step_index)
+        .and_then(|step| step.get(param_idx))
+        .copied()
+        .flatten()
+        .unwrap_or_else(|| {
+            eval.midi_fx_slot
+                .defaults
+                .get(param_idx)
+                .copied()
+                .unwrap_or(0.0)
+        });
+    Ok(EValue::Number(value as f64))
+}
+
+enum FxNoteField {
+    Transpose,
+    Start,
+    End,
+}
+
+fn eval_note_span_field(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+    field: FxNoteField,
+) -> Result<EValue, String> {
+    let Some(EValue::Number(index)) = args.first() else {
+        return Err("note helper expects numeric index".to_string());
+    };
+    if *index < 0.0 {
+        return Ok(EValue::Nil);
+    }
+    let index = *index as usize;
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    if let Some(spans) = eval.note_spans.as_ref() {
+        let Some(span) = spans.get(index) else {
+            return Ok(EValue::Nil);
+        };
+        return Ok(EValue::Number(match field {
+            FxNoteField::Transpose => span.transpose as f64,
+            FxNoteField::Start => span.start_beats as f64,
+            FxNoteField::End => span.end_beats as f64,
+        }));
+    }
+    let notes = accumulator_chord_notes(eval);
+    let Some(note) = notes.get(index) else {
+        return Ok(EValue::Nil);
+    };
+    Ok(EValue::Number(match field {
+        FxNoteField::Transpose => note.transpose as f64,
+        FxNoteField::Start => 0.0,
+        FxNoteField::End => (note.duration_steps * eval.step_beats) as f64,
+    }))
+}
+
+fn eval_note_spans_as_list(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    let notes = if let Some(spans) = eval.note_spans.as_ref() {
+        spans
+            .iter()
+            .map(|span| (span.transpose, span.start_beats, span.end_beats))
+            .collect::<Vec<_>>()
+    } else {
+        accumulator_chord_notes(eval)
+            .into_iter()
+            .map(|note| (note.transpose, 0.0, note.duration_steps * eval.step_beats))
+            .collect::<Vec<_>>()
+    };
+    Ok(lisp_list(
+        notes
+            .into_iter()
+            .map(|(transpose, start_beats, end_beats)| {
+                let mut map = HashMap::new();
+                map.insert("note".to_string(), lisp_number(transpose as f64));
+                map.insert("start".to_string(), lisp_number(start_beats as f64));
+                map.insert("end".to_string(), lisp_number(end_beats as f64));
+                EValue::Map(map)
+            })
+            .collect(),
+    ))
+}
+
+fn midi_fx_state_user_key(value: &EValue) -> Result<String, String> {
+    match value {
+        EValue::String(key) | EValue::Keyword(key) => Ok(key.clone()),
+        _ => Err("MIDI FX state key must be a string or keyword".to_string()),
+    }
+}
+
+fn current_midi_fx_state_key(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    user_key: &str,
+) -> Result<String, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    let Some((track, fx_name)) = eval.midi_fx_scope.as_ref() else {
+        return Err("MIDI FX state is only available inside def-midi-fx".to_string());
+    };
+    Ok(format!("{track}\u{0}{fx_name}\u{0}{user_key}"))
+}
+
+fn eval_midi_fx_state_get(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    midi_fx_state: &SharedMidiFxState,
+    args: &[EValue],
+) -> Result<EValue, String> {
+    let Some(key_value) = args.first() else {
+        return Err("fx-state-get expects a key".to_string());
+    };
+    let user_key = midi_fx_state_user_key(key_value)?;
+    let key = current_midi_fx_state_key(accumulator_eval, &user_key)?;
+    Ok(midi_fx_state
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX state".to_string())?
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| args.get(1).cloned().unwrap_or(EValue::Nil)))
+}
+
+fn eval_midi_fx_state_set(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    midi_fx_state: &SharedMidiFxState,
+    args: &[EValue],
+) -> Result<EValue, String> {
+    let Some(key_value) = args.first() else {
+        return Err("fx-state-set expects a key and value".to_string());
+    };
+    let Some(value) = args.get(1).cloned() else {
+        return Err("fx-state-set expects a value".to_string());
+    };
+    let user_key = midi_fx_state_user_key(key_value)?;
+    let key = current_midi_fx_state_key(accumulator_eval, &user_key)?;
+    midi_fx_state
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX state".to_string())?
+        .insert(key, value.clone());
+    Ok(value)
 }
 
 #[derive(Clone, Copy)]
@@ -3822,11 +4978,59 @@ fn accumulator_arp_note(
     rate_beats: f32,
     tick: usize,
 ) -> Option<f32> {
+    accumulator_arp_note_directed(eval, rate_beats, tick, 0)
+}
+
+fn directed_note_index(tick: usize, len: usize, direction: i32) -> usize {
+    if len <= 1 {
+        return 0;
+    }
+    match direction {
+        1 => len - 1 - (tick % len),
+        2 => {
+            let period = len * 2 - 2;
+            let pos = tick % period;
+            if pos < len {
+                pos
+            } else {
+                period - pos
+            }
+        }
+        3 => {
+            let mut x = tick as u64;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            ((x.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as usize) % len
+        }
+        _ => tick % len,
+    }
+}
+
+fn accumulator_arp_note_directed(
+    eval: &AccumulatorEvalContext,
+    rate_beats: f32,
+    tick: usize,
+    direction: i32,
+) -> Option<f32> {
+    accumulator_arp_note_directed_octaves(eval, rate_beats, tick, direction, 1)
+}
+
+fn accumulator_arp_note_directed_octaves(
+    eval: &AccumulatorEvalContext,
+    rate_beats: f32,
+    tick: usize,
+    direction: i32,
+    octaves: usize,
+) -> Option<f32> {
     if rate_beats <= 0.0 {
         return None;
     }
+    let octaves = octaves.max(1);
+    let phase_tick = (eval.arp_phase_beats.max(0.0) / rate_beats).floor() as usize;
     let elapsed = tick as f32 * rate_beats;
     if let Some(note_spans) = eval.note_spans.as_ref() {
+        let phased_tick = tick.saturating_add(phase_tick);
         let active = note_spans
             .iter()
             .filter(|note| {
@@ -3837,16 +5041,25 @@ fn accumulator_arp_note(
         if active.is_empty() {
             return None;
         }
-        return Some(active[tick % active.len()].transpose);
+        let idx = directed_note_index(phased_tick, active.len() * octaves, direction);
+        let note_idx = idx % active.len();
+        let octave_idx = idx / active.len();
+        return Some(active[note_idx].transpose + octave_idx as f32 * 12.0);
     }
     let notes = accumulator_chord_notes(eval);
     if notes.is_empty() || eval.step_beats <= 0.0 {
         return None;
     }
-    let note_idx = tick % notes.len();
+    let idx = directed_note_index(
+        tick.saturating_add(phase_tick),
+        notes.len() * octaves,
+        direction,
+    );
+    let note_idx = idx % notes.len();
+    let octave_idx = idx / notes.len();
     let duration_beats = notes[note_idx].duration_steps * eval.step_beats;
     if elapsed < duration_beats - f32::EPSILON {
-        Some(notes[note_idx].transpose)
+        Some(notes[note_idx].transpose + octave_idx as f32 * 12.0)
     } else {
         None
     }
@@ -3863,6 +5076,12 @@ fn parse_acc_emit_offset(
     match first {
         EValue::Number(offset) => Ok((*offset as f32 * default_step_beats, 1)),
         EValue::Keyword(_) | EValue::String(_) => {
+            if matches!(first, EValue::Keyword(name) | EValue::String(name) if name == "beats") {
+                let Some(EValue::Number(offset)) = args.get(1) else {
+                    return Err("acc-emit :beats expects numeric offset".to_string());
+                };
+                return Ok((*offset as f32, 2));
+            }
             let timebase = parse_timebase_arg(args, 0)?;
             let Some(EValue::Number(offset)) = args.get(1) else {
                 return Err("acc-emit explicit timebase expects numeric offset".to_string());
@@ -4308,6 +5527,139 @@ fn parse_timebase_arg(args: &[EValue], idx: usize) -> Result<Timebase, String> {
             }
         }
         _ => Err("expected timebase keyword/string/index".to_string()),
+    }
+}
+
+fn midi_fx_attr_name(value: &EValue) -> Option<String> {
+    match value {
+        EValue::Keyword(name) => Some(
+            name.trim_start_matches('@')
+                .trim_start_matches(':')
+                .to_ascii_lowercase(),
+        ),
+        EValue::Symbol(name) | EValue::String(name)
+            if name.starts_with('@') || name.starts_with(':') =>
+        {
+            Some(
+                name.trim_start_matches('@')
+                    .trim_start_matches(':')
+                    .to_ascii_lowercase(),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn midi_fx_attr_number(args: &[EValue], idx: usize, attr: &str) -> Result<f32, String> {
+    match args.get(idx) {
+        Some(EValue::Number(value)) => Ok(*value as f32),
+        _ => Err(format!("midi-fx-param :{attr} expects a number")),
+    }
+}
+
+fn parse_midi_fx_param_descriptor(
+    name: &str,
+    args: &[EValue],
+) -> Result<crate::effects::ParamDescriptor, String> {
+    let mut default = 0.0_f32;
+    let mut min = 0.0_f32;
+    let mut max = 1.0_f32;
+    let mut unit = None;
+    let mut labels: Option<Vec<String>> = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        let Some(attr) = midi_fx_attr_name(&args[idx]) else {
+            return Err("midi-fx-param expects keyword attributes".to_string());
+        };
+        idx += 1;
+        match attr.as_str() {
+            "default" => {
+                default = midi_fx_attr_number(args, idx, "default")?;
+                idx += 1;
+            }
+            "min" => {
+                min = midi_fx_attr_number(args, idx, "min")?;
+                idx += 1;
+            }
+            "max" => {
+                max = midi_fx_attr_number(args, idx, "max")?;
+                idx += 1;
+            }
+            "unit" => {
+                unit = match args.get(idx) {
+                    Some(EValue::String(value))
+                    | Some(EValue::Keyword(value))
+                    | Some(EValue::Symbol(value)) => Some(value.clone()),
+                    _ => return Err("midi-fx-param :unit expects string/symbol".to_string()),
+                };
+                idx += 1;
+            }
+            "enum" => {
+                let mut enum_labels = Vec::new();
+                while idx < args.len() && midi_fx_attr_name(&args[idx]).is_none() {
+                    match &args[idx] {
+                        EValue::String(value) | EValue::Keyword(value) | EValue::Symbol(value) => {
+                            enum_labels.push(value.clone())
+                        }
+                        _ => return Err("midi-fx-param :enum labels must be strings".to_string()),
+                    }
+                    idx += 1;
+                }
+                if enum_labels.is_empty() {
+                    return Err("midi-fx-param :enum expects at least one label".to_string());
+                }
+                max = (enum_labels.len().saturating_sub(1)) as f32;
+                labels = Some(enum_labels);
+            }
+            other => return Err(format!("midi-fx-param unknown attribute :{other}")),
+        }
+    }
+    if max < min {
+        std::mem::swap(&mut min, &mut max);
+    }
+    default = default.clamp(min, max);
+    Ok(crate::effects::ParamDescriptor {
+        name: name.to_string(),
+        min,
+        max,
+        default,
+        kind: labels
+            .map(|labels| crate::effects::ParamKind::Enum { labels })
+            .unwrap_or(crate::effects::ParamKind::Continuous { unit }),
+        scaling: crate::effects::ParamScaling::Linear,
+        node_param_idx: 0,
+        host_control: None,
+    })
+}
+
+fn midi_fx_param_descriptor_for_slot(
+    state: &crate::sequencer::SequencerState,
+    registry: &[RegisteredAccumulator],
+    track_idx: usize,
+    slot_idx: usize,
+    param_ref: &EValue,
+) -> Result<crate::effects::ParamDescriptor, String> {
+    let chain = state.pattern.track_params[track_idx].midi_fx_chain();
+    let fx_name = chain
+        .get(slot_idx)
+        .ok_or_else(|| "MIDI FX slot out of range".to_string())?;
+    let entry = registry
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(fx_name))
+        .ok_or_else(|| format!("unknown MIDI FX '{fx_name}'"))?;
+    match param_ref {
+        EValue::Number(index) if *index >= 0.0 => entry
+            .params
+            .get(*index as usize)
+            .cloned()
+            .ok_or_else(|| "MIDI FX param index out of range".to_string()),
+        EValue::String(name) | EValue::Keyword(name) | EValue::Symbol(name) => entry
+            .params
+            .iter()
+            .find(|param| param.name.eq_ignore_ascii_case(name))
+            .cloned()
+            .ok_or_else(|| format!("unknown MIDI FX param '{name}'")),
+        _ => Err("MIDI FX param must be name or index".to_string()),
     }
 }
 
@@ -4859,7 +6211,16 @@ pub fn run_embedded_scratch_flow(
     mut on_loop_event: impl FnMut(&mut Editor, Option<(&str, &EValue)>) -> Option<String>,
 ) -> Option<(String, (usize, usize), ScratchControlRuntime)> {
     control_runtime.set_position(track, cursor_step);
-    let (runtime, context, metadata, accumulators, accumulator_eval) = control_runtime.into_parts();
+    let (
+        runtime,
+        context,
+        metadata,
+        accumulators,
+        midi_fx,
+        pending_midi_fx_params,
+        midi_fx_state,
+        accumulator_eval,
+    ) = control_runtime.into_parts();
     let init_src = std::fs::read_to_string("../eseqlisp/init.lisp")
         .or_else(|_| std::fs::read_to_string("init.lisp"))
         .unwrap_or_default();
@@ -4948,6 +6309,9 @@ pub fn run_embedded_scratch_flow(
                     context,
                     metadata,
                     accumulators,
+                    midi_fx,
+                    pending_midi_fx_params,
+                    midi_fx_state,
                     accumulator_eval,
                 ),
             ));
@@ -4982,6 +6346,82 @@ pub fn scratch_runtime_with_fallbacks(
     );
     runtime.set_theme_sync_enabled(false);
     runtime
+}
+
+pub fn load_midi_fx_library_source() -> String {
+    fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                let dsp = path.join("dsp.lisp");
+                if dsp.exists() {
+                    if let (Ok(rel), Ok(src)) =
+                        (path.strip_prefix(root), std::fs::read_to_string(&dsp))
+                    {
+                        out.push((rel.to_string_lossy().replace('\\', "/"), src));
+                    }
+                }
+                collect(&path, root, out);
+            }
+        }
+    }
+
+    let root = Path::new("midi-fx");
+    let mut sources = Vec::new();
+    collect(root, root, &mut sources);
+    sources.sort_by(|a, b| a.0.cmp(&b.0));
+    sources
+        .into_iter()
+        .map(|(name, src)| format!("; midi-fx/{name}/dsp.lisp\n{src}\n"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn midi_fx_library_source_with_user_source(user_source: &str) -> String {
+    let library = load_midi_fx_library_source();
+    if library.trim().is_empty() {
+        user_source.to_string()
+    } else if user_source.trim().is_empty() {
+        library
+    } else {
+        format!("{library}\n; *scratch*\n{user_source}")
+    }
+}
+
+pub fn load_midi_fx_descriptors() -> Vec<EffectDescriptor> {
+    let source = load_midi_fx_library_source();
+    if source.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let state = Arc::new(crate::sequencer::SequencerState::new(
+        1,
+        vec![crate::sequencer::default_empty_effect_chain()],
+    ));
+    let mut runtime = ScratchControlRuntime::new(
+        Arc::clone(&state),
+        fallback_effect_descriptors(1),
+        fallback_instrument_descriptors(1),
+        0,
+        0,
+    );
+    if runtime.eval(&source).is_err() {
+        return Vec::new();
+    }
+    runtime.midi_fx_descriptors()
+}
+
+pub fn load_midi_fx_descriptor(name: &str) -> Option<EffectDescriptor> {
+    load_midi_fx_descriptors()
+        .into_iter()
+        .find(|desc| desc.name.eq_ignore_ascii_case(name))
 }
 
 pub fn eval_sequencer_control(
@@ -5190,6 +6630,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use eseqlisp::vm::Value;
     use eseqlisp::{BufferMode, Editor, EditorConfig, Runtime};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn folder_instrument_dsp_path_maps_to_instrument_name() {
@@ -6259,6 +7700,434 @@ mod tests {
     }
 
     #[test]
+    fn scratch_control_runtime_midi_fx_source_assigns_track_chain() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-midi-fx "arp-16"
+                  (do
+                    (fx-suppress)
+                    (for-each |i|
+                      (fx-arp-emit :16 i :vel 0.8)
+                      (range 0 (fx-arp-count :16)))))
+
+                (seq-use-midi-fx 0 "arp-16")
+                "#,
+            )
+            .unwrap();
+
+        let params = &state.pattern.track_params[0];
+        assert_eq!(runtime.midi_fx_names(), vec!["arp-16".to_string()]);
+        assert_eq!(params.midi_fx_chain(), vec!["arp-16".to_string()]);
+        assert_eq!(
+            params.get_midi_fx_position(),
+            crate::sequencer::MidiFxPosition::PostAccumulator
+        );
+    }
+
+    #[test]
+    fn folder_midi_fx_registers_params_and_syncs_track_slot() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(&super::midi_fx_library_source_with_user_source(
+                r#"
+                (seq-use-midi-fx 0 "arp")
+                (seq-set-midi-fx-param 0 "rate" 3)
+                (seq-plock-midi-fx 0 0 "rate" 9)
+                "#,
+            ))
+            .unwrap();
+
+        let params = &state.pattern.track_params[0];
+        let slot = &state.pattern.midi_fx_slots[0][0];
+        assert!(runtime.midi_fx_names().iter().any(|name| name == "arp"));
+        assert_eq!(params.midi_fx_chain(), vec!["arp".to_string()]);
+        assert_eq!(slot.num_params.load(Ordering::Relaxed), 5);
+        assert_eq!(slot.defaults.get(0), 3.0);
+        assert_eq!(slot.plocks.get(0, 0), Some(9.0));
+    }
+
+    #[test]
+    fn scratch_control_runtime_midi_fx_can_emit_joined_arp_events() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-midi-fx "arp-held"
+                  (do
+                    (fx-suppress)
+                    (for-each |i|
+                      (fx-arp-emit :16 i :vel 0.8)
+                      (range 0 (fx-arp-count :16)))))
+                "#,
+            )
+            .unwrap();
+
+        let output = runtime
+            .invoke_midi_fx(
+                0,
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 8.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                Vec::new(),
+                Vec::new(),
+                0.0,
+                Some(vec![
+                    AccumulatorNoteSpan {
+                        transpose: 0.0,
+                        start_beats: 0.0,
+                        end_beats: 2.0,
+                    },
+                    AccumulatorNoteSpan {
+                        transpose: 4.0,
+                        start_beats: 0.0,
+                        end_beats: 2.0,
+                    },
+                    AccumulatorNoteSpan {
+                        transpose: 7.0,
+                        start_beats: 1.0,
+                        end_beats: 2.0,
+                    },
+                ]),
+                EffectSlotSnapshot::new_empty(),
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        let notes = output
+            .emitted
+            .iter()
+            .map(|event| event.resolved.transpose)
+            .collect::<Vec<_>>();
+        assert!(output.suppressed);
+        assert_eq!(notes, vec![0.0, 4.0, 0.0, 4.0, 4.0, 7.0, 0.0, 4.0]);
+        assert_eq!(output.emitted.len(), 8);
+    }
+
+    #[test]
+    fn scratch_control_runtime_midi_fx_arp_octave_expands_note_pool() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-midi-fx "arp-octave"
+                  (do
+                    (fx-suppress)
+                    (for-each |i|
+                      (fx-arp-emit-directed :16 i 0 :octave 2)
+                      (range 0 (fx-arp-count :16)))))
+                "#,
+            )
+            .unwrap();
+
+        let output = runtime
+            .invoke_midi_fx(
+                0,
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 8.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                vec![0.0, 4.0, 7.0],
+                vec![8.0, 8.0, 8.0],
+                0.0,
+                None,
+                EffectSlotSnapshot::new_empty(),
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        let notes = output
+            .emitted
+            .iter()
+            .map(|event| event.resolved.transpose)
+            .collect::<Vec<_>>();
+        assert!(output.suppressed);
+        assert_eq!(notes, vec![0.0, 4.0, 7.0, 12.0, 16.0, 19.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn scratch_control_runtime_midi_fx_uses_beat_timing_helpers() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-midi-fx "timing"
+                  (do
+                    (fx-suppress)
+                    (fx-emit :beats (fx-time :8t 1))
+                    (fx-emit :beats (fx-source-time 2))))
+                "#,
+            )
+            .unwrap();
+
+        let output = runtime
+            .invoke_midi_fx(
+                0,
+                0,
+                0,
+                0.0,
+                ResolvedStep {
+                    duration: 1.0,
+                    velocity: 1.0,
+                    speed: 1.0,
+                    aux_a: 0.0,
+                    aux_b: 0.0,
+                    transpose: 0.0,
+                    pan: 0.0,
+                    chop: 1.0,
+                },
+                Vec::new(),
+                Vec::new(),
+                0.0,
+                None,
+                EffectSlotSnapshot::new_empty(),
+                0.25,
+                16,
+                vec![EffectSlotSnapshot::new_default(
+                    &EffectDescriptor::builtin_filter(),
+                    42,
+                )],
+                EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert!(output.suppressed);
+        assert!((output.emitted[0].offset_beats - (1.0 / 3.0)).abs() < 0.0001);
+        assert_eq!(output.emitted[1].offset_beats, 0.5);
+    }
+
+    #[test]
+    fn scratch_control_runtime_midi_fx_arp_phase_rotates_live_notes() {
+        let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(1),
+            fallback_instrument_descriptors(1),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-midi-fx "live-arp"
+                  (do
+                    (fx-suppress)
+                    (for-each |i|
+                      (fx-arp-emit :16 i :vel 0.8)
+                      (range 0 (fx-arp-count :16)))))
+                "#,
+            )
+            .unwrap();
+
+        let invoke = |runtime: &mut ScratchControlRuntime, arp_phase_beats| {
+            runtime
+                .invoke_midi_fx_with_arp_phase_beats(
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    ResolvedStep {
+                        duration: 1.0,
+                        velocity: 1.0,
+                        speed: 1.0,
+                        aux_a: 0.0,
+                        aux_b: 0.0,
+                        transpose: 0.0,
+                        pan: 0.0,
+                        chop: 1.0,
+                    },
+                    vec![0.0, 4.0, 7.0],
+                    vec![1.0, 1.0, 1.0],
+                    0.0,
+                    Some(vec![
+                        AccumulatorNoteSpan {
+                            transpose: 0.0,
+                            start_beats: 0.0,
+                            end_beats: 0.25,
+                        },
+                        AccumulatorNoteSpan {
+                            transpose: 4.0,
+                            start_beats: 0.0,
+                            end_beats: 0.25,
+                        },
+                        AccumulatorNoteSpan {
+                            transpose: 7.0,
+                            start_beats: 0.0,
+                            end_beats: 0.25,
+                        },
+                    ]),
+                    EffectSlotSnapshot::new_empty(),
+                    arp_phase_beats,
+                    0.25,
+                    16,
+                    vec![EffectSlotSnapshot::new_default(
+                        &EffectDescriptor::builtin_filter(),
+                        42,
+                    )],
+                    EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(1)[0], 7),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .unwrap()
+        };
+
+        assert_eq!(invoke(&mut runtime, 0.0).emitted[0].resolved.transpose, 0.0);
+        assert_eq!(
+            invoke(&mut runtime, 0.25).emitted[0].resolved.transpose,
+            4.0
+        );
+        assert_eq!(invoke(&mut runtime, 0.5).emitted[0].resolved.transpose, 7.0);
+    }
+
+    #[test]
+    fn scratch_control_runtime_midi_fx_state_persists_per_track() {
+        let state = Arc::new(SequencerState::new(
+            2,
+            vec![default_empty_effect_chain(), default_empty_effect_chain()],
+        ));
+        let mut runtime = ScratchControlRuntime::new(
+            Arc::clone(&state),
+            fallback_effect_descriptors(2),
+            fallback_instrument_descriptors(2),
+            0,
+            0,
+        );
+
+        runtime
+            .eval(
+                r#"
+                (def-midi-fx "every-two-octave"
+                  (do
+                    (if (= (fx-state-get :count 0) 1)
+                      (do
+                        (fx-state-set :count 0)
+                        (fx-emit 0 :transpose (+ 12 (fx-note 0))))
+                      (fx-state-set :count 1))))
+                "#,
+            )
+            .unwrap();
+
+        let invoke = |runtime: &mut ScratchControlRuntime, track| {
+            runtime
+                .invoke_midi_fx(
+                    0,
+                    track,
+                    0,
+                    0.0,
+                    ResolvedStep {
+                        duration: 1.0,
+                        velocity: 1.0,
+                        speed: 1.0,
+                        aux_a: 0.0,
+                        aux_b: 0.0,
+                        transpose: 0.0,
+                        pan: 0.0,
+                        chop: 1.0,
+                    },
+                    vec![0.0],
+                    vec![1.0],
+                    0.0,
+                    None,
+                    EffectSlotSnapshot::new_empty(),
+                    0.25,
+                    16,
+                    vec![EffectSlotSnapshot::new_default(
+                        &EffectDescriptor::builtin_filter(),
+                        42,
+                    )],
+                    EffectSlotSnapshot::new_default(&fallback_instrument_descriptors(2)[track], 7),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .unwrap()
+        };
+
+        assert_eq!(invoke(&mut runtime, 0).emitted.len(), 0);
+        assert_eq!(invoke(&mut runtime, 0).emitted[0].resolved.transpose, 12.0);
+        assert_eq!(invoke(&mut runtime, 1).emitted.len(), 0);
+        assert_eq!(invoke(&mut runtime, 1).emitted[0].resolved.transpose, 12.0);
+    }
+
+    #[test]
     fn scratch_control_runtime_can_register_closure_accumulator_directly() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(
@@ -6613,6 +8482,55 @@ mod tests {
                     ("op2_frq".to_string(), 19.0),
                     ("op2_vol".to_string(), 0.38),
                     ("tone".to_string(), 0.64),
+                ],
+            },
+        )
+        .unwrap();
+
+        assert!(
+            report.peak > 0.01,
+            "expected audible peak, got report: {report:?}"
+        );
+        assert!(
+            report.rms > 0.001,
+            "expected audible rms, got report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn fmplus_par_v1_renders_audible_signal() {
+        let name = "emulations/monomachine-fmplus-par-v1/";
+        let source = super::load_instrument_source(name).unwrap();
+        let asset_base = super::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let report = super::render_instrument_source_for_test(
+            &source,
+            asset_base.as_deref(),
+            &super::InstrumentRenderOptions {
+                sample_rate: 44_100,
+                block_size: 128,
+                frames: 4096,
+                midi_note: 69.0,
+                velocity: 1.0,
+                gate_frames: 4096,
+                voice_index: 0,
+                param_overrides: vec![
+                    ("op1_frq".to_string(), 15.0),
+                    ("op1_env".to_string(), 0.55),
+                    ("op2_frq".to_string(), 19.0),
+                    ("op2_env".to_string(), 0.42),
+                    ("op3_frq".to_string(), 23.0),
+                    ("op3_env".to_string(), 0.30),
+                    ("op1_wave".to_string(), 18.0),
+                    ("op1_mix".to_string(), 0.35),
+                    ("op2_wave".to_string(), 34.0),
+                    ("op2_mix".to_string(), 0.28),
+                    ("op3_wave".to_string(), 51.0),
+                    ("op3_mix".to_string(), 0.22),
+                    ("car_wave".to_string(), 9.0),
+                    ("car_mix".to_string(), 0.18),
+                    ("tone".to_string(), 0.62),
                 ],
             },
         )

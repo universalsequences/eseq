@@ -1,6 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -15,8 +16,8 @@ use crate::scheduled_event::{
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
 };
 use crate::sequencer::{
-    sync_beats, SequencerSnapshot, SequencerState, StepParam, SwingResolution, MAX_STEPS,
-    MAX_TRACKS,
+    sync_beats, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState, StepParam,
+    SwingResolution, MAX_STEPS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
 
@@ -35,6 +36,7 @@ struct SnapshotTrigger {
     step: usize,
     offset: usize,
     cycle_start_beats: f64,
+    absolute_beats: f64,
     samples_per_step: f32,
 }
 
@@ -237,6 +239,7 @@ impl SnapshotSequencerClock {
                                 step,
                                 offset,
                                 cycle_start_beats: tc.boundaries[step],
+                                absolute_beats: self.total_beats,
                                 samples_per_step,
                             });
                             state.transport.track_playheads[t].store(step_u32, Ordering::Relaxed);
@@ -350,6 +353,43 @@ fn resolve_instrument_params(
         params.push(ScheduledInstrumentParam { target, idx, value });
     }
     params
+}
+
+fn resolve_midi_fx_slot_param(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    step_idx: usize,
+) -> Option<f32> {
+    let slot = snapshot
+        .tracks
+        .get(track_idx)?
+        .midi_fx_slots
+        .get(slot_idx)?;
+    if param_idx >= slot.num_params as usize {
+        return None;
+    }
+    Some(
+        slot.plocks
+            .get(step_idx)
+            .and_then(|step| step.get(param_idx))
+            .copied()
+            .flatten()
+            .unwrap_or_else(|| slot.defaults.get(param_idx).copied().unwrap_or(0.0)),
+    )
+}
+
+fn live_midi_fx_tick_beats(snapshot: &SequencerSnapshot, track_idx: usize, step_idx: usize) -> f32 {
+    resolve_midi_fx_slot_param(snapshot, track_idx, 0, 0, step_idx)
+        .and_then(|idx| {
+            crate::sequencer::Timebase::ALL
+                .get(idx.round().max(0.0) as usize)
+                .copied()
+        })
+        .map(|timebase| timebase.step_beats(snapshot.tracks[track_idx].params.num_steps) as f32)
+        .filter(|beats| *beats > 0.0)
+        .unwrap_or(0.25)
 }
 
 fn instrument_sound_fingerprint(
@@ -527,6 +567,78 @@ fn track_note_spans_for_trigger(
     out
 }
 
+fn track_active_note_spans_at_beat(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    position_beats: f32,
+    window_beats: f32,
+) -> Vec<AccumulatorNoteSpan> {
+    const EPS: f32 = 1e-5;
+    let Some(track) = snapshot.tracks.get(track_idx) else {
+        return Vec::new();
+    };
+    if window_beats <= 0.0 {
+        return Vec::new();
+    }
+    let ns = track.params.num_steps;
+    let boundaries = track_step_boundaries(track);
+    let cycle_beats = boundaries.get(ns).copied().unwrap_or(0.0).max(EPS);
+    let position = position_beats.rem_euclid(cycle_beats);
+    let window_end = position + window_beats;
+    let mut spans = Vec::new();
+
+    for cycle_offset in [0.0, cycle_beats] {
+        for step in 0..ns {
+            let step_snapshot = &track.steps[step];
+            if !step_snapshot.active {
+                continue;
+            }
+            let step_start = boundaries[step] + cycle_offset;
+            let step_beats = step_snapshot
+                .timebase_override
+                .unwrap_or(track.params.timebase)
+                .step_beats(ns) as f32;
+            if step_beats <= 0.0 {
+                continue;
+            }
+            let fallback_duration = step_snapshot.params[StepParam::Duration.index()].max(0.0);
+            if step_snapshot.chord.is_empty() {
+                let note_end = step_start + fallback_duration * step_beats;
+                if note_end > position + EPS && step_start < window_end - EPS {
+                    spans.push(AccumulatorNoteSpan {
+                        transpose: step_snapshot.params[StepParam::Transpose.index()],
+                        start_beats: (step_start - position).max(0.0),
+                        end_beats: (note_end - position).min(window_beats).max(0.0),
+                    });
+                }
+            } else {
+                for (idx, note) in step_snapshot.chord.iter().enumerate() {
+                    let duration = step_snapshot
+                        .chord_durations
+                        .get(idx)
+                        .copied()
+                        .filter(|duration| *duration > 0.0)
+                        .unwrap_or(fallback_duration)
+                        .max(0.0);
+                    let note_end = step_start + duration * step_beats;
+                    if note_end > position + EPS && step_start < window_end - EPS {
+                        spans.push(AccumulatorNoteSpan {
+                            transpose: *note,
+                            start_beats: (step_start - position).max(0.0),
+                            end_beats: (note_end - position).min(window_beats).max(0.0),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    spans
+        .into_iter()
+        .filter(|span| span.end_beats > span.start_beats + EPS)
+        .collect()
+}
+
 fn enqueue_resolved_trigger(
     queue: &ScheduledEventQueue<4096>,
     snapshot: &SequencerSnapshot,
@@ -560,12 +672,455 @@ fn enqueue_resolved_trigger(
         .is_ok()
 }
 
+#[derive(Clone)]
+struct MidiFxEvent {
+    offset_beats: f32,
+    track: usize,
+    step: usize,
+    samples_per_step: f32,
+    step_beats: f32,
+    resolved: ResolvedStep,
+    chord: Vec<f32>,
+    chord_durations: Vec<f32>,
+    chord_step_transpose: f32,
+    note_spans: Option<Vec<AccumulatorNoteSpan>>,
+    arp_phase_beats: f32,
+    effect_params: Vec<ScheduledEffectParam>,
+    instrument_params: Vec<ScheduledInstrumentParam>,
+}
+
+#[derive(Clone, Copy)]
+struct LiveMidiFxNote {
+    transpose: f32,
+    velocity: f32,
+}
+
+#[derive(Clone, Default)]
+struct LiveMidiFxTrackState {
+    notes: Vec<LiveMidiFxNote>,
+    next_tick_sample: u64,
+    quantize_next_tick: bool,
+}
+
+fn midi_fx_event_from_step(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+    samples_per_step: f32,
+    step_beats: f32,
+    arp_phase_beats: f32,
+    resolved: ResolvedStep,
+    effect_params: Vec<ScheduledEffectParam>,
+    instrument_params: Vec<ScheduledInstrumentParam>,
+) -> MidiFxEvent {
+    let step = &snapshot.tracks[track_idx].steps[step_idx];
+    MidiFxEvent {
+        offset_beats: 0.0,
+        track: track_idx,
+        step: step_idx,
+        samples_per_step,
+        step_beats,
+        resolved,
+        chord: step.chord.clone(),
+        chord_durations: step.chord_durations.clone(),
+        chord_step_transpose: step.params[StepParam::Transpose.index()],
+        note_spans: Some(track_note_spans_for_trigger(snapshot, track_idx, step_idx)),
+        arp_phase_beats,
+        effect_params,
+        instrument_params,
+    }
+}
+
+fn run_midi_fx_chain_for_track(
+    runtime: &mut lisp_effect::ScratchControlRuntime,
+    snapshot: &SequencerSnapshot,
+    source_track: usize,
+    events: Vec<MidiFxEvent>,
+    depth: usize,
+    debug_accum: bool,
+) -> Vec<MidiFxEvent> {
+    if depth > 4 || source_track >= snapshot.tracks.len() {
+        return events;
+    }
+    let chain = snapshot.tracks[source_track].params.midi_fx_chain.clone();
+    if chain.is_empty() {
+        return events;
+    }
+    let names = runtime.midi_fx_names();
+    let mut current = events;
+    for (stage_idx, fx_name) in chain.into_iter().enumerate() {
+        let Some(fx_idx) = names
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(&fx_name))
+        else {
+            if debug_accum {
+                eprintln!("[midi-fx] missing fx name={fx_name:?} track={source_track}");
+            }
+            continue;
+        };
+        let mut next = Vec::new();
+        for event in current {
+            if event.track != source_track {
+                next.extend(run_midi_fx_chain_for_track(
+                    runtime,
+                    snapshot,
+                    event.track,
+                    vec![event],
+                    depth + 1,
+                    debug_accum,
+                ));
+                continue;
+            }
+            runtime.set_position(event.track, event.step);
+            match runtime.invoke_midi_fx_with_arp_phase_beats(
+                fx_idx,
+                event.track,
+                event.step,
+                0.0,
+                event.resolved,
+                event.chord.clone(),
+                event.chord_durations.clone(),
+                event.chord_step_transpose,
+                event.note_spans.clone(),
+                snapshot.tracks[event.track]
+                    .midi_fx_slots
+                    .get(stage_idx)
+                    .cloned()
+                    .unwrap_or_else(crate::effects::EffectSlotSnapshot::new_empty),
+                event.arp_phase_beats,
+                event.step_beats,
+                snapshot.tracks[event.track].params.num_steps,
+                snapshot.tracks[event.track].effect_slots.clone(),
+                snapshot.tracks[event.track].instrument_slot.clone(),
+                event.effect_params.clone(),
+                event.instrument_params.clone(),
+            ) {
+                Ok(output) => {
+                    if !output.suppressed {
+                        let mut passthrough = event.clone();
+                        passthrough.resolved = output.resolved;
+                        passthrough.effect_params = output.effect_params.clone();
+                        passthrough.instrument_params = output.instrument_params.clone();
+                        next.push(passthrough);
+                    }
+                    for emitted in output.emitted {
+                        let target_track = emitted.track.unwrap_or(event.track);
+                        if target_track >= snapshot.tracks.len() {
+                            continue;
+                        }
+                        let routed = MidiFxEvent {
+                            offset_beats: event.offset_beats + emitted.offset_beats,
+                            track: target_track,
+                            step: event.step,
+                            samples_per_step: event.samples_per_step,
+                            step_beats: event.step_beats,
+                            resolved: emitted.resolved,
+                            chord: emitted.chord,
+                            chord_durations: emitted.chord_durations,
+                            chord_step_transpose: emitted.chord_step_transpose,
+                            note_spans: None,
+                            arp_phase_beats: event.arp_phase_beats,
+                            effect_params: emitted.effect_params,
+                            instrument_params: emitted.instrument_params,
+                        };
+                        if target_track == source_track {
+                            next.push(routed);
+                        } else {
+                            next.extend(run_midi_fx_chain_for_track(
+                                runtime,
+                                snapshot,
+                                target_track,
+                                vec![routed],
+                                depth + 1,
+                                debug_accum,
+                            ));
+                        }
+                    }
+                }
+                Err(err) => {
+                    if debug_accum {
+                        eprintln!(
+                            "[midi-fx] invoke err track={} step={} fx={} err={}",
+                            event.track, event.step, fx_name, err
+                        );
+                    }
+                    next.push(event);
+                }
+            }
+            if next.len() > 1024 {
+                next.truncate(1024);
+                break;
+            }
+        }
+        current = next;
+    }
+    current
+}
+
+fn enqueue_midi_fx_events(
+    queue: &ScheduledEventQueue<4096>,
+    snapshot: &SequencerSnapshot,
+    pattern_epoch: u64,
+    base_sample_time: u64,
+    samples_per_quarter: f32,
+    events: Vec<MidiFxEvent>,
+) -> bool {
+    let mut ok = true;
+    for event in events {
+        let sample_time = base_sample_time
+            .saturating_add((event.offset_beats.max(0.0) * samples_per_quarter).round() as u64);
+        let chord = chord_data_from_parts(
+            &event.chord,
+            &event.chord_durations,
+            event.resolved.duration,
+            event.chord_step_transpose,
+        );
+        if !enqueue_resolved_trigger(
+            queue,
+            snapshot,
+            pattern_epoch,
+            sample_time,
+            event.track,
+            event.step,
+            event.samples_per_step,
+            event.resolved,
+            chord,
+            event.effect_params,
+            event.instrument_params,
+        ) {
+            ok = false;
+            break;
+        }
+    }
+    ok
+}
+
+fn drain_live_keyboard_inputs(
+    live_keyboard_rx: &mpsc::Receiver<KeyboardTrigger>,
+    snapshot: &SequencerSnapshot,
+    rendered_sample: u64,
+    live_tracks: &mut [LiveMidiFxTrackState; MAX_TRACKS],
+) {
+    while let Ok(trigger) = live_keyboard_rx.try_recv() {
+        if trigger.track >= snapshot.tracks.len() || trigger.track >= MAX_TRACKS {
+            continue;
+        }
+        let track_state = &mut live_tracks[trigger.track];
+        if trigger.note_off {
+            track_state
+                .notes
+                .retain(|note| note.transpose != trigger.transpose);
+            if track_state.notes.is_empty() {
+                track_state.next_tick_sample = 0;
+                track_state.quantize_next_tick = false;
+            }
+            continue;
+        }
+        let was_empty = track_state.notes.is_empty();
+        if let Some(note) = track_state
+            .notes
+            .iter_mut()
+            .find(|note| note.transpose == trigger.transpose)
+        {
+            note.velocity = trigger.velocity;
+        } else {
+            track_state.notes.push(LiveMidiFxNote {
+                transpose: trigger.transpose,
+                velocity: trigger.velocity,
+            });
+        }
+        if was_empty || track_state.next_tick_sample == 0 {
+            track_state.next_tick_sample = rendered_sample;
+            track_state.quantize_next_tick = true;
+        }
+    }
+}
+
+fn any_live_midi_fx_notes(live_tracks: &[LiveMidiFxTrackState; MAX_TRACKS]) -> bool {
+    live_tracks.iter().any(|track| !track.notes.is_empty())
+}
+
+fn track_has_live_midi_fx_notes(
+    live_tracks: &[LiveMidiFxTrackState; MAX_TRACKS],
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+) -> bool {
+    track_idx < MAX_TRACKS
+        && track_idx < snapshot.tracks.len()
+        && !live_tracks[track_idx].notes.is_empty()
+        && !snapshot.tracks[track_idx].params.midi_fx_chain.is_empty()
+        && snapshot.tracks[track_idx].params.midi_fx_position == MidiFxPosition::PostAccumulator
+}
+
+fn quantized_live_tick_sample(
+    rendered_sample: u64,
+    rendered_total_beats: f64,
+    live_tick_beats: f32,
+    samples_per_quarter: f32,
+) -> u64 {
+    let beat_phase = rendered_total_beats.rem_euclid(live_tick_beats as f64);
+    let beats_to_next_tick = if beat_phase <= 1e-6 {
+        0.0
+    } else {
+        live_tick_beats as f64 - beat_phase
+    };
+    rendered_sample.saturating_add((beats_to_next_tick * samples_per_quarter as f64).round() as u64)
+}
+
+fn schedule_live_midi_fx(
+    runtime: Option<&mut lisp_effect::ScratchControlRuntime>,
+    state: &SequencerState,
+    snapshot: &SequencerSnapshot,
+    queue: &ScheduledEventQueue<4096>,
+    pattern_epoch: u64,
+    rendered_sample: u64,
+    rendered_total_beats: f64,
+    lookahead_samples: u64,
+    sample_rate: u32,
+    live_tracks: &mut [LiveMidiFxTrackState; MAX_TRACKS],
+    debug_accum: bool,
+) -> bool {
+    let live_active = any_live_midi_fx_notes(live_tracks);
+    let Some(runtime) = runtime else {
+        return live_active;
+    };
+    if snapshot.transport.bpm == 0 {
+        return live_active;
+    }
+    let samples_per_quarter = sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
+    let horizon = rendered_sample.saturating_add(lookahead_samples);
+
+    for track_idx in 0..snapshot.tracks.len().min(MAX_TRACKS) {
+        if live_tracks[track_idx].notes.is_empty()
+            || snapshot.tracks[track_idx].params.midi_fx_chain.is_empty()
+            || snapshot.tracks[track_idx].params.midi_fx_position != MidiFxPosition::PostAccumulator
+        {
+            continue;
+        }
+        if live_tracks[track_idx].next_tick_sample < rendered_sample {
+            live_tracks[track_idx].next_tick_sample = rendered_sample;
+        }
+        while live_tracks[track_idx].next_tick_sample < horizon {
+            let notes = live_tracks[track_idx].notes.clone();
+            if notes.is_empty() {
+                break;
+            }
+            let num_steps = snapshot.tracks[track_idx].params.num_steps.max(1);
+            let step = (state.transport.track_playheads[track_idx].load(Ordering::Relaxed)
+                as usize)
+                % num_steps;
+            let live_tick_beats = live_midi_fx_tick_beats(snapshot, track_idx, step);
+            let live_tick_samples = (samples_per_quarter * live_tick_beats).round().max(1.0) as u64;
+            if live_tracks[track_idx].quantize_next_tick {
+                live_tracks[track_idx].next_tick_sample = quantized_live_tick_sample(
+                    rendered_sample,
+                    rendered_total_beats,
+                    live_tick_beats,
+                    samples_per_quarter,
+                );
+                live_tracks[track_idx].quantize_next_tick = false;
+            }
+            let track_boundaries = track_step_boundaries(&snapshot.tracks[track_idx]);
+            let cycle_beats = track_boundaries
+                .get(snapshot.tracks[track_idx].params.num_steps)
+                .copied()
+                .unwrap_or(live_tick_beats)
+                .max(live_tick_beats) as f64;
+            let tick_offset_beats = live_tracks[track_idx]
+                .next_tick_sample
+                .saturating_sub(rendered_sample) as f64
+                / samples_per_quarter as f64;
+            let track_position_beats =
+                ((rendered_total_beats + tick_offset_beats) % cycle_beats) as f32;
+            let velocity = notes
+                .iter()
+                .map(|note| note.velocity)
+                .fold(0.0_f32, f32::max)
+                .clamp(0.0, 1.0);
+            let mut note_spans = track_active_note_spans_at_beat(
+                snapshot,
+                track_idx,
+                track_position_beats,
+                live_tick_beats,
+            );
+            let mut chord = note_spans
+                .iter()
+                .map(|note| note.transpose)
+                .collect::<Vec<_>>();
+            let live_spans = notes
+                .iter()
+                .map(|note| AccumulatorNoteSpan {
+                    transpose: note.transpose,
+                    start_beats: 0.0,
+                    end_beats: live_tick_beats,
+                })
+                .collect::<Vec<_>>();
+            chord.extend(live_spans.iter().map(|note| note.transpose));
+            note_spans.extend(live_spans);
+            if chord.is_empty() {
+                break;
+            }
+            let chord_durations = vec![1.0; chord.len()];
+            let first_transpose = chord[0];
+            let resolved = ResolvedStep {
+                duration: 1.0,
+                velocity,
+                speed: 1.0,
+                aux_a: 0.0,
+                aux_b: 0.0,
+                transpose: first_transpose,
+                pan: 0.0,
+                chop: 1.0,
+            };
+            let event = MidiFxEvent {
+                offset_beats: 0.0,
+                track: track_idx,
+                step,
+                samples_per_step: live_tick_samples as f32,
+                step_beats: live_tick_beats,
+                resolved,
+                chord,
+                chord_durations,
+                chord_step_transpose: 0.0,
+                note_spans: Some(note_spans),
+                arp_phase_beats: (rendered_total_beats + tick_offset_beats) as f32,
+                effect_params: resolve_effect_params(snapshot, track_idx, step),
+                instrument_params: resolve_instrument_params(snapshot, track_idx, step),
+            };
+            let events = run_midi_fx_chain_for_track(
+                runtime,
+                snapshot,
+                track_idx,
+                vec![event],
+                0,
+                debug_accum,
+            );
+            if !enqueue_midi_fx_events(
+                queue,
+                snapshot,
+                pattern_epoch,
+                live_tracks[track_idx].next_tick_sample,
+                samples_per_quarter,
+                events,
+            ) {
+                break;
+            }
+            live_tracks[track_idx].next_tick_sample = live_tracks[track_idx]
+                .next_tick_sample
+                .saturating_add(live_tick_samples);
+        }
+    }
+
+    live_active
+}
+
 pub fn spawn_scheduler_thread(
     state: Arc<SequencerState>,
     sample_rate: u32,
     scheduler_block_size: usize,
     rendered_samples: Arc<AtomicU64>,
     queue: Arc<ScheduledEventQueue<4096>>,
+    live_keyboard_rx: mpsc::Receiver<KeyboardTrigger>,
 ) {
     let _ = thread::Builder::new()
         .name("sequencer-scheduler".to_string())
@@ -579,6 +1134,9 @@ pub fn spawn_scheduler_thread(
             let lookahead_target_samples = (scheduler_block_size.max(1) * 4) as u64;
             let mut accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
             let mut pending_accum_reset = [false; MAX_TRACKS];
+            let mut live_midi_fx_tracks: [LiveMidiFxTrackState; MAX_TRACKS] =
+                std::array::from_fn(|_| LiveMidiFxTrackState::default());
+            let mut last_live_midi_fx_active = false;
             let mut scratch_source_version = u64::MAX;
             let mut scratch_runtime = None;
             let debug_accum = std::env::var_os("TINYSEQ_DEBUG_ACCUM").is_some();
@@ -608,7 +1166,8 @@ pub fn spawn_scheduler_thread(
                 let topology_edit_in_flight = state.topology_edit_in_flight();
 
                 if latest_scratch_source_version != scratch_source_version {
-                    let source = state.scratch_source();
+                    let source =
+                        lisp_effect::midi_fx_library_source_with_user_source(&state.scratch_source());
                     if debug_accum {
                         eprintln!(
                             "[accum] scratch source version {} -> {} bytes={}",
@@ -630,8 +1189,9 @@ pub fn spawn_scheduler_thread(
                                 if debug_accum {
                                     let status = runtime.take_status_message();
                                     eprintln!(
-                                        "[accum] scratch eval ok names={:?} status={:?}",
+                                        "[accum] scratch eval ok names={:?} midi_fx={:?} status={:?}",
                                         runtime.accumulator_names(),
+                                        runtime.midi_fx_names(),
                                         status
                                     );
                                     for track_idx in 0..state.active_track_count().min(MAX_TRACKS) {
@@ -661,8 +1221,54 @@ pub fn spawn_scheduler_thread(
                     scratch_source_version = latest_scratch_source_version;
                 }
 
-                if !playing {
+                if !playing
+                    && (last_playing
+                        || last_pattern != pattern
+                        || last_pattern_epoch != pattern_epoch
+                        || last_topology_epoch != topology_epoch)
+                {
                     queue.clear();
+                }
+
+                drain_live_keyboard_inputs(
+                    &live_keyboard_rx,
+                    &snapshot,
+                    rendered,
+                    &mut live_midi_fx_tracks,
+                );
+                let live_midi_fx_active = any_live_midi_fx_notes(&live_midi_fx_tracks);
+                if live_midi_fx_active != last_live_midi_fx_active {
+                    let previous_scheduled_until = scheduled_until_sample;
+                    queue.clear();
+                    scheduled_until_sample = rendered;
+                    if playing {
+                        clock.seek_to_rendered_position(
+                            &snapshot,
+                            rendered,
+                            previous_scheduled_until,
+                        );
+                    }
+                    last_live_midi_fx_active = live_midi_fx_active;
+                }
+                let samples_per_quarter =
+                    sample_rate as f64 * 60.0 / snapshot.transport.bpm.max(1) as f64;
+                let scheduled_ahead_beats =
+                    scheduled_until_sample.saturating_sub(rendered) as f64 / samples_per_quarter;
+                let rendered_total_beats = (clock.total_beats - scheduled_ahead_beats).max(0.0);
+                if !playing {
+                    let live_active = schedule_live_midi_fx(
+                        scratch_runtime.as_mut(),
+                        &state,
+                        &snapshot,
+                        &queue,
+                        pattern_epoch,
+                        rendered,
+                        rendered_total_beats,
+                        lookahead_target_samples,
+                        sample_rate,
+                        &mut live_midi_fx_tracks,
+                        debug_accum,
+                    );
                     clock.reset();
                     scheduled_until_sample = rendered;
                     last_playing = false;
@@ -671,7 +1277,7 @@ pub fn spawn_scheduler_thread(
                     last_topology_epoch = topology_epoch;
                     pending_accum_reset = [false; MAX_TRACKS];
                     accumulator_states = [AccumulatorRuntimeState::default(); MAX_TRACKS];
-                    thread::sleep(Duration::from_millis(2));
+                    thread::sleep(Duration::from_millis(if live_active { 1 } else { 2 }));
                     continue;
                 }
 
@@ -764,11 +1370,32 @@ pub fn spawn_scheduler_thread(
                     pending_accum_reset = [true; MAX_TRACKS];
                 }
 
+                schedule_live_midi_fx(
+                    scratch_runtime.as_mut(),
+                    &state,
+                    &snapshot,
+                    &queue,
+                    pattern_epoch,
+                    rendered,
+                    rendered_total_beats,
+                    lookahead_target_samples,
+                    sample_rate,
+                    &mut live_midi_fx_tracks,
+                    debug_accum,
+                );
+
                 while scheduled_until_sample < rendered.saturating_add(lookahead_target_samples) {
                     let triggers = clock.process_chunk(scheduler_block_size, &snapshot, &state);
                     let mut chunk_enqueued = true;
                     for trigger in triggers {
                         if !snapshot.tracks[trigger.track].steps[trigger.step].active {
+                            continue;
+                        }
+                        if track_has_live_midi_fx_notes(
+                            &live_midi_fx_tracks,
+                            &snapshot,
+                            trigger.track,
+                        ) {
                             continue;
                         }
                         let track = &snapshot.tracks[trigger.track];
@@ -896,7 +1523,7 @@ pub fn spawn_scheduler_thread(
                                     step_snapshot.chord.clone(),
                                     step_snapshot.chord_durations.clone(),
                                     step_snapshot.params[StepParam::Transpose.index()],
-                                    Some(note_spans),
+                                    Some(note_spans.clone()),
                                     trigger.samples_per_step
                                         / (sample_rate as f32 * 60.0
                                             / snapshot.transport.bpm as f32),
@@ -932,57 +1559,88 @@ pub fn spawn_scheduler_thread(
                                         }
                                         debug_accum_invocations =
                                             debug_accum_invocations.saturating_add(1);
-                                        if !output.suppressed {
-                                            let chord =
-                                                step_chord_data(&snapshot, trigger.track, trigger.step);
-                                            if !enqueue_resolved_trigger(
-                                                &queue,
-                                                &snapshot,
-                                                pattern_epoch,
-                                                sample_time,
-                                                trigger.track,
-                                                trigger.step,
-                                                trigger.samples_per_step,
-                                                output.resolved,
-                                                chord,
-                                                output.effect_params.clone(),
-                                                output.instrument_params.clone(),
-                                            ) {
-                                                chunk_enqueued = false;
-                                            }
-                                        }
                                         let samples_per_quarter =
                                             sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
+                                        let step_beats =
+                                            trigger.samples_per_step / samples_per_quarter;
+                                        let mut accumulator_events = Vec::new();
+                                        if !output.suppressed {
+                                            accumulator_events.push(MidiFxEvent {
+                                                offset_beats: 0.0,
+                                                track: trigger.track,
+                                                step: trigger.step,
+                                                samples_per_step: trigger.samples_per_step,
+                                                step_beats,
+                                                resolved: output.resolved,
+                                                chord: step_snapshot.chord.clone(),
+                                                chord_durations: step_snapshot.chord_durations.clone(),
+                                                chord_step_transpose: step_snapshot.params
+                                                    [StepParam::Transpose.index()],
+                                                note_spans: Some(note_spans.clone()),
+                                                arp_phase_beats: trigger.absolute_beats as f32,
+                                                effect_params: output.effect_params.clone(),
+                                                instrument_params: output.instrument_params.clone(),
+                                            });
+                                        }
                                         for emitted in output.emitted {
                                             let target_track = emitted.track.unwrap_or(trigger.track);
                                             if target_track >= snapshot.tracks.len() {
                                                 continue;
                                             }
-                                            let emitted_sample_time = sample_time.saturating_add(
-                                                (emitted.offset_beats.max(0.0) * samples_per_quarter)
-                                                    .round()
-                                                    as u64,
-                                            );
-                                            let chord = chord_data_from_parts(
-                                                &emitted.chord,
-                                                &emitted.chord_durations,
-                                                emitted.resolved.duration,
-                                                emitted.chord_step_transpose,
-                                            );
-                                            if !enqueue_resolved_trigger(
+                                            accumulator_events.push(MidiFxEvent {
+                                                offset_beats: emitted.offset_beats,
+                                                track: target_track,
+                                                step: trigger.step,
+                                                samples_per_step: trigger.samples_per_step,
+                                                step_beats,
+                                                resolved: emitted.resolved,
+                                                chord: emitted.chord,
+                                                chord_durations: emitted.chord_durations,
+                                                chord_step_transpose: emitted.chord_step_transpose,
+                                                note_spans: None,
+                                                arp_phase_beats: trigger.absolute_beats as f32,
+                                                effect_params: emitted.effect_params,
+                                                instrument_params: emitted.instrument_params,
+                                            });
+                                        }
+                                        for event in accumulator_events {
+                                            if track_has_live_midi_fx_notes(
+                                                &live_midi_fx_tracks,
+                                                &snapshot,
+                                                event.track,
+                                            ) {
+                                                continue;
+                                            }
+                                            let final_events = if snapshot.tracks[event.track]
+                                                .params
+                                                .midi_fx_position
+                                                == MidiFxPosition::PostAccumulator
+                                                && !snapshot.tracks[event.track]
+                                                    .params
+                                                    .midi_fx_chain
+                                                    .is_empty()
+                                            {
+                                                run_midi_fx_chain_for_track(
+                                                    runtime,
+                                                    &snapshot,
+                                                    event.track,
+                                                    vec![event],
+                                                    0,
+                                                    debug_accum,
+                                                )
+                                            } else {
+                                                vec![event]
+                                            };
+                                            if !enqueue_midi_fx_events(
                                                 &queue,
                                                 &snapshot,
                                                 pattern_epoch,
-                                                emitted_sample_time,
-                                                target_track,
-                                                trigger.step,
-                                                trigger.samples_per_step,
-                                                emitted.resolved,
-                                                chord,
-                                                emitted.effect_params,
-                                                emitted.instrument_params,
+                                                sample_time,
+                                                samples_per_quarter,
+                                                final_events,
                                             ) {
                                                 chunk_enqueued = false;
+                                                break;
                                             }
                                         }
                                         if !chunk_enqueued {
@@ -1029,26 +1687,92 @@ pub fn spawn_scheduler_thread(
                             if target_track >= snapshot.tracks.len() {
                                 continue;
                             }
+                            if track_has_live_midi_fx_notes(
+                                &live_midi_fx_tracks,
+                                &snapshot,
+                                target_track,
+                            ) {
+                                continue;
+                            }
                             let effect_params =
                                 resolve_effect_params(&snapshot, target_track, trigger.step);
                             let instrument_params =
                                 resolve_instrument_params(&snapshot, target_track, trigger.step);
-                            let chord = step_chord_data(&snapshot, target_track, trigger.step);
-                            if !enqueue_resolved_trigger(
-                                &queue,
-                                &snapshot,
-                                pattern_epoch,
-                                sample_time,
-                                target_track,
-                                trigger.step,
-                                trigger.samples_per_step,
-                                resolved,
-                                chord,
-                                effect_params,
-                                instrument_params,
-                            ) {
-                                chunk_enqueued = false;
-                                break;
+                            let samples_per_quarter =
+                                sample_rate as f32 * 60.0 / snapshot.transport.bpm as f32;
+                            if snapshot.tracks[target_track].params.midi_fx_position
+                                == MidiFxPosition::PostAccumulator
+                                && !snapshot.tracks[target_track].params.midi_fx_chain.is_empty()
+                            {
+                                if let Some(runtime) = scratch_runtime.as_mut() {
+                                    let event = midi_fx_event_from_step(
+                                        &snapshot,
+                                        target_track,
+                                        trigger.step,
+                                        trigger.samples_per_step,
+                                        trigger.samples_per_step / samples_per_quarter,
+                                        trigger.absolute_beats as f32,
+                                        resolved,
+                                        effect_params,
+                                        instrument_params,
+                                    );
+                                    let events = run_midi_fx_chain_for_track(
+                                        runtime,
+                                        &snapshot,
+                                        target_track,
+                                        vec![event],
+                                        0,
+                                        debug_accum,
+                                    );
+                                    if !enqueue_midi_fx_events(
+                                        &queue,
+                                        &snapshot,
+                                        pattern_epoch,
+                                        sample_time,
+                                        samples_per_quarter,
+                                        events,
+                                    ) {
+                                        chunk_enqueued = false;
+                                        break;
+                                    }
+                                } else {
+                                    let chord =
+                                        step_chord_data(&snapshot, target_track, trigger.step);
+                                    if !enqueue_resolved_trigger(
+                                        &queue,
+                                        &snapshot,
+                                        pattern_epoch,
+                                        sample_time,
+                                        target_track,
+                                        trigger.step,
+                                        trigger.samples_per_step,
+                                        resolved,
+                                        chord,
+                                        effect_params,
+                                        instrument_params,
+                                    ) {
+                                        chunk_enqueued = false;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                let chord = step_chord_data(&snapshot, target_track, trigger.step);
+                                if !enqueue_resolved_trigger(
+                                    &queue,
+                                    &snapshot,
+                                    pattern_epoch,
+                                    sample_time,
+                                    target_track,
+                                    trigger.step,
+                                    trigger.samples_per_step,
+                                    resolved,
+                                    chord,
+                                    effect_params,
+                                    instrument_params,
+                                ) {
+                                    chunk_enqueued = false;
+                                    break;
+                                }
                             }
                         }
                         if !chunk_enqueued {
@@ -1073,7 +1797,10 @@ pub fn spawn_scheduler_thread(
 
 #[cfg(test)]
 mod tests {
-    use super::{track_note_spans_for_trigger, SnapshotSequencerClock};
+    use super::{
+        quantized_live_tick_sample, track_active_note_spans_at_beat, track_note_spans_for_trigger,
+        SnapshotSequencerClock,
+    };
     use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
 
     #[test]
@@ -1175,5 +1902,43 @@ mod tests {
         assert_eq!(next_group[0].transpose, 24.0);
         assert_eq!(next_group[0].start_beats, 0.0);
         assert_eq!(next_group[0].end_beats, 1.0);
+    }
+
+    #[test]
+    fn active_note_spans_at_beat_exposes_current_sequenced_pool_for_live_join() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+
+        state.pattern.patterns[track].set_step_active(0, true);
+        state.pattern.chord_data[track].add_note_with_duration(0, 0.0, 8.0);
+        state.pattern.chord_data[track].add_note_with_duration(0, 7.0, 4.0);
+        state.pattern.step_data[track].set(0, StepParam::Duration, 8.0);
+
+        state.pattern.patterns[track].set_step_active(4, true);
+        state.pattern.step_data[track].set(4, StepParam::Transpose, 12.0);
+        state.pattern.step_data[track].set(4, StepParam::Duration, 4.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let spans = track_active_note_spans_at_beat(&snapshot, track, 1.0, 0.25);
+        let transposes = spans.iter().map(|span| span.transpose).collect::<Vec<_>>();
+
+        assert_eq!(transposes, vec![0.0, 12.0]);
+        assert!(spans.iter().all(|span| span.start_beats == 0.0));
+        assert!(spans.iter().all(|span| span.end_beats <= 0.25));
+    }
+
+    #[test]
+    fn live_midi_fx_start_quantizes_to_next_tick() {
+        let rendered_sample = 48_000;
+        let samples_per_quarter = 24_000.0;
+
+        assert_eq!(
+            quantized_live_tick_sample(rendered_sample, 1.25, 0.25, samples_per_quarter),
+            rendered_sample
+        );
+        assert_eq!(
+            quantized_live_tick_sample(rendered_sample, 1.30, 0.25, samples_per_quarter),
+            rendered_sample + 4_800
+        );
     }
 }

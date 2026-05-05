@@ -16,8 +16,8 @@ use eseqlisp::{BufferMode, Editor, EditorConfig, HostCommand, HostEvent, Runtime
 
 use sequencer::engine;
 use sequencer::sequencer::{
-    KeyboardTrigger, SequencerState, StepParam, SwingResolution, Timebase, MAX_STEPS,
-    SYNC_RESOLUTIONS,
+    KeyboardTrigger, MidiFxPosition, SequencerState, StepParam, SwingResolution, Timebase,
+    MAX_STEPS, SYNC_RESOLUTIONS,
 };
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
@@ -613,7 +613,7 @@ fn expr_to_lisp(expr: &eseqlisp::parser::Expression) -> String {
 fn custom_ui_param_name(expr: &eseqlisp::parser::Expression) -> Option<String> {
     use eseqlisp::parser::Expression;
     match expr {
-        Expression::Symbol(name) => Some(name.clone()),
+        Expression::String(name) | Expression::Symbol(name) => Some(name.clone()),
         Expression::List(items) => items.first().and_then(custom_ui_param_name),
         _ => None,
     }
@@ -669,6 +669,48 @@ fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
                 items
                     .iter()
                     .map(transform_synth_ui_expr)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        }
+        _ => expr_to_lisp(expr),
+    }
+}
+
+fn transform_midi_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
+    use eseqlisp::parser::Expression;
+    match expr {
+        Expression::List(items) if !items.is_empty() => {
+            if let Expression::Symbol(head) = &items[0] {
+                if head == "midi-fx-param" {
+                    if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
+                        return format!(
+                            "(midi-fx-ui-param-control {})",
+                            lisp_string_literal(&name)
+                        );
+                    }
+                }
+                if head == "params" {
+                    let mut controls = Vec::new();
+                    for item in items.iter().skip(1) {
+                        if matches!(item, Expression::Keyword(_)) {
+                            continue;
+                        }
+                        if let Some(name) = custom_ui_param_name(item) {
+                            controls.push(format!(
+                                "(midi-fx-ui-param-control {})",
+                                lisp_string_literal(&name)
+                            ));
+                        }
+                    }
+                    return format!("(v-stack :gap 0.25 {})", controls.join(" "));
+                }
+            }
+            format!(
+                "({})",
+                items
+                    .iter()
+                    .map(transform_midi_fx_ui_expr)
                     .collect::<Vec<_>>()
                     .join(" ")
             )
@@ -791,12 +833,113 @@ fn build_custom_instrument_ui_source_with_overlay(
     format!("{functions}\n(def custom-instrument-synth-ui (inst) {dispatch})\n")
 }
 
+fn build_custom_midi_fx_ui_source_with_overlay(
+    overlay: Option<(String, String, String)>,
+) -> String {
+    use eseqlisp::parser::{ASTParser, Expression, Parser};
+
+    fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if path.join("dsp.lisp").exists() {
+                    let ui_path = path.join("ui.lisp");
+                    if ui_path.exists() {
+                        if let (Ok(rel), Ok(src)) =
+                            (path.strip_prefix(root), std::fs::read_to_string(&ui_path))
+                        {
+                            let fx_name = rel.to_string_lossy().replace('\\', "/");
+                            out.push((fx_name, ui_path.display().to_string(), src));
+                        }
+                    }
+                }
+                collect(&path, root, out);
+            }
+        }
+    }
+
+    let root = Path::new("midi-fx");
+    let mut ui_sources = Vec::new();
+    collect(root, root, &mut ui_sources);
+
+    if let Some((fx_name, ui_path, src)) = overlay {
+        if let Some(existing) = ui_sources.iter_mut().find(|(name, _, _)| name == &fx_name) {
+            *existing = (fx_name, ui_path, src);
+        } else {
+            ui_sources.push((fx_name, ui_path, src));
+        }
+    }
+
+    let mut functions = String::new();
+    let mut dispatch = "false".to_string();
+    for (fx_name, ui_path, src) in ui_sources {
+        let tokens = match Parser::new(src).parse() {
+            Ok(tokens) => tokens,
+            Err(err) => {
+                eprintln!("custom MIDI FX UI parse error in {ui_path}: {err:?}");
+                continue;
+            }
+        };
+        let exprs = match ASTParser::new(tokens).parse() {
+            Ok(exprs) => exprs,
+            Err(err) => {
+                eprintln!("custom MIDI FX UI AST error in {ui_path}: {err:?}");
+                continue;
+            }
+        };
+        let mut body = None;
+        let mut helpers = Vec::new();
+        for expr in &exprs {
+            if let Expression::List(items) = expr {
+                if matches!(items.first(), Some(Expression::Symbol(head)) if head == "def-midi-fx-ui")
+                {
+                    body = items.get(1).map(transform_midi_fx_ui_expr);
+                    continue;
+                }
+            }
+            helpers.push(transform_midi_fx_ui_expr(expr));
+        }
+        let Some(body) = body else {
+            continue;
+        };
+        let fn_name = format!("custom-midi-fx-ui-{}", safe_lisp_ident(&fx_name));
+        for helper in helpers {
+            functions.push_str(&format!("\n{helper}\n"));
+        }
+        functions.push_str(&format!(
+            "\n(def {fn_name} (fx) (do (set! midi-fx-ui-current-fx fx) (set! midi-fx-ui-current-name {}) {body}))\n",
+            lisp_string_literal(&fx_name)
+        ));
+        dispatch = format!(
+            "(if (= (get fx :name) {}) ({fn_name} fx) {dispatch})",
+            lisp_string_literal(&fx_name)
+        );
+    }
+
+    format!("{functions}\n(def custom-midi-fx-ui (fx) {dispatch})\n")
+}
+
 fn reload_custom_instrument_ui(editor: &mut Editor) {
     let custom_ui_source =
         build_custom_instrument_ui_source_with_overlay(active_custom_ui_buffer_overlay(editor));
     if !custom_ui_source.is_empty() {
         if let Err(err) = editor.runtime_mut().eval_str(&custom_ui_source) {
             eprintln!("custom instrument UI load error: {err:?}");
+        }
+    }
+    let custom_midi_fx_source = build_custom_midi_fx_ui_source_with_overlay(
+        active_custom_midi_fx_ui_buffer_overlay(editor),
+    );
+    if !custom_midi_fx_source.is_empty() {
+        if let Err(err) = editor.runtime_mut().eval_str(&custom_midi_fx_source) {
+            eprintln!("custom MIDI FX UI load error: {err:?}");
         }
     }
 }
@@ -815,6 +958,22 @@ fn active_custom_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, S
     let rel = folder.strip_prefix(root).ok()?;
     let instrument_name = format!("{}/", rel.to_string_lossy().replace('\\', "/"));
     Some((instrument_name, path.display().to_string(), buffer.text()))
+}
+
+fn active_custom_midi_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, String)> {
+    let buffer = editor.active_buffer();
+    let path = buffer.path.as_ref()?;
+    if path.file_name().and_then(|name| name.to_str()) != Some("ui.lisp") {
+        return None;
+    }
+    let folder = path.parent()?;
+    if !folder.join("dsp.lisp").exists() {
+        return None;
+    }
+    let root = Path::new("midi-fx");
+    let rel = folder.strip_prefix(root).ok()?;
+    let fx_name = rel.to_string_lossy().replace('\\', "/");
+    Some((fx_name, path.display().to_string(), buffer.text()))
 }
 
 fn filter_instrument_tree_nodes(
@@ -944,6 +1103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let track_count = track_names.len();
     let accumulator_names = Arc::new(Mutex::new(build_accumulator_names(&app)));
+    let midi_fx_names = Arc::new(Mutex::new(Vec::<String>::new()));
 
     // Register SEQ reactive namespace
     runtime.register_reactive(
@@ -1051,6 +1211,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 ),
                 (
+                    "midi-effects",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_midi_effects_value(&state, 0, &selected_steps)
+                    },
+                ),
+                (
                     "instrument-panel",
                     if track_count == 0 {
                         Value::List(vec![])
@@ -1134,6 +1302,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ("fts-options", build_fts_options()),
                 ("accum-mode-options", build_accum_mode_options()),
                 ("available-effects", build_available_effects()),
+                ("available-midi-effects", build_available_midi_effects()),
                 ("selected-steps", build_selection_value(&selected_steps)),
                 (
                     "step-has-plocks",
@@ -1886,6 +2055,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "#,
     );
 
+    let midi_fx_names_for_native = midi_fx_names.clone();
+    let debug_midi_fx_preview = debug_accum;
+    runtime.register_native("__register-midi-fx-preview", move |args, _ctx| {
+        let label = match args.first() {
+            Some(Value::String(s)) => s.clone(),
+            _ => return Err("__register-midi-fx-preview: expected string label".into()),
+        };
+        let mut names = midi_fx_names_for_native.lock().unwrap();
+        if !names.iter().any(|name| name.eq_ignore_ascii_case(&label)) {
+            names.push(label.clone());
+        }
+        if debug_midi_fx_preview {
+            eprintln!("[midi-fx-ui] preview register label={label} names={names:?}");
+        }
+        Ok(Value::String(label))
+    });
+    let _ = runtime.eval_str(
+        r#"
+        (defmacro def-midi-fx (name body)
+          `(__register-midi-fx-preview ,name))
+        "#,
+    );
+
     let st = state.clone();
     let ct = current_track.clone();
     let ui_ep = ui_epoch.clone();
@@ -1940,6 +2132,112 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Ok(Value::String(names[idx].clone()))
+    });
+
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    let midi_fx_names_for_native = midi_fx_names.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    let debug_midi_fx_use = debug_accum;
+    runtime.register_native("seq-use-midi-fx", move |args, _ctx| {
+        if args.is_empty() {
+            return Err("seq-use-midi-fx: expected one or more MIDI FX names".into());
+        }
+        let (track, start_idx) = match args.first() {
+            Some(Value::Number(track)) if *track >= 0.0 => (*track as usize, 1),
+            _ => (ct.load(Ordering::Relaxed), 0),
+        };
+        if track >= st.active_track_count() {
+            return Err("seq-use-midi-fx: track out of range".into());
+        }
+        let mut chain = Vec::new();
+        for arg in args.iter().skip(start_idx) {
+            match arg {
+                Value::String(label) => chain.push(label.clone()),
+                _ => return Err("seq-use-midi-fx: expected string MIDI FX names".into()),
+            }
+        }
+        if chain.is_empty() {
+            return Err("seq-use-midi-fx: expected at least one MIDI FX name".into());
+        }
+        let mut names = midi_fx_names_for_native.lock().unwrap();
+        for label in &chain {
+            if !names.iter().any(|name| name.eq_ignore_ascii_case(label)) {
+                names.push(label.clone());
+            }
+        }
+        st.pattern.track_params[track].set_midi_fx_chain(chain.clone());
+        st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        if debug_midi_fx_use {
+            eprintln!("[midi-fx-ui] seq-use track={} chain={:?}", track, chain);
+        }
+        Ok(Value::List(
+            chain
+                .into_iter()
+                .map(|name| Rc::new(RefCell::new(Value::String(name))))
+                .collect(),
+        ))
+    });
+
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-clear-midi-fx", move |args, _ctx| {
+        let track = match args.first() {
+            Some(Value::Number(track)) if *track >= 0.0 => *track as usize,
+            None => ct.load(Ordering::Relaxed),
+            _ => return Err("seq-clear-midi-fx: expected no args or track".into()),
+        };
+        if track >= st.active_track_count() {
+            return Err("seq-clear-midi-fx: track out of range".into());
+        }
+        st.pattern.track_params[track].set_midi_fx_chain(Vec::new());
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(true))
+    });
+
+    let st = state.clone();
+    let ct = current_track.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-midi-fx-position", move |args, _ctx| {
+        if args.is_empty() {
+            return Err("seq-set-midi-fx-position: expected position".into());
+        }
+        let (track, pos_idx) = match args.first() {
+            Some(Value::Number(track)) if *track >= 0.0 => (*track as usize, 1),
+            _ => (ct.load(Ordering::Relaxed), 0),
+        };
+        if track >= st.active_track_count() {
+            return Err("seq-set-midi-fx-position: track out of range".into());
+        }
+        let position = match args.get(pos_idx) {
+            Some(Value::Keyword(name)) | Some(Value::String(name))
+                if name == "post-accumulator" || name == "post" =>
+            {
+                MidiFxPosition::PostAccumulator
+            }
+            Some(Value::Keyword(name)) | Some(Value::String(name))
+                if name == "pre-accumulator" || name == "pre" =>
+            {
+                return Err(
+                    "seq-set-midi-fx-position: pre-accumulator is not implemented yet".into(),
+                )
+            }
+            _ => {
+                return Err(
+                    "seq-set-midi-fx-position: expected :pre-accumulator or :post-accumulator"
+                        .into(),
+                )
+            }
+        };
+        st.pattern.track_params[track].set_midi_fx_position(position);
+        st.publish_scheduler_snapshot();
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(true))
     });
 
     let st = state.clone();
@@ -2657,6 +2955,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     rt.set_reactive(
                                         "SEQ",
+                                        "midi-effects",
+                                        build_midi_effects_value(&state, idx, &selected_steps),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
                                         "instrument-panel",
                                         build_instrument_panel_value(&app, idx, &selected_steps),
                                     );
@@ -2734,6 +3037,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     &state,
                                                     idx,
                                                     &app.graph.effect_descriptors,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "midi-effects",
+                                                build_midi_effects_value(
+                                                    &state,
+                                                    idx,
                                                     &selected_steps,
                                                 ),
                                             );
@@ -3349,6 +3661,184 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-midi-fx-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
+                            if let (Some(slot_idx), Some(param_idx), Some(value)) =
+                                (slot_idx, param_idx, value)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let chain = state.pattern.track_params[track].midi_fx_chain();
+                                let clamped = chain
+                                    .get(slot_idx)
+                                    .and_then(|name| {
+                                        sequencer::lisp_effect::load_midi_fx_descriptor(name)
+                                    })
+                                    .and_then(|desc| desc.params.get(param_idx).cloned())
+                                    .map(|p| value.clamp(p.min, p.max))
+                                    .unwrap_or(value);
+                                if let Some(slot) = state
+                                    .pattern
+                                    .midi_fx_slots
+                                    .get(track)
+                                    .and_then(|slots| slots.get(slot_idx))
+                                {
+                                    slot.defaults.set(param_idx, clamped);
+                                    state.publish_scheduler_snapshot();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-midi-fx-plock" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
+                            if let (Some(slot_idx), Some(param_idx), Some(value)) =
+                                (slot_idx, param_idx, value)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let chain = state.pattern.track_params[track].midi_fx_chain();
+                                let clamped = chain
+                                    .get(slot_idx)
+                                    .and_then(|name| {
+                                        sequencer::lisp_effect::load_midi_fx_descriptor(name)
+                                    })
+                                    .and_then(|desc| desc.params.get(param_idx).cloned())
+                                    .map(|p| value.clamp(p.min, p.max))
+                                    .unwrap_or(value);
+                                if let Some(slot) = state
+                                    .pattern
+                                    .midi_fx_slots
+                                    .get(track)
+                                    .and_then(|slots| slots.get(slot_idx))
+                                {
+                                    let steps: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    for step in steps {
+                                        slot.plocks.set(step, param_idx, clamped);
+                                    }
+                                    state.publish_scheduler_snapshot();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-midi-fx-param-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            if let (Some(slot_idx), Some(param_idx), Some(label)) =
+                                (slot_idx, param_idx, label)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let chain = state.pattern.track_params[track].midi_fx_chain();
+                                if let Some(selected_idx) = chain
+                                    .get(slot_idx)
+                                    .and_then(|name| midi_fx_option_index(name, param_idx, &label))
+                                {
+                                    if let Some(slot) = state
+                                        .pattern
+                                        .midi_fx_slots
+                                        .get(track)
+                                        .and_then(|slots| slots.get(slot_idx))
+                                    {
+                                        slot.defaults.set(param_idx, selected_idx as f32);
+                                        state.publish_scheduler_snapshot();
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-midi-fx-plock-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            if let (Some(slot_idx), Some(param_idx), Some(label)) =
+                                (slot_idx, param_idx, label)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let chain = state.pattern.track_params[track].midi_fx_chain();
+                                if let Some(selected_idx) = chain
+                                    .get(slot_idx)
+                                    .and_then(|name| midi_fx_option_index(name, param_idx, &label))
+                                {
+                                    if let Some(slot) = state
+                                        .pattern
+                                        .midi_fx_slots
+                                        .get(track)
+                                        .and_then(|slots| slots.get(slot_idx))
+                                    {
+                                        let steps: Vec<usize> = selected_steps
+                                            .lock()
+                                            .unwrap()
+                                            .iter()
+                                            .copied()
+                                            .collect();
+                                        for step in steps {
+                                            slot.plocks.set(step, param_idx, selected_idx as f32);
+                                        }
+                                        state.publish_scheduler_snapshot();
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "set-instrument-base-note" => {
                         if let Value::Map(ref map) = payload {
                             let value = map.get("value").and_then(|cell| match &*cell.borrow() {
@@ -3392,6 +3882,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "add-midi-fx" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(cell) = map.get("name") {
+                                if let Value::String(fx_name) = &*cell.borrow() {
+                                    let fx_name = fx_name.clone();
+                                    let track = current_track.load(Ordering::Relaxed);
+                                    match app.add_midi_fx_to_track_sync(track, &fx_name) {
+                                        Ok(slot_idx) => {
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "midi-effects",
+                                                build_midi_effects_value(
+                                                    &state,
+                                                    track,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "step-has-plocks",
+                                                build_step_has_plocks(
+                                                    &state,
+                                                    track,
+                                                    &app.graph.effect_descriptors,
+                                                ),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Added MIDI FX '{}' to slot {}",
+                                                fx_name,
+                                                slot_idx + 1
+                                            )));
+                                        }
+                                        Err(e) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Error adding MIDI FX: {e}"),
+                                        )),
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "delete-effect" => {
                         let slot_idx = match &payload {
                             Value::Map(map) => {
@@ -3428,6 +3963,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 rt.set_reactive(
                                     "SEQ",
+                                    "midi-effects",
+                                    build_midi_effects_value(&state, track, &selected_steps),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
                                     "step-has-plocks",
                                     build_step_has_plocks(
                                         &state,
@@ -3449,6 +3989,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     "Error deleting effect: {e}"
                                 )));
                             }
+                        }
+                    }
+                    "delete-midi-fx" => {
+                        let slot_idx = match &payload {
+                            Value::Map(map) => {
+                                map.get("slot").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                            }
+                            Value::Number(n) => Some(*n as usize),
+                            _ => None,
+                        };
+                        let Some(slot_idx) = slot_idx else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "No MIDI FX selected".to_string(),
+                            ));
+                            continue;
+                        };
+                        let track = current_track.load(Ordering::Relaxed);
+                        match app.delete_midi_fx_slot(track, slot_idx) {
+                            Ok(()) => {
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "midi-effects",
+                                    build_midi_effects_value(&state, track, &selected_steps),
+                                );
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "step-has-plocks",
+                                    build_step_has_plocks(
+                                        &state,
+                                        track,
+                                        &app.graph.effect_descriptors,
+                                    ),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Deleted MIDI FX slot {}",
+                                    slot_idx + 1
+                                )));
+                            }
+                            Err(e) => editor.handle_host_event(HostEvent::Status(format!(
+                                "Error deleting MIDI FX: {e}"
+                            ))),
                         }
                     }
                     "switch-pattern" => {
@@ -3485,6 +4074,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             &app.graph.effect_descriptors,
                                             &selected_steps,
                                         ),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "midi-effects",
+                                        build_midi_effects_value(&state, ct, &selected_steps),
                                     );
                                     rt.set_reactive(
                                         "SEQ",
@@ -3591,6 +4185,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &app.graph.effect_descriptors,
                                     &selected_steps,
                                 ),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "midi-effects",
+                                build_midi_effects_value(&state, ct, &selected_steps),
                             );
                             rt.set_reactive(
                                 "SEQ",
@@ -3757,6 +4356,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     &state,
                                                     idx,
                                                     &app.graph.effect_descriptors,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "midi-effects",
+                                                build_midi_effects_value(
+                                                    &state,
+                                                    idx,
                                                     &selected_steps,
                                                 ),
                                             );
@@ -3956,6 +4564,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     &state,
                                                     ct,
                                                     &app.graph.effect_descriptors,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "midi-effects",
+                                                build_midi_effects_value(
+                                                    &state,
+                                                    ct,
                                                     &selected_steps,
                                                 ),
                                             );
@@ -4398,6 +5015,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
                             sync_track_mixer_empty_state(rt);
                             rt.set_reactive("SEQ", "effects", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
                             rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
                         } else {
@@ -4424,6 +5042,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &app.graph.effect_descriptors,
                                     &selected_steps,
                                 ),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "midi-effects",
+                                build_midi_effects_value(&state, ct, &selected_steps),
                             );
                             rt.set_reactive(
                                 "SEQ",
@@ -4484,6 +5107,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Value::List(vec![])
                 } else {
                     build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps)
+                },
+            );
+            rt.set_reactive(
+                "SEQ",
+                "midi-effects",
+                if app.tracks.is_empty() {
+                    Value::List(vec![])
+                } else {
+                    build_midi_effects_value(&state, ct, &selected_steps)
                 },
             );
             rt.set_reactive(
@@ -4562,6 +5194,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "SEQ",
                     "effects",
                     build_effects_value(&state, ct, &app.graph.effect_descriptors, &selected_steps),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "midi-effects",
+                    build_midi_effects_value(&state, ct, &selected_steps),
                 );
                 rt.set_reactive(
                     "SEQ",
@@ -4740,11 +5377,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 rt.set_reactive(
                     "SEQ",
+                    "midi-effects",
+                    if app.tracks.is_empty() {
+                        Value::List(vec![])
+                    } else {
+                        build_midi_effects_value(&state, ct, &selected_steps)
+                    },
+                );
+                rt.set_reactive(
+                    "SEQ",
                     "instrument-panel",
                     if app.tracks.is_empty() {
                         Value::List(vec![])
                     } else {
                         build_instrument_panel_value(&app, ct, &selected_steps)
+                    },
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "step-has-plocks",
+                    if app.tracks.is_empty() {
+                        Value::List(vec![])
+                    } else {
+                        build_step_has_plocks(&state, ct, &app.graph.effect_descriptors)
                     },
                 );
                 prev_fx_epoch = fx_ep;
@@ -6122,6 +6777,7 @@ fn sync_track_topology_state(
         rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
         sync_track_mixer_empty_state(rt);
         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
+        rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
         return;
@@ -6146,6 +6802,11 @@ fn sync_track_topology_state(
             &app.graph.effect_descriptors,
             selected_steps,
         ),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "midi-effects",
+        build_midi_effects_value(state, current_track_idx, selected_steps),
     );
     rt.set_reactive(
         "SEQ",
@@ -6335,6 +6996,126 @@ fn build_effects_value(
             );
 
             Rc::new(RefCell::new(Value::Map(slot_map)))
+        })
+        .collect();
+
+    Value::List(slots)
+}
+
+fn build_midi_effects_value(
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    use sequencer::effects::{EffectDescriptor, ParamKind};
+    use std::collections::HashMap;
+
+    let descriptors = sequencer::lisp_effect::load_midi_fx_descriptors();
+    let descriptor_for = |name: &str| -> Option<EffectDescriptor> {
+        descriptors
+            .iter()
+            .find(|desc| desc.name.eq_ignore_ascii_case(name))
+            .cloned()
+    };
+    let Some(track_params) = state.pattern.track_params.get(track) else {
+        return Value::List(vec![]);
+    };
+    let chain = track_params.midi_fx_chain();
+    let sel = selected.lock().unwrap();
+    let plock_step = sel.iter().copied().min();
+
+    let slots: Vec<Rc<RefCell<Value>>> = chain
+        .iter()
+        .enumerate()
+        .filter_map(|(slot_idx, name)| {
+            let desc = descriptor_for(name)?;
+            let slot = state
+                .pattern
+                .midi_fx_slots
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx));
+            let mut slot_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+            slot_map.insert(
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String(desc.name.clone()))),
+            );
+            slot_map.insert(
+                "slot-idx".to_string(),
+                Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+            );
+            slot_map.insert(
+                "midi-fx".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+
+            let params: Vec<Rc<RefCell<Value>>> = desc
+                .params
+                .iter()
+                .enumerate()
+                .map(|(param_idx, pdesc)| {
+                    let default_val = slot
+                        .map(|s| s.defaults.get(param_idx))
+                        .unwrap_or(pdesc.default);
+                    let current_val = plock_step
+                        .and_then(|step| slot.and_then(|s| s.plocks.get(step, param_idx)))
+                        .unwrap_or(default_val);
+                    let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                    pmap.insert(
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String(pdesc.name.clone()))),
+                    );
+                    pmap.insert(
+                        "idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(param_idx as f64))),
+                    );
+                    pmap.insert(
+                        "value".to_string(),
+                        Rc::new(RefCell::new(Value::Number(current_val as f64))),
+                    );
+                    pmap.insert(
+                        "min".to_string(),
+                        Rc::new(RefCell::new(Value::Number(pdesc.min as f64))),
+                    );
+                    pmap.insert(
+                        "max".to_string(),
+                        Rc::new(RefCell::new(Value::Number(pdesc.max as f64))),
+                    );
+                    match &pdesc.kind {
+                        ParamKind::Boolean => {
+                            pmap.insert(
+                                "boolean".to_string(),
+                                Rc::new(RefCell::new(Value::Bool(true))),
+                            );
+                        }
+                        ParamKind::Enum { labels } => {
+                            let selected = labels
+                                .get(current_val.round() as usize)
+                                .cloned()
+                                .unwrap_or_default();
+                            let option_values = labels
+                                .iter()
+                                .cloned()
+                                .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                                .collect();
+                            pmap.insert(
+                                "text-value".to_string(),
+                                Rc::new(RefCell::new(Value::String(selected))),
+                            );
+                            pmap.insert(
+                                "options".to_string(),
+                                Rc::new(RefCell::new(Value::List(option_values))),
+                            );
+                        }
+                        ParamKind::Continuous { .. } => {}
+                    }
+                    Rc::new(RefCell::new(Value::Map(pmap)))
+                })
+                .collect();
+            slot_map.insert(
+                "params".to_string(),
+                Rc::new(RefCell::new(Value::List(params))),
+            );
+            Some(Rc::new(RefCell::new(Value::Map(slot_map))))
         })
         .collect();
 
@@ -6918,6 +7699,30 @@ fn build_available_effects() -> Value {
     Value::List(items)
 }
 
+fn build_available_midi_effects() -> Value {
+    let mut names: Vec<String> = sequencer::lisp_effect::load_midi_fx_descriptors()
+        .into_iter()
+        .map(|desc| desc.name)
+        .collect();
+    names.sort();
+    let items: Vec<Rc<RefCell<Value>>> = names
+        .into_iter()
+        .map(|name| Rc::new(RefCell::new(Value::String(name))))
+        .collect();
+    Value::List(items)
+}
+
+fn midi_fx_option_index(fx_name: &str, param_idx: usize, label: &str) -> Option<usize> {
+    sequencer::lisp_effect::load_midi_fx_descriptor(fx_name)
+        .and_then(|desc| desc.params.get(param_idx).cloned())
+        .and_then(|param| match param.kind {
+            sequencer::effects::ParamKind::Enum { labels } => {
+                labels.iter().position(|item| item == label)
+            }
+            _ => None,
+        })
+}
+
 fn build_string_list(items: &[String]) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = items
         .iter()
@@ -7362,6 +8167,7 @@ fn build_step_has_plocks(
     descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
 ) -> Value {
     let chain = &state.pattern.effect_chains[track];
+    let midi_fx_slots = &state.pattern.midi_fx_slots[track];
     let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
     let instrument_slot = &state.pattern.instrument_slots[track];
     let instrument_num_params = instrument_slot.num_params.load(Ordering::Relaxed) as usize;
@@ -7379,7 +8185,12 @@ fn build_step_has_plocks(
             });
             let instrument_has_plock =
                 (0..instrument_num_params).any(|p| instrument_slot.plocks.get(step, p).is_some());
+            let midi_fx_has_plock = midi_fx_slots.iter().any(|slot| {
+                let np = slot.num_params.load(Ordering::Relaxed) as usize;
+                (0..np).any(|p| slot.plocks.get(step, p).is_some())
+            });
             let has_plock = effect_has_plock
+                || midi_fx_has_plock
                 || instrument_has_plock
                 || timebase_plocks.has_plock(step)
                 || swing_plocks.has_plock(step)
@@ -7856,6 +8667,7 @@ mod tests {
             "emulations/monomachine-dpro-ddrw-v1/",
             "emulations/monomachine-dpro-wave-v2/",
             "emulations/monomachine-fmplus/",
+            "emulations/monomachine-fmplus-par-v1/",
             "emulations/monomachine-fmplus-stat-v1/",
             "emulations/monomachine-sid/",
             "emulations/monomachine-superwave/",
@@ -7876,6 +8688,49 @@ mod tests {
                 "{instrument_name} did not dispatch to a custom UI"
             );
         }
+    }
+
+    #[test]
+    fn generated_custom_midi_fx_uis_eval_and_dispatch() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"
+                (def midi-fx-ui-current-fx false)
+                (def midi-fx-ui-current-name "")
+                (def midi-fx-ui-param (fx name)
+                  (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
+                (def fx-param-row (p fx key)
+                  (dict :param (get p :name) :key key))
+                (def midi-fx-ui-param-control (name)
+                  (let ((p (midi-fx-ui-param midi-fx-ui-current-fx name)))
+                    (if p
+                      (fx-param-row p midi-fx-ui-current-fx
+                        (str "custom-midi-fx-ui-" midi-fx-ui-current-name "-" name))
+                      false)))
+                "#,
+            )
+            .expect("load custom MIDI FX UI test helpers");
+
+        let custom_ui_source = build_custom_midi_fx_ui_source_with_overlay(None);
+        runtime
+            .eval_str(&custom_ui_source)
+            .expect("load custom MIDI FX UIs");
+
+        let rendered = runtime
+            .eval_str(
+                r#"
+                (custom-midi-fx-ui
+                  (dict :name "arp"
+                        :params (list
+                          (dict :name "rate" :value 4 :min 0 :max 12)
+                          (dict :name "direction" :value 0 :min 0 :max 3)
+                          (dict :name "gate" :value 0.9 :min 0.05 :max 1.0)
+                          (dict :name "velocity" :value 0.8 :min 0 :max 1))))
+                "#,
+            )
+            .expect("render custom MIDI FX UI");
+        assert!(!matches!(rendered, Some(Value::Bool(false)) | None));
     }
 }
 

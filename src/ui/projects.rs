@@ -702,6 +702,7 @@ impl App {
             step_data,
             track_params,
             effect_slots,
+            midi_fx_slots,
             instrument_slots,
             instrument_base_note_offsets,
             track_sound_states,
@@ -740,6 +741,17 @@ impl App {
                                     .load(Ordering::Relaxed);
                                 slot.into_snapshot_with_node_id(node_id)
                             })
+                            .collect()
+                    })
+                    .collect(),
+                midi_fx_slots: (0..num_tracks)
+                    .map(|track_idx| {
+                        midi_fx_slots
+                            .get(track_idx)
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|slot| slot.into_snapshot_with_node_id(0))
                             .collect()
                     })
                     .collect(),

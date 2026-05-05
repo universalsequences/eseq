@@ -505,6 +505,8 @@ pub struct TrackParams {
     pub timebase: AtomicU32,
     pub accumulator_idx: AtomicU32,
     pub script_accumulator_name: Mutex<Option<String>>,
+    pub midi_fx_chain: Mutex<Vec<String>>,
+    pub midi_fx_position: AtomicU32,
     pub accum_limit: AtomicU32,
     pub accum_mode: AtomicU32,
     pub fts_scale: AtomicU32,
@@ -528,6 +530,8 @@ impl TrackParams {
             timebase: AtomicU32::new(Timebase::Sixteenth as u32),
             accumulator_idx: AtomicU32::new(0),
             script_accumulator_name: Mutex::new(None),
+            midi_fx_chain: Mutex::new(Vec::new()),
+            midi_fx_position: AtomicU32::new(MidiFxPosition::PostAccumulator as u32),
             accum_limit: AtomicU32::new(48.0_f32.to_bits()),
             accum_mode: AtomicU32::new(0),
             fts_scale: AtomicU32::new(0),
@@ -658,6 +662,19 @@ impl TrackParams {
     pub fn set_script_accumulator_name(&self, name: Option<String>) {
         *self.script_accumulator_name.lock().unwrap() = name;
     }
+    pub fn midi_fx_chain(&self) -> Vec<String> {
+        self.midi_fx_chain.lock().unwrap().clone()
+    }
+    pub fn set_midi_fx_chain(&self, chain: Vec<String>) {
+        *self.midi_fx_chain.lock().unwrap() = chain;
+    }
+    pub fn get_midi_fx_position(&self) -> MidiFxPosition {
+        MidiFxPosition::from_index(self.midi_fx_position.load(Ordering::Relaxed))
+    }
+    pub fn set_midi_fx_position(&self, position: MidiFxPosition) {
+        self.midi_fx_position
+            .store(position as u32, Ordering::Relaxed);
+    }
     pub fn get_accum_limit(&self) -> f32 {
         f32::from_bits(self.accum_limit.load(Ordering::Relaxed))
     }
@@ -679,6 +696,21 @@ impl TrackParams {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MidiFxPosition {
+    PreAccumulator = 0,
+    PostAccumulator = 1,
+}
+
+impl MidiFxPosition {
+    pub fn from_index(idx: u32) -> Self {
+        match idx {
+            0 => Self::PreAccumulator,
+            _ => Self::PostAccumulator,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TrackParamsSnapshot {
     pub gate: bool,
@@ -696,6 +728,8 @@ pub struct TrackParamsSnapshot {
     pub timebase: Timebase,
     pub accumulator_idx: usize,
     pub script_accumulator_name: Option<String>,
+    pub midi_fx_chain: Vec<String>,
+    pub midi_fx_position: MidiFxPosition,
     pub accum_limit: f32,
     pub accum_mode: u32,
     pub fts_scale: usize,
@@ -719,6 +753,8 @@ impl Default for TrackParamsSnapshot {
             timebase: Timebase::Sixteenth,
             accumulator_idx: 0,
             script_accumulator_name: None,
+            midi_fx_chain: Vec::new(),
+            midi_fx_position: MidiFxPosition::PostAccumulator,
             accum_limit: 48.0,
             accum_mode: 0,
             fts_scale: 0,
@@ -867,6 +903,7 @@ impl ChordSnapshot {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeyboardTrigger {
     pub track: usize,
     pub transpose: f32,

@@ -52,6 +52,7 @@ pub struct PatternSnapshot {
     pub step_data: Vec<Vec<[f32; NUM_PARAMS]>>,
     pub track_params: Vec<TrackParamsSnapshot>,
     pub effect_slots: Vec<Vec<EffectSlotSnapshot>>,
+    pub midi_fx_slots: Vec<Vec<EffectSlotSnapshot>>,
     pub instrument_slots: Vec<EffectSlotSnapshot>,
     pub instrument_base_note_offsets: Vec<f32>,
     pub track_sound_states: Vec<TrackSoundState>,
@@ -79,6 +80,7 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.step_data, track_idx);
         remove_track_lane_if_present(&mut self.track_params, track_idx);
         remove_track_lane_if_present(&mut self.effect_slots, track_idx);
+        remove_track_lane_if_present(&mut self.midi_fx_slots, track_idx);
         remove_track_lane_if_present(&mut self.instrument_slots, track_idx);
         remove_track_lane_if_present(&mut self.instrument_base_note_offsets, track_idx);
         remove_track_lane_if_present(&mut self.track_sound_states, track_idx);
@@ -106,6 +108,29 @@ impl PatternSnapshot {
         }
     }
 
+    pub fn remove_midi_fx_slot(&mut self, track: usize, slot_idx: usize) {
+        let Some(params) = self.track_params.get_mut(track) else {
+            return;
+        };
+        if slot_idx < params.midi_fx_chain.len() {
+            params.midi_fx_chain.remove(slot_idx);
+        }
+
+        let Some(slots) = self.midi_fx_slots.get_mut(track) else {
+            return;
+        };
+        if slot_idx >= slots.len() {
+            return;
+        }
+
+        for idx in slot_idx..slots.len().saturating_sub(1) {
+            slots[idx] = slots[idx + 1].clone();
+        }
+        if let Some(last) = slots.last_mut() {
+            last.clear();
+        }
+    }
+
     pub fn capture(
         state: &SequencerState,
         num_tracks: usize,
@@ -117,6 +142,7 @@ impl PatternSnapshot {
         let mut step_data = Vec::with_capacity(num_tracks);
         let mut track_params = Vec::with_capacity(num_tracks);
         let mut effect_slots = Vec::with_capacity(num_tracks);
+        let mut midi_fx_slots = Vec::with_capacity(num_tracks);
         let mut instrument_slots = Vec::with_capacity(num_tracks);
         let mut instrument_base_note_offsets = Vec::with_capacity(num_tracks);
         let track_sound_state = state.pattern.track_sound_state.lock().unwrap();
@@ -158,6 +184,8 @@ impl PatternSnapshot {
                 timebase: tp.get_timebase(),
                 accumulator_idx: tp.get_accumulator_idx(),
                 script_accumulator_name: tp.script_accumulator_name(),
+                midi_fx_chain: tp.midi_fx_chain(),
+                midi_fx_position: tp.get_midi_fx_position(),
                 accum_limit: tp.get_accum_limit(),
                 accum_mode: tp.get_accum_mode(),
                 fts_scale: tp.get_fts_scale(),
@@ -168,6 +196,12 @@ impl PatternSnapshot {
                 .map(EffectSlotSnapshot::capture)
                 .collect();
             effect_slots.push(chain);
+            midi_fx_slots.push(
+                state.pattern.midi_fx_slots[t]
+                    .iter()
+                    .map(EffectSlotSnapshot::capture)
+                    .collect(),
+            );
             instrument_slots.push(EffectSlotSnapshot::capture(
                 &state.pattern.instrument_slots[t],
             ));
@@ -211,6 +245,7 @@ impl PatternSnapshot {
             step_data,
             track_params,
             effect_slots,
+            midi_fx_slots,
             instrument_slots,
             instrument_base_note_offsets,
             track_sound_states: sound_states,
@@ -252,6 +287,8 @@ impl PatternSnapshot {
             tp.set_timebase(snap.timebase);
             tp.set_accumulator_idx(snap.accumulator_idx);
             tp.set_script_accumulator_name(snap.script_accumulator_name.clone());
+            tp.set_midi_fx_chain(snap.midi_fx_chain.clone());
+            tp.set_midi_fx_position(snap.midi_fx_position);
             tp.set_accum_limit(snap.accum_limit);
             tp.set_accum_mode(snap.accum_mode);
             tp.set_fts_scale(snap.fts_scale);
@@ -259,6 +296,13 @@ impl PatternSnapshot {
             for (slot_idx, slot_snap) in self.effect_slots[t].iter().enumerate() {
                 if slot_idx < state.pattern.effect_chains[t].len() {
                     slot_snap.restore(&state.pattern.effect_chains[t][slot_idx]);
+                }
+            }
+            if t < self.midi_fx_slots.len() {
+                for (slot_idx, slot_snap) in self.midi_fx_slots[t].iter().enumerate() {
+                    if slot_idx < state.pattern.midi_fx_slots[t].len() {
+                        slot_snap.restore(&state.pattern.midi_fx_slots[t][slot_idx]);
+                    }
                 }
             }
 
@@ -302,6 +346,7 @@ impl PatternSnapshot {
         self.step_data[track] = source.step_data[track].clone();
         self.track_params[track] = source.track_params[track].clone();
         self.effect_slots[track] = source.effect_slots[track].clone();
+        self.midi_fx_slots[track] = source.midi_fx_slots[track].clone();
         self.instrument_slots[track] = source.instrument_slots[track].clone();
         self.instrument_base_note_offsets[track] = source.instrument_base_note_offsets[track];
         self.track_sound_states[track] = source.track_sound_states[track].clone();
@@ -327,6 +372,7 @@ impl PatternSnapshot {
         self.step_data[track] = Self::default_step_data();
         self.track_params[track] = TrackParamsSnapshot::default();
         self.effect_slots[track] = Self::default_effect_slots(track, slot_descriptors);
+        self.midi_fx_slots[track] = Self::default_midi_fx_slots();
         self.instrument_slots[track] = Self::default_instrument_slot();
         self.instrument_base_note_offsets[track] = 0.0;
         self.track_sound_states[track] = TrackSoundState::default();
@@ -368,12 +414,19 @@ impl PatternSnapshot {
         EffectSlotSnapshot::new_empty()
     }
 
+    fn default_midi_fx_slots() -> Vec<EffectSlotSnapshot> {
+        (0..crate::lisp_effect::MAX_MIDI_FX_SLOTS)
+            .map(|_| EffectSlotSnapshot::new_empty())
+            .collect()
+    }
+
     fn push_default_track(&mut self, t: usize, slot_descriptors: &[Vec<EffectDescriptor>]) {
         self.track_bits.push([0u64; TRACK_PATTERN_WORDS]);
         self.step_data.push(Self::default_step_data());
         self.track_params.push(TrackParamsSnapshot::default());
         self.effect_slots
             .push(Self::default_effect_slots(t, slot_descriptors));
+        self.midi_fx_slots.push(Self::default_midi_fx_slots());
         self.instrument_slots.push(Self::default_instrument_slot());
         self.instrument_base_note_offsets.push(0.0);
         self.track_sound_states.push(TrackSoundState::default());
@@ -392,6 +445,7 @@ impl PatternSnapshot {
             step_data: Vec::with_capacity(num_tracks),
             track_params: Vec::with_capacity(num_tracks),
             effect_slots: Vec::with_capacity(num_tracks),
+            midi_fx_slots: Vec::with_capacity(num_tracks),
             instrument_slots: Vec::with_capacity(num_tracks),
             instrument_base_note_offsets: Vec::with_capacity(num_tracks),
             track_sound_states: Vec::with_capacity(num_tracks),
@@ -433,6 +487,16 @@ impl PatternSnapshot {
             self.effect_slots[track].push(EffectSlotSnapshot::new_empty());
         }
         self.effect_slots[track][slot_idx].sync_to_descriptor(desc, node_id);
+    }
+
+    pub fn sync_midi_fx_slot(&mut self, track: usize, slot_idx: usize, desc: &EffectDescriptor) {
+        while self.midi_fx_slots.len() <= track {
+            self.push_default_track(track, &[]);
+        }
+        while self.midi_fx_slots[track].len() <= slot_idx {
+            self.midi_fx_slots[track].push(EffectSlotSnapshot::new_empty());
+        }
+        self.midi_fx_slots[track][slot_idx].sync_to_descriptor(desc, 0);
     }
 
     pub fn sync_instrument_slot(
@@ -600,6 +664,7 @@ pub struct PatternState {
     pub chord_data: Vec<ChordData>,
     pub track_params: Vec<TrackParams>,
     pub effect_chains: Vec<Vec<EffectSlotState>>,
+    pub midi_fx_slots: Vec<Vec<EffectSlotState>>,
     pub pattern_bank: Mutex<Vec<PatternSnapshot>>,
     pub current_pattern: AtomicU32,
     pub num_patterns: AtomicU32,
@@ -684,6 +749,13 @@ impl SequencerState {
         for _ in effect_chains.len()..MAX_TRACKS {
             effect_chains.push(default_empty_effect_chain());
         }
+        let midi_fx_slots = (0..MAX_TRACKS)
+            .map(|_| {
+                (0..crate::lisp_effect::MAX_MIDI_FX_SLOTS)
+                    .map(|_| EffectSlotState::empty())
+                    .collect()
+            })
+            .collect();
 
         let slot_descriptors: Vec<Vec<EffectDescriptor>> = (0..num_tracks)
             .map(|_| EffectDescriptor::default_full_chain())
@@ -698,6 +770,7 @@ impl SequencerState {
                 chord_data,
                 track_params,
                 effect_chains,
+                midi_fx_slots,
                 pattern_bank: Mutex::new(vec![PatternSnapshot::new_default(
                     num_tracks,
                     &slot_descriptors,
@@ -871,6 +944,8 @@ impl SequencerState {
         params.set_timebase(defaults.timebase);
         params.set_accumulator_idx(defaults.accumulator_idx);
         params.set_script_accumulator_name(defaults.script_accumulator_name);
+        params.set_midi_fx_chain(defaults.midi_fx_chain);
+        params.set_midi_fx_position(defaults.midi_fx_position);
         params.set_accum_limit(defaults.accum_limit);
         params.set_accum_mode(defaults.accum_mode);
         params.set_fts_scale(defaults.fts_scale);
@@ -889,6 +964,9 @@ impl SequencerState {
         }
         self.reset_track_params_to_default(track);
         for slot in &self.pattern.effect_chains[track] {
+            slot.clear();
+        }
+        for slot in &self.pattern.midi_fx_slots[track] {
             slot.clear();
         }
         self.pattern.instrument_slots[track].clear();
@@ -1626,6 +1704,8 @@ mod tests {
             timebase: Timebase::Quarter,
             accumulator_idx: id,
             script_accumulator_name: Some(format!("acc-{id}")),
+            midi_fx_chain: vec![format!("fx-{id}")],
+            midi_fx_position: crate::sequencer::MidiFxPosition::PostAccumulator,
             accum_limit: (1 + id) as f32,
             accum_mode: id as u32,
             fts_scale: id + 1,
@@ -1670,6 +1750,11 @@ mod tests {
             track_params: (0..num_tracks).map(sample_track_params).collect(),
             effect_slots: (0..num_tracks)
                 .map(|track| vec![sample_effect_slot_snapshot(track)])
+                .collect(),
+            midi_fx_slots: (0..num_tracks)
+                .map(|_| {
+                    vec![EffectSlotSnapshot::new_empty(); crate::lisp_effect::MAX_MIDI_FX_SLOTS]
+                })
                 .collect(),
             instrument_slots: (0..num_tracks)
                 .map(|track| sample_effect_slot_snapshot(track + 10))
@@ -1903,6 +1988,13 @@ mod tests {
                 }],
                 vec![EffectSlotSnapshot::new_empty()],
                 vec![EffectSlotSnapshot::new_empty()],
+            ],
+            midi_fx_slots: vec![
+                vec![
+                    EffectSlotSnapshot::new_empty();
+                    crate::lisp_effect::MAX_MIDI_FX_SLOTS
+                ];
+                4
             ],
             instrument_slots: vec![EffectSlotSnapshot::new_empty(); 4],
             instrument_base_note_offsets: vec![0.0; 4],
