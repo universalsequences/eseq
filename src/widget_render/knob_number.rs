@@ -292,7 +292,7 @@ impl WidgetDefinition for KnobNumberWidget {
         let previous = get_f32_prop(&node.props, "value", 0.0);
         let min = get_f32_prop(&node.props, "min", 0.0);
         let max = get_f32_prop(&node.props, "max", 1.0);
-        if should_trigger_integer_haptic(previous, new_value, min, max) {
+        if should_trigger_integer_haptic(node.widget_id, previous, new_value, min, max) {
             trigger_level_change_haptic();
         }
         let callback = node.props.get("on-change")?.clone();

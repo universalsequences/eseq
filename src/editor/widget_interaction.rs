@@ -345,6 +345,7 @@ impl Editor {
         if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
             self.active_leaf_mut().active_widget_gesture = Some(WidgetGesture {
                 widget_id: node.widget_id,
+                node,
                 start_precise_col: precise_col,
                 start_precise_row: precise_row,
                 gesture_data,
@@ -549,6 +550,7 @@ impl Editor {
         }
         let leaf = self.active_leaf_mut();
         leaf.focused_widget_id = None;
+        leaf.focused_widget_node = None;
         leaf.active_widget_gesture = None;
         self.completion = None;
         self.minibuffer = None;
@@ -698,8 +700,7 @@ impl Editor {
         precise_row: f32,
         modifiers: KeyModifiers,
     ) -> Option<crate::widget_render::EventOutput> {
-        let layout = self.runtime.current_layout.as_ref()?;
-        let node = find_node_by_id(layout, gesture.widget_id)?;
+        let node = gesture.node;
         self.dispatch_widget_mouse_event(
             &node,
             mouse_kind,

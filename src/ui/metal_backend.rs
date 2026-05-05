@@ -1613,55 +1613,244 @@ fragment float4 waveform_frag(
                     let unsel_bg = to_rgba(theme::COMP_UNSELECTED_BG());
                     let pop_fg = to_rgba(theme::COMP_FG());
                     let popup_col = col_off + comp.anchor.1;
-                    let popup_row = row_off + comp.anchor.0 + 1;
+                    let anchor_row = row_off + comp.anchor.0;
+                    let popup_row = anchor_row + 1;
+                    let total_cols = (vp_w / cell_w).floor().max(1.0) as usize;
+                    let total_rows = (vp_h / cell_h).floor().max(1.0) as usize;
                     let label_w = comp
                         .entries
                         .iter()
                         .map(|e| e.label.len())
                         .max()
                         .unwrap_or(0)
-                        .max(12);
+                        .max(12)
+                        .min(34);
+                    let has_doc = comp.doc.is_some();
+                    let doc_gap = if has_doc { 1 } else { 0 };
+                    let desired_pane_w = if has_doc { 54 } else { label_w + 4 };
+                    let max_pane_w = if has_doc {
+                        total_cols
+                            .saturating_sub(popup_col + doc_gap + 2)
+                            .saturating_div(2)
+                            .max(label_w + 4)
+                    } else {
+                        total_cols.saturating_sub(popup_col + 2)
+                    };
+                    let pane_w = desired_pane_w.min(max_pane_w).max(label_w + 4).min(64);
+                    let show_doc = has_doc && pane_w >= 26;
+                    let total_panel_w = if show_doc {
+                        pane_w * 2 + doc_gap
+                    } else {
+                        pane_w
+                    };
+                    let popup_col = if popup_col + total_panel_w + 1 > total_cols {
+                        total_cols.saturating_sub(total_panel_w + 1)
+                    } else {
+                        popup_col
+                    };
+                    let doc_col = popup_col + pane_w + doc_gap;
+                    let doc_pad_x = 3usize;
+                    let doc_pad_top = 1usize;
+                    let doc_text_w = pane_w.saturating_sub(doc_pad_x * 2);
+                    let doc_body = comp.doc.as_ref().map(|(_, body)| {
+                        wrap_completion_doc_lines(body, doc_text_w)
+                    });
+                    let doc_content_h = if show_doc {
+                        doc_pad_top + 3 + doc_body.as_ref().map(|body| body.len()).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    let row_step = 1usize;
+                    let list_pad_top = 1usize;
+                    let list_visible_h = list_pad_top + comp.entries.len() * row_step;
+                    let desired_h = list_visible_h.max(8).max(doc_content_h).min(16);
+                    let rows_below = total_rows.saturating_sub(popup_row + 1);
+                    let panel_h = desired_h.min(rows_below.max(1));
+                    let panel_row = if panel_h < desired_h && anchor_row > desired_h {
+                        anchor_row.saturating_sub(desired_h)
+                    } else {
+                        popup_row
+                    };
                     let mut popup_verts = Vec::new();
-                    let x0 = ndc_x(popup_col as f32 * cell_w);
-                    let x1 = ndc_x((popup_col + label_w) as f32 * cell_w);
+                    let panel_bg = Color::rgba(0.105, 0.115, 0.135, 0.96);
+                    let panel_border = Color::rgba(0.24, 0.26, 0.30, 1.0);
+                    let shadow = Color::rgba(0.0, 0.0, 0.0, 0.38);
+                    let muted_fg = to_rgba(Color::rgba(0.58, 0.59, 0.62, 1.0));
+                    let doc_bg = Color::rgba(0.085, 0.09, 0.105, 0.98);
+                    let mut rounded = Vec::new();
+                    push_rounded_instance_cells(
+                        &mut rounded,
+                        popup_col as f32 + 0.18,
+                        panel_row as f32 + 0.20,
+                        pane_w as f32,
+                        panel_h as f32,
+                        shadow,
+                        10.0,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                    push_rounded_instance_cells(
+                        &mut rounded,
+                        popup_col as f32,
+                        panel_row as f32,
+                        pane_w as f32,
+                        panel_h as f32,
+                        panel_bg,
+                        8.0,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                    if show_doc {
+                        push_rounded_instance_cells(
+                            &mut rounded,
+                            doc_col as f32 + 0.18,
+                            panel_row as f32 + 0.20,
+                            pane_w as f32,
+                            panel_h as f32,
+                            shadow,
+                            10.0,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                        push_rounded_instance_cells(
+                            &mut rounded,
+                            doc_col as f32,
+                            panel_row as f32,
+                            pane_w as f32,
+                            panel_h as f32,
+                            doc_bg,
+                            8.0,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
+                    if let Some(wpipe) = self.widget_pipelines.get("dropdown") {
+                        draw_widget_instances(
+                            &enc,
+                            &self.device,
+                            wpipe,
+                            rounded.as_slice(),
+                        );
+                    }
                     for (i, entry) in comp.entries.iter().enumerate() {
-                        let row = popup_row + i;
-                        let y0 = ndc_y(row as f32 * cell_h);
-                        let y1 = ndc_y((row + 1) as f32 * cell_h);
+                        let row = panel_row + list_pad_top + i * row_step;
+                        if row >= panel_row + panel_h {
+                            break;
+                        }
                         let bg = if entry.selected { sel_bg } else { unsel_bg };
-                        let gv = |px, py| Vertex {
-                            position: [px, py],
-                            uv: [0.0, 0.0],
-                            fg: pop_fg,
+                        let mut selected = Vec::new();
+                        push_rounded_instance_cells_rgba(
+                            &mut selected,
+                            popup_col as f32 + 1.0,
+                            row as f32 - 0.15,
+                            pane_w.saturating_sub(2) as f32,
+                            1.18,
                             bg,
-                        };
-                        popup_verts.extend_from_slice(&[
-                            gv(x0, y0),
-                            gv(x0, y1),
-                            gv(x1, y0),
-                            gv(x1, y0),
-                            gv(x0, y1),
-                            gv(x1, y1),
-                        ]);
-                        for (j, ch) in entry.label.chars().enumerate() {
-                            if ch == ' ' {
-                                continue;
-                            }
-                            {
-                                let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                                rasterize_char(
-                                    atlas,
-                                    ch,
-                                    ((popup_col + j) as i32, row as f32),
-                                    &CharCtx {
-                                        cell_w,
-                                        cell_h,
-                                        vp_w,
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                        if entry.selected
+                            && let Some(wpipe) = self.widget_pipelines.get("dropdown")
+                        {
+                            draw_widget_instances(
+                                &enc,
+                                &self.device,
+                                wpipe,
+                                selected.as_slice(),
+                            );
+                        }
+                        let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                        push_text_cells(
+                            &mut popup_verts,
+                            atlas,
+                            &entry.label,
+                            popup_col + 3,
+                            row,
+                            pane_w.saturating_sub(6),
+                            pop_fg,
+                            to_rgba(panel_bg),
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                        );
+                    }
+                    if show_doc {
+                        if let Some((title, _)) = &comp.doc {
+                            let title_fg = to_rgba(theme::COMP_DOC_TITLE_FG());
+                            let doc_fg = to_rgba(theme::COMP_DOC_FG());
+                            let doc_bg_rgba = to_rgba(doc_bg);
+                            let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                            push_text_cells(
+                                &mut popup_verts,
+                                atlas,
+                                title,
+                                doc_col + doc_pad_x,
+                                panel_row + doc_pad_top,
+                                doc_text_w,
+                                title_fg,
+                                doc_bg_rgba,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
+                            push_rect_px(
+                                &mut popup_verts,
+                                (doc_col + doc_pad_x) as f32 * cell_w,
+                                (panel_row + doc_pad_top + 2) as f32 * cell_h - 2.0,
+                                doc_text_w as f32 * cell_w,
+                                1.0,
+                                panel_border,
+                                vp_w,
+                                vp_h,
+                            );
+                            if let Some(lines) = &doc_body {
+                                for (li, line) in lines.iter().enumerate() {
+                                    let row = panel_row + doc_pad_top + 3 + li;
+                                    if row >= panel_row + panel_h {
+                                        break;
+                                    }
+                                    push_text_cells(
+                                        &mut popup_verts,
+                                            atlas,
+                                            line,
+                                            doc_col + doc_pad_x,
+                                            row,
+                                            doc_text_w,
+                                            doc_fg,
+                                            doc_bg_rgba,
+                                            cell_w,
+                                            cell_h,
+                                            vp_w,
                                         vp_h,
-                                        fg: pop_fg,
-                                        bg,
-                                    },
+                                    );
+                                }
+                            }
+                            if doc_content_h == 0 {
+                                push_text_cells(
                                     &mut popup_verts,
+                                    atlas,
+                                    "No documentation.",
+                                    doc_col + doc_pad_x,
+                                    panel_row + doc_pad_top + 3,
+                                    doc_text_w,
+                                    muted_fg,
+                                    doc_bg_rgba,
+                                    cell_w,
+                                    cell_h,
+                                    vp_w,
+                                    vp_h,
                                 );
                             }
                         }
@@ -3060,6 +3249,226 @@ fragment float4 waveform_frag(
             v(x0, y1),
             v(x1, y1),
         ]);
+    }
+
+    fn push_rect_px(
+        verts: &mut Vec<Vertex>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        color: Color,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        push_rect_px_rgba(verts, x, y, width, height, color.to_rgba(), vp_w, vp_h);
+    }
+
+    fn push_rect_px_rgba(
+        verts: &mut Vec<Vertex>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        rgba: [f32; 4],
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let x0 = ndc_x(x);
+        let x1 = ndc_x(x + width);
+        let y0 = ndc_y(y);
+        let y1 = ndc_y(y + height);
+        let v = |px, py| Vertex {
+            position: [px, py],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        };
+        verts.extend_from_slice(&[
+            v(x0, y0),
+            v(x0, y1),
+            v(x1, y0),
+            v(x1, y0),
+            v(x0, y1),
+            v(x1, y1),
+        ]);
+    }
+
+    fn push_text_cells(
+        verts: &mut Vec<Vertex>,
+        atlas: &mut GlyphAtlas,
+        text: &str,
+        col: usize,
+        row: usize,
+        max_cols: usize,
+        fg: [f32; 4],
+        bg: [f32; 4],
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        for (j, ch) in text.chars().take(max_cols).enumerate() {
+            if ch == ' ' {
+                continue;
+            }
+            rasterize_char(
+                atlas,
+                ch,
+                ((col + j) as i32, row as f32),
+                &CharCtx {
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                    fg,
+                    bg,
+                },
+                verts,
+            );
+        }
+    }
+
+    fn push_rounded_instance_cells(
+        instances: &mut Vec<WidgetInstance>,
+        col: f32,
+        row: f32,
+        width: f32,
+        height: f32,
+        color: Color,
+        radius_px: f32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        push_rounded_instance_cells_rgba(
+            instances,
+            col,
+            row,
+            width,
+            height,
+            color.to_rgba(),
+            cell_w,
+            cell_h,
+            vp_w,
+            vp_h,
+        );
+        if let Some(instance) = instances.last_mut() {
+            instance.corner_radius = normalized_overlay_radius(height, cell_h, radius_px);
+        }
+    }
+
+    fn push_rounded_instance_cells_rgba(
+        instances: &mut Vec<WidgetInstance>,
+        col: f32,
+        row: f32,
+        width: f32,
+        height: f32,
+        rgba: [f32; 4],
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let x0 = ndc_x(col * cell_w);
+        let x1 = ndc_x((col + width) * cell_w);
+        let y0 = ndc_y(row * cell_h);
+        let y1 = ndc_y((row + height) * cell_h);
+        instances.push(WidgetInstance {
+            ndc_min: [x0.min(x1), y1.min(y0)],
+            ndc_max: [x0.max(x1), y1.max(y0)],
+            value_t: 0.0,
+            orientation: 0.0,
+            itime: 0.0,
+            uniform_a: [0.0; 4],
+            uniform_b: [0.0; 4],
+            color_a: rgba,
+            color_b: rgba,
+            color_c: rgba,
+            color_d: rgba,
+            corner_radius: normalized_overlay_radius(height, cell_h, 7.0),
+            pixel_aspect: if height > 0.0 {
+                (width * cell_w) / (height * cell_h)
+            } else {
+                1.0
+            },
+        });
+    }
+
+    fn normalized_overlay_radius(height_cells: f32, cell_h: f32, radius_px: f32) -> f32 {
+        if radius_px <= 0.0 || height_cells <= 0.0 || cell_h <= 0.0 {
+            return 0.0;
+        }
+        ((radius_px * 2.0) / (height_cells * cell_h)).clamp(0.001, 0.5)
+    }
+
+    fn draw_widget_instances(
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        device: &ProtocolObject<dyn MTLDevice>,
+        pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+        instances: &[WidgetInstance],
+    ) {
+        if instances.is_empty() {
+            return;
+        }
+        let byte_len = std::mem::size_of_val(instances);
+        let Some(buffer) = (unsafe {
+            device.newBufferWithBytes_length_options(
+                NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                byte_len,
+                MTLResourceOptions(0),
+            )
+        }) else {
+            return;
+        };
+        enc.setRenderPipelineState(pipeline);
+        unsafe {
+            enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                instances.len() as _,
+            );
+        }
+    }
+
+    fn wrap_completion_doc_lines(lines: &[String], width: usize) -> Vec<String> {
+        let width = width.max(8);
+        let mut out = Vec::new();
+        for line in lines {
+            let mut current = String::new();
+            for word in line.split_whitespace() {
+                let current_len = current.chars().count();
+                let word_len = word.chars().count();
+                if current_len == 0 {
+                    current.push_str(word);
+                } else if current_len + 1 + word_len <= width {
+                    current.push(' ');
+                    current.push_str(word);
+                } else {
+                    out.push(current);
+                    current = word.to_string();
+                }
+            }
+            if !current.is_empty() {
+                out.push(current);
+            } else if line.trim().is_empty() {
+                out.push(String::new());
+            }
+        }
+        out
     }
 
     /// Split a flat list of primitives into segments separated by PushClipRect/PopClipRect.

@@ -184,6 +184,7 @@ impl Editor {
                     return;
                 }
                 self.minibuffer = None;
+                self.record_undo_snapshot();
                 if !self.delete_active_region() {
                     self.clear_mark();
                     self.active_buffer_mut().delete_char_before();
@@ -196,6 +197,7 @@ impl Editor {
                     return;
                 }
                 self.minibuffer = None;
+                self.record_undo_snapshot();
                 if !self.kill_active_region() {
                     self.active_buffer_mut().delete_word_before();
                 }
@@ -219,6 +221,7 @@ impl Editor {
                 self.minibuffer = None;
                 self.clear_mark();
                 if let Some(text) = self.kill_ring.last().cloned() {
+                    self.record_undo_snapshot();
                     self.active_buffer_mut().insert_str(&text);
                     self.sync_text_horizontal_scroll_to_viewport();
                 } else {
@@ -237,6 +240,7 @@ impl Editor {
                 }
                 self.completion = None;
                 self.minibuffer = None;
+                self.record_undo_snapshot();
                 self.paste_from_system_clipboard();
             }
             "delete-to-line-end" => {
@@ -246,6 +250,7 @@ impl Editor {
                 self.completion = None;
                 self.minibuffer = None;
                 self.clear_mark();
+                self.record_undo_snapshot();
                 self.active_buffer_mut().delete_to_line_end();
                 self.sync_text_horizontal_scroll_to_viewport();
             }
@@ -264,6 +269,7 @@ impl Editor {
                 self.minibuffer = None;
                 self.refresh_completion();
                 if self.completion.is_none() {
+                    self.record_undo_snapshot();
                     self.active_buffer_mut().indent_current_line();
                     self.sync_runtime_context();
                 }

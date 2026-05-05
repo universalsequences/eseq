@@ -960,7 +960,6 @@ impl Runtime {
             last_ui_invalidation_trace: None,
         };
         runtime.register_reactive("THEME", crate::theme::reactive_fields(), true);
-        crate::theme::set_current(crate::theme::default_theme());
         register_audio_natives(&mut runtime);
         // (load path) — read and evaluate a Lisp file; relative paths resolve from CWD.
         runtime.vm.register_native_with_vm("load", |args, vm| {

@@ -1144,7 +1144,7 @@ impl TimelineView {
     }
 
     fn snap_edit_time(&self, time: f64) -> f64 {
-        self.snap_resize_time(time)
+        self.snap_value(time, self.effective_resize_snap(), true)
     }
 
     fn effective_resize_snap(&self) -> f64 {
@@ -1352,10 +1352,18 @@ impl TimelineView {
                         ),
                     ]))
                 }
-                HitRegion::ItemEdgeEnd { item } => Some(map_value(vec![
-                    ("kind", keyword(":resize-end")),
-                    ("id", item.id),
-                ])),
+                HitRegion::ItemEdgeEnd { item } => {
+                    let ids = if self.item_selected(&item) {
+                        self.selected_ids_for(item.id.clone())
+                    } else {
+                        vec![item.id.clone()]
+                    };
+                    Some(map_value(vec![
+                        ("kind", keyword(":resize-end")),
+                        ("id", item.id),
+                        ("ids", list_value(ids)),
+                    ]))
+                }
                 HitRegion::ContentLengthEnd => {
                     Some(map_value(vec![("kind", keyword(":resize-content-length"))]))
                 }
@@ -1510,14 +1518,14 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "resize-end" => {
                 let id = gesture.get("id")?.clone();
                 let item = self.items.iter().find(|item| item.id == id)?;
+                let next_time = current_resize_time.max(self.minimum_end_for(item));
                 Some(action_map(vec![
                     ("type", keyword(":resize-item-absolute")),
-                    ("id", id),
+                    ("id", id.clone()),
+                    ("ids", gesture.get("ids")?.clone()),
                     ("edge", keyword(":end")),
-                    (
-                        "time",
-                        Value::Number(current_resize_time.max(self.minimum_end_for(item))),
-                    ),
+                    ("time", Value::Number(next_time)),
+                    ("duration-delta", Value::Number(next_time - item.end)),
                 ]))
             }
             Some(Value::Keyword(kind)) if kind == "resize-content-length" => {
@@ -1824,6 +1832,22 @@ impl TimelineView {
             1.0
         };
         match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A')
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SUPER | KeyModifiers::CONTROL) =>
+            {
+                let ids = self
+                    .items
+                    .iter()
+                    .map(|item| item.id.clone())
+                    .collect::<Vec<_>>();
+                Some(action_map(vec![
+                    ("type", keyword(":select")),
+                    ("ids", list_value(ids)),
+                    ("mode", keyword(":replace")),
+                ]))
+            }
             KeyCode::Left if !selected_ids.is_empty() => Some(action_map(vec![
                 ("type", keyword(":nudge-selection")),
                 ("ids", list_value(selected_ids)),
@@ -2394,6 +2418,78 @@ mod tests {
     }
 
     #[test]
+    fn resize_selected_item_sends_selection_ids_and_duration_delta() {
+        let props = HashMap::from([
+            ("tool".to_string(), keyword_value("pointer")),
+            (
+                "lanes".to_string(),
+                list_value_raw(vec![map_value_raw(vec![
+                    ("id", number_value(0.0)),
+                    ("label", Value::String("L0".to_string())),
+                ])]),
+            ),
+            (
+                "items".to_string(),
+                list_value_raw(vec![
+                    map_value_raw(vec![
+                        ("id", number_value(10.0)),
+                        ("lane", number_value(0.0)),
+                        ("start", number_value(4.0)),
+                        ("end", number_value(8.0)),
+                        ("selected", bool_value(true)),
+                    ]),
+                    map_value_raw(vec![
+                        ("id", number_value(11.0)),
+                        ("lane", number_value(0.0)),
+                        ("start", number_value(9.0)),
+                        ("end", number_value(12.0)),
+                        ("selected", bool_value(true)),
+                    ]),
+                ]),
+            ),
+            (
+                "selection".to_string(),
+                list_value_raw(vec![number_value(10.0), number_value(11.0)]),
+            ),
+            ("view-start".to_string(), number_value(0.0)),
+            ("view-duration".to_string(), number_value(16.0)),
+            ("snap".to_string(), number_value(1.0)),
+        ]);
+
+        let view = TimelineView::from_props(
+            &props,
+            Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 32.0,
+                height: 8.0,
+            },
+        );
+
+        let gesture = view.begin_gesture(16.0, 2.0).expect("gesture");
+        let action = view
+            .handle_pointer_drag(18.0, 2.0, Some(&gesture))
+            .expect("resize action");
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        assert_eq!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword("resize-item-absolute".to_string()))
+        );
+        assert_eq!(
+            map.get("duration-delta")
+                .map(|value| value.borrow().clone()),
+            Some(Value::Number(1.0))
+        );
+        let ids = map.get("ids").expect("ids");
+        let Value::List(ids) = &*ids.borrow() else {
+            panic!("expected ids list");
+        };
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
     fn resize_snap_rounds_to_nearest_boundary_when_configured() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
@@ -2600,7 +2696,7 @@ mod tests {
     }
 
     #[test]
-    fn double_click_create_uses_zoomed_grid_snap() {
+    fn double_click_create_floors_to_zoomed_grid_snap() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
             (
@@ -2641,16 +2737,16 @@ mod tests {
         };
         assert_eq!(
             map.get("start").map(|value| value.borrow().clone()),
-            Some(Value::Number(2.5))
+            Some(Value::Number(2.0))
         );
         assert_eq!(
             map.get("end").map(|value| value.borrow().clone()),
-            Some(Value::Number(3.0))
+            Some(Value::Number(2.5))
         );
     }
 
     #[test]
-    fn marquee_selection_uses_zoomed_grid_snap() {
+    fn marquee_selection_floors_to_zoomed_grid_snap() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
             (
@@ -2692,11 +2788,11 @@ mod tests {
         };
         assert_eq!(
             map.get("time-a").map(|value| value.borrow().clone()),
-            Some(Value::Number(2.5))
+            Some(Value::Number(2.0))
         );
         assert_eq!(
             map.get("time-b").map(|value| value.borrow().clone()),
-            Some(Value::Number(3.5))
+            Some(Value::Number(3.0))
         );
     }
 

@@ -146,6 +146,7 @@ fn build_message_status_row(message: &str, width: usize) -> (Vec<Cell>, StatusIn
 fn build_buffer_status_row(
     buffer: &Buffer,
     ui_available: bool,
+    vim_status: Option<&str>,
     cursor_row: usize,
     cursor_col: usize,
     width: usize,
@@ -188,6 +189,17 @@ fn build_buffer_status_row(
         left.push(status_space());
     }
 
+    if let Some(vim_status) = vim_status {
+        push_status_chip(
+            &mut left,
+            &format!(" {vim_status} "),
+            theme::STATUS_FG(),
+            theme::STATUS_CHIP_BG(),
+            false,
+        );
+        left.push(status_space());
+    }
+
     left.push(status_space());
     push_status_text(
         &mut left,
@@ -214,11 +226,12 @@ fn build_buffer_status_row(
     );
 
     let signature = format!(
-        "buf:{}:{}:{}:{}:{}:{}:{}",
+        "buf:{}:{}:{}:{}:{}:{}:{}:{}",
         buffer.name,
         buffer.mode.name(),
         buffer.dirty,
         buffer.read_only,
+        vim_status.unwrap_or("-"),
         ui_available,
         buffer.view_mode.label(),
         cursor_row * 10000 + cursor_col
@@ -356,6 +369,7 @@ pub fn build_render_frame(
             build_buffer_status_row(
                 buf,
                 editor.active_buffer_has_ui(),
+                editor.vim_status_label(),
                 cursor_row,
                 cursor_col,
                 viewport_width,
@@ -363,6 +377,17 @@ pub fn build_render_frame(
         };
 
     let completion = build_completion(editor, cursor_row, cursor_col, scroll_top);
+    if Editor::trace_completion_enabled() {
+        eprintln!(
+            "{} render_kind=buffer-frame show={} viewport={}x{} scroll_top={} cursor_visible={}",
+            editor.completion_debug_summary("render:buffer-frame"),
+            completion.is_some(),
+            viewport_width,
+            viewport_height,
+            scroll_top,
+            cursor.is_some()
+        );
+    }
 
     let text_cache_key = {
         let mut hasher = DefaultHasher::new();
@@ -484,6 +509,17 @@ fn build_tiled_render_frame_impl(
     let (cursor_row, cursor_col) = buf.cursor;
     let scroll_top = buf.scroll_top;
     let completion = build_completion(editor, cursor_row, cursor_col, scroll_top);
+    if Editor::trace_completion_enabled() {
+        let show = completion.is_some();
+        eprintln!(
+            "{} render_kind=tiled-global show={} cursor_row={} cursor_col={} scroll_top={}",
+            editor.completion_debug_summary("render:tiled-global"),
+            show,
+            cursor_row,
+            cursor_col,
+            scroll_top
+        );
+    }
 
     // Pre-collect per-tile metadata to avoid borrow conflicts
     let tile_info: Vec<_> = tile_rects
@@ -579,6 +615,16 @@ fn build_tiled_render_frame_impl(
         if is_active {
             // Active tile: use full build_render_frame (has highlights, etc.)
             let frame = build_render_frame(editor, inner_width, inner_height);
+            if Editor::trace_completion_enabled() {
+                eprintln!(
+                    "{} render_kind=active-tile frame_show={} tile_id={} inner={}x{}",
+                    editor.completion_debug_summary("render:active-tile"),
+                    frame.completion.is_some(),
+                    tile_id,
+                    inner_width,
+                    inner_height
+                );
+            }
             tiles.push(TileFrame {
                 tile_id,
                 rect,
@@ -688,6 +734,7 @@ fn build_inactive_tile_frame_from_parts(
     let (status_cells, status_indicator, status_signature) = build_buffer_status_row(
         buffer,
         buffer.widget_tree.is_some() || cached_layout.is_some(),
+        None,
         cursor_row,
         cursor_col,
         viewport_width,
@@ -746,7 +793,19 @@ fn build_completion(
     cursor_col: usize,
     scroll_top: usize,
 ) -> Option<CompletionFrame> {
-    editor.completion_state().map(|comp| {
+    let Some(comp) = editor.completion_state() else {
+        if Editor::trace_completion_enabled() {
+            eprintln!(
+                "{} build_completion=none reason=no-editor-completion-state anchor=({}, {}) scroll_top={}",
+                editor.completion_debug_summary("render:build-completion"),
+                cursor_row.saturating_sub(scroll_top),
+                cursor_col,
+                scroll_top
+            );
+        }
+        return None;
+    };
+    let frame = {
         let visible_count = comp.items.len().min(8);
         let start = comp
             .scroll
@@ -778,5 +837,16 @@ fn build_completion(
             anchor: (cursor_row.saturating_sub(scroll_top), cursor_col),
             doc,
         }
-    })
+    };
+    if Editor::trace_completion_enabled() {
+        eprintln!(
+            "{} build_completion=some entries={} anchor=({}, {}) selected_doc={}",
+            editor.completion_debug_summary("render:build-completion"),
+            frame.entries.len(),
+            frame.anchor.0,
+            frame.anchor.1,
+            frame.doc.is_some()
+        );
+    }
+    Some(frame)
 }

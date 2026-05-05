@@ -1305,9 +1305,15 @@ impl Compiler {
     pub fn compile_list(&mut self, list: &[Expression]) -> Result<(), CompilerError> {
         // Macro expansion: if the head is a macro name, expand and compile the result
         if let Some(Expression::Symbol(name)) = list.first() {
-            if self.macros.contains_key(name) {
+            if let Some(mac) = self.macros.get(name) {
+                if list.len() - 1 != mac.params.len() {
+                    return Err(CompilerError::InvalidArg);
+                }
                 let call_expr = Expression::List(list.to_vec());
                 let expanded = self.expand_macros(&call_expr, 0);
+                if expanded == call_expr {
+                    return Err(CompilerError::InvalidArg);
+                }
                 return self.compile_expression(&expanded);
             }
         }

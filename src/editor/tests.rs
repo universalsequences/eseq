@@ -16,6 +16,7 @@
             runtime,
             EditorConfig {
                 init_source: Some(init.to_string()),
+                ..EditorConfig::default()
             },
         );
         editor.open_scratch_buffer("*test*", "(+ 1 2)");
@@ -73,6 +74,7 @@
             runtime,
             EditorConfig {
                 init_source: Some(init),
+                ..EditorConfig::default()
             },
         );
 
@@ -846,6 +848,312 @@
     }
 
     #[test]
+    fn vim_mode_starts_in_normal_and_does_not_insert_plain_keys() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "abc");
+        assert_eq!(editor.vim_input_mode, VimInputMode::Normal);
+    }
+
+    #[test]
+    fn vim_insert_mode_accepts_text_and_escape_returns_to_normal() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc");
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT));
+        editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "aZbc");
+        assert_eq!(editor.vim_input_mode, VimInputMode::Normal);
+    }
+
+    #[test]
+    fn vim_normal_mode_supports_basic_motions() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc def\nxyz");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().cursor, (0, 4));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().cursor, (1, 0));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+    }
+
+    #[test]
+    fn vim_normal_mode_accepts_shifted_motions_without_inserting() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc\ndef");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::SHIFT));
+        assert_eq!(editor.active_buffer().text(), "abc\ndef");
+        assert_eq!(editor.active_buffer().cursor, (0, 3));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(editor.active_buffer().text(), "abc\ndef");
+        assert_eq!(editor.active_buffer().cursor, (1, 2));
+    }
+
+    #[test]
+    fn vim_dd_and_p_are_linewise() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "one\ntwo\nthree");
+        editor.active_buffer_mut().cursor = (1, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().text(), "one\nthree");
+        assert_eq!(editor.active_buffer().cursor, (1, 1));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().text(), "one\nthree\ntwo");
+        assert_eq!(editor.active_buffer().cursor, (2, 0));
+    }
+
+    #[test]
+    fn vim_delete_line_operator_accepts_count_between_keys() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "one\ntwo\nthree\nfour");
+        editor.active_buffer_mut().cursor = (1, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "one\nfour");
+        assert_eq!(editor.active_buffer().cursor, (1, 0));
+    }
+
+    #[test]
+    fn vim_yank_line_operator_accepts_count_between_keys() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "one\ntwo\nthree\nfour");
+        editor.active_buffer_mut().cursor = (1, 0);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "one\ntwo\ntwo\nthree\nthree\nfour");
+        assert_eq!(editor.active_buffer().cursor, (2, 0));
+    }
+
+    #[test]
+    fn vim_delete_word_operator_accepts_count_between_keys() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "one two three four");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "three four");
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+    }
+
+    #[test]
+    fn vim_y_yanks_active_selection() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        editor.active_buffer_mut().cursor = (0, 7);
+        editor.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "abc defabc");
+        assert!(editor.active_region_range().is_none());
+    }
+
+    #[test]
+    fn vim_d_deletes_active_selection() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc def");
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), " def");
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+        assert!(editor.active_region_range().is_none());
+    }
+
+    #[test]
+    fn vim_r_replaces_character_under_cursor() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc");
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "axc");
+        assert_eq!(editor.active_buffer().cursor, (0, 1));
+        assert_eq!(editor.vim_input_mode, VimInputMode::Normal);
+    }
+
+    #[test]
+    fn vim_r_accepts_shifted_replacement_character() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc");
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+
+        assert_eq!(editor.active_buffer().text(), "aXc");
+        assert_eq!(editor.active_buffer().cursor, (0, 1));
+    }
+
+    #[test]
+    fn vim_escape_clears_selection_before_changing_mode() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc");
+        editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(editor.active_region_range().is_some());
+
+        editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(editor.active_region_range().is_none());
+        assert_eq!(editor.vim_input_mode, VimInputMode::Insert);
+    }
+
+    #[test]
+    fn vim_undo_and_redo_restore_text_edits() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "abc");
+        editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT));
+        assert_eq!(editor.active_buffer().text(), "Zabc");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert_eq!(editor.active_buffer().text(), "abc");
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(editor.active_buffer().text(), "Zabc");
+    }
+
+    #[test]
     fn ctrl_k_deletes_rest_of_line() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -867,6 +1175,25 @@
         editor.active_buffer_mut().cursor = (0, 4);
 
         editor.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+
+        editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(editor.active_buffer().text(), "(seq-step");
+    }
+
+    #[test]
+    fn vim_normal_mode_tab_still_accepts_completion() {
+        let mut runtime = Runtime::new();
+        runtime.register_native("seq-step", |_args, _ctx| Ok(Value::Bool(true)));
+        let mut editor = Editor::new(
+            runtime,
+            EditorConfig {
+                vim_mode: true,
+                ..EditorConfig::default()
+            },
+        );
+        editor.open_scratch_buffer("*test*", "(seq-");
+        editor.active_buffer_mut().cursor = (0, 5);
 
         editor.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
 
@@ -921,6 +1248,66 @@
 
         editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert!(editor.completion_state().is_none());
+    }
+
+    #[test]
+    fn key_release_does_not_close_completion_popup() {
+        let mut runtime = Runtime::new();
+        runtime.register_native("seq-step", |_args, _ctx| Ok(Value::Bool(true)));
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(seq");
+        editor.active_buffer_mut().cursor = (0, 4);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+        assert!(editor.completion_state().is_some());
+
+        editor.handle_key(KeyEvent {
+            code: KeyCode::Char('-'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        });
+
+        assert_eq!(editor.active_buffer().text(), "(seq-");
+        assert!(editor.completion_state().is_some());
+    }
+
+    #[test]
+    fn typing_exact_special_form_keeps_completion_popup_open() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(");
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        for ch in ['d', 'e', 'f'] {
+            editor.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+
+        assert_eq!(editor.active_buffer().text(), "(def");
+        assert!(editor.completion_state().is_some());
+        assert!(editor
+            .completion_state()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.label == "def"));
+    }
+
+    #[test]
+    fn no_op_runtime_side_effect_refresh_keeps_completion_popup_open() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.open_scratch_buffer("*test*", "(");
+        editor.active_buffer_mut().cursor = (0, 1);
+
+        editor.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        editor.handle_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert!(editor.completion_state().is_some());
+
+        editor.refresh_runtime_side_effects();
+
+        assert_eq!(editor.active_buffer().text(), "(de");
+        assert!(editor.completion_state().is_some());
     }
 
     #[test]
@@ -985,6 +1372,7 @@
             runtime,
             EditorConfig {
                 init_source: Some(init.to_string()),
+                ..EditorConfig::default()
             },
         );
         editor.open_scratch_buffer("*test*", "(return-map)");
@@ -1009,6 +1397,7 @@
             runtime,
             EditorConfig {
                 init_source: Some(init.to_string()),
+                ..EditorConfig::default()
             },
         );
         editor.open_scratch_buffer("*test*", "(+ 5 10)");
@@ -1378,6 +1767,92 @@ fn transient_minibuffer_message_expires_without_input() {
     }
 
     #[test]
+    fn knob_drag_stays_bound_after_callback_reorders_layout() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(24, 6);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def selected (state 0))
+                (def algo (state 0))
+                (def xy (state 0))
+                (def algo-knob ()
+                  (subtree :key "algo-knob"
+                    (knob-number
+                      :label "algo" :min 0 :max 10 :value algo :width 4 :height 2
+                      :on-change |v| (do (set! selected 1) (set! algo v)))))
+                (def xy-knob ()
+                  (subtree :key "xy-knob"
+                    (knob-number
+                      :label "x/y" :min 0 :max 10 :value xy :width 4 :height 2
+                      :on-change |v| (set! xy v))))
+                (effect
+                  (if (= selected 0)
+                    (h-stack :gap 0 (algo-knob) (xy-knob))
+                    (h-stack :gap 0 (xy-knob) (algo-knob))))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(24, 6);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 2),
+            1,
+            1,
+            24,
+            6,
+        );
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 1),
+            1,
+            1,
+            24,
+            6,
+        );
+        let _ = crate::frame::build_render_frame(&mut editor, 24, 6);
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 0),
+            1,
+            1,
+            24,
+            6,
+        );
+        let frame = crate::frame::build_render_frame(&mut editor, 24, 6);
+
+        let algo_value = editor.runtime.eval_str("algo").unwrap().unwrap();
+        let xy_value = editor.runtime.eval_str("xy").unwrap().unwrap();
+        match (algo_value, xy_value) {
+            (Value::Number(algo), Value::Number(xy)) => {
+                assert!(algo > 0.0, "expected captured algo knob to keep dragging");
+                assert_eq!(xy, 0.0, "drag retargeted to x/y after layout changed");
+            }
+            _ => panic!("expected numeric knob states"),
+        }
+
+        fn find_label_for_id(node: &crate::layout::LayoutNode, id: u64) -> Option<String> {
+            if node.widget_id == id {
+                return node.props.get("label").and_then(|value| match value {
+                    Value::String(label) => Some(label.clone()),
+                    _ => None,
+                });
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_label_for_id(child, id))
+        }
+
+        let focused_id = frame.focused_widget_id.expect("focused widget");
+        let layout = frame.widget_layout.expect("widget layout");
+        assert_eq!(
+            find_label_for_id(&layout, focused_id).as_deref(),
+            Some("algo"),
+            "focus retargeted after layout changed"
+        );
+    }
+
+    #[test]
     fn mouse_drag_updates_slider_via_bind_shorthand() {
         let runtime = Runtime::new();
         let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -1699,6 +2174,7 @@ fn transient_minibuffer_message_expires_without_input() {
             runtime,
             EditorConfig {
                 init_source: Some(init.to_string()),
+                ..EditorConfig::default()
             },
         );
         editor.open_scratch_buffer(
@@ -1936,6 +2412,7 @@ fn transient_minibuffer_message_expires_without_input() {
             runtime,
             EditorConfig {
                 init_source: Some(init),
+                ..EditorConfig::default()
             },
         );
 
@@ -1972,6 +2449,7 @@ fn transient_minibuffer_message_expires_without_input() {
             runtime,
             EditorConfig {
                 init_source: Some(init),
+                ..EditorConfig::default()
             },
         );
 
@@ -2622,6 +3100,7 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
             runtime,
             EditorConfig {
                 init_source: Some(init),
+                ..EditorConfig::default()
             },
         );
         editor.set_layout_viewport(80, 12);
@@ -2687,6 +3166,7 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
             runtime,
             EditorConfig {
                 init_source: Some(init),
+                ..EditorConfig::default()
             },
         );
 
@@ -2727,6 +3207,7 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
             runtime,
             EditorConfig {
                 init_source: Some(init),
+                ..EditorConfig::default()
             },
         );
 
@@ -3501,6 +3982,57 @@ fn named_effect_buffer_emits_replace_subtree_for_committed_root() {
             Some("delete-items".to_string())
         );
         assert_eq!(super::get_first_list_number(&action, "ids"), Some(10.0));
+    }
+
+    #[test]
+    fn focused_timeline_cmd_a_emits_select_all_action() {
+        let runtime = Runtime::new();
+        let mut editor = Editor::new(runtime, EditorConfig::default());
+        editor.set_layout_viewport(30, 8);
+        editor
+            .runtime
+            .eval_str(
+                r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 8
+                    :focusable true
+                    :lanes (list (dict :id 0 :label "L0"))
+                    :items (list
+                      (dict :id 10 :lane 0 :start 4 :end 8)
+                      (dict :id 11 :lane 0 :start 9 :end 12))
+                    :view-start 0
+                    :view-duration 16
+                    :snap 1
+                    :on-action |e| (set! last-action e)))
+                "#,
+            )
+            .unwrap();
+        editor.set_layout_viewport(30, 8);
+
+        editor.handle_mouse(
+            mouse_event(MouseEventKind::Down(MouseButton::Left), 11, 2),
+            1,
+            1,
+            30,
+            8,
+        );
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SUPER));
+
+        let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+        assert_eq!(
+            super::get_map_field_keyword(&action, "type"),
+            Some("select".to_string())
+        );
+        let Value::Map(map) = action else {
+            panic!("expected action map");
+        };
+        let ids = map.get("ids").expect("ids");
+        let Value::List(ids) = &*ids.borrow() else {
+            panic!("expected ids list");
+        };
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]

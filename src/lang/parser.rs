@@ -296,7 +296,7 @@ impl Parser {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     Symbol(String),
     Keyword(String), // :foo

@@ -3087,4 +3087,23 @@ mod tests {
             Some(Value::Number(4104.0))
         );
     }
+
+    #[test]
+    fn wrong_arity_macro_call_returns_error_instead_of_recursing() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro demo (x) `(+ ,x 1))")
+            .expect("macro definition");
+
+        assert!(vm.eval_str("(demo)").is_err());
+        assert!(vm.eval_str("(demo 1 2)").is_err());
+    }
+
+    #[test]
+    fn self_recursive_macro_returns_error_instead_of_recursing() {
+        let mut vm = VM::new(Vec::new());
+        vm.eval_str("(defmacro again (x) `(again ,x))")
+            .expect("macro definition");
+
+        assert!(vm.eval_str("(again 1)").is_err());
+    }
 }

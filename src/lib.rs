@@ -60,6 +60,7 @@ pub fn run_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            ..EditorConfig::default()
         },
     );
 
@@ -111,6 +112,7 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            ..EditorConfig::default()
         },
     );
     let mut backend = MetalBackend::new()?;

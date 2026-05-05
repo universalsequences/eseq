@@ -331,7 +331,7 @@ pub fn completion_match(
         .into_iter()
         .filter(|item| {
             let label_lower = item.label.to_ascii_lowercase();
-            label_lower.starts_with(&prefix_lower) && label_lower != prefix_lower
+            label_lower.starts_with(&prefix_lower)
         })
         .filter(|item| seen.insert(item.label.clone()))
         .collect::<Vec<_>>();
@@ -621,5 +621,15 @@ mod tests {
         )
         .unwrap();
         assert!(result.items.iter().any(|item| item.label == "MODUM_DELAY"));
+    }
+
+    #[test]
+    fn completion_keeps_exact_special_form_match_visible() {
+        let mut buffer = Buffer::from_text(0, "*test*", "(def");
+        buffer.cursor = (0, 4);
+        let result = completion_match(&BufferMode::ESeqLisp, &buffer, &[], &HashMap::new())
+            .expect("exact special form should still produce a completion item");
+
+        assert!(result.items.iter().any(|item| item.label == "def"));
     }
 }

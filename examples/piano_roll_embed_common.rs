@@ -216,6 +216,7 @@ fn bootstrap_editor() -> (Editor, Rc<RefCell<PatternHost>>) {
         runtime,
         EditorConfig {
             init_source: Some(init_src),
+            ..EditorConfig::default()
         },
     );
     let _ = editor.open_scratch_buffer("*piano-roll*", piano_roll_buffer_text());

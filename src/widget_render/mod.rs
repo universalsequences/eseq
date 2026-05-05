@@ -65,13 +65,34 @@ fn haptic_quantum(min: f32, max: f32) -> f32 {
     }
 }
 
-pub fn should_trigger_integer_haptic(previous: f32, new_value: f32, min: f32, max: f32) -> bool {
+fn haptic_bucket(value: f32, min: f32, quantum: f32) -> i64 {
+    ((value - min) / quantum).floor() as i64
+}
+
+pub fn should_trigger_integer_haptic(
+    widget_id: u64,
+    previous: f32,
+    new_value: f32,
+    min: f32,
+    max: f32,
+) -> bool {
     let range = (max - min).abs();
     if range <= 1.0 || !previous.is_finite() || !new_value.is_finite() {
         return false;
     }
     let quantum = haptic_quantum(min, max);
-    (previous / quantum).floor() != (new_value / quantum).floor()
+    let previous_bucket = haptic_bucket(previous, min, quantum);
+    let new_bucket = haptic_bucket(new_value, min, quantum);
+    HAPTIC_BUCKETS.with(|buckets| {
+        let mut buckets = buckets.borrow_mut();
+        let last_bucket = buckets.entry(widget_id).or_insert(previous_bucket);
+        if *last_bucket != new_bucket {
+            *last_bucket = new_bucket;
+            true
+        } else {
+            false
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -97,6 +118,7 @@ struct OverlayInfo {
 
 thread_local! {
     static OVERLAY_INFO: RefCell<Option<OverlayInfo>> = RefCell::new(None);
+    static HAPTIC_BUCKETS: RefCell<HashMap<u64, i64>> = RefCell::new(HashMap::new());
     #[cfg(target_os = "macos")]
     static OVERLAY_PRIMITIVES: RefCell<Vec<MetalPrimitive>> = RefCell::new(Vec::new());
     #[cfg(target_os = "macos")]
@@ -996,6 +1018,31 @@ pub fn styled_cell(ch: char, fg: Color, bg: Option<Color>) -> Cell {
             bg,
             bold: false,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clear_haptic_buckets() {
+        HAPTIC_BUCKETS.with(|buckets| buckets.borrow_mut().clear());
+    }
+
+    #[test]
+    fn integer_haptic_only_fires_once_for_stale_previous_bucket() {
+        clear_haptic_buckets();
+        assert!(should_trigger_integer_haptic(10, 1.0, 2.1, 0.0, 10.0));
+        assert!(!should_trigger_integer_haptic(10, 1.0, 2.2, 0.0, 10.0));
+        assert!(!should_trigger_integer_haptic(10, 1.0, 2.9, 0.0, 10.0));
+        assert!(should_trigger_integer_haptic(10, 1.0, 3.0, 0.0, 10.0));
+    }
+
+    #[test]
+    fn integer_haptic_buckets_are_relative_to_min() {
+        clear_haptic_buckets();
+        assert!(!should_trigger_integer_haptic(11, 5.2, 5.9, 5.0, 12.0));
+        assert!(should_trigger_integer_haptic(11, 5.2, 6.1, 5.0, 12.0));
     }
 }
 

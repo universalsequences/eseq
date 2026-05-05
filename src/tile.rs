@@ -36,6 +36,7 @@ pub struct TileLeaf {
     pub max_height: Option<f32>,
     // Per-tile interaction state (moved from Editor)
     pub focused_widget_id: Option<u64>,
+    pub focused_widget_node: Option<LayoutNode>,
     pub widget_scroll_top: f32,
     pub widget_scroll_left: f32,
     pub active_widget_gesture: Option<WidgetGesture>,
@@ -84,6 +85,7 @@ pub struct SplitDividerHit {
 #[derive(Debug, Clone)]
 pub struct WidgetGesture {
     pub widget_id: u64,
+    pub node: LayoutNode,
     pub start_precise_col: f32,
     pub start_precise_row: f32,
     pub gesture_data: Option<Value>,
@@ -126,6 +128,7 @@ impl TileLeaf {
             max_width: None,
             max_height: None,
             focused_widget_id: None,
+            focused_widget_node: None,
             widget_scroll_top: 0.0,
             widget_scroll_left: 0.0,
             active_widget_gesture: None,
@@ -248,6 +251,7 @@ impl TileNode {
             TileNode::Leaf(leaf) => {
                 if leaf.id != keep_id {
                     leaf.focused_widget_id = None;
+                    leaf.focused_widget_node = None;
                 }
             }
             TileNode::Split(s) => {

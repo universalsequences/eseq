@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 
 use crate::buffer::{Buffer, debug_widget_tree_summary};
@@ -66,6 +67,7 @@ impl ViewMode {
 #[derive(Default, Clone)]
 pub struct EditorConfig {
     pub init_source: Option<String>,
+    pub vim_mode: bool,
 }
 
 #[derive(Debug)]
@@ -166,6 +168,27 @@ struct DefinitionLocation {
     cursor: (usize, usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VimInputMode {
+    Normal,
+    Insert,
+}
+
+#[derive(Debug, Clone)]
+enum VimPending {
+    Key(KeyEvent),
+    Replace,
+    Operator { op: char, count: String },
+}
+
+#[derive(Debug, Clone)]
+struct TextUndoSnapshot {
+    buffer_id: BufferId,
+    lines: Vec<String>,
+    cursor: (usize, usize),
+    dirty: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct MajorMode {
     pub name: String,
@@ -203,6 +226,12 @@ pub struct Editor {
     kill_ring: Vec<String>,
     minibuffer_input: Option<MinibufferMode>,
     mode_registry: HashMap<String, MajorMode>,
+    vim_enabled: bool,
+    vim_input_mode: VimInputMode,
+    pending_vim: Option<VimPending>,
+    vim_linewise_yank: Option<Vec<String>>,
+    undo_stack: Vec<TextUndoSnapshot>,
+    redo_stack: Vec<TextUndoSnapshot>,
     /// Cached tile rects, recomputed when tiles change or viewport resizes.
     cached_tile_rects: Vec<(TileId, Rect)>,
     widget_cursor: WidgetCursor,
@@ -268,6 +297,16 @@ impl Editor {
             kill_ring: vec![],
             minibuffer_input: None,
             mode_registry: HashMap::new(),
+            vim_enabled: config.vim_mode,
+            vim_input_mode: if config.vim_mode {
+                VimInputMode::Normal
+            } else {
+                VimInputMode::Insert
+            },
+            pending_vim: None,
+            vim_linewise_yank: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             cached_tile_rects: vec![],
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
@@ -285,6 +324,16 @@ impl Editor {
 
     pub fn widget_cursor(&self) -> WidgetCursor {
         self.widget_cursor
+    }
+
+    pub fn vim_status_label(&self) -> Option<&'static str> {
+        if !self.vim_applies_to_active_buffer() {
+            return None;
+        }
+        Some(match self.vim_input_mode {
+            VimInputMode::Normal => "NORMAL",
+            VimInputMode::Insert => "INSERT",
+        })
     }
 
     // ── Tile accessors ─────────────────────────────────────────────────────
@@ -1181,6 +1230,62 @@ impl Editor {
         self.completion.as_ref()
     }
 
+    pub fn trace_completion_enabled() -> bool {
+        std::env::var("ESEQLISP_TRACE_COMPLETION")
+            .ok()
+            .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+    }
+
+    pub fn completion_debug_summary(&self, stage: &str) -> String {
+        let buffer = self.active_buffer();
+        let cursor_row = buffer.cursor.0;
+        let cursor_col = buffer.cursor.1;
+        let line = buffer.lines.get(cursor_row).map(String::as_str).unwrap_or("");
+        let prefix = debug_symbol_prefix(line, cursor_col)
+            .map(|(start, prefix)| format!("prefix='{prefix}' start_col={start}"))
+            .unwrap_or_else(|| "prefix=<none>".to_string());
+        let completion = self
+            .completion
+            .as_ref()
+            .map(|state| {
+                let selected = state
+                    .items
+                    .get(state.selected)
+                    .map(|item| item.label.as_str())
+                    .unwrap_or("<out-of-range>");
+                format!(
+                    "state=some items={} selected={} selected_label='{selected}' scroll={} start_col={}",
+                    state.items.len(),
+                    state.selected,
+                    state.scroll,
+                    state.start_col
+                )
+            })
+            .unwrap_or_else(|| "state=none".to_string());
+        format!(
+            "[completion][{stage}] editor_ptr={:p} runtime_ptr={:p} buffer='{}' id={} mode={:?} cursor=({}, {}) save_prompt={} minibuffer={} runtime_symbols_rev={} {} {} line='{}'",
+            self,
+            &self.runtime,
+            buffer.name,
+            buffer.id,
+            buffer.mode,
+            cursor_row,
+            cursor_col,
+            self.save_prompt.is_some(),
+            self.minibuffer.is_some(),
+            self.runtime.symbol_revision(),
+            prefix,
+            completion,
+            line.escape_debug()
+        )
+    }
+
+    pub fn trace_completion(&self, stage: &str) {
+        if Self::trace_completion_enabled() {
+            eprintln!("{}", self.completion_debug_summary(stage));
+        }
+    }
+
     pub fn active_highlight_spans(&mut self) -> Rc<Vec<Vec<TokenSpan>>> {
         let buf_idx = self.active_buffer_idx();
         let buffer = &self.buffers[buf_idx];
@@ -1684,6 +1789,7 @@ impl Editor {
         let leaf = self.active_leaf_mut();
         leaf.cached_layout = layout;
         leaf.layout_revision = revision;
+        self.remap_focused_widget_after_layout_change();
     }
 
     pub fn open_scratch_buffer(&mut self, name: &str, initial: &str) -> BufferId {
@@ -1992,6 +2098,10 @@ impl Editor {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+
         self.mark_needs_redraw();
 
         if self.handle_save_prompt_key(key) {
@@ -1999,6 +2109,18 @@ impl Editor {
         }
 
         if self.handle_minibuffer_key(key) {
+            return;
+        }
+
+        if self.handle_selection_escape(key) {
+            return;
+        }
+
+        if self.handle_vim_insert_escape(key) {
+            return;
+        }
+
+        if self.handle_vim_redo_key(key) {
             return;
         }
 
@@ -2049,6 +2171,10 @@ impl Editor {
             return;
         }
 
+        if self.handle_vim_normal_key(key) {
+            return;
+        }
+
         if self.handle_mode_input_key(key) {
             return;
         }
@@ -2096,6 +2222,7 @@ impl Editor {
                 }
                 self.minibuffer = None;
                 self.clear_mark();
+                self.record_undo_snapshot();
                 self.active_buffer_mut().insert_char(c);
                 self.sync_text_horizontal_scroll_to_viewport();
                 self.sync_runtime_context();
@@ -2108,12 +2235,542 @@ impl Editor {
                 self.completion = None;
                 self.minibuffer = None;
                 self.clear_mark();
+                self.record_undo_snapshot();
                 self.active_buffer_mut().insert_newline_with_indent();
                 self.sync_text_horizontal_scroll_to_viewport();
                 self.sync_runtime_context();
             }
             _ => {}
         }
+    }
+
+    fn vim_applies_to_active_buffer(&self) -> bool {
+        self.vim_enabled
+            && self.active_buffer().view_mode != ViewMode::UiOnly
+            && matches!(
+                self.active_buffer().mode,
+                BufferMode::ESeqLisp | BufferMode::DGenLisp
+            )
+    }
+
+    fn handle_selection_escape(&mut self, key: KeyEvent) -> bool {
+        if key.code != KeyCode::Esc
+            || key.modifiers != KeyModifiers::NONE
+            || self.active_region_range().is_none()
+        {
+            return false;
+        }
+        self.completion = None;
+        self.clear_mark();
+        self.mark_needs_redraw();
+        true
+    }
+
+    fn handle_vim_redo_key(&mut self, key: KeyEvent) -> bool {
+        if !self.vim_applies_to_active_buffer()
+            || self.vim_input_mode != VimInputMode::Normal
+            || key.code != KeyCode::Char('r')
+            || !key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return false;
+        }
+        self.redo_text();
+        true
+    }
+
+    fn handle_vim_insert_escape(&mut self, key: KeyEvent) -> bool {
+        if !self.vim_applies_to_active_buffer()
+            || self.vim_input_mode != VimInputMode::Insert
+            || key.modifiers != KeyModifiers::NONE
+            || key.code != KeyCode::Esc
+        {
+            return false;
+        }
+
+        self.completion = None;
+        self.pending_vim = None;
+        self.vim_input_mode = VimInputMode::Normal;
+        self.minibuffer = Some("-- NORMAL --".to_string());
+        true
+    }
+
+    fn handle_vim_normal_key(&mut self, key: KeyEvent) -> bool {
+        if !self.vim_applies_to_active_buffer()
+            || self.vim_input_mode != VimInputMode::Normal
+            || !(key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT)
+        {
+            return false;
+        }
+
+        if let Some(pending) = self.pending_vim.take() {
+            return self.handle_pending_vim_key(pending, key);
+        }
+
+        match key.code {
+            KeyCode::Char('u') => {
+                self.undo_text();
+                true
+            }
+            KeyCode::Char('i') => self.enter_vim_insert_mode(),
+            KeyCode::Char('a') => {
+                let row = self.active_buffer().cursor.0;
+                let col = self.active_buffer().cursor.1;
+                let line_len = self.active_buffer().lines[row].chars().count();
+                if col < line_len {
+                    self.active_buffer_mut().move_right();
+                }
+                self.enter_vim_insert_mode()
+            }
+            KeyCode::Char('I') => {
+                let row = self.active_buffer().cursor.0;
+                let first_nonblank = self.active_buffer().lines[row]
+                    .chars()
+                    .take_while(|ch| ch.is_whitespace())
+                    .count();
+                self.active_buffer_mut().cursor.1 = first_nonblank;
+                self.enter_vim_insert_mode()
+            }
+            KeyCode::Char('A') => {
+                self.active_buffer_mut().move_to_line_end();
+                self.enter_vim_insert_mode()
+            }
+            KeyCode::Char('o') => {
+                if self.guard_read_only() {
+                    return true;
+                }
+                self.record_undo_snapshot();
+                self.active_buffer_mut().move_to_line_end();
+                self.active_buffer_mut().insert_newline_with_indent();
+                self.sync_runtime_context();
+                self.enter_vim_insert_mode()
+            }
+            KeyCode::Char('O') => {
+                if self.guard_read_only() {
+                    return true;
+                }
+                self.record_undo_snapshot();
+                self.insert_line_above_for_vim();
+                self.sync_runtime_context();
+                self.enter_vim_insert_mode()
+            }
+            KeyCode::Char('h') => self.vim_run_motion("move-left"),
+            KeyCode::Char('j') => self.vim_run_motion("move-down"),
+            KeyCode::Char('k') => self.vim_run_motion("move-up"),
+            KeyCode::Char('l') => self.vim_run_motion("move-right"),
+            KeyCode::Left => self.vim_run_motion("move-left"),
+            KeyCode::Down => self.vim_run_motion("move-down"),
+            KeyCode::Up => self.vim_run_motion("move-up"),
+            KeyCode::Right => self.vim_run_motion("move-right"),
+            KeyCode::Char('w') => {
+                self.vim_move_word_forward();
+                true
+            }
+            KeyCode::Char('b') => self.vim_run_motion("move-word-left"),
+            KeyCode::Char('0') => self.vim_run_motion("move-line-start"),
+            KeyCode::Char('$') => self.vim_run_motion("move-line-end"),
+            KeyCode::Char('G') => self.vim_run_motion("move-buffer-end"),
+            KeyCode::Tab => {
+                self.accept_or_open_completion();
+                true
+            }
+            KeyCode::Char('g') => {
+                self.pending_vim = Some(VimPending::Key(key));
+                true
+            }
+            KeyCode::Char('d') if self.active_region_range().is_some() => {
+                self.vim_delete_selection();
+                true
+            }
+            KeyCode::Char('y') if self.active_region_range().is_some() => {
+                self.vim_yank_selection();
+                true
+            }
+            KeyCode::Char('d') | KeyCode::Char('y') => {
+                let op = match key.code {
+                    KeyCode::Char(op) => op,
+                    _ => unreachable!(),
+                };
+                self.pending_vim = Some(VimPending::Operator {
+                    op,
+                    count: String::new(),
+                });
+                true
+            }
+            KeyCode::Char('r') => {
+                self.pending_vim = Some(VimPending::Replace);
+                true
+            }
+            KeyCode::Char('x') => {
+                self.vim_delete_char_under_cursor();
+                true
+            }
+            KeyCode::Char('p') => {
+                self.vim_paste_after();
+                true
+            }
+            KeyCode::Esc => true,
+            KeyCode::Char(_) | KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete => true,
+            _ => false,
+        }
+    }
+
+    fn handle_pending_vim_key(&mut self, pending: VimPending, key: KeyEvent) -> bool {
+        match pending {
+            VimPending::Key(prefix) => match (prefix.code, key.code) {
+                (KeyCode::Char('g'), KeyCode::Char('g')) => {
+                    self.active_buffer_mut().cursor = (0, 0);
+                    self.sync_text_horizontal_scroll_to_viewport();
+                    true
+                }
+                _ => true,
+            },
+            VimPending::Replace => {
+                if let KeyCode::Char(c) = key.code {
+                    self.vim_replace_char_under_cursor(c);
+                }
+                true
+            }
+            VimPending::Operator { op, mut count } => {
+                if let KeyCode::Char(c) = key.code
+                    && c.is_ascii_digit()
+                {
+                    if !(count.is_empty() && c == '0') {
+                        count.push(c);
+                    }
+                    self.pending_vim = Some(VimPending::Operator { op, count });
+                    return true;
+                }
+
+                let count = count.parse::<usize>().unwrap_or(1).max(1);
+                match (op, key.code) {
+                    ('d', KeyCode::Char('d')) => {
+                        self.vim_delete_lines(count);
+                        true
+                    }
+                    ('y', KeyCode::Char('y')) => {
+                        self.vim_yank_lines(count);
+                        true
+                    }
+                    ('d', KeyCode::Char('w')) => {
+                        self.vim_delete_words(count);
+                        true
+                    }
+                    ('y', KeyCode::Char('w')) => {
+                        self.vim_yank_words(count);
+                        true
+                    }
+                    _ => true,
+                }
+            }
+        }
+    }
+
+    fn enter_vim_insert_mode(&mut self) -> bool {
+        self.pending_vim = None;
+        self.vim_input_mode = VimInputMode::Insert;
+        self.minibuffer = Some("-- INSERT --".to_string());
+        true
+    }
+
+    fn vim_run_motion(&mut self, cmd: &str) -> bool {
+        self.run_command(cmd);
+        true
+    }
+
+    fn vim_move_word_forward(&mut self) {
+        let (row, col) = self.vim_word_forward_position(self.active_buffer().cursor, 1);
+        self.active_buffer_mut().cursor = (row, col);
+        self.sync_text_horizontal_scroll_to_viewport();
+    }
+
+    fn vim_word_forward_position(&self, start: (usize, usize), count: usize) -> (usize, usize) {
+        let (mut row, mut col) = start;
+        for _ in 0..count {
+            let next = self.vim_word_forward_position_once((row, col));
+            if next == (row, col) {
+                break;
+            }
+            (row, col) = next;
+        }
+        (row, col)
+    }
+
+    fn vim_word_forward_position_once(&self, start: (usize, usize)) -> (usize, usize) {
+        let (mut row, mut col) = start;
+        loop {
+            let line = &self.active_buffer().lines[row];
+            let chars = line.chars().collect::<Vec<_>>();
+            let len = chars.len();
+
+            while col < len && !chars[col].is_whitespace() {
+                col += 1;
+            }
+            while col < len && chars[col].is_whitespace() {
+                col += 1;
+            }
+
+            if col < len || row + 1 >= self.active_buffer().lines.len() {
+                return (row, col.min(len));
+            }
+
+            row += 1;
+            col = 0;
+        }
+    }
+
+    fn vim_line_range(&self, count: usize) -> (usize, usize) {
+        let start = self.active_buffer().cursor.0;
+        let end_exclusive = (start + count).min(self.active_buffer().lines.len());
+        (start, end_exclusive.max(start + 1))
+    }
+
+    fn vim_yank_lines(&mut self, count: usize) {
+        let (start, end) = self.vim_line_range(count);
+        let lines = self.active_buffer().lines[start..end].to_vec();
+        self.kill_ring.push(lines.join("\n"));
+        self.vim_linewise_yank = Some(lines);
+        self.minibuffer = Some(format!(
+            "Yanked {} line{}",
+            end - start,
+            if end - start == 1 { "" } else { "s" }
+        ));
+    }
+
+    fn vim_yank_selection(&mut self) {
+        if self.copy_active_region() {
+            self.vim_linewise_yank = None;
+            self.clear_mark();
+            self.minibuffer = Some("Yanked selection".to_string());
+        }
+    }
+
+    fn vim_delete_selection(&mut self) {
+        if self.guard_read_only() {
+            return;
+        }
+        if self.active_region_range().is_none() {
+            return;
+        }
+        self.record_undo_snapshot();
+        if self.kill_active_region() {
+            self.vim_linewise_yank = None;
+            self.sync_text_horizontal_scroll_to_viewport();
+            self.sync_runtime_context();
+            self.refresh_completion();
+        }
+    }
+
+    fn vim_delete_lines(&mut self, count: usize) {
+        if self.guard_read_only() {
+            return;
+        }
+        let (start, end) = self.vim_line_range(count);
+        let removed = self.active_buffer().lines[start..end].to_vec();
+        self.record_undo_snapshot();
+        self.kill_ring.push(removed.join("\n"));
+        self.vim_linewise_yank = Some(removed);
+
+        let buffer = self.active_buffer_mut();
+        if start == 0 && end == buffer.lines.len() {
+            buffer.lines = vec![String::new()];
+            buffer.cursor = (0, 0);
+        } else {
+            buffer.lines.drain(start..end);
+            let next_row = start.min(buffer.lines.len().saturating_sub(1));
+            let next_col = buffer.cursor.1.min(buffer.lines[next_row].chars().count());
+            buffer.cursor = (next_row, next_col);
+        }
+        buffer.dirty = true;
+        buffer.revision = buffer.revision.wrapping_add(1);
+        buffer.text_styles.clear();
+        self.sync_runtime_context();
+        self.refresh_completion();
+    }
+
+    fn vim_yank_words(&mut self, count: usize) {
+        let start = self.active_buffer().cursor;
+        let end = self.vim_word_forward_position(start, count);
+        if end == start {
+            return;
+        }
+        let text = self.active_buffer().slice_range(start, end);
+        self.kill_ring.push(text);
+        self.vim_linewise_yank = None;
+        self.minibuffer = Some(format!(
+            "Yanked {} word{}",
+            count,
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+
+    fn vim_delete_words(&mut self, count: usize) {
+        if self.guard_read_only() {
+            return;
+        }
+        let start = self.active_buffer().cursor;
+        let end = self.vim_word_forward_position(start, count);
+        if end == start {
+            return;
+        }
+        self.record_undo_snapshot();
+        let text = self.active_buffer().slice_range(start, end);
+        self.kill_ring.push(text);
+        self.vim_linewise_yank = None;
+        self.active_buffer_mut().delete_range(start, end);
+        self.sync_text_horizontal_scroll_to_viewport();
+        self.sync_runtime_context();
+        self.refresh_completion();
+    }
+
+    fn insert_line_above_for_vim(&mut self) {
+        let row = self.active_buffer().cursor.0;
+        let indent = self.active_buffer().lines[row]
+            .chars()
+            .take_while(|ch| ch.is_whitespace())
+            .collect::<String>();
+        let buffer = self.active_buffer_mut();
+        buffer.lines.insert(row, indent.clone());
+        buffer.cursor = (row, indent.chars().count());
+        buffer.dirty = true;
+        buffer.revision = buffer.revision.wrapping_add(1);
+    }
+
+    fn vim_delete_char_under_cursor(&mut self) {
+        if self.guard_read_only() {
+            return;
+        }
+        let row = self.active_buffer().cursor.0;
+        let col = self.active_buffer().cursor.1;
+        let line_len = self.active_buffer().lines[row].chars().count();
+        if col >= line_len {
+            return;
+        }
+        self.record_undo_snapshot();
+        self.active_buffer_mut()
+            .delete_range((row, col), (row, col + 1));
+        self.sync_runtime_context();
+        self.refresh_completion();
+    }
+
+    fn vim_replace_char_under_cursor(&mut self, c: char) {
+        if self.guard_read_only() {
+            return;
+        }
+        let row = self.active_buffer().cursor.0;
+        let col = self.active_buffer().cursor.1;
+        let line_len = self.active_buffer().lines[row].chars().count();
+        if col >= line_len {
+            return;
+        }
+        self.record_undo_snapshot();
+        {
+            let buffer = self.active_buffer_mut();
+            buffer.delete_range((row, col), (row, col + 1));
+            buffer.insert_char(c);
+            buffer.cursor = (row, col);
+        }
+        self.sync_runtime_context();
+        self.refresh_completion();
+    }
+
+    fn vim_paste_after(&mut self) {
+        if self.guard_read_only() {
+            return;
+        }
+        if let Some(lines) = self.vim_linewise_yank.clone() {
+            self.record_undo_snapshot();
+            let row = self.active_buffer().cursor.0;
+            let insert_row = row + 1;
+            let buffer = self.active_buffer_mut();
+            for (offset, line) in lines.iter().cloned().enumerate() {
+                buffer.lines.insert(insert_row + offset, line);
+            }
+            buffer.cursor = (insert_row, 0);
+            buffer.dirty = true;
+            buffer.revision = buffer.revision.wrapping_add(1);
+            buffer.text_styles.clear();
+            self.sync_runtime_context();
+            return;
+        }
+
+        if let Some(text) = self.kill_ring.last().cloned() {
+            self.record_undo_snapshot();
+            self.active_buffer_mut().move_right();
+            self.active_buffer_mut().insert_str(&text);
+            self.sync_runtime_context();
+        }
+    }
+
+    fn current_text_snapshot(&self) -> TextUndoSnapshot {
+        let buffer = self.active_buffer();
+        TextUndoSnapshot {
+            buffer_id: buffer.id,
+            lines: buffer.lines.clone(),
+            cursor: buffer.cursor,
+            dirty: buffer.dirty,
+        }
+    }
+
+    fn record_undo_snapshot(&mut self) {
+        let snapshot = self.current_text_snapshot();
+        if self.undo_stack.last().is_some_and(|last| {
+            last.buffer_id == snapshot.buffer_id && last.lines == snapshot.lines
+        }) {
+            return;
+        }
+        self.undo_stack.push(snapshot);
+        const MAX_UNDO: usize = 256;
+        if self.undo_stack.len() > MAX_UNDO {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    fn restore_text_snapshot(&mut self, snapshot: TextUndoSnapshot) {
+        let Some(buffer_idx) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.id == snapshot.buffer_id)
+        else {
+            return;
+        };
+        let buffer = &mut self.buffers[buffer_idx];
+        buffer.lines = snapshot.lines;
+        if buffer.lines.is_empty() {
+            buffer.lines.push(String::new());
+        }
+        let row = snapshot.cursor.0.min(buffer.lines.len().saturating_sub(1));
+        let col = snapshot.cursor.1.min(buffer.lines[row].chars().count());
+        buffer.cursor = (row, col);
+        buffer.dirty = snapshot.dirty;
+        buffer.revision = buffer.revision.wrapping_add(1);
+        buffer.text_styles.clear();
+        if self.active_buffer_idx() == buffer_idx {
+            self.sync_text_horizontal_scroll_to_viewport();
+        }
+        self.sync_runtime_context();
+        self.refresh_completion();
+        self.mark_needs_redraw();
+    }
+
+    fn undo_text(&mut self) {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            self.minibuffer = Some("No undo".to_string());
+            return;
+        };
+        self.redo_stack.push(self.current_text_snapshot());
+        self.restore_text_snapshot(snapshot);
+        self.minibuffer = Some("Undo".to_string());
+    }
+
+    fn redo_text(&mut self) {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            self.minibuffer = Some("No redo".to_string());
+            return;
+        };
+        self.undo_stack.push(self.current_text_snapshot());
+        self.restore_text_snapshot(snapshot);
+        self.minibuffer = Some("Redo".to_string());
     }
 
     pub fn handle_mouse(
@@ -3021,6 +3678,7 @@ impl Editor {
         let Some(item) = completion.items.get(completion.selected) else {
             return;
         };
+        self.record_undo_snapshot();
         let buffer = self.active_buffer_mut();
         let row = buffer.cursor.0;
         let end_col = buffer.cursor.1.min(buffer.lines[row].len());
@@ -3031,13 +3689,34 @@ impl Editor {
         self.sync_runtime_context();
     }
 
+    fn accept_or_open_completion(&mut self) {
+        self.minibuffer = None;
+        self.refresh_completion();
+        if self.completion.is_some() {
+            self.accept_completion();
+        } else {
+            self.record_undo_snapshot();
+            self.active_buffer_mut().indent_current_line();
+            self.sync_runtime_context();
+        }
+    }
+
     fn refresh_completion(&mut self) {
         if self.save_prompt.is_some() {
             self.completion = None;
+            self.trace_completion("refresh:save-prompt");
             return;
         }
         let symbols = self.runtime.completion_symbols();
         let metadata = self.runtime.completion_metadata();
+        if Self::trace_completion_enabled() {
+            eprintln!(
+                "{} runtime_symbols={} metadata={}",
+                self.completion_debug_summary("refresh:before"),
+                symbols.len(),
+                metadata.len()
+            );
+        }
         let previous = self
             .completion
             .as_ref()
@@ -3069,6 +3748,14 @@ impl Editor {
             state.ensure_visible();
             state
         });
+        if Self::trace_completion_enabled() {
+            eprintln!(
+                "{} runtime_symbols={} metadata={}",
+                self.completion_debug_summary("refresh:after"),
+                symbols.len(),
+                metadata.len()
+            );
+        }
     }
 
     fn alloc_buffer_id(&mut self) -> BufferId {
@@ -3324,7 +4011,7 @@ impl Editor {
                     buffer.set_widget_tree(None, None);
                     buffer.view_mode = ViewMode::TextOnly;
                     self.runtime.clear_layout_effects();
-                    self.active_leaf_mut().focused_widget_id = None;
+                    self.clear_focused_widget();
                 }
                 tree => {
                     let source_id = self.active_buffer().id;
@@ -3531,11 +4218,13 @@ impl Editor {
             }
         } else if self.runtime.take_pending_load() {
             match self.load_active_buffer() {
-                Ok(path) => self.show_transient_message(format!("Loaded {}", path.display())),
+                Ok(path) => {
+                    self.completion = None;
+                    self.show_transient_message(format!("Loaded {}", path.display()));
+                }
                 Err(error) => self.show_transient_message(format!("Error: {error:?}")),
             }
         }
-        self.completion = None;
 
         // ── Create scratch buffers (without switching) ──────────────────────
         for (name, text) in self.runtime.take_pending_scratch_buffers() {
@@ -4060,16 +4749,46 @@ fn get_first_list_number(value: &Value, key: &str) -> Option<f64> {
     }
 }
 
+fn debug_symbol_prefix(line: &str, cursor_col: usize) -> Option<(usize, String)> {
+    if cursor_col == 0 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let cursor_col = cursor_col.min(bytes.len());
+    let mut start = cursor_col;
+    while start > 0 && debug_is_symbol_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start == cursor_col {
+        return None;
+    }
+    let prefix = line[start..cursor_col].to_ascii_lowercase();
+    if prefix.is_empty() {
+        return None;
+    }
+    Some((start, prefix))
+}
+
+fn debug_is_symbol_byte(byte: u8) -> bool {
+    let ch = byte as char;
+    !ch.is_whitespace()
+        && !matches!(
+            ch,
+            '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | ';' | '#'
+        )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Editor, EditorConfig, key_str};
+    use super::{Editor, EditorConfig, VimInputMode, key_str};
     use crate::host::HostCommand;
     use crate::mode::BufferMode;
     use crate::runtime::Runtime;
     use crate::tile::SplitDir;
     use crate::vm::Value;
     use crossterm::event::{
-        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     };
     use std::cell::RefCell;
     use std::collections::HashMap;

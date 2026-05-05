@@ -7,6 +7,51 @@ use crate::widget_render::{WidgetKeyEvent, handle_event, map_key_event};
 use super::{Editor, key_str};
 
 impl Editor {
+    pub(super) fn set_focused_widget(&mut self, node: LayoutNode) {
+        let leaf = self.active_leaf_mut();
+        leaf.focused_widget_id = Some(node.widget_id);
+        leaf.focused_widget_node = Some(node);
+    }
+
+    pub(super) fn clear_focused_widget(&mut self) {
+        let leaf = self.active_leaf_mut();
+        leaf.focused_widget_id = None;
+        leaf.focused_widget_node = None;
+    }
+
+    pub(super) fn remap_focused_widget_after_layout_change(&mut self) {
+        let Some(previous) = self.active_leaf().focused_widget_node.clone() else {
+            return;
+        };
+        let Some(layout) = self.runtime.current_layout.clone() else {
+            self.clear_focused_widget();
+            return;
+        };
+        let remapped = previous
+            .stable_widget_id
+            .and_then(|stable_id| find_focusable_node_by_stable_widget_id(&layout, stable_id))
+            .or_else(|| {
+                previous.subtree_root_id.and_then(|subtree_root_id| {
+                    find_focusable_node_by_subtree_root_and_type(
+                        &layout,
+                        subtree_root_id,
+                        &previous.widget_type,
+                    )
+                })
+            })
+            .or_else(|| {
+                self.active_leaf()
+                    .focused_widget_id
+                    .and_then(|id| find_node_by_id(&layout, id))
+                    .filter(|node| same_focus_identity(&previous, node))
+            });
+        if let Some(node) = remapped {
+            self.set_focused_widget(node);
+        } else {
+            self.clear_focused_widget();
+        }
+    }
+
     /// Ensure only the active tile has widget focus (clear focus on all others).
     fn clear_focus_on_other_tiles(&mut self) {
         let active = self.active_tile;
@@ -62,7 +107,11 @@ impl Editor {
                 && local_col >= *col
                 && local_col < col + width
             {
-                self.active_leaf_mut().focused_widget_id = Some(*id);
+                if let Some(node) = find_node_by_id(&layout, *id) {
+                    self.set_focused_widget(node);
+                } else {
+                    self.active_leaf_mut().focused_widget_id = Some(*id);
+                }
                 self.clear_focus_on_other_tiles();
                 self.adjust_widget_scroll(*row);
                 self.mark_needs_redraw();
@@ -71,7 +120,7 @@ impl Editor {
         }
         // Click landed outside any focusable widget → blur
         if self.active_leaf().focused_widget_id.is_some() {
-            self.active_leaf_mut().focused_widget_id = None;
+            self.clear_focused_widget();
             self.mark_needs_redraw();
         }
         false
@@ -101,7 +150,7 @@ impl Editor {
 
         match key.code {
             KeyCode::Esc if has_focus => {
-                self.active_leaf_mut().focused_widget_id = None;
+                self.clear_focused_widget();
                 self.mark_needs_redraw();
                 true
             }
@@ -254,7 +303,11 @@ impl Editor {
         }
 
         if let Some((next_id, next_row, _)) = best {
-            self.active_leaf_mut().focused_widget_id = Some(next_id);
+            if let Some(node) = find_node_by_id(&layout, next_id) {
+                self.set_focused_widget(node);
+            } else {
+                self.active_leaf_mut().focused_widget_id = Some(next_id);
+            }
             self.clear_focus_on_other_tiles();
             self.adjust_widget_scroll(next_row);
             self.mark_needs_redraw();
@@ -340,6 +393,7 @@ impl Editor {
         self.runtime.clear_current_widget_tree();
         let leaf = self.active_leaf_mut();
         leaf.focused_widget_id = None;
+        leaf.focused_widget_node = None;
         leaf.widget_scroll_top = 0.0;
         leaf.widget_scroll_left = 0.0;
         leaf.active_widget_gesture = None;
@@ -393,7 +447,7 @@ impl Editor {
 
     pub(super) fn auto_focus_first_widget(&mut self) {
         if !self.widgets_active() {
-            self.active_leaf_mut().focused_widget_id = None;
+            self.clear_focused_widget();
             return;
         }
         let Some(layout) = self.runtime.current_layout.clone() else {
@@ -402,9 +456,57 @@ impl Editor {
         let mut focusable_nodes: Vec<(u64, f32, f32, f32, f32)> = Vec::new();
         collect_focusable_nodes(&layout, &mut focusable_nodes);
         if let Some((id, _, _, _, _)) = focusable_nodes.first() {
-            self.active_leaf_mut().focused_widget_id = Some(*id);
+            if let Some(node) = find_node_by_id(&layout, *id) {
+                self.set_focused_widget(node);
+            } else {
+                self.active_leaf_mut().focused_widget_id = Some(*id);
+            }
         }
     }
+}
+
+fn same_focus_identity(a: &LayoutNode, b: &LayoutNode) -> bool {
+    a.focusable
+        && b.focusable
+        && a.widget_type == b.widget_type
+        && ((a.stable_widget_id.is_some() && a.stable_widget_id == b.stable_widget_id)
+            || (a.subtree_root_id.is_some() && a.subtree_root_id == b.subtree_root_id))
+}
+
+fn find_focusable_node_by_stable_widget_id(
+    node: &LayoutNode,
+    stable_id: u64,
+) -> Option<LayoutNode> {
+    if node.focusable && node.stable_widget_id == Some(stable_id) {
+        return Some(node.clone());
+    }
+    for child in &node.children {
+        if let Some(found) = find_focusable_node_by_stable_widget_id(child, stable_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_focusable_node_by_subtree_root_and_type(
+    node: &LayoutNode,
+    subtree_root_id: u64,
+    widget_type: &str,
+) -> Option<LayoutNode> {
+    if node.focusable
+        && node.subtree_root_id == Some(subtree_root_id)
+        && node.widget_type == widget_type
+    {
+        return Some(node.clone());
+    }
+    for child in &node.children {
+        if let Some(found) =
+            find_focusable_node_by_subtree_root_and_type(child, subtree_root_id, widget_type)
+        {
+            return Some(found);
+        }
+    }
+    None
 }
 
 pub(super) fn has_focusable_node(node: &LayoutNode) -> bool {

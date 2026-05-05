@@ -79,7 +79,7 @@ macro_rules! theme_slots {
         }
 
         pub fn reactive_fields() -> Vec<(&'static str, Value)> {
-            let theme = default_theme();
+            let theme = current();
             vec![
                 $((stringify!($field), color_to_value(theme.$field)),)+
             ]
