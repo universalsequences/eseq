@@ -157,7 +157,9 @@ impl WidgetDefinition for BoxWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["padding", "width", "height", "align", "h-align", "v-align"]
+        &[
+            "padding", "width", "height", "aspect", "align", "h-align", "v-align",
+        ]
     }
 
     fn measure(
@@ -165,7 +167,7 @@ impl WidgetDefinition for BoxWidget {
         node: &Value,
         children: &[Value],
         constraints: Constraints,
-        _ctx: &MeasureCtx<'_>,
+        ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
@@ -174,22 +176,38 @@ impl WidgetDefinition for BoxWidget {
         let child_size = children
             .first()
             .and_then(|child| measure_child(child, inner));
-        Some(Size {
-            width: get_prop_num(node, "width")
+        let width = if prop_is_keyword(node, "width", "fill") && constraints.max_width.is_finite() {
+            constraints.max_width
+        } else {
+            get_prop_num(node, "width")
                 .map(f64_to_f32)
                 .unwrap_or_else(|| {
                     child_size
                         .map(|size| size.width + padding * 2.0)
                         .unwrap_or(padding * 2.0)
-                }),
-            height: get_prop_num(node, "height")
+                })
+        };
+        let height =
+            if prop_is_keyword(node, "height", "fill") && constraints.max_height.is_finite() {
+                constraints.max_height
+            } else if let Some(height) = get_prop_num(node, "height").map(f64_to_f32) {
+                height
+            } else if let Some(pixel_aspect) = get_prop_num(node, "aspect")
                 .map(f64_to_f32)
-                .unwrap_or_else(|| {
-                    child_size
-                        .map(|size| size.height + pad_y * 2.0)
-                        .unwrap_or(pad_y * 2.0)
-                }),
-        })
+                .filter(|value| *value > 0.0)
+            {
+                let cell_pixel_aspect = if ctx.cell_h > 0.0 {
+                    ctx.cell_w / ctx.cell_h
+                } else {
+                    1.0
+                };
+                width / pixel_aspect * cell_pixel_aspect
+            } else {
+                child_size
+                    .map(|size| size.height + pad_y * 2.0)
+                    .unwrap_or(pad_y * 2.0)
+            };
+        Some(Size { width, height })
     }
 
     fn layout_children(

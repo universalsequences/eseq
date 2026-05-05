@@ -31,6 +31,16 @@ use crate::widget_render::WidgetCursor;
 use commands::key_str;
 use natives::register_editor_natives;
 
+fn layout_matches_viewport_width(layout: &crate::layout::LayoutNode, cols: u16) -> bool {
+    (layout.rect.width - cols as f32).abs() < 0.5
+}
+
+fn debug_ui_updates_enabled() -> bool {
+    std::env::var("ESEQLISP_DEBUG_UI_UPDATES")
+        .ok()
+        .is_some_and(|value| value == "1" || value == "true")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewMode {
     Both,
@@ -1769,7 +1779,12 @@ impl Editor {
     }
 
     pub fn set_layout_aspect(&mut self, aspect: f32) {
+        let old_aspect = self.runtime.layout_aspect();
         self.runtime.set_layout_aspect(aspect);
+        if (old_aspect - aspect).abs() >= f32::EPSILON {
+            self.sync_layout_to_active_leaf();
+            self.refresh_all_inactive_tile_layouts();
+        }
     }
 
     pub fn layout_aspect(&self) -> f32 {
@@ -1782,7 +1797,14 @@ impl Editor {
         cell_w: f32,
         cell_h: f32,
     ) {
+        let old_dims = self.runtime.layout_cell_dims();
         self.runtime.set_text_measurer(measurer, cell_w, cell_h);
+        if (old_dims.0 - cell_w).abs() >= f32::EPSILON
+            || (old_dims.1 - cell_h).abs() >= f32::EPSILON
+        {
+            self.sync_layout_to_active_leaf();
+            self.refresh_all_inactive_tile_layouts();
+        }
     }
 
     /// Sync the Runtime's current layout to the active tile leaf's cached_layout.
@@ -1794,6 +1816,27 @@ impl Editor {
         leaf.cached_layout = layout;
         leaf.layout_revision = revision;
         self.remap_focused_widget_after_layout_change();
+    }
+
+    fn refresh_all_inactive_tile_layouts(&mut self) {
+        let mut buf_indices: Vec<usize> = Vec::new();
+        for id in self.tile_root.leaf_ids() {
+            if id == self.active_tile {
+                continue;
+            }
+            if let Some(leaf) = self.tile_root.find_leaf_mut(id) {
+                leaf.cached_layout = None;
+                leaf.dirty_widget_ids.clear();
+                leaf.cached_inactive_frame = None;
+                if !buf_indices.contains(&leaf.buffer_idx) {
+                    buf_indices.push(leaf.buffer_idx);
+                }
+            }
+        }
+        for buf_idx in buf_indices {
+            self.refresh_inactive_tile_layouts_for_buffer(buf_idx);
+        }
+        self.mark_needs_redraw();
     }
 
     pub fn open_scratch_buffer(&mut self, name: &str, initial: &str) -> BufferId {
@@ -3520,6 +3563,9 @@ impl Editor {
                 .and_then(|leaf| leaf.cached_layout.clone());
             let reused_layout_and_dirty = tree.as_ref().and_then(|tree| {
                 let existing = existing_layout.as_ref()?;
+                if !layout_matches_viewport_width(existing, cols) {
+                    return None;
+                }
                 let mut dirty_widget_ids = Vec::new();
                 crate::layout::reuse_layout_node(existing, tree, &mut dirty_widget_ids)
                     .map(|layout| (std::sync::Arc::new(layout), dirty_widget_ids))
@@ -3546,6 +3592,18 @@ impl Editor {
             }
         }
         self.mark_needs_redraw();
+    }
+
+    pub fn refresh_visible_layouts_for_buffer_named(&mut self, name: &str) {
+        let Some(buffer_idx) = self.buffers.iter().position(|buffer| buffer.name == name) else {
+            return;
+        };
+        if buffer_idx == self.active_buffer_idx() {
+            self.sync_layout_to_active_leaf();
+            self.mark_needs_redraw();
+        } else {
+            self.refresh_inactive_tile_layouts_for_buffer(buffer_idx);
+        }
     }
 
     fn refresh_inactive_tile_layouts_for_buffer_subtrees(
@@ -3590,7 +3648,8 @@ impl Editor {
                 .find_leaf(tile_id)
                 .and_then(|leaf| leaf.cached_layout.clone());
             let mut dirty_widget_ids = Vec::new();
-            let mut layout = existing_layout;
+            let mut layout =
+                existing_layout.filter(|layout| layout_matches_viewport_width(layout, cols));
             let mut targeted = layout.is_some();
             let subtree_paths = layout
                 .as_ref()
@@ -4048,6 +4107,14 @@ impl Editor {
                         }
                     };
                     let buffer_name = self.buffers[buffer_idx].name.clone();
+                    if debug_ui_updates_enabled() {
+                        eprintln!(
+                            "[ui-update full] target={} active={} incoming={}",
+                            buffer_name,
+                            self.active_buffer_idx() == buffer_idx,
+                            debug_widget_tree_summary(Some(&pending.tree)),
+                        );
+                    }
                     self.trace_ui_tree_event_with(&buffer_name, "pending-full", || {
                         format!(
                             "incoming={} before={}",
@@ -4073,6 +4140,12 @@ impl Editor {
                         )
                     });
                     if upgraded_subtree {
+                        if debug_ui_updates_enabled() {
+                            eprintln!(
+                                "[ui-update full->subtree] target={} root={:?}",
+                                buffer_name, upgraded_subtree_root
+                            );
+                        }
                         self.buffers[buffer_idx].view_mode = ViewMode::UiOnly;
                         if is_active {
                             crate::widget_render::clear_overlay();
@@ -4088,11 +4161,17 @@ impl Editor {
                                 .map(|roots| roots.push(upgraded_subtree_root.unwrap()));
                         }
                     } else if is_active {
+                        if debug_ui_updates_enabled() {
+                            eprintln!("[ui-update full-active] target={buffer_name}");
+                        }
                         crate::widget_render::clear_overlay();
                         let buffer = &mut self.buffers[buffer_idx];
                         buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
                         buffer.view_mode = ViewMode::UiOnly;
                     } else {
+                        if debug_ui_updates_enabled() {
+                            eprintln!("[ui-update full-inactive] target={buffer_name}");
+                        }
                         {
                             let buffer = &mut self.buffers[buffer_idx];
                             buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
@@ -4128,6 +4207,15 @@ impl Editor {
                         EffectTarget::BufferName(name) => self.ensure_scratch_buffer_named(&name),
                     };
                     let buffer_name = self.buffers[buffer_idx].name.clone();
+                    if debug_ui_updates_enabled() {
+                        eprintln!(
+                            "[ui-update subtree] target={} active={} root={} incoming={}",
+                            buffer_name,
+                            self.active_buffer_idx() == buffer_idx,
+                            subtree_root_id,
+                            debug_widget_tree_summary(Some(&tree)),
+                        );
+                    }
                     self.trace_ui_tree_event_with(&buffer_name, "pending-subtree", || {
                         format!(
                             "root={subtree_root_id} incoming={} before={}",

@@ -920,12 +920,17 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
             let Some(Value::Number(start)) = args.get(1) else {
                 return Err("substring expects a start index".to_string());
             };
-            let start = (*start as usize).min(s.len());
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len();
+            let start = ((*start).max(0.0) as usize).min(len);
             let end = match args.get(2) {
-                Some(Value::Number(e)) => (*e as usize).min(s.len()),
-                _ => s.len(),
+                Some(Value::Number(e)) => ((*e).max(0.0) as usize).min(len),
+                _ => len,
             };
-            Ok(Value::String(s.get(start..end).unwrap_or("").to_string()))
+            if end < start {
+                return Ok(Value::String(String::new()));
+            }
+            Ok(Value::String(chars[start..end].iter().collect()))
         },
     );
 

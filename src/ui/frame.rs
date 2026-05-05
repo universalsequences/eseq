@@ -613,8 +613,10 @@ fn build_tiled_render_frame_impl(
             .map(|(_, frame)| frame.clone());
 
         if is_active {
-            // Active tile: use full build_render_frame (has highlights, etc.)
-            let frame = build_render_frame(editor, inner_width, inner_height);
+            // Active tile: use full build_render_frame for highlights/cursor, but
+            // completion is rendered once globally by the tiled backend.
+            let mut frame = build_render_frame(editor, inner_width, inner_height);
+            frame.completion = None;
             if Editor::trace_completion_enabled() {
                 eprintln!(
                     "{} render_kind=active-tile frame_show={} tile_id={} inner={}x{}",

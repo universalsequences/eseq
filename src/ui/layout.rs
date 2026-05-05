@@ -316,7 +316,8 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
         if !rect_contains(node.rect, row, col) {
             return None;
         }
-        let state = widget_render::scroll::get_scroll_state(node.widget_id);
+        let state =
+            widget_render::scroll::get_scroll_state(widget_render::scroll::scroll_state_key(node));
         let adjusted_row = row + state.offset_y;
         for child in node.children.iter().rev() {
             if let Some(hit) = hit_test_layout(child, adjusted_row, col) {
@@ -457,7 +458,8 @@ fn reuse_layout_node_impl(
         ));
     }
 
-    let new_props = collect_props(tree);
+    let mut new_props = collect_props(tree);
+    preserve_layout_internal_props(&existing.props, &mut new_props);
     if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
         return Err(format_reason(format!("size-props:{widget_type}"), path));
     }
@@ -657,6 +659,17 @@ pub fn reuse_layout_failure_reason(existing: &LayoutNode, tree: &Value) -> Optio
     let mut dirty_widget_ids = Vec::new();
     let mut path = Vec::new();
     reuse_layout_node_impl(existing, tree, &mut dirty_widget_ids, &mut path).err()
+}
+
+fn preserve_layout_internal_props(
+    existing_props: &HashMap<String, Value>,
+    new_props: &mut HashMap<String, Value>,
+) {
+    for (key, value) in existing_props {
+        if key.starts_with('_') && !new_props.contains_key(key) {
+            new_props.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 pub fn same_layout_geometry(left: &LayoutNode, right: &LayoutNode) -> bool {
@@ -1107,7 +1120,67 @@ mod tests {
         build_widget("grid", args)
     }
 
+    fn scroll_with_tall_box(background: &str) -> Value {
+        build_widget(
+            "scroll",
+            vec![
+                kw("width"),
+                num(20.0),
+                kw("height"),
+                num(5.0),
+                build_widget(
+                    "box",
+                    vec![
+                        kw("width"),
+                        num(20.0),
+                        kw("height"),
+                        num(20.0),
+                        kw("background-color"),
+                        s(background),
+                    ],
+                ),
+            ],
+        )
+    }
+
+    fn get_prop_num_from_layout(node: &LayoutNode, key: &str) -> Option<f64> {
+        match node.props.get(key) {
+            Some(Value::Number(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
     // ── Tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn reused_scroll_layout_preserves_internal_content_dimensions() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = scroll_with_tall_box("first");
+        let layout = engine.layout(&first).unwrap();
+
+        assert_eq!(
+            get_prop_num_from_layout(&layout, "_content_height"),
+            Some(20.0)
+        );
+        assert_eq!(
+            get_prop_num_from_layout(&layout, "_viewport_height"),
+            Some(5.0)
+        );
+
+        let second = scroll_with_tall_box("second");
+        let mut dirty_widget_ids = Vec::new();
+        let reused = reuse_layout_node(&layout, &second, &mut dirty_widget_ids)
+            .expect("scroll layout should be reusable for non-size prop changes");
+
+        assert_eq!(
+            get_prop_num_from_layout(&reused, "_content_height"),
+            Some(20.0)
+        );
+        assert_eq!(
+            get_prop_num_from_layout(&reused, "_viewport_height"),
+            Some(5.0)
+        );
+    }
 
     #[test]
     fn natural_width_simple_vstack_fits_viewport() {

@@ -49,6 +49,10 @@ pub fn set_scroll_state(widget_id: u64, state: ScrollState) {
     }
 }
 
+pub fn scroll_state_key(node: &LayoutNode) -> u64 {
+    node.stable_widget_id.unwrap_or(node.widget_id)
+}
+
 /// Per-event scroll context for child widgets that need to map pointer input
 /// into content coordinates inside a scroll container.
 pub fn current_event_scroll_offset() -> f32 {
@@ -103,12 +107,13 @@ pub(crate) fn sync_node_state(node: &LayoutNode) -> ScrollState {
         .unwrap_or(0.0);
     let viewport_height = node.rect.height;
 
-    let mut state = get_scroll_state(node.widget_id);
+    let key = scroll_state_key(node);
+    let mut state = get_scroll_state(key);
     state.content_height = content_height;
     state.viewport_height = viewport_height;
     sync_selected_child_into_view(node, &mut state);
     clamp_offset(&mut state);
-    set_scroll_state(node.widget_id, state.clone());
+    set_scroll_state(key, state.clone());
     state
 }
 
@@ -220,7 +225,8 @@ impl WidgetDefinition for ScrollWidget {
         _delta_x: f32,
         delta_y: f32,
     ) -> Option<WidgetEvent> {
-        let mut state = get_scroll_state(node.widget_id);
+        let key = scroll_state_key(node);
+        let mut state = get_scroll_state(key);
 
         // Update dimensions from layout props
         state.content_height = node
@@ -252,7 +258,7 @@ impl WidgetDefinition for ScrollWidget {
         state.offset_y -= delta_y * scroll_speed;
         clamp_offset(&mut state);
 
-        set_scroll_state(node.widget_id, state);
+        set_scroll_state(key, state);
 
         // Return Custom(Nil) to trigger a redraw without invoking a Lisp callback
         Some(WidgetEvent::Custom(Value::Nil))

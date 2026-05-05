@@ -24,6 +24,8 @@ pub fn register_widget_natives(vm: &mut VM) {
         "h-stack",
         "box",
         "grid",
+        "responsive-grid",
+        "image",
         "tabs",
         "timeline",
         "waveform",

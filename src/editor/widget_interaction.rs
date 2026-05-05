@@ -664,7 +664,10 @@ impl Editor {
             .as_ref()
             .and_then(|layout| find_scroll_ancestor(layout, node.widget_id))
             .map(|scroll_node| {
-                crate::widget_render::scroll::get_scroll_state(scroll_node.widget_id).offset_y
+                crate::widget_render::scroll::get_scroll_state(
+                    crate::widget_render::scroll::scroll_state_key(&scroll_node),
+                )
+                .offset_y
             });
         let drag_start = drag_start.map(|(start_col, start_row)| {
             (

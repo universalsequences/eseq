@@ -891,7 +891,7 @@ pub fn register_core_natives(vm: &mut VM) {
     // (len list-or-string) → number
     vm.register_native("len", |args| match args.first() {
         Some(Value::List(l)) => Value::Number(l.len() as f64),
-        Some(Value::String(s)) => Value::Number(s.len() as f64),
+        Some(Value::String(s)) => Value::Number(s.chars().count() as f64),
         _ => Value::Number(0.0),
     });
 

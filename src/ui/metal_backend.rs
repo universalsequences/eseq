@@ -2,9 +2,12 @@
 #[cfg(target_os = "macos")]
 mod inner {
     use std::collections::hash_map::DefaultHasher;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::fs;
     use std::hash::{Hash, Hasher};
+    use std::path::PathBuf;
     use std::ptr::NonNull;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     use crossterm::event::{
@@ -19,9 +22,10 @@ mod inner {
     use objc2_metal::{
         MTLBlendFactor, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder,
         MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction,
-        MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-        MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLResourceOptions, MTLScissorRect,
-        MTLStoreAction, MTLTexture,
+        MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
+        MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
+        MTLResourceOptions, MTLScissorRect, MTLSize, MTLStoreAction, MTLTexture,
+        MTLTextureDescriptor,
     };
     use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
     use winit::{
@@ -147,6 +151,65 @@ fragment float4 prop_frag(
     // The pipeline uses standard alpha blending (srcAlpha, 1-srcAlpha)
     // so glyphs composite over the background rect without clipping neighbors.
     return float4(in.fg.rgb, coverage);
+}
+"#;
+
+    const IMAGE_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct ImageVertex {
+    packed_float2 position;
+    packed_float2 uv;
+    float  opacity;
+    packed_float2 local_pos;
+    packed_float2 half_size;
+    float  radius;
+};
+
+struct ImageVaryings {
+    float4 position [[position]];
+    float2 uv;
+    float  opacity;
+    float2 local_pos;
+    float2 half_size;
+    float  radius;
+};
+
+vertex ImageVaryings image_vert(
+    uint vid [[vertex_id]],
+    device const ImageVertex* verts [[buffer(0)]])
+{
+    ImageVertex v = verts[vid];
+    ImageVaryings out;
+    out.position = float4(v.position, 0.0, 1.0);
+    out.uv = v.uv;
+    out.opacity = v.opacity;
+    out.local_pos = v.local_pos;
+    out.half_size = v.half_size;
+    out.radius = v.radius;
+    return out;
+}
+
+float image_rounded_rect_sdf(float2 p, float2 half_size, float radius) {
+    float2 q = abs(p) - half_size + radius;
+    return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+fragment float4 image_frag(
+    ImageVaryings in [[stage_in]],
+    texture2d<float> image_tex [[texture(0)]])
+{
+    constexpr sampler s(address::clamp_to_edge, filter::linear);
+    float4 color = image_tex.sample(s, in.uv);
+    if (in.radius > 0.0) {
+        float radius = min(in.radius, min(in.half_size.x, in.half_size.y));
+        float d = image_rounded_rect_sdf(in.local_pos, in.half_size, radius);
+        float aa = max(fwidth(d), 0.001);
+        color.a *= smoothstep(aa, -aa, d);
+    }
+    color.a *= in.opacity;
+    return color;
 }
 "#;
 
@@ -508,6 +571,17 @@ fragment float4 waveform_frag(
 
     #[repr(C)]
     #[derive(Clone, Copy)]
+    struct ImageVertex {
+        position: [f32; 2],
+        uv: [f32; 2],
+        opacity: f32,
+        local_pos: [f32; 2],
+        half_size: [f32; 2],
+        radius: f32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
     struct WaveformInstance {
         ndc_min: [f32; 2],
         ndc_max: [f32; 2],
@@ -553,6 +627,66 @@ fragment float4 waveform_frag(
         primitives: Vec<widget_render::MetalPrimitive>,
     }
 
+    struct ImageTextureResource {
+        texture: Retained<ProtocolObject<dyn MTLTexture>>,
+        width: u32,
+        height: u32,
+        modified: Option<std::time::SystemTime>,
+    }
+
+    struct ImageDecodeJob {
+        path: PathBuf,
+        modified: Option<std::time::SystemTime>,
+    }
+
+    struct DecodedImageData {
+        width: u32,
+        height: u32,
+        bgra: Vec<u8>,
+    }
+
+    struct ImageDecodeResult {
+        path: PathBuf,
+        modified: Option<std::time::SystemTime>,
+        image: Option<DecodedImageData>,
+    }
+
+    fn decode_image_job(job: ImageDecodeJob) -> ImageDecodeResult {
+        let path = job.path;
+        let modified = job.modified;
+        let image = decode_image_path(&path);
+        ImageDecodeResult {
+            path,
+            modified,
+            image,
+        }
+    }
+
+    fn decode_image_path(path: &PathBuf) -> Option<DecodedImageData> {
+        let mut decoded = image::ImageReader::open(path).ok()?.decode().ok()?;
+        let max_dimension = decoded.width().max(decoded.height());
+        if max_dimension > 640 {
+            let scale = 640.0 / max_dimension as f32;
+            let width = (decoded.width() as f32 * scale).round().max(1.0) as u32;
+            let height = (decoded.height() as f32 * scale).round().max(1.0) as u32;
+            decoded = decoded.resize(width, height, image::imageops::FilterType::Triangle);
+        }
+        let rgba = decoded.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let mut bgra = rgba.into_raw();
+        for px in bgra.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+        Some(DecodedImageData {
+            width,
+            height,
+            bgra,
+        })
+    }
+
     #[derive(Clone, Copy, Hash, PartialEq, Eq)]
     struct WidgetSceneCacheKey {
         owner_frame_key: u64,
@@ -584,7 +718,16 @@ fragment float4 waveform_frag(
         widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         sdf_widget_pipeline_sources: HashMap<String, String>,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        image_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
+        image_textures: HashMap<PathBuf, ImageTextureResource>,
+        image_decode_tx: mpsc::Sender<ImageDecodeJob>,
+        image_decode_rx: mpsc::Receiver<ImageDecodeResult>,
+        image_decode_in_flight: HashSet<PathBuf>,
+        pending_image_loads: bool,
+        image_load_suspended_until: Option<Instant>,
+        image_last_decode_at: Option<Instant>,
+        image_decode_min_interval: Duration,
         // Glyph atlases
         atlas: Option<GlyphAtlas>,
         prop_atlas: Option<ProportionalGlyphAtlas>,
@@ -622,6 +765,19 @@ fragment float4 waveform_frag(
             let device = MTLCreateSystemDefaultDevice().ok_or(BackendError::MetalError)?;
             let command_queue = device.newCommandQueue().ok_or(BackendError::MetalError)?;
             let layer = CAMetalLayer::new();
+            let (image_decode_tx, image_decode_job_rx) = mpsc::channel::<ImageDecodeJob>();
+            let (image_decode_result_tx, image_decode_rx) = mpsc::channel::<ImageDecodeResult>();
+            std::thread::Builder::new()
+                .name("eseqlisp-image-decoder".to_string())
+                .spawn(move || {
+                    while let Ok(job) = image_decode_job_rx.recv() {
+                        let decoded = decode_image_job(job);
+                        if image_decode_result_tx.send(decoded).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .map_err(|_| BackendError::MetalError)?;
             layer.setDevice(Some(&device));
             layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
             layer.setFramebufferOnly(false); // atlas upload needs non-framebuffer-only
@@ -634,7 +790,16 @@ fragment float4 waveform_frag(
                 widget_pipelines: HashMap::new(),
                 sdf_widget_pipeline_sources: HashMap::new(),
                 waveform_pipeline: None,
+                image_pipeline: None,
                 waveform_buffers: HashMap::new(),
+                image_textures: HashMap::new(),
+                image_decode_tx,
+                image_decode_rx,
+                image_decode_in_flight: HashSet::new(),
+                pending_image_loads: false,
+                image_load_suspended_until: None,
+                image_last_decode_at: None,
+                image_decode_min_interval: Duration::ZERO,
                 atlas: None,
                 prop_atlas: None,
                 cached_text_key: None,
@@ -846,6 +1011,21 @@ fragment float4 waveform_frag(
                 .unwrap_or((8.0, 16.0))
         }
 
+        pub fn take_pending_image_loads(&mut self) -> bool {
+            let pending = self.pending_image_loads;
+            self.pending_image_loads = false;
+            pending
+        }
+
+        pub fn suspend_image_loading_for(&mut self, duration: Duration) {
+            self.image_load_suspended_until = Some(Instant::now() + duration);
+            self.pending_image_loads = true;
+        }
+
+        pub fn set_image_decode_min_interval(&mut self, interval: Duration) {
+            self.image_decode_min_interval = interval;
+        }
+
         fn sync_window_theme(&mut self) {
             let Some(window) = self.window.as_ref() else {
                 return;
@@ -918,6 +1098,122 @@ fragment float4 waveform_frag(
                 );
             }
             self.waveform_buffers.get(&key)
+        }
+
+        fn image_path_and_modified(src: &str) -> Option<(PathBuf, Option<std::time::SystemTime>)> {
+            if src.is_empty() {
+                return None;
+            }
+            let mut path = PathBuf::from(src);
+            if !path.is_absolute() {
+                path = std::env::current_dir().ok()?.join(path);
+            }
+            let metadata = fs::metadata(&path).ok()?;
+            let modified = metadata.modified().ok();
+            Some((path, modified))
+        }
+
+        fn ensure_image_texture(
+            &mut self,
+            src: &str,
+            load_budget: &mut usize,
+        ) -> Option<&ImageTextureResource> {
+            let (path, modified) = Self::image_path_and_modified(src)?;
+            let should_reload = self
+                .image_textures
+                .get(&path)
+                .map(|cached| cached.modified != modified)
+                .unwrap_or(true);
+            if should_reload {
+                if self
+                    .image_load_suspended_until
+                    .is_some_and(|until| Instant::now() < until)
+                {
+                    self.pending_image_loads = true;
+                    return None;
+                }
+                if self.image_decode_in_flight.contains(&path) {
+                    self.pending_image_loads = true;
+                    return None;
+                }
+                if *load_budget == 0 {
+                    self.pending_image_loads = true;
+                    return None;
+                }
+                if self
+                    .image_last_decode_at
+                    .is_some_and(|last| last.elapsed() < self.image_decode_min_interval)
+                {
+                    self.pending_image_loads = true;
+                    return None;
+                }
+                *load_budget = load_budget.saturating_sub(1);
+                self.image_last_decode_at = Some(Instant::now());
+                if self.image_decode_in_flight.insert(path.clone()) {
+                    if self
+                        .image_decode_tx
+                        .send(ImageDecodeJob {
+                            path: path.clone(),
+                            modified,
+                        })
+                        .is_err()
+                    {
+                        self.image_decode_in_flight.remove(&path);
+                    }
+                }
+                self.pending_image_loads = true;
+            }
+            self.image_textures.get(&path)
+        }
+
+        fn drain_decoded_images(&mut self, mut upload_budget: usize) {
+            while upload_budget > 0 {
+                let Ok(result) = self.image_decode_rx.try_recv() else {
+                    break;
+                };
+                self.image_decode_in_flight.remove(&result.path);
+                let Some(decoded) = result.image else {
+                    self.pending_image_loads = true;
+                    continue;
+                };
+
+                let desc = MTLTextureDescriptor::new();
+                unsafe {
+                    desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                    desc.setWidth(decoded.width as usize);
+                    desc.setHeight(decoded.height as usize);
+                }
+                let Some(texture) = self.device.newTextureWithDescriptor(&desc) else {
+                    self.pending_image_loads = true;
+                    continue;
+                };
+                unsafe {
+                    texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                        MTLRegion {
+                            origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                            size: MTLSize {
+                                width: decoded.width as usize,
+                                height: decoded.height as usize,
+                                depth: 1,
+                            },
+                        },
+                        0,
+                        NonNull::new(decoded.bgra.as_ptr() as *mut core::ffi::c_void).unwrap(),
+                        decoded.width as usize * 4,
+                    );
+                }
+                self.image_textures.insert(
+                    result.path,
+                    ImageTextureResource {
+                        texture,
+                        width: decoded.width,
+                        height: decoded.height,
+                        modified: result.modified,
+                    },
+                );
+                self.pending_image_loads = true;
+                upload_budget -= 1;
+            }
         }
 
         /// Compile Metal pipelines for any SDF widgets that have been registered
@@ -1046,6 +1342,57 @@ fragment float4 waveform_frag(
             }
         }
 
+        fn draw_image_primitives(
+            &mut self,
+            enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+            pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+            images: &[widget_render::MetalImagePrimitive],
+            scissor: Option<MTLScissorRect>,
+            load_budget: &mut usize,
+            cell_w: f32,
+            cell_h: f32,
+            vp_w: f32,
+            vp_h: f32,
+        ) {
+            for image in images {
+                if let Some(scissor) = scissor {
+                    if !image_intersects_scissor(image, scissor, cell_w, cell_h) {
+                        continue;
+                    }
+                }
+                let Some(resource) = self.ensure_image_texture(&image.src, load_budget) else {
+                    continue;
+                };
+                let texture = resource.texture.clone();
+                let image_w = resource.width;
+                let image_h = resource.height;
+                let verts = image_vertices(image, image_w, image_h, cell_w, cell_h, vp_w, vp_h);
+                if verts.is_empty() {
+                    continue;
+                }
+                let byte_len = std::mem::size_of_val(verts.as_slice());
+                let Some(vbuf) = (unsafe {
+                    self.device.newBufferWithBytes_length_options(
+                        NonNull::new(verts.as_ptr() as *mut _).unwrap(),
+                        byte_len,
+                        MTLResourceOptions(0),
+                    )
+                }) else {
+                    continue;
+                };
+                enc.setRenderPipelineState(pipeline);
+                unsafe {
+                    enc.setVertexBuffer_offset_atIndex(Some(&vbuf), 0, 0);
+                    enc.setFragmentTexture_atIndex(Some(&texture), 0);
+                    enc.drawPrimitives_vertexStart_vertexCount(
+                        MTLPrimitiveType::Triangle,
+                        0,
+                        verts.len() as _,
+                    );
+                }
+            }
+        }
+
         /// Render a tiled frame with per-tile scissor clipping.
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
@@ -1056,6 +1403,8 @@ fragment float4 waveform_frag(
             self.sync_window_theme();
             let mut widget_scene_build_time = Duration::ZERO;
             let mut metal_prep_time = Duration::ZERO;
+            let mut image_load_budget = 1usize;
+            self.drain_decoded_images(2);
 
             let Some(pipeline) = self.pipeline.clone() else {
                 return Ok(());
@@ -1278,6 +1627,21 @@ fragment float4 waveform_frag(
                             }
                         }
 
+                        if let Some(image_pipeline) = self.image_pipeline.clone() {
+                            let images = collect_image_primitives(seg_prims);
+                            self.draw_image_primitives(
+                                &enc,
+                                &image_pipeline,
+                                &images,
+                                Some(*seg_scissor),
+                                &mut image_load_budget,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
+                        }
+
                         let prim_quads = {
                             let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
                             build_widget_primitive_quads(seg_prims, atlas, vp_w, vp_h)
@@ -1394,6 +1758,21 @@ fragment float4 waveform_frag(
                                     instances.len() as _,
                                 );
                             }
+                        }
+
+                        if let Some(image_pipeline) = self.image_pipeline.clone() {
+                            let images = collect_image_primitives(&offset_overlay);
+                            self.draw_image_primitives(
+                                &enc,
+                                &image_pipeline,
+                                &images,
+                                Some(scissor),
+                                &mut image_load_budget,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
+                            );
                         }
 
                         let prim_quads = {
@@ -1974,6 +2353,36 @@ fragment float4 waveform_frag(
                 );
             }
 
+            // ── Image pipeline ───────────────────────────────────────────────
+            {
+                let image_lib = self
+                    .device
+                    .newLibraryWithSource_options_error(&NSString::from_str(IMAGE_SHADER_SRC), None)
+                    .map_err(|_| BackendError::MetalError)?;
+                let image_vert = image_lib
+                    .newFunctionWithName(&NSString::from_str("image_vert"))
+                    .ok_or(BackendError::MetalError)?;
+                let image_frag = image_lib
+                    .newFunctionWithName(&NSString::from_str("image_frag"))
+                    .ok_or(BackendError::MetalError)?;
+                let image_desc = MTLRenderPipelineDescriptor::new();
+                image_desc.setVertexFunction(Some(&image_vert));
+                image_desc.setFragmentFunction(Some(&image_frag));
+                let image_attach =
+                    unsafe { image_desc.colorAttachments().objectAtIndexedSubscript(0) };
+                image_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                image_attach.setBlendingEnabled(true);
+                image_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                image_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                image_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                image_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                self.image_pipeline = Some(
+                    self.device
+                        .newRenderPipelineStateWithDescriptor_error(&image_desc)
+                        .map_err(|_| BackendError::MetalError)?,
+                );
+            }
+
             // ── Widget render pipelines (one per widget type) ────────────────
             // Each widget gets its own fragment shader but shares the vertex
             // shader and SDF utilities from the preamble.
@@ -2288,6 +2697,8 @@ fragment float4 waveform_frag(
             let time_seconds = self.elapsed_time_seconds();
             let mut widget_scene_build_time = Duration::ZERO;
             let mut metal_prep_time = Duration::ZERO;
+            let mut image_load_budget = 1usize;
+            self.drain_decoded_images(2);
 
             self.compile_pending_sdf_pipelines();
 
@@ -2347,6 +2758,7 @@ fragment float4 waveform_frag(
             let Some(atlas) = &mut self.atlas else {
                 return Ok(());
             };
+            let atlas_texture = atlas.texture.clone();
             if self.cached_text_key != Some(frame.text_cache_key) {
                 self.cached_text_quads = build_text_quads(frame, atlas, vp_w, vp_h);
                 self.cached_text_key = Some(frame.text_cache_key);
@@ -2370,9 +2782,10 @@ fragment float4 waveform_frag(
             let (primitive_bg_runs, primitive_instance_runs) =
                 partition_widget_instance_runs(&primitive_scene);
             metal_prep_time += prep_started.elapsed();
+            let _ = atlas;
 
             // ── Vertex buffer ────────────────────────────────────────────────
-            let text_vbuf = self.cached_text_buffer.as_ref();
+            let text_vbuf = self.cached_text_buffer.clone();
             let label_vbuf = if primitive_quads.is_empty() {
                 None
             } else {
@@ -2436,11 +2849,26 @@ fragment float4 waveform_frag(
                 }
             }
 
+            if let Some(image_pipeline) = self.image_pipeline.clone() {
+                let images = collect_image_primitives(&primitive_scene);
+                self.draw_image_primitives(
+                    &enc,
+                    &image_pipeline,
+                    &images,
+                    None,
+                    &mut image_load_budget,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
             if let Some(vbuf) = &text_vbuf {
                 enc.setRenderPipelineState(&pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(vbuf), 0, 0);
-                    enc.setFragmentTexture_atIndex(Some(&atlas.texture), 0);
+                    enc.setFragmentTexture_atIndex(Some(&atlas_texture), 0);
                     enc.drawPrimitives_vertexStart_vertexCount(
                         MTLPrimitiveType::Triangle,
                         0,
@@ -2453,7 +2881,7 @@ fragment float4 waveform_frag(
                 enc.setRenderPipelineState(&pipeline);
                 unsafe {
                     enc.setVertexBuffer_offset_atIndex(Some(vbuf), 0, 0);
-                    enc.setFragmentTexture_atIndex(Some(&atlas.texture), 0);
+                    enc.setFragmentTexture_atIndex(Some(&atlas_texture), 0);
                     enc.drawPrimitives_vertexStart_vertexCount(
                         MTLPrimitiveType::Triangle,
                         0,
@@ -3126,12 +3554,25 @@ fragment float4 waveform_frag(
                 // Proportional text is rendered in a separate pass with its own atlas.
                 widget_render::MetalPrimitive::ProportionalText(_) => {}
                 widget_render::MetalPrimitive::Waveform(_) => {}
+                widget_render::MetalPrimitive::Image(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
                 widget_render::MetalPrimitive::PushClipRect(_)
                 | widget_render::MetalPrimitive::PopClipRect => {}
             }
         }
         verts
+    }
+
+    fn collect_image_primitives(
+        primitives: &[widget_render::MetalPrimitive],
+    ) -> Vec<widget_render::MetalImagePrimitive> {
+        primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                widget_render::MetalPrimitive::Image(image) => Some(image.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn collect_waveform_primitives(
@@ -3144,6 +3585,141 @@ fragment float4 waveform_frag(
                 _ => None,
             })
             .collect()
+    }
+
+    fn image_vertices(
+        image: &widget_render::MetalImagePrimitive,
+        image_w: u32,
+        image_h: u32,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<ImageVertex> {
+        if image.rect.width <= 0.0 || image.rect.height <= 0.0 || image_w == 0 || image_h == 0 {
+            return Vec::new();
+        }
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let x0 = ndc_x(image.rect.col * cell_w);
+        let x1 = ndc_x((image.rect.col + image.rect.width) * cell_w);
+        let y0 = ndc_y(image.rect.row * cell_h);
+        let y1 = ndc_y((image.rect.row + image.rect.height) * cell_h);
+
+        let dst_aspect = (image.rect.width * cell_w) / (image.rect.height * cell_h).max(0.001);
+        let src_aspect = image_w as f32 / (image_h as f32).max(1.0);
+        let (mut u0, mut v0, mut u1, mut v1) = (0.0, 0.0, 1.0, 1.0);
+        match image.fit {
+            widget_render::ImageFit::Cover => {
+                if src_aspect > dst_aspect {
+                    let visible = dst_aspect / src_aspect;
+                    u0 = (1.0 - visible) * 0.5;
+                    u1 = 1.0 - u0;
+                } else {
+                    let visible = src_aspect / dst_aspect;
+                    v0 = (1.0 - visible) * 0.5;
+                    v1 = 1.0 - v0;
+                }
+            }
+            widget_render::ImageFit::Contain | widget_render::ImageFit::Stretch => {}
+        }
+
+        if matches!(image.fit, widget_render::ImageFit::Contain) {
+            let mut dx0 = x0;
+            let mut dx1 = x1;
+            let mut dy0 = y0;
+            let mut dy1 = y1;
+            if src_aspect > dst_aspect {
+                let target_h = (image.rect.width * cell_w / src_aspect) / vp_h * 2.0;
+                let mid = (y0 + y1) * 0.5;
+                dy0 = mid + target_h * 0.5;
+                dy1 = mid - target_h * 0.5;
+            } else {
+                let target_w = (image.rect.height * cell_h * src_aspect) / vp_w * 2.0;
+                let mid = (x0 + x1) * 0.5;
+                dx0 = mid - target_w * 0.5;
+                dx1 = mid + target_w * 0.5;
+            }
+            return image_vertex_quad(
+                dx0,
+                dx1,
+                dy0,
+                dy1,
+                u0,
+                u1,
+                v0,
+                v1,
+                image.opacity,
+                image.radius_px,
+                image.rect.width * cell_w,
+                image.rect.height * cell_h,
+            );
+        }
+
+        image_vertex_quad(
+            x0,
+            x1,
+            y0,
+            y1,
+            u0,
+            u1,
+            v0,
+            v1,
+            image.opacity,
+            image.radius_px,
+            image.rect.width * cell_w,
+            image.rect.height * cell_h,
+        )
+    }
+
+    fn image_intersects_scissor(
+        image: &widget_render::MetalImagePrimitive,
+        scissor: MTLScissorRect,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> bool {
+        let x0 = (image.rect.col * cell_w).floor() as isize;
+        let y0 = (image.rect.row * cell_h).floor() as isize;
+        let x1 = ((image.rect.col + image.rect.width) * cell_w).ceil() as isize;
+        let y1 = ((image.rect.row + image.rect.height) * cell_h).ceil() as isize;
+        let sx0 = scissor.x as isize;
+        let sy0 = scissor.y as isize;
+        let sx1 = (scissor.x + scissor.width) as isize;
+        let sy1 = (scissor.y + scissor.height) as isize;
+        x1 > sx0 && x0 < sx1 && y1 > sy0 && y0 < sy1
+    }
+
+    fn image_vertex_quad(
+        x0: f32,
+        x1: f32,
+        y0: f32,
+        y1: f32,
+        u0: f32,
+        u1: f32,
+        v0: f32,
+        v1: f32,
+        opacity: f32,
+        radius: f32,
+        width_px: f32,
+        height_px: f32,
+    ) -> Vec<ImageVertex> {
+        let half_size = [width_px.max(0.0) * 0.5, height_px.max(0.0) * 0.5];
+        let v = |position, uv, local_pos| ImageVertex {
+            position,
+            uv,
+            opacity,
+            local_pos,
+            half_size,
+            radius,
+        };
+        vec![
+            v([x0, y0], [u0, v0], [-half_size[0], -half_size[1]]),
+            v([x0, y1], [u0, v1], [-half_size[0], half_size[1]]),
+            v([x1, y0], [u1, v0], [half_size[0], -half_size[1]]),
+            v([x1, y0], [u1, v0], [half_size[0], -half_size[1]]),
+            v([x0, y1], [u0, v1], [-half_size[0], half_size[1]]),
+            v([x1, y1], [u1, v1], [half_size[0], half_size[1]]),
+        ]
     }
 
     fn push_solid_rect_vertices(
@@ -3614,6 +4190,11 @@ fragment float4 waveform_frag(
                 w.rect.col += col_off;
                 w.rect.row += row_off;
                 widget_render::MetalPrimitive::Waveform(w)
+            }
+            widget_render::MetalPrimitive::Image(mut i) => {
+                i.rect.col += col_off;
+                i.rect.row += row_off;
+                widget_render::MetalPrimitive::Image(i)
             }
             widget_render::MetalPrimitive::WidgetInstance {
                 widget_type,

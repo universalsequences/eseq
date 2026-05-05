@@ -5,6 +5,7 @@ pub mod dropdown;
 pub mod grid;
 pub mod hslider;
 pub mod hstack;
+pub mod image;
 pub mod knob;
 pub mod knob_number;
 pub mod label;
@@ -412,12 +413,30 @@ pub struct MetalWaveformPrimitive {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
+pub struct MetalImagePrimitive {
+    pub rect: Rect,
+    pub src: String,
+    pub fit: ImageFit,
+    pub radius_px: f32,
+    pub opacity: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImageFit {
+    Cover,
+    Contain,
+    Stretch,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub enum MetalPrimitive {
     Rect(MetalRectPrimitive),
     Quad(MetalQuadPrimitive),
     GlyphRun(MetalGlyphRunPrimitive),
     ProportionalText(MetalProportionalTextPrimitive),
     Waveform(MetalWaveformPrimitive),
+    Image(MetalImagePrimitive),
     WidgetInstance {
         widget_type: String,
         instance: WidgetInstance,
@@ -607,6 +626,8 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &hstack::HSTACK_WIDGET,
     &box_widget::BOX_WIDGET,
     &grid::GRID_WIDGET,
+    &grid::RESPONSIVE_GRID_WIDGET,
+    &image::IMAGE_WIDGET,
     &dropdown::DROPDOWN_WIDGET,
     &number_picker::NUMBER_PICKER_WIDGET,
     &scroll::SCROLL_WIDGET,
@@ -884,6 +905,7 @@ fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetVi
         MetalPrimitive::GlyphRun(g) => g.row += dy,
         MetalPrimitive::ProportionalText(t) => t.row += dy,
         MetalPrimitive::Waveform(w) => w.rect.row += dy,
+        MetalPrimitive::Image(i) => i.rect.row += dy,
         MetalPrimitive::WidgetInstance { instance, .. } => {
             let ndc_dy = -(dy * viewport.cell_h / viewport.vp_h) * 2.0;
             instance.ndc_min[1] += ndc_dy;

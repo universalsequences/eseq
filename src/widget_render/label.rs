@@ -25,6 +25,23 @@ fn resolve_color(props: &HashMap<String, Value>, hovered: bool) -> Color {
     resolve_named_color(props, "color", theme::WIDGET_LABEL_FG())
 }
 
+fn resolve_h_align(props: &HashMap<String, Value>) -> f32 {
+    match props.get("h-align") {
+        Some(Value::Number(value)) => (*value as f32).clamp(0.0, 1.0),
+        Some(Value::Keyword(value)) | Some(Value::String(value))
+            if value == "center" || value == "middle" =>
+        {
+            0.5
+        }
+        Some(Value::Keyword(value)) | Some(Value::String(value))
+            if value == "right" || value == "end" =>
+        {
+            1.0
+        }
+        _ => 0.0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,8 +199,8 @@ impl WidgetDefinition for LabelWidget {
             MetalProportionalTextPrimitive {
                 row: label_text_row(&node.props, node.rect),
                 col: node.rect.col,
-                align_width: 0.0,
-                h_align: 0.0,
+                align_width: node.rect.width,
+                h_align: resolve_h_align(&node.props),
                 text: text.clone(),
                 font_size,
                 fg,
