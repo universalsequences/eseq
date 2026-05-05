@@ -3704,6 +3704,11 @@ fn register_sequencer_natives_with_accumulators(
         }
         Ok(EValue::Number(track as f64))
     });
+    runtime.document_symbol(
+        "__host-set-current-track",
+        "(__host-set-current-track track)",
+        "Internal host hook that updates the scratch evaluation context's current track.",
+    );
 
     let context_for_step = Arc::clone(&context);
     runtime.register_native_with_docs(
@@ -3727,6 +3732,11 @@ fn register_sequencer_natives_with_accumulators(
         }
         Ok(EValue::Number(step as f64))
     });
+    runtime.document_symbol(
+        "__host-set-current-step",
+        "(__host-set-current-step step)",
+        "Internal host hook that updates the scratch evaluation context's current step.",
+    );
 
     let state_for_steps = Arc::clone(&state);
     let context_for_steps = Arc::clone(&context);

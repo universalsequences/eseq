@@ -737,6 +737,246 @@ fn safe_lisp_ident(value: &str) -> String {
         .collect()
 }
 
+fn document_metal_seq_natives(runtime: &mut Runtime) {
+    runtime.document_symbols([
+        (
+            "seq-toggle-step",
+            "(seq-toggle-step step)",
+            "Toggle the current track's step on/off and clear that step's p-locks.",
+        ),
+        (
+            "seq-set-step-param",
+            "(seq-set-step-param step :param value)",
+            "Set a per-step parameter on the current track.",
+        ),
+        (
+            "seq-piano-roll-action",
+            "(seq-piano-roll-action action-map)",
+            "Apply a piano-roll edit action to the current track.",
+        ),
+        (
+            "seq-set-track",
+            "(seq-set-track track)",
+            "Select the current track by 0-based index.",
+        ),
+        (
+            "seq-set-track-volume",
+            "(seq-set-track-volume track volume)",
+            "Set a track's mixer volume and update its audio panner.",
+        ),
+        (
+            "seq-toggle-track-mute",
+            "(seq-toggle-track-mute track)",
+            "Toggle a track's mute state.",
+        ),
+        (
+            "seq-toggle-track-solo",
+            "(seq-toggle-track-solo track)",
+            "Toggle a track's solo state and update solo mute routing.",
+        ),
+        (
+            "seq-set-effect-param",
+            "(seq-set-effect-param slot param value)",
+            "Set an effect parameter default on the current track.",
+        ),
+        (
+            "seq-select-step",
+            "(seq-select-step step)",
+            "Toggle a step in the current selection.",
+        ),
+        (
+            "seq-select-step-range",
+            "(seq-select-step-range start end)",
+            "Replace the selection with an inclusive step range.",
+        ),
+        (
+            "seq-clear-selection",
+            "(seq-clear-selection)",
+            "Clear the selected steps.",
+        ),
+        (
+            "seq-has-selection?",
+            "(seq-has-selection?)",
+            "Return true when one or more steps are selected.",
+        ),
+        (
+            "seq-select-all-steps",
+            "(seq-select-all-steps)",
+            "Select all steps in the current track pattern.",
+        ),
+        (
+            "seq-delete-selected-steps",
+            "(seq-delete-selected-steps)",
+            "Clear all selected step payloads and clear the selection.",
+        ),
+        (
+            "seq-move-step-drag",
+            "(seq-move-step-drag start target)",
+            "Move a step payload or the selected step payloads by drag delta.",
+        ),
+        (
+            "seq-shift-selected-steps",
+            "(seq-shift-selected-steps direction)",
+            "Shift selected step payloads left or right by one step.",
+        ),
+        (
+            "seq-set-effect-plock",
+            "(seq-set-effect-plock slot param value)",
+            "Set an effect parameter p-lock on each selected step.",
+        ),
+        (
+            "seq-set-step-param-plock",
+            "(seq-set-step-param-plock :param value)",
+            "Set a step parameter p-lock on each selected step.",
+        ),
+        (
+            "seq-toggle-play",
+            "(seq-toggle-play)",
+            "Toggle sequencer playback.",
+        ),
+        (
+            "seq-set-bpm",
+            "(seq-set-bpm bpm)",
+            "Set the project tempo in beats per minute.",
+        ),
+        (
+            "seq-set-track-param",
+            "(seq-set-track-param track :param value)",
+            "Set a track-level parameter such as length, scale, transpose, or pan.",
+        ),
+        (
+            "seq-set-accumulator",
+            "(seq-set-accumulator value)",
+            "Set the accumulator value for the current track.",
+        ),
+        (
+            "__register-accumulator-preview",
+            "(__register-accumulator-preview label)",
+            "Internal helper that registers an accumulator preview label for UI selection.",
+        ),
+        (
+            "__register-midi-fx-preview",
+            "(__register-midi-fx-preview label)",
+            "Internal helper that registers a MIDI FX preview label for UI selection.",
+        ),
+        (
+            "seq-use-accumulator",
+            "(seq-use-accumulator [track] name)",
+            "Assign a script accumulator to a track.",
+        ),
+        (
+            "seq-use-midi-fx",
+            "(seq-use-midi-fx [track] name ...)",
+            "Set the MIDI FX chain for a track.",
+        ),
+        (
+            "seq-clear-midi-fx",
+            "(seq-clear-midi-fx [track])",
+            "Clear a track's MIDI FX chain.",
+        ),
+        (
+            "seq-set-midi-fx-position",
+            "(seq-set-midi-fx-position [track] position)",
+            "Set where the MIDI FX chain runs relative to the accumulator.",
+        ),
+        (
+            "seq-set-accum-mode",
+            "(seq-set-accum-mode label)",
+            "Set the current track's accumulator mode by label.",
+        ),
+        (
+            "seq-set-accum-limit",
+            "(seq-set-accum-limit limit)",
+            "Set the current track's accumulator limit.",
+        ),
+        (
+            "seq-double-track-pattern",
+            "(seq-double-track-pattern)",
+            "Duplicate the current track pattern to double its length.",
+        ),
+        (
+            "seq-halve-track-pattern",
+            "(seq-halve-track-pattern)",
+            "Halve the current track pattern length.",
+        ),
+        (
+            "seq-propagate-current-track-to-all-patterns",
+            "(seq-propagate-current-track-to-all-patterns)",
+            "Request host propagation of the current track to every pattern.",
+        ),
+        (
+            "seq-set-timebase",
+            "(seq-set-timebase label)",
+            "Set the current track's default timebase by label.",
+        ),
+        (
+            "seq-set-fts",
+            "(seq-set-fts label)",
+            "Set the current track's force-to-scale mode by label.",
+        ),
+        (
+            "seq-plock-timebase",
+            "(seq-plock-timebase label)",
+            "Set a timebase p-lock on selected steps.",
+        ),
+        (
+            "seq-set-swing-resolution",
+            "(seq-set-swing-resolution label)",
+            "Set default swing resolution or p-lock it on selected steps.",
+        ),
+        (
+            "seq-pause-auto-follow",
+            "(seq-pause-auto-follow)",
+            "Temporarily pause automatic playhead following.",
+        ),
+        (
+            "seq-toggle-record",
+            "(seq-toggle-record)",
+            "Toggle recording when at least one track is armed.",
+        ),
+        (
+            "seq-toggle-record-arm",
+            "(seq-toggle-record-arm track)",
+            "Toggle record-arm state for a track.",
+        ),
+        (
+            "seq-search-samples",
+            "(seq-search-samples query)",
+            "Search indexed sample files by name.",
+        ),
+        (
+            "seq-sample-tree",
+            "(seq-sample-tree)",
+            "Return the sample browser tree.",
+        ),
+        (
+            "seq-filter-sample-tree",
+            "(seq-filter-sample-tree query)",
+            "Return a filtered sample browser tree.",
+        ),
+        (
+            "seq-project-tree",
+            "(seq-project-tree query)",
+            "Return the project browser tree filtered by query.",
+        ),
+        (
+            "seq-preset-tree",
+            "(seq-preset-tree presets query)",
+            "Return a preset browser tree for a preset list and query.",
+        ),
+        (
+            "seq-saved-instruments",
+            "(seq-saved-instruments)",
+            "Return saved custom instrument names.",
+        ),
+        (
+            "seq-saved-instrument-tree",
+            "(seq-saved-instrument-tree query)",
+            "Return the saved instrument browser tree filtered by query.",
+        ),
+    ]);
+}
+
 fn build_custom_instrument_ui_source_with_overlay(
     overlay: Option<(String, String, String)>,
 ) -> String {
@@ -2589,6 +2829,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         Ok(build_instrument_tree_value(query))
     });
+    document_metal_seq_natives(&mut runtime);
 
     // 4. Create editor with Metal backend
     let init_src = std::fs::read_to_string("init.lisp")
