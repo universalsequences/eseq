@@ -3209,6 +3209,22 @@ fn register_sequencer_natives_with_accumulators(
         move |args, _ctx| eval_fx_source_time(&fx_eval_for_source_time, &args),
     );
 
+    let fx_eval_for_phase_time = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-phase-time",
+        "(fx-phase-time)",
+        "Return the current MIDI FX scheduling phase in beats. Live quantized triggers advance this across repeated invocations.",
+        move |_args, _ctx| eval_fx_phase_time(&fx_eval_for_phase_time),
+    );
+
+    let fx_eval_for_phase_tick = Arc::clone(&accumulator_eval);
+    runtime.register_native_with_docs(
+        "fx-phase-tick",
+        "(fx-phase-tick :16)",
+        "Return the current MIDI FX scheduling phase as a tick index at the given timebase.",
+        move |args, _ctx| eval_fx_phase_tick(&fx_eval_for_phase_tick, &args),
+    );
+
     let fx_eval_for_param = Arc::clone(&accumulator_eval);
     runtime.register_native_with_docs(
         "fx-param",
@@ -4478,36 +4494,11 @@ fn apply_acc_emit_overrides(
                 }
                 target_track = Some(track as usize);
             }
-            "octave" | "octaves" => {
-                // Consumed by arp helpers before normal event overrides are applied.
-            }
             _ => return Err(format!("acc-emit unknown override :{key}")),
         }
         idx += 1;
     }
     Ok(target_track)
-}
-
-fn parse_arp_octaves_arg(args: &[EValue], mut idx: usize) -> Result<usize, String> {
-    let mut octaves = 1usize;
-    while idx < args.len() {
-        let key = match &args[idx] {
-            EValue::Keyword(name) | EValue::String(name) | EValue::Symbol(name) => {
-                name.to_ascii_lowercase()
-            }
-            _ => return Err("arp helper expects keyword/value override pairs".to_string()),
-        };
-        idx += 1;
-        let Some(value) = args.get(idx) else {
-            return Err(format!("arp helper missing value for :{key}"));
-        };
-        if matches!(key.as_str(), "octave" | "octaves") {
-            let value = acc_emit_number(value, "octave")?;
-            octaves = value.round().clamp(1.0, 8.0) as usize;
-        }
-        idx += 1;
-    }
-    Ok(octaves)
 }
 
 fn eval_suppress_current_event(
@@ -4663,15 +4654,10 @@ fn eval_arp_emit_directed_current_event(
     if *tick < 0.0 {
         return Ok(EValue::Bool(false));
     }
-    let octaves = parse_arp_octaves_arg(args, 3)?;
     let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
-    let Some(note) = accumulator_arp_note_directed_octaves(
-        eval,
-        rate_beats,
-        *tick as usize,
-        *direction as i32,
-        octaves,
-    ) else {
+    let Some(note) =
+        accumulator_arp_note_directed(eval, rate_beats, *tick as usize, *direction as i32)
+    else {
         return Ok(EValue::Bool(false));
     };
 
@@ -4734,6 +4720,36 @@ fn eval_fx_source_time(
         _ => return Err("fx-source-time units must be numeric".to_string()),
     };
     Ok(EValue::Number((eval.step_beats * units) as f64))
+}
+
+fn eval_fx_phase_time(accumulator_eval: &SharedAccumulatorEvalContext) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    Ok(EValue::Number(eval.arp_phase_beats.max(0.0) as f64))
+}
+
+fn eval_fx_phase_tick(
+    accumulator_eval: &SharedAccumulatorEvalContext,
+    args: &[EValue],
+) -> Result<EValue, String> {
+    let guard = accumulator_eval
+        .lock()
+        .map_err(|_| "failed to lock MIDI FX eval context".to_string())?;
+    let Some(eval) = guard.as_ref() else {
+        return Err("MIDI FX context not active".to_string());
+    };
+    let timebase = parse_timebase_arg(args, 0)?;
+    let rate_beats = timebase.step_beats(eval.num_steps).max(0.0) as f32;
+    if rate_beats <= 0.0 {
+        return Ok(EValue::Number(0.0));
+    }
+    Ok(EValue::Number(
+        (eval.arp_phase_beats.max(0.0) / rate_beats).floor() as f64,
+    ))
 }
 
 fn parse_midi_fx_param_ref(eval: &AccumulatorEvalContext, value: &EValue) -> Result<usize, String> {
@@ -5013,20 +5029,9 @@ fn accumulator_arp_note_directed(
     tick: usize,
     direction: i32,
 ) -> Option<f32> {
-    accumulator_arp_note_directed_octaves(eval, rate_beats, tick, direction, 1)
-}
-
-fn accumulator_arp_note_directed_octaves(
-    eval: &AccumulatorEvalContext,
-    rate_beats: f32,
-    tick: usize,
-    direction: i32,
-    octaves: usize,
-) -> Option<f32> {
     if rate_beats <= 0.0 {
         return None;
     }
-    let octaves = octaves.max(1);
     let phase_tick = (eval.arp_phase_beats.max(0.0) / rate_beats).floor() as usize;
     let elapsed = tick as f32 * rate_beats;
     if let Some(note_spans) = eval.note_spans.as_ref() {
@@ -5041,25 +5046,16 @@ fn accumulator_arp_note_directed_octaves(
         if active.is_empty() {
             return None;
         }
-        let idx = directed_note_index(phased_tick, active.len() * octaves, direction);
-        let note_idx = idx % active.len();
-        let octave_idx = idx / active.len();
-        return Some(active[note_idx].transpose + octave_idx as f32 * 12.0);
+        return Some(active[directed_note_index(phased_tick, active.len(), direction)].transpose);
     }
     let notes = accumulator_chord_notes(eval);
     if notes.is_empty() || eval.step_beats <= 0.0 {
         return None;
     }
-    let idx = directed_note_index(
-        tick.saturating_add(phase_tick),
-        notes.len() * octaves,
-        direction,
-    );
-    let note_idx = idx % notes.len();
-    let octave_idx = idx / notes.len();
+    let note_idx = directed_note_index(tick.saturating_add(phase_tick), notes.len(), direction);
     let duration_beats = notes[note_idx].duration_steps * eval.step_beats;
     if elapsed < duration_beats - f32::EPSILON {
-        Some(notes[note_idx].transpose + octave_idx as f32 * 12.0)
+        Some(notes[note_idx].transpose)
     } else {
         None
     }
@@ -7858,18 +7854,14 @@ mod tests {
             0,
         );
 
-        runtime
-            .eval(
-                r#"
-                (def-midi-fx "arp-octave"
-                  (do
-                    (fx-suppress)
-                    (for-each |i|
-                      (fx-arp-emit-directed :16 i 0 :octave 2)
-                      (range 0 (fx-arp-count :16)))))
-                "#,
-            )
-            .unwrap();
+        runtime.eval(&super::load_midi_fx_library_source()).unwrap();
+        let arp_desc = runtime
+            .midi_fx_descriptors()
+            .into_iter()
+            .find(|desc| desc.name == "arp")
+            .expect("arp descriptor");
+        let mut slot = EffectSlotSnapshot::new_default(&arp_desc, 0);
+        slot.defaults[2] = 2.0;
 
         let output = runtime
             .invoke_midi_fx(
@@ -7891,7 +7883,7 @@ mod tests {
                 vec![8.0, 8.0, 8.0],
                 0.0,
                 None,
-                EffectSlotSnapshot::new_empty(),
+                slot,
                 0.25,
                 16,
                 vec![EffectSlotSnapshot::new_default(
@@ -7985,18 +7977,7 @@ mod tests {
             0,
         );
 
-        runtime
-            .eval(
-                r#"
-                (def-midi-fx "live-arp"
-                  (do
-                    (fx-suppress)
-                    (for-each |i|
-                      (fx-arp-emit :16 i :vel 0.8)
-                      (range 0 (fx-arp-count :16)))))
-                "#,
-            )
-            .unwrap();
+        runtime.eval(&super::load_midi_fx_library_source()).unwrap();
 
         let invoke = |runtime: &mut ScratchControlRuntime, arp_phase_beats| {
             runtime

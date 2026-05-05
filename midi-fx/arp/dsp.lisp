@@ -16,15 +16,13 @@
 (midi-fx-param "velocity" :default 0.80 :min 0.00 :max 1.00)
 
 (def-midi-fx "arp"
-  (do
-    (fx-suppress)
-    (for-each |i|
-      (fx-arp-emit-directed
-        (fx-param "rate")
-        i
-        (fx-param "direction")
-        :octave (fx-param "octave")
-        :vel (fx-param "velocity")
-        :dur (* (fx-param "gate")
-                (/ (fx-time (fx-param "rate")) (fx-source-time))))
-      (range 0 (fx-arp-count (fx-param "rate"))))))
+  (let ((notes (fx-notes-octaves (fx-notes) (fx-param "octave")))
+        (rate (fx-param "rate"))
+        (direction (fx-param "direction"))
+        (gate (fx-param "gate"))
+        (velocity (fx-param "velocity")))
+    (do
+      (fx-suppress)
+      (for-each |i|
+        (fx-arp-emit-from notes rate i direction gate velocity)
+        (range 0 (fx-arp-count-for notes rate))))))
