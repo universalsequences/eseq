@@ -26,7 +26,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "metal_seq"
-path = "src/bin/metal_seq.rs"
+path = "src/bin/metal_seq/main.rs"
 
 [build-dependencies]
 cc = "1.0"
