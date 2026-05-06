@@ -573,6 +573,13 @@
         (v-stack :gap 0.5 :align :center
           (label "+" :font-size 15 :color :gray :bg :transparent)
           (dropdown :value ""
+            :options SEQ.available-builtin-effects
+            :placeholder "Add Built-in"
+            :on-change (lambda (v)
+              (fx-clear-selected-effect)
+              (host-command "add-builtin-bus-effect" (dict :bus selected-bus :name v)))
+            :width 12 :height 1.5 :font-size 14)
+          (dropdown :value ""
             :options SEQ.available-effects
             :placeholder "Add Bus FX"
             :on-change (lambda (v)
@@ -618,6 +625,13 @@
              :on-click |x y r| (fx-clear-selected-effect)
           (v-stack :gap 0.5 :align :center
             (label "+" :font-size 15 :color :gray :bg :transparent)
+            (dropdown :value ""
+              :options SEQ.available-builtin-effects
+              :placeholder "Add Built-in"
+              :on-change (lambda (v)
+                (fx-clear-selected-effect)
+                (host-command "add-builtin-effect" (dict :name v)))
+              :width 12 :height 1.5 :font-size 14)
             (dropdown :value ""
               :options SEQ.available-effects
               :placeholder "Add Effect"

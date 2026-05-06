@@ -1654,6 +1654,15 @@ pub(crate) fn build_available_effects() -> Value {
     Value::List(items)
 }
 
+pub(crate) fn build_available_builtin_effects() -> Value {
+    let items: Vec<Rc<RefCell<Value>>> =
+        sequencer::effects::EffectDescriptor::builtin_insert_names()
+            .iter()
+            .map(|name| Rc::new(RefCell::new(Value::String((*name).to_string()))))
+            .collect();
+    Value::List(items)
+}
+
 pub(crate) fn build_available_midi_effects() -> Value {
     let mut names: Vec<String> = sequencer::lisp_effect::load_midi_fx_descriptors()
         .into_iter()
@@ -2523,6 +2532,10 @@ mod tests {
                     "available-effects",
                     test_list(vec![Value::String("limiter".to_string())]),
                 ),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filter".to_string())]),
+                ),
                 ("available-midi-effects", test_list(vec![])),
                 (
                     "bus-names",
@@ -2663,6 +2676,7 @@ mod tests {
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
                 ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
                 ("available-midi-effects", test_list(vec![])),
                 ("bus-names", test_list(vec![])),
                 ("effects", test_list(vec![])),

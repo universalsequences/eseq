@@ -2266,6 +2266,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "add-builtin-bus-effect" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let effect_name =
+                                map.get("name").and_then(|cell| match &*cell.borrow() {
+                                    Value::String(s) => Some(s.clone()),
+                                    _ => None,
+                                });
+                            if let (Some(bus_idx), Some(effect_name)) = (bus_idx, effect_name) {
+                                match app.add_builtin_bus_effect_sync(bus_idx, &effect_name) {
+                                    Ok(slot_idx) => {
+                                        app.publish_bus_gate_runtime();
+                                        *bus_state.lock().unwrap() = app.buses.clone();
+                                        let rt = editor.runtime_mut();
+                                        sync_bus_mixer_state(rt, &app);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        editor.reset_widget_scroll_for_buffer_named("*fx*");
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Added built-in bus effect '{}' to slot {}",
+                                            effect_name,
+                                            slot_idx + 1
+                                        )));
+                                    }
+                                    Err(error) => editor.handle_host_event(HostEvent::Status(
+                                        format!("Error adding built-in bus effect: {error}"),
+                                    )),
+                                }
+                            }
+                        }
+                    }
                     "add-effect" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(cell) = map.get("name") {
@@ -2283,6 +2319,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         editor.handle_host_event(HostEvent::Status(
                                             "No free effect slots available".to_string(),
                                         ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "add-builtin-effect" => {
+                        if let Value::Map(ref map) = payload {
+                            if let Some(cell) = map.get("name") {
+                                if let Value::String(effect_name) = &*cell.borrow() {
+                                    let effect_name = effect_name.clone();
+                                    let track = current_track.load(Ordering::Relaxed);
+                                    app.ui.cursor_track = track;
+                                    match app.add_builtin_effect_sync(track, &effect_name) {
+                                        Ok(slot_idx) => {
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "effects",
+                                                build_effects_value(
+                                                    &state,
+                                                    track,
+                                                    &app.graph.effect_descriptors,
+                                                    &selected_steps,
+                                                ),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "step-has-plocks",
+                                                build_step_has_plocks(
+                                                    &state,
+                                                    track,
+                                                    &app.graph.effect_descriptors,
+                                                ),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            editor.reset_widget_scroll_for_buffer_named("*fx*");
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                            editor.handle_host_event(HostEvent::Status(format!(
+                                                "Added built-in effect '{}' to slot {}",
+                                                effect_name,
+                                                slot_idx + 1
+                                            )));
+                                        }
+                                        Err(error) => editor.handle_host_event(HostEvent::Status(
+                                            format!("Error adding built-in effect: {error}"),
+                                        )),
                                     }
                                 }
                             }
@@ -3181,6 +3265,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     rt.set_reactive(
                                         "SEQ",
+                                        "available-builtin-effects",
+                                        build_available_builtin_effects(),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
                                         "available-effects",
                                         build_available_effects(),
                                     );
@@ -3647,6 +3736,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Track switch — rebuild everything
             if ct != prev_current_track && !app.tracks.is_empty() {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
+                editor.reset_widget_scroll_for_buffer_named("*fx*");
                 let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);

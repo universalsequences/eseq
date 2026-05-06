@@ -340,6 +340,10 @@ pub(crate) fn init_runtime(
                 ("accumulator-options", build_accumulator_options(&app)),
                 ("fts-options", build_fts_options()),
                 ("accum-mode-options", build_accum_mode_options()),
+                (
+                    "available-builtin-effects",
+                    build_available_builtin_effects(),
+                ),
                 ("available-effects", build_available_effects()),
                 ("available-midi-effects", build_available_midi_effects()),
                 ("selected-steps", build_selection_value(&selected_steps)),

@@ -32,7 +32,7 @@ pub(crate) fn create_editor_and_backend(
     push_project_scratch_to_named_buffer(&mut editor, &app);
 
     let mut backend =
-        MetalBackend::new_with_size(1100, 700).map_err(|_| "Metal backend creation failed")?;
+        MetalBackend::new_with_size(1250, 850).map_err(|_| "Metal backend creation failed")?;
     backend
         .initialize()
         .map_err(|_| "Metal backend init failed")?;

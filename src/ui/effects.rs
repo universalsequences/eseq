@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crossterm::event::KeyCode;
+use std::ffi::CString;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -419,6 +420,269 @@ impl App {
             successor_inputs,
             existing,
         )
+    }
+
+    unsafe fn connect_builtin_effect_chain(
+        &self,
+        predecessor_id: i32,
+        predecessor_outputs: usize,
+        effect_id: i32,
+        effect_inputs: usize,
+        effect_outputs: usize,
+        successor_id: i32,
+        successor_inputs: usize,
+    ) {
+        for src_port in 0..2 {
+            for dst_port in 0..2 {
+                crate::audiograph::graph_disconnect(
+                    self.graph.lg.0,
+                    predecessor_id,
+                    src_port,
+                    successor_id,
+                    dst_port,
+                );
+            }
+        }
+
+        if effect_inputs <= 1 {
+            let pred_channels = predecessor_outputs.max(1).min(2);
+            for src_port in 0..pred_channels {
+                let _ = crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    predecessor_id,
+                    src_port as i32,
+                    effect_id,
+                    0,
+                );
+            }
+        } else {
+            let pred_channels = predecessor_outputs.max(1).min(2);
+            for ch in 0..pred_channels.min(effect_inputs).min(2) {
+                let _ = crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    predecessor_id,
+                    ch as i32,
+                    effect_id,
+                    ch as i32,
+                );
+            }
+        }
+
+        if effect_outputs <= 1 {
+            let succ_channels = successor_inputs.max(1).min(2);
+            for dst_port in 0..succ_channels {
+                let _ = crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    effect_id,
+                    0,
+                    successor_id,
+                    dst_port as i32,
+                );
+            }
+        } else {
+            let succ_channels = successor_inputs.max(1).min(2);
+            for ch in 0..succ_channels.min(effect_outputs).min(2) {
+                let _ = crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    effect_id,
+                    ch as i32,
+                    successor_id,
+                    ch as i32,
+                );
+            }
+        }
+    }
+
+    fn create_builtin_effect_node(
+        &self,
+        slot_id: usize,
+        desc: &EffectDescriptor,
+    ) -> Result<i32, String> {
+        let (vtable, state_size) = match desc.name.as_str() {
+            "Filter" => (
+                crate::filter::filter_vtable(),
+                crate::filter::FILTER_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
+            "Delay" => (
+                crate::delay::delay_vtable(),
+                crate::delay::DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
+            "Reverb" => (
+                crate::reverb::reverb_vtable(),
+                crate::reverb::REVERB_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
+            other => return Err(format!("Unknown built-in effect '{other}'")),
+        };
+        let name = CString::new(format!(
+            "builtin_fx_{}_{}",
+            slot_id,
+            desc.name.to_lowercase()
+        ))
+        .unwrap();
+        let node_id = unsafe {
+            crate::audiograph::add_node(
+                self.graph.lg.0,
+                vtable,
+                state_size,
+                name.as_ptr(),
+                desc.input_channels as i32,
+                desc.output_channels as i32,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if node_id < 0 {
+            Err(format!("Failed to create built-in effect '{}'", desc.name))
+        } else {
+            Ok(node_id)
+        }
+    }
+
+    fn push_track_effect_slot_defaults(&self, track: usize, slot_idx: usize) {
+        let Some(desc) = self
+            .graph
+            .effect_descriptors
+            .get(track)
+            .and_then(|slots| slots.get(slot_idx))
+        else {
+            return;
+        };
+        for (param_idx, _) in desc.params.iter().enumerate() {
+            let value = self.state.pattern.effect_chains[track][slot_idx]
+                .defaults
+                .get(param_idx);
+            self.send_slot_param(track, slot_idx, param_idx, value);
+        }
+    }
+
+    pub fn push_all_delay_bpm(&self) {
+        let bpm = self.state.transport.bpm.load(Ordering::Relaxed) as f32;
+        for (track_idx, descs) in self.graph.effect_descriptors.iter().enumerate() {
+            for (slot_idx, desc) in descs.iter().enumerate() {
+                if desc.name != "Delay" {
+                    continue;
+                }
+                let Some(slot) = self
+                    .state
+                    .pattern
+                    .effect_chains
+                    .get(track_idx)
+                    .and_then(|chain| chain.get(slot_idx))
+                else {
+                    continue;
+                };
+                let node_id = slot.node_id.load(Ordering::Relaxed);
+                if node_id != 0 {
+                    unsafe {
+                        crate::audiograph::params_push_wrapper(
+                            self.graph.lg.0,
+                            crate::audiograph::ParamMsg {
+                                logical_id: node_id as u64,
+                                idx: crate::delay::DELAY_PARAM_BPM,
+                                fvalue: bpm,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        for bus in &self.buses {
+            for (slot_idx, desc) in bus.effect_descriptors.iter().enumerate() {
+                if desc.name != "Delay" {
+                    continue;
+                }
+                let Some(slot) = bus.effect_slots.get(slot_idx) else {
+                    continue;
+                };
+                if slot.node_id != 0 {
+                    unsafe {
+                        crate::audiograph::params_push_wrapper(
+                            self.graph.lg.0,
+                            crate::audiograph::ParamMsg {
+                                logical_id: slot.node_id as u64,
+                                idx: crate::delay::DELAY_PARAM_BPM,
+                                fvalue: bpm,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_builtin_effect_to_slot(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        node_id: i32,
+        desc: EffectDescriptor,
+    ) {
+        self.graph.effect_descriptors[track][slot_idx] = desc.clone();
+        self.state.pattern.effect_chains[track][slot_idx].apply_descriptor(&desc, node_id as u32);
+
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
+            &self.state,
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        );
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+            if pattern_idx == current_pattern {
+                *snapshot = current_snapshot.clone();
+            } else {
+                snapshot.sync_effect_slot(track, slot_idx, &desc, node_id as u32);
+            }
+        }
+    }
+
+    pub(super) fn load_builtin_effect_to_slot_sync(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        let desc = EffectDescriptor::builtin_insert(name)
+            .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
+            self.resolve_custom_slot_wiring(track, slot_idx);
+        let node_id = self.create_builtin_effect_node(slot_id, &desc)?;
+        unsafe {
+            if let Some(old_id) = existing {
+                lisp_effect::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
+            }
+            self.connect_builtin_effect_chain(
+                pred,
+                pred_outputs,
+                node_id,
+                desc.input_channels,
+                desc.output_channels,
+                succ,
+                succ_inputs,
+            );
+        }
+        self.apply_builtin_effect_to_slot(track, slot_idx, node_id, desc);
+        self.push_track_effect_slot_defaults(track, slot_idx);
+        self.push_all_delay_bpm();
+        self.ui.effect_tab = EffectTab::Slot(slot_idx);
+        self.ui.effect_param_cursor = 0;
+        self.ui.effect_scroll_offset = 0;
+        Ok(())
+    }
+
+    pub fn add_builtin_effect_sync(&mut self, track: usize, name: &str) -> Result<usize, String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let chain = &self.state.pattern.effect_chains[track];
+        let slot_idx = (0..MAX_CUSTOM_FX)
+            .map(|offset| BUILTIN_SLOT_COUNT + offset)
+            .find(|idx| *idx < chain.len() && chain[*idx].node_id.load(Ordering::Relaxed) == 0)
+            .ok_or_else(|| "No free effect slots available".to_string())?;
+        self.load_builtin_effect_to_slot_sync(track, slot_idx, name)?;
+        Ok(slot_idx)
     }
 
     pub(super) fn effect_sidechain_labels(&self, track: usize) -> Vec<String> {
@@ -968,6 +1232,61 @@ impl App {
             .ok_or_else(|| "No free bus effect slots available".to_string())?;
         self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, name)?;
         Ok(slot_idx)
+    }
+
+    pub fn add_builtin_bus_effect_sync(
+        &mut self,
+        bus_idx: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let slot_idx = self
+            .next_free_bus_effect_slot(bus_idx)
+            .ok_or_else(|| "No free bus effect slots available".to_string())?;
+        self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, name)?;
+        Ok(slot_idx)
+    }
+
+    pub fn load_builtin_bus_effect_to_slot_sync(
+        &mut self,
+        bus_idx: usize,
+        slot_idx: usize,
+        name: &str,
+    ) -> Result<(), String> {
+        let desc = EffectDescriptor::builtin_insert(name)
+            .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
+            self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
+        let node_id = self.create_builtin_effect_node(slot_id, &desc)?;
+        unsafe {
+            if let Some(old_id) = existing {
+                lisp_effect::remove_effect_from_chain(self.graph.lg.0, old_id, pred, succ);
+            }
+            self.connect_builtin_effect_chain(
+                pred,
+                pred_outputs,
+                node_id,
+                desc.input_channels,
+                desc.output_channels,
+                succ,
+                succ_inputs,
+            );
+        }
+        let bus = self
+            .buses
+            .get_mut(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        bus.effect_descriptors[slot_idx] = desc.clone();
+        bus.effect_slots[slot_idx] =
+            crate::effects::EffectSlotSnapshot::new_default(&desc, node_id as u32);
+        if slot_idx < bus.custom_effect_names.len() {
+            bus.custom_effect_names[slot_idx] =
+                EffectDescriptor::builtin_insert_project_name(&desc.name);
+        }
+        self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+        self.push_all_delay_bpm();
+        self.ui.effect_param_cursor = 0;
+        self.ui.effect_scroll_offset = 0;
+        Ok(())
     }
 
     pub fn load_bus_effect_to_slot_sync(

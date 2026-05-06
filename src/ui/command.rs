@@ -895,6 +895,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
                 .transport
                 .bpm
                 .store(bpm.clamp(20, 999), Ordering::Relaxed);
+            app.push_all_delay_bpm();
         }
 
         AppCommand::AdjustRecordQuantizeThresh { delta } => {

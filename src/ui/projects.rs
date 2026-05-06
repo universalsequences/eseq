@@ -562,6 +562,10 @@ impl App {
                                 .to_string();
                             if name.is_empty() {
                                 None
+                            } else if let Some(project_name) =
+                                crate::effects::EffectDescriptor::builtin_insert_project_name(&name)
+                            {
+                                Some(project_name)
                             } else {
                                 Some(name)
                             }
@@ -699,11 +703,23 @@ impl App {
                             BUILTIN_SLOT_COUNT + offset,
                             effect_name
                         );
-                        self.load_saved_effect_to_slot_sync(
-                            track_idx,
-                            BUILTIN_SLOT_COUNT + offset,
-                            effect_name,
-                        )?;
+                        if let Some(builtin_name) =
+                            crate::effects::EffectDescriptor::strip_builtin_insert_project_name(
+                                effect_name,
+                            )
+                        {
+                            self.load_builtin_effect_to_slot_sync(
+                                track_idx,
+                                BUILTIN_SLOT_COUNT + offset,
+                                builtin_name,
+                            )?;
+                        } else {
+                            self.load_saved_effect_to_slot_sync(
+                                track_idx,
+                                BUILTIN_SLOT_COUNT + offset,
+                                effect_name,
+                            )?;
+                        }
                     }
                     pending.phase = super::PendingProjectLoadPhase::AddEffect {
                         track_idx,
@@ -836,7 +852,13 @@ impl App {
                 })
                 .collect();
         for (bus_idx, slot_idx, name, saved_slot) in saved_bus_effects {
-            self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, &name)?;
+            if let Some(builtin_name) =
+                crate::effects::EffectDescriptor::strip_builtin_insert_project_name(&name)
+            {
+                self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, builtin_name)?;
+            } else {
+                self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, &name)?;
+            }
             if let Some(slot) = self
                 .buses
                 .get_mut(bus_idx)

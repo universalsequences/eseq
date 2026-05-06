@@ -11,7 +11,7 @@
   (sdf/layer 
     (sdf/fill (sdf/rounded-rect width height 0.6) 
       (mix 
-        (if selected (rgba 0.3 0.3 0.3 1) (rgba 0 0 0 0))
+        (if selected (if even (rgba 1 1 1 1 ) (rgba 0.7 0.7 0.7 1)) (rgba 0 0 0 0))
         (if even (rgba 0 0 0 0) (rgba 0.1 0.1 0.1 1))
         (if selected (smoothstep 0 -0.1 d) 1)
         )

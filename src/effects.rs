@@ -341,6 +341,38 @@ pub struct EffectDescriptor {
 }
 
 impl EffectDescriptor {
+    pub const BUILTIN_INSERT_PREFIX: &'static str = "builtin:";
+
+    pub fn builtin_insert_names() -> &'static [&'static str] {
+        &["Filter", "Delay", "Reverb"]
+    }
+
+    pub fn builtin_insert_project_name(name: &str) -> Option<String> {
+        let canonical = Self::canonical_builtin_insert_name(name)?;
+        Some(format!("{}{}", Self::BUILTIN_INSERT_PREFIX, canonical))
+    }
+
+    pub fn strip_builtin_insert_project_name(name: &str) -> Option<&str> {
+        name.strip_prefix(Self::BUILTIN_INSERT_PREFIX)
+            .and_then(Self::canonical_builtin_insert_name)
+    }
+
+    pub fn canonical_builtin_insert_name(name: &str) -> Option<&'static str> {
+        Self::builtin_insert_names()
+            .iter()
+            .copied()
+            .find(|builtin| builtin.eq_ignore_ascii_case(name.trim()))
+    }
+
+    pub fn builtin_insert(name: &str) -> Option<Self> {
+        match Self::canonical_builtin_insert_name(name)? {
+            "Filter" => Some(Self::builtin_filter()),
+            "Delay" => Some(Self::builtin_delay()),
+            "Reverb" => Some(Self::builtin_reverb_insert()),
+            _ => None,
+        }
+    }
+
     /// Built-in filter effect descriptor.
     pub fn builtin_filter() -> Self {
         Self {
@@ -469,6 +501,60 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 5,
+                    host_control: None,
+                },
+            ],
+        }
+    }
+
+    /// Built-in reverb as an insert effect. The DSP node is mono-in/stereo-out,
+    /// so stereo predecessors are currently folded to its mono input by graph wiring.
+    pub fn builtin_reverb_insert() -> Self {
+        Self {
+            name: "Reverb".to_string(),
+            input_channels: 1,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "mix".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.35,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 4,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "size".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.2,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::reverb::REVERB_PARAM_SIZE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "brightness".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.8,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::reverb::REVERB_PARAM_BRIGHT as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "replace".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.3,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::reverb::REVERB_PARAM_REPLACE as u32,
                     host_control: None,
                 },
             ],
