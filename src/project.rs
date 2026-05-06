@@ -206,6 +206,8 @@ pub struct ProjectPattern {
         deserialize_with = "deserialize_timebase_plock_snapshots"
     )]
     pub swing_resolution_plock_snapshots: Vec<Vec<Option<u32>>>,
+    #[serde(default)]
+    pub bus_patterns: Vec<ProjectBusPatternSnapshot>,
     pub instrument_types: Vec<ProjectInstrumentType>,
     pub sample_paths: Vec<Option<String>>,
     pub sample_names: Vec<String>,
@@ -303,11 +305,21 @@ fn default_midi_fx_position() -> ProjectMidiFxPosition {
     ProjectMidiFxPosition::PostAccumulator
 }
 
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct ProjectBusPatternSnapshot {
+    pub id: u64,
+    #[serde(default)]
+    pub gate_sequence: ProjectBusGateSequence,
+    #[serde(default)]
+    pub effect_slots: Vec<ProjectEffectSlot>,
+}
+
 impl ProjectPattern {
     pub fn from_snapshot(
         snapshot: &PatternSnapshot,
         sample_paths: Vec<Option<String>>,
         sample_names: Vec<String>,
+        bus_patterns: Vec<ProjectBusPatternSnapshot>,
     ) -> Self {
         Self {
             track_bits: snapshot.track_bits.clone(),
@@ -365,6 +377,7 @@ impl ProjectPattern {
                 .iter()
                 .map(|steps| steps.to_vec())
                 .collect(),
+            bus_patterns,
             instrument_types: snapshot
                 .instrument_types
                 .iter()
@@ -1136,6 +1149,7 @@ mod tests {
                 timebase_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
                 swing_resolution_plock_snapshots: vec![vec![None; 256], vec![None; 256]],
+                bus_patterns: Vec::new(),
                 instrument_types: vec![
                     ProjectInstrumentType::Custom,
                     ProjectInstrumentType::Sampler,
@@ -1167,8 +1181,8 @@ mod tests {
         assert_eq!(restored.patterns[0].track_params[0].accum_mode, 2);
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);
-        assert_eq!(restored.buses.len(), 2);
-        assert_eq!(restored.buses[0].id, crate::sequencer::DEFAULT_BUS_A_ID);
+        assert_eq!(restored.buses.len(), 3);
+        assert_eq!(restored.buses[0].id, crate::sequencer::MIX_BUS_ID);
         assert!(matches!(
             restored.patterns[0].track_params[0].output,
             ProjectTrackOutput::Bus { id } if id == crate::sequencer::DEFAULT_BUS_A_ID

@@ -2495,6 +2495,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             });
                             if let Some(idx) = idx {
                                 let num_tracks = app.tracks.len();
+                                let current_pattern =
+                                    app.state.pattern.current_pattern.load(Ordering::Relaxed)
+                                        as usize;
+                                let num_patterns =
+                                    app.state.pattern.num_patterns.load(Ordering::Relaxed) as usize;
+                                if idx != current_pattern && idx < num_patterns {
+                                    app.switch_bus_pattern(idx);
+                                }
                                 if let Some(sample_ids) = app.state.switch_pattern(
                                     idx,
                                     num_tracks,
@@ -2590,14 +2598,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "clone-pattern" => {
                         let num_tracks = app.tracks.len();
+                        app.save_current_bus_pattern();
+                        let source_pattern =
+                            app.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
                         let new_idx = app.state.clone_pattern(
                             num_tracks,
                             &app.graph.track_buffer_ids,
                             &app.tracks,
                             &app.graph.track_instrument_types,
                         );
+                        app.clone_bus_pattern_from_to(source_pattern, new_idx);
                         let rt = editor.runtime_mut();
                         sync_pattern_state(rt, &state);
+                        sync_bus_mixer_state(rt, &app);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2608,6 +2621,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     "delete-pattern" => {
                         let num_tracks = app.tracks.len();
+                        app.save_current_bus_pattern();
+                        let deleted_pattern =
+                            app.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
                         if let Some(sample_ids) = app.state.delete_pattern(
                             num_tracks,
                             &app.graph.track_buffer_ids,
@@ -2616,6 +2632,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ) {
                             app.graph_controller().apply_sample_ids(&sample_ids);
                             app.push_all_restored_defaults();
+                            let new_pattern =
+                                app.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+                            app.delete_bus_pattern_at(deleted_pattern, new_pattern);
                             let ct = current_track.load(Ordering::Relaxed);
                             let rt = editor.runtime_mut();
                             sync_track_name_state(rt, &mut track_names, &app);

@@ -7,7 +7,8 @@ use crossterm::event::KeyCode;
 use crate::effects::BUILTIN_SLOT_COUNT;
 use crate::project::{
     self, chord_snapshot_from_steps_and_durations, project_file_version, ProjectBusChannel,
-    ProjectFile, ProjectPattern, ProjectReverbState, ProjectScratchState, ProjectTrack,
+    ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
+    ProjectScratchState, ProjectTrack,
 };
 use crate::sequencer::{BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS};
 
@@ -86,6 +87,39 @@ fn project_bus_gate_sequence_to_ui(
             value.map(crate::sequencer::SwingResolution::from_index);
     }
     restored
+}
+
+fn project_bus_pattern_snapshot_from_ui(
+    snapshot: &super::BusPatternSnapshot,
+) -> ProjectBusPatternSnapshot {
+    ProjectBusPatternSnapshot {
+        id: snapshot.id.0,
+        gate_sequence: project_bus_gate_sequence_from_ui(&snapshot.gate_sequence),
+        effect_slots: snapshot
+            .effect_plocks
+            .iter()
+            .map(|plocks| crate::project::ProjectEffectSlot {
+                num_params: plocks.iter().map(Vec::len).max().unwrap_or(0) as u32,
+                defaults: Vec::new(),
+                plocks: plocks.clone(),
+                param_node_indices: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn project_bus_pattern_snapshot_to_ui(
+    snapshot: ProjectBusPatternSnapshot,
+) -> super::BusPatternSnapshot {
+    super::BusPatternSnapshot {
+        id: BusId(snapshot.id),
+        gate_sequence: project_bus_gate_sequence_to_ui(snapshot.gate_sequence),
+        effect_plocks: snapshot
+            .effect_slots
+            .into_iter()
+            .map(|slot| slot.plocks)
+            .collect(),
+    }
 }
 
 impl From<BusChannelState> for ProjectBusChannel {
@@ -247,6 +281,7 @@ impl App {
             tick: 0,
             project,
             built_patterns: Vec::new(),
+            built_bus_patterns: Vec::new(),
             fallback_samples: 0,
             phase: super::PendingProjectLoadPhase::ClearExisting,
         });
@@ -397,8 +432,11 @@ impl App {
                 );
             }
         }
+        self.save_current_bus_pattern();
 
         let bank = self.state.pattern.pattern_bank.lock().unwrap().clone();
+        self.ensure_bus_pattern_bank_len(bank.len());
+        let bus_pattern_bank = self.bus_pattern_bank.clone();
         let tracks = self.capture_project_tracks()?;
         let custom_effects = self.capture_custom_effects();
         let patterns = bank
@@ -433,6 +471,13 @@ impl App {
                     snapshot,
                     sample_paths,
                     sample_names,
+                    bus_pattern_bank
+                        .get(pattern_idx)
+                        .cloned()
+                        .unwrap_or_else(|| self.capture_bus_pattern_snapshot())
+                        .iter()
+                        .map(project_bus_pattern_snapshot_from_ui)
+                        .collect(),
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -676,10 +721,12 @@ impl App {
                 if pattern_idx >= pending.project.patterns.len() {
                     pending.phase = super::PendingProjectLoadPhase::Finalize;
                 } else {
-                    let (snapshot, fallback_count) = self.project_pattern_into_snapshot(
-                        pending.project.patterns[pattern_idx].clone(),
-                    )?;
+                    let (snapshot, bus_patterns, fallback_count) = self
+                        .project_pattern_into_snapshot(
+                            pending.project.patterns[pattern_idx].clone(),
+                        )?;
                     pending.built_patterns.push(snapshot);
+                    pending.built_bus_patterns.push(bus_patterns);
                     pending.fallback_samples += fallback_count;
                     pending.phase = super::PendingProjectLoadPhase::BuildPattern(pattern_idx + 1);
                 }
@@ -722,6 +769,7 @@ impl App {
             patterns: _,
         } = pending.project;
         let bank = pending.built_patterns;
+        let mut bus_pattern_bank = pending.built_bus_patterns;
         let current_pattern = saved_current_pattern.min(bank.len().saturating_sub(1));
 
         {
@@ -800,6 +848,22 @@ impl App {
             }
             self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
         }
+        if bus_pattern_bank.is_empty() {
+            bus_pattern_bank = (0..self.state.pattern.num_patterns.load(Ordering::Relaxed)
+                as usize)
+                .map(|_| self.capture_bus_pattern_snapshot())
+                .collect();
+        }
+        self.bus_pattern_bank = bus_pattern_bank;
+        self.ensure_bus_pattern_bank_len(
+            self.state.pattern.num_patterns.load(Ordering::Relaxed) as usize
+        );
+        let current_bus_snapshot = self
+            .bus_pattern_bank
+            .get(current_pattern)
+            .cloned()
+            .unwrap_or_else(|| self.capture_bus_pattern_snapshot());
+        self.restore_bus_pattern_snapshot(&current_bus_snapshot);
         for bus in &self.buses {
             let Some(nodes) = self
                 .graph
@@ -920,7 +984,7 @@ impl App {
     fn project_pattern_into_snapshot(
         &mut self,
         pattern: ProjectPattern,
-    ) -> Result<(PatternSnapshot, usize), String> {
+    ) -> Result<(PatternSnapshot, Vec<super::BusPatternSnapshot>, usize), String> {
         let num_tracks = self.tracks.len();
         let mut sample_ids = Vec::with_capacity(num_tracks);
         let mut fallback_count = 0;
@@ -994,10 +1058,15 @@ impl App {
             timebase_plock_snapshots,
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
+            bus_patterns,
             instrument_types: _,
             sample_paths: _,
             sample_names: _,
         } = pattern;
+        let bus_patterns = bus_patterns
+            .into_iter()
+            .map(project_bus_pattern_snapshot_to_ui)
+            .collect();
 
         // Pre-extract attack/release for sampler instrument slot migration
         // before track_params is consumed by into_iter().
@@ -1006,167 +1075,162 @@ impl App {
             .map(|tp| (tp.attack_ms, tp.release_ms))
             .collect();
 
-        Ok((
-            PatternSnapshot {
-                track_bits,
-                step_data,
-                track_params: track_params.into_iter().map(Into::into).collect(),
-                effect_slots: effect_slots
-                    .into_iter()
-                    .enumerate()
-                    .map(|(track_idx, slots)| {
-                        slots
-                            .into_iter()
-                            .enumerate()
-                            .map(|(slot_idx, slot)| {
-                                let node_id = self.state.pattern.effect_chains[track_idx][slot_idx]
-                                    .node_id
-                                    .load(Ordering::Relaxed);
-                                slot.into_snapshot_with_node_id(node_id)
-                            })
-                            .collect()
-                    })
-                    .collect(),
-                midi_fx_slots: (0..num_tracks)
-                    .map(|track_idx| {
-                        midi_fx_slots
-                            .get(track_idx)
-                            .cloned()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(|slot| slot.into_snapshot_with_node_id(0))
-                            .collect()
-                    })
-                    .collect(),
-                instrument_slots: (0..num_tracks)
-                    .map(|track_idx| {
-                        let node_id = self.state.pattern.instrument_slots[track_idx]
-                            .node_id
-                            .load(Ordering::Relaxed);
-                        if self.is_sampler_track(track_idx) {
-                            let saved_slot = instrument_slots
-                                .get(track_idx)
-                                .cloned()
-                                .unwrap_or_else(|| crate::project::ProjectEffectSlot {
+        let snapshot = PatternSnapshot {
+            track_bits,
+            step_data,
+            track_params: track_params.into_iter().map(Into::into).collect(),
+            effect_slots: effect_slots
+                .into_iter()
+                .enumerate()
+                .map(|(track_idx, slots)| {
+                    slots
+                        .into_iter()
+                        .enumerate()
+                        .map(|(slot_idx, slot)| {
+                            let node_id = self.state.pattern.effect_chains[track_idx][slot_idx]
+                                .node_id
+                                .load(Ordering::Relaxed);
+                            slot.into_snapshot_with_node_id(node_id)
+                        })
+                        .collect()
+                })
+                .collect(),
+            midi_fx_slots: (0..num_tracks)
+                .map(|track_idx| {
+                    midi_fx_slots
+                        .get(track_idx)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|slot| slot.into_snapshot_with_node_id(0))
+                        .collect()
+                })
+                .collect(),
+            instrument_slots: (0..num_tracks)
+                .map(|track_idx| {
+                    let node_id = self.state.pattern.instrument_slots[track_idx]
+                        .node_id
+                        .load(Ordering::Relaxed);
+                    if self.is_sampler_track(track_idx) {
+                        let saved_slot =
+                            instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
+                                crate::project::ProjectEffectSlot {
                                     num_params: 0,
                                     defaults: Vec::new(),
                                     plocks: vec![Vec::new(); MAX_STEPS],
                                     param_node_indices: Vec::new(),
-                                });
-                            if saved_slot.num_params >= 4 {
-                                // New project format: sampler params already saved
-                                saved_slot.into_snapshot_with_node_id(0)
-                            } else {
-                                // Old project: migrate attack/release from TrackParams
-                                let sampler_desc =
-                                    crate::effects::EffectDescriptor::builtin_sampler();
-                                let mut defaults: Vec<f32> =
-                                    sampler_desc.params.iter().map(|p| p.default).collect();
-                                let (attack, release) = sampler_attack_release
-                                    .get(track_idx)
-                                    .copied()
-                                    .unwrap_or((0.0, 0.0));
-                                defaults[0] = attack;
-                                defaults[1] = release;
-                                // start=0.0, end=1.0 already set from defaults
-                                crate::effects::EffectSlotSnapshot {
-                                    node_id: 0,
-                                    num_params: defaults.len() as u32,
-                                    defaults,
-                                    plocks: vec![Vec::new(); MAX_STEPS],
-                                    param_node_indices: sampler_desc
-                                        .params
-                                        .iter()
-                                        .map(|p| p.node_param_idx)
-                                        .collect(),
                                 }
-                            }
+                            });
+                        if saved_slot.num_params >= 4 {
+                            // New project format: sampler params already saved
+                            saved_slot.into_snapshot_with_node_id(0)
                         } else {
-                            let desc = self.graph.instrument_descriptors[track_idx].clone();
-                            let slot =
-                                instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
-                                    crate::project::ProjectEffectSlot {
-                                        num_params: 0,
-                                        defaults: Vec::new(),
-                                        plocks: vec![Vec::new(); MAX_STEPS],
-                                        param_node_indices: Vec::new(),
-                                    }
-                                });
-                            if slot.num_params == 0 {
-                                crate::effects::EffectSlotSnapshot::capture(
-                                    &self.state.pattern.instrument_slots[track_idx],
-                                )
-                            } else {
-                                let mut snapshot = slot.into_snapshot_with_node_id(node_id);
-                                // Regenerate instrument param routing from the current descriptor.
-                                // Older projects may have serialized stale absolute node ids here,
-                                // which makes restored synth edits no-op after load.
-                                snapshot.param_node_indices =
-                                    desc.params.iter().map(|p| p.node_param_idx).collect();
-                                snapshot
+                            // Old project: migrate attack/release from TrackParams
+                            let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
+                            let mut defaults: Vec<f32> =
+                                sampler_desc.params.iter().map(|p| p.default).collect();
+                            let (attack, release) = sampler_attack_release
+                                .get(track_idx)
+                                .copied()
+                                .unwrap_or((0.0, 0.0));
+                            defaults[0] = attack;
+                            defaults[1] = release;
+                            // start=0.0, end=1.0 already set from defaults
+                            crate::effects::EffectSlotSnapshot {
+                                node_id: 0,
+                                num_params: defaults.len() as u32,
+                                defaults,
+                                plocks: vec![Vec::new(); MAX_STEPS],
+                                param_node_indices: sampler_desc
+                                    .params
+                                    .iter()
+                                    .map(|p| p.node_param_idx)
+                                    .collect(),
                             }
                         }
-                    })
-                    .collect(),
-                instrument_base_note_offsets,
-                track_sound_states: track_sound_states
-                    .into_iter()
-                    .enumerate()
-                    .map(|(track_idx, sound)| {
-                        let engine_id = self
-                            .graph
-                            .track_engine_ids
-                            .get(track_idx)
-                            .and_then(|id| *id);
-                        sound.into_track_sound_state(engine_id)
-                    })
-                    .collect(),
-                sample_ids,
-                chord_snapshots: chord_snapshots
-                    .into_iter()
-                    .zip(
-                        chord_duration_snapshots
-                            .into_iter()
-                            .chain(std::iter::repeat_with(|| vec![Vec::new(); MAX_STEPS])),
-                    )
-                    .map(|(steps, durations)| {
-                        chord_snapshot_from_steps_and_durations(steps, durations)
-                    })
-                    .collect(),
-                timebase_plock_snapshots: timebase_plock_snapshots
-                    .into_iter()
-                    .map(|steps| {
-                        let mut snapshot = [None; MAX_STEPS];
-                        for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
-                            snapshot[idx] = value;
+                    } else {
+                        let desc = self.graph.instrument_descriptors[track_idx].clone();
+                        let slot = instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
+                            crate::project::ProjectEffectSlot {
+                                num_params: 0,
+                                defaults: Vec::new(),
+                                plocks: vec![Vec::new(); MAX_STEPS],
+                                param_node_indices: Vec::new(),
+                            }
+                        });
+                        if slot.num_params == 0 {
+                            crate::effects::EffectSlotSnapshot::capture(
+                                &self.state.pattern.instrument_slots[track_idx],
+                            )
+                        } else {
+                            let mut snapshot = slot.into_snapshot_with_node_id(node_id);
+                            // Regenerate instrument param routing from the current descriptor.
+                            // Older projects may have serialized stale absolute node ids here,
+                            // which makes restored synth edits no-op after load.
+                            snapshot.param_node_indices =
+                                desc.params.iter().map(|p| p.node_param_idx).collect();
+                            snapshot
                         }
-                        snapshot
-                    })
-                    .collect(),
-                swing_plock_snapshots: swing_plock_snapshots
-                    .into_iter()
-                    .map(|steps| {
-                        let mut snapshot = [None; MAX_STEPS];
-                        for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
-                            snapshot[idx] = value;
-                        }
-                        snapshot
-                    })
-                    .collect(),
-                swing_resolution_plock_snapshots: swing_resolution_plock_snapshots
-                    .into_iter()
-                    .map(|steps| {
-                        let mut snapshot = [None; MAX_STEPS];
-                        for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
-                            snapshot[idx] = value;
-                        }
-                        snapshot
-                    })
-                    .collect(),
-                instrument_types: self.graph.track_instrument_types.clone(),
-            },
-            fallback_count,
-        ))
+                    }
+                })
+                .collect(),
+            instrument_base_note_offsets,
+            track_sound_states: track_sound_states
+                .into_iter()
+                .enumerate()
+                .map(|(track_idx, sound)| {
+                    let engine_id = self
+                        .graph
+                        .track_engine_ids
+                        .get(track_idx)
+                        .and_then(|id| *id);
+                    sound.into_track_sound_state(engine_id)
+                })
+                .collect(),
+            sample_ids,
+            chord_snapshots: chord_snapshots
+                .into_iter()
+                .zip(
+                    chord_duration_snapshots
+                        .into_iter()
+                        .chain(std::iter::repeat_with(|| vec![Vec::new(); MAX_STEPS])),
+                )
+                .map(|(steps, durations)| chord_snapshot_from_steps_and_durations(steps, durations))
+                .collect(),
+            timebase_plock_snapshots: timebase_plock_snapshots
+                .into_iter()
+                .map(|steps| {
+                    let mut snapshot = [None; MAX_STEPS];
+                    for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                        snapshot[idx] = value;
+                    }
+                    snapshot
+                })
+                .collect(),
+            swing_plock_snapshots: swing_plock_snapshots
+                .into_iter()
+                .map(|steps| {
+                    let mut snapshot = [None; MAX_STEPS];
+                    for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                        snapshot[idx] = value;
+                    }
+                    snapshot
+                })
+                .collect(),
+            swing_resolution_plock_snapshots: swing_resolution_plock_snapshots
+                .into_iter()
+                .map(|steps| {
+                    let mut snapshot = [None; MAX_STEPS];
+                    for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                        snapshot[idx] = value;
+                    }
+                    snapshot
+                })
+                .collect(),
+            instrument_types: self.graph.track_instrument_types.clone(),
+        };
+
+        Ok((snapshot, bus_patterns, fallback_count))
     }
 
     fn first_available_sample_path(&self) -> Option<PathBuf> {

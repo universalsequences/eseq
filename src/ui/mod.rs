@@ -228,6 +228,7 @@ struct PendingProjectLoad {
     tick: usize,
     project: crate::project::ProjectFile,
     built_patterns: Vec<crate::sequencer::PatternSnapshot>,
+    built_bus_patterns: Vec<Vec<BusPatternSnapshot>>,
     fallback_samples: usize,
     phase: PendingProjectLoadPhase,
 }
@@ -518,6 +519,13 @@ pub struct BusChannelState {
 }
 
 #[derive(Clone)]
+pub struct BusPatternSnapshot {
+    pub id: BusId,
+    pub gate_sequence: BusGateSequence,
+    pub effect_plocks: Vec<Vec<Vec<Option<f32>>>>,
+}
+
+#[derive(Clone)]
 pub struct BusGateSequence {
     pub steps: [bool; MAX_STEPS],
     pub velocities: [f32; MAX_STEPS],
@@ -691,6 +699,7 @@ pub struct App {
     pub state: Arc<SequencerState>,
     pub tracks: Vec<String>,
     pub buses: Vec<BusChannelState>,
+    pub bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub sample_path_registry: HashMap<String, PathBuf>,
     pub current_project_name: Option<String>,
@@ -705,6 +714,109 @@ pub struct App {
 }
 
 impl App {
+    pub fn capture_bus_pattern_snapshot(&self) -> Vec<BusPatternSnapshot> {
+        self.buses
+            .iter()
+            .map(|bus| BusPatternSnapshot {
+                id: bus.id,
+                gate_sequence: bus.gate_sequence.clone(),
+                effect_plocks: bus
+                    .effect_slots
+                    .iter()
+                    .map(|slot| slot.plocks.clone())
+                    .collect(),
+            })
+            .collect()
+    }
+
+    pub fn restore_bus_pattern_snapshot(&mut self, snapshot: &[BusPatternSnapshot]) {
+        for bus in &mut self.buses {
+            let Some(saved) = snapshot.iter().find(|saved| saved.id == bus.id) else {
+                bus.gate_sequence = BusGateSequence::default();
+                for slot in &mut bus.effect_slots {
+                    slot.plocks = (0..MAX_STEPS)
+                        .map(|_| vec![None; slot.num_params as usize])
+                        .collect();
+                }
+                continue;
+            };
+            bus.gate_sequence = saved.gate_sequence.clone();
+            for (slot_idx, slot) in bus.effect_slots.iter_mut().enumerate() {
+                let Some(saved_plocks) = saved.effect_plocks.get(slot_idx) else {
+                    slot.plocks = (0..MAX_STEPS)
+                        .map(|_| vec![None; slot.num_params as usize])
+                        .collect();
+                    continue;
+                };
+                let param_count = slot.num_params as usize;
+                slot.plocks = (0..MAX_STEPS)
+                    .map(|step| {
+                        let mut values = vec![None; param_count];
+                        if let Some(saved_step) = saved_plocks.get(step) {
+                            for (param_idx, value) in saved_step.iter().copied().enumerate() {
+                                if param_idx < values.len() {
+                                    values[param_idx] = value;
+                                }
+                            }
+                        }
+                        values
+                    })
+                    .collect();
+            }
+        }
+        self.publish_bus_gate_runtime();
+    }
+
+    pub fn save_current_bus_pattern(&mut self) {
+        let current_pattern = self
+            .state
+            .pattern
+            .current_pattern
+            .load(std::sync::atomic::Ordering::Relaxed) as usize;
+        let num_patterns = self
+            .state
+            .pattern
+            .num_patterns
+            .load(std::sync::atomic::Ordering::Relaxed) as usize;
+        self.ensure_bus_pattern_bank_len(num_patterns.max(current_pattern + 1));
+        self.bus_pattern_bank[current_pattern] = self.capture_bus_pattern_snapshot();
+    }
+
+    pub fn ensure_bus_pattern_bank_len(&mut self, len: usize) {
+        while self.bus_pattern_bank.len() < len {
+            self.bus_pattern_bank
+                .push(self.capture_bus_pattern_snapshot());
+        }
+    }
+
+    pub fn switch_bus_pattern(&mut self, new_idx: usize) {
+        self.save_current_bus_pattern();
+        self.ensure_bus_pattern_bank_len(new_idx + 1);
+        let snapshot = self.bus_pattern_bank[new_idx].clone();
+        self.restore_bus_pattern_snapshot(&snapshot);
+    }
+
+    pub fn clone_bus_pattern_from_to(&mut self, source_idx: usize, new_idx: usize) {
+        self.save_current_bus_pattern();
+        let source = self
+            .bus_pattern_bank
+            .get(source_idx)
+            .cloned()
+            .unwrap_or_else(|| self.capture_bus_pattern_snapshot());
+        self.ensure_bus_pattern_bank_len(new_idx + 1);
+        self.bus_pattern_bank[new_idx] = source.clone();
+        self.restore_bus_pattern_snapshot(&source);
+    }
+
+    pub fn delete_bus_pattern_at(&mut self, deleted_idx: usize, new_idx: usize) {
+        if self.bus_pattern_bank.len() > 1 && deleted_idx < self.bus_pattern_bank.len() {
+            self.bus_pattern_bank.remove(deleted_idx);
+        }
+        self.ensure_bus_pattern_bank_len(new_idx + 1);
+        let snapshot = self.bus_pattern_bank[new_idx].clone();
+        self.restore_bus_pattern_snapshot(&snapshot);
+    }
+
     pub fn publish_bus_gate_runtime(&self) {
         let runtime = self
             .buses
@@ -772,10 +884,11 @@ impl App {
         };
         let browser_tree = BrowserNode::scan_root("samples");
 
-        let app = Self {
+        let mut app = Self {
             state,
             tracks: Vec::new(),
             buses: BusChannelState::default_buses(),
+            bus_pattern_bank: Vec::new(),
             sampler_paths: Vec::new(),
             sample_path_registry: HashMap::new(),
             current_project_name: None,
@@ -907,6 +1020,7 @@ impl App {
                 keyboard_tx,
             },
         };
+        app.ensure_bus_pattern_bank_len(1);
         app.publish_bus_gate_runtime();
         app
     }
