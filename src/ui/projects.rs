@@ -20,6 +20,7 @@ fn project_bus_gate_sequence_from_ui(
         steps: sequence.steps.to_vec(),
         velocities: sequence.velocities.to_vec(),
         durations: sequence.durations.to_vec(),
+        syncs: sequence.syncs.to_vec(),
         num_steps: sequence.num_steps,
         timebase: sequence.timebase as u8,
         swing: sequence.swing,
@@ -50,6 +51,9 @@ fn project_bus_gate_sequence_to_ui(
     }
     for (idx, value) in sequence.durations.into_iter().take(MAX_STEPS).enumerate() {
         restored.durations[idx] = value.clamp(0.1, 2.0);
+    }
+    for (idx, value) in sequence.syncs.into_iter().take(MAX_STEPS).enumerate() {
+        restored.set_step_sync(idx, value);
     }
     restored.set_num_steps(sequence.num_steps);
     restored.timebase = crate::sequencer::Timebase::from_index(sequence.timebase as u32);
@@ -139,6 +143,7 @@ impl App {
             self.graph_controller()
                 .ensure_bus_graph_node(bus.id, &bus.name);
         }
+        self.publish_bus_gate_runtime();
         id
     }
 
@@ -173,6 +178,7 @@ impl App {
             }
         }
         self.graph_controller().delete_bus_graph_node(id);
+        self.publish_bus_gate_runtime();
         let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
         for pattern in bank.iter_mut() {
             for params in &mut pattern.track_params {
@@ -822,6 +828,7 @@ impl App {
                 );
             }
         }
+        self.publish_bus_gate_runtime();
 
         self.ui.cursor_track = 0;
         self.ui.cursor_step = 0;

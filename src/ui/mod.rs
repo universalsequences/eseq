@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::agent::actions::{
@@ -361,6 +361,8 @@ pub struct GraphState {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
     pub bus_node_ids: Vec<BusNodeIds>,
+    pub bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
+    pub bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
     pub track_buffer_ids: Vec<i32>,
@@ -478,6 +480,8 @@ pub struct AudioBuses {
     pub bus_l_id: i32,
     pub bus_r_id: i32,
     pub default_bus_nodes: Vec<BusNodeIds>,
+    pub bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
+    pub bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
 }
@@ -488,7 +492,16 @@ pub struct BusNodeIds {
     pub left_id: i32,
     pub right_id: i32,
     pub merge_id: i32,
+    pub gate_id: i32,
     pub volume_id: i32,
+}
+
+#[derive(Clone)]
+pub struct BusGateRuntimeState {
+    pub id: BusId,
+    pub gate_id: i32,
+    pub sequence: BusGateSequence,
+    pub effect_slots: Vec<EffectSlotSnapshot>,
 }
 
 #[derive(Clone)]
@@ -509,6 +522,7 @@ pub struct BusGateSequence {
     pub steps: [bool; MAX_STEPS],
     pub velocities: [f32; MAX_STEPS],
     pub durations: [f32; MAX_STEPS],
+    pub syncs: [f32; MAX_STEPS],
     pub num_steps: usize,
     pub timebase: Timebase,
     pub swing: f32,
@@ -524,6 +538,7 @@ impl Default for BusGateSequence {
             steps: [true; MAX_STEPS],
             velocities: [1.0; MAX_STEPS],
             durations: [1.0; MAX_STEPS],
+            syncs: [0.0; MAX_STEPS],
             num_steps: 16,
             timebase: Timebase::Sixteenth,
             swing: 50.0,
@@ -551,6 +566,14 @@ impl BusGateSequence {
     pub fn set_step_duration(&mut self, step: usize, value: f32) -> Option<f32> {
         let slot = self.durations.get_mut(step)?;
         *slot = value.clamp(0.1, 2.0);
+        Some(*slot)
+    }
+
+    pub fn set_step_sync(&mut self, step: usize, value: f32) -> Option<f32> {
+        let slot = self.syncs.get_mut(step)?;
+        *slot = value
+            .round()
+            .clamp(0.0, (crate::sequencer::SYNC_COUNT - 1) as f32);
         Some(*slot)
     }
 
@@ -682,6 +705,42 @@ pub struct App {
 }
 
 impl App {
+    pub fn publish_bus_gate_runtime(&self) {
+        let runtime = self
+            .buses
+            .iter()
+            .filter_map(|bus| {
+                let nodes = self
+                    .graph
+                    .bus_node_ids
+                    .iter()
+                    .find(|nodes| nodes.id == bus.id)?;
+                Some(BusGateRuntimeState {
+                    id: bus.id,
+                    gate_id: nodes.gate_id,
+                    sequence: bus.gate_sequence.clone(),
+                    effect_slots: bus.effect_slots.clone(),
+                })
+            })
+            .collect();
+        *self.graph.bus_gate_runtime.lock().unwrap() = runtime;
+
+        let mut playheads = self.graph.bus_gate_playheads.lock().unwrap();
+        let next_playheads = self
+            .buses
+            .iter()
+            .map(|bus| {
+                let step = playheads
+                    .iter()
+                    .find(|(id, _)| *id == bus.id)
+                    .map(|(_, step)| *step)
+                    .unwrap_or(0);
+                (bus.id, step)
+            })
+            .collect();
+        *playheads = next_playheads;
+    }
+
     pub fn new(
         state: Arc<SequencerState>,
         lg: LiveGraphPtr,
@@ -713,7 +772,7 @@ impl App {
         };
         let browser_tree = BrowserNode::scan_root("samples");
 
-        Self {
+        let app = Self {
             state,
             tracks: Vec::new(),
             buses: BusChannelState::default_buses(),
@@ -831,6 +890,8 @@ impl App {
                 bus_l_id: buses.bus_l_id,
                 bus_r_id: buses.bus_r_id,
                 bus_node_ids: buses.default_bus_nodes,
+                bus_gate_runtime: buses.bus_gate_runtime,
+                bus_gate_playheads: buses.bus_gate_playheads,
                 reverb_bus_id: buses.reverb_bus_id,
                 reverb_node_id: buses.reverb_node_id,
                 track_buffer_ids: Vec::new(),
@@ -845,7 +906,9 @@ impl App {
                 record_armed: Vec::new(),
                 keyboard_tx,
             },
-        }
+        };
+        app.publish_bus_gate_runtime();
+        app
     }
 
     fn selected_range(&self) -> (usize, usize) {

@@ -5,11 +5,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::BinaryHeap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::audiograph::*;
 use crate::delay;
+use crate::effects::EffectSlotSnapshot;
 use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
@@ -21,7 +22,10 @@ use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
     ScheduledInstrumentParam, ScheduledInstrumentParamTarget, TimedEvent,
 };
-use crate::sequencer::{KeyboardTrigger, SequencerState, StepParam, SwingResolution, MAX_TRACKS};
+use crate::sequencer::{
+    sync_beats, BusId, KeyboardTrigger, SequencerState, StepParam, SwingResolution, MAX_TRACKS,
+};
+use crate::ui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
 
 fn env_flag(name: &str, default: bool) -> bool {
@@ -148,6 +152,11 @@ struct AudioCallbackData {
     pending_accum_reset: [bool; MAX_TRACKS],
     scheduled_events: Arc<ScheduledEventQueue<4096>>,
     rendered_samples: Arc<AtomicU64>,
+    bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
+    bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
+    bus_gate_clocks: Vec<BusGateClock>,
+    bus_gate_was_playing: bool,
+    bus_gate_play_start_sample: u64,
     dropped_scheduled_events: u64,
     late_scheduled_events: u64,
     events_heap: BinaryHeap<Reverse<TimedEvent>>,
@@ -156,6 +165,13 @@ struct AudioCallbackData {
     trace_callback_counter: u64,
     trace_render_probe_blocks: u32,
     trace_silent_active_callbacks: u32,
+}
+
+#[derive(Clone, Copy)]
+struct BusGateClock {
+    id: crate::sequencer::BusId,
+    last_target: f32,
+    last_step: Option<usize>,
 }
 
 struct CustomVoiceSlot {
@@ -1025,6 +1041,191 @@ fn render_chunk(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
 }
 
+fn bus_gate_state_at(sequence: &crate::ui::BusGateSequence, total_beats: f64) -> (f32, usize) {
+    const EPS: f64 = 1e-9;
+    let ns = sequence.num_steps.clamp(1, crate::sequencer::MAX_STEPS);
+    let mut starts = [0.0f64; crate::sequencer::MAX_STEPS];
+    let mut durations = [0.0f64; crate::sequencer::MAX_STEPS];
+    let mut accum = 0.0f64;
+    for step in 0..ns {
+        let timebase = sequence.timebase_plocks[step].unwrap_or(sequence.timebase);
+        let duration = timebase.step_beats(ns).max(EPS);
+        let sync = sync_beats(sequence.syncs[step]);
+        if sync > EPS {
+            accum = ceil_to_grid(accum, sync);
+        }
+        starts[step] = accum;
+        durations[step] = duration;
+        accum += duration;
+    }
+    let sync0 = sync_beats(sequence.syncs[0]);
+    if sync0 > EPS {
+        accum = ceil_to_grid(accum, sync0).max(EPS);
+    }
+    if accum <= EPS {
+        return (1.0, 0);
+    }
+
+    let pos = total_beats.rem_euclid(accum);
+    let mut active_step = None;
+    for idx in 0..ns {
+        if pos + EPS >= starts[idx] && pos < starts[idx] + durations[idx] {
+            active_step = Some(idx);
+            break;
+        }
+    }
+    let step = active_step.unwrap_or_else(|| {
+        let idx = starts[..ns].partition_point(|&start| start <= pos);
+        idx.saturating_sub(1).min(ns - 1)
+    });
+    if active_step.is_none() {
+        return (0.0, step);
+    }
+
+    if !sequence.steps[step] {
+        return (0.0, step);
+    }
+    let local = pos - starts[step];
+    let gate_duration = durations[step] * sequence.durations[step].clamp(0.0, 1.0) as f64;
+    if local <= gate_duration + EPS {
+        (sequence.velocities[step].clamp(0.0, 1.0), step)
+    } else {
+        (0.0, step)
+    }
+}
+
+fn bus_gate_target_at(sequence: &crate::ui::BusGateSequence, total_beats: f64) -> f32 {
+    bus_gate_state_at(sequence, total_beats).0
+}
+
+fn ceil_to_grid(value: f64, grid: f64) -> f64 {
+    let rem = value % grid;
+    if rem > 1e-9 {
+        value + (grid - rem)
+    } else {
+        value
+    }
+}
+
+unsafe fn dispatch_bus_effect_params_at_step(
+    lg: *mut LiveGraph,
+    effect_slots: &[EffectSlotSnapshot],
+    step: usize,
+) {
+    for slot in effect_slots {
+        if slot.node_id == 0 {
+            continue;
+        }
+        let num_params = slot.num_params as usize;
+        for param_idx in 0..num_params {
+            let idx = slot
+                .param_node_indices
+                .get(param_idx)
+                .copied()
+                .unwrap_or(param_idx as u32);
+            if idx == u32::MAX || param_idx >= slot.defaults.len() {
+                continue;
+            }
+            let value = slot
+                .plocks
+                .get(step)
+                .and_then(|step_plocks| step_plocks.get(param_idx))
+                .copied()
+                .flatten()
+                .unwrap_or(slot.defaults[param_idx]);
+            if !value.is_finite() {
+                continue;
+            }
+            crate::audiograph::params_push_wrapper(
+                lg,
+                crate::audiograph::ParamMsg {
+                    idx: idx as u64,
+                    logical_id: slot.node_id as u64,
+                    fvalue: value,
+                },
+            );
+        }
+    }
+}
+
+fn sync_bus_gate_params(data: &mut AudioCallbackData, block_start_sample: u64) {
+    let playing = data.state.transport.playing.load(Ordering::Relaxed);
+    let bpm = data.state.transport.bpm.load(Ordering::Relaxed).max(1) as f64;
+    if playing && !data.bus_gate_was_playing {
+        data.bus_gate_play_start_sample = block_start_sample;
+        for clock in &mut data.bus_gate_clocks {
+            clock.last_target = f32::NAN;
+            clock.last_step = None;
+        }
+    }
+    if !playing && data.bus_gate_was_playing {
+        for clock in &mut data.bus_gate_clocks {
+            clock.last_target = f32::NAN;
+            clock.last_step = None;
+        }
+    }
+    data.bus_gate_was_playing = playing;
+
+    let elapsed_samples = block_start_sample.saturating_sub(data.bus_gate_play_start_sample);
+    let total_beats = elapsed_samples as f64 * bpm / (data.sample_rate * 60.0);
+    let Ok(gates) = data.bus_gate_runtime.try_lock() else {
+        return;
+    };
+    let gates = gates.clone();
+    let mut playheads = Vec::with_capacity(gates.len());
+
+    data.bus_gate_clocks
+        .retain(|clock| gates.iter().any(|gate| gate.id == clock.id));
+
+    for gate in gates {
+        if gate.gate_id <= 0 {
+            continue;
+        }
+        let (target, step) = if playing {
+            bus_gate_state_at(&gate.sequence, total_beats)
+        } else {
+            (1.0, 0)
+        };
+        playheads.push((gate.id, step));
+        let clock_idx = data
+            .bus_gate_clocks
+            .iter()
+            .position(|clock| clock.id == gate.id)
+            .unwrap_or_else(|| {
+                data.bus_gate_clocks.push(BusGateClock {
+                    id: gate.id,
+                    last_target: f32::NAN,
+                    last_step: None,
+                });
+                data.bus_gate_clocks.len() - 1
+            });
+        let clock = &mut data.bus_gate_clocks[clock_idx];
+        if clock.last_step != Some(step) {
+            clock.last_step = Some(step);
+            unsafe {
+                dispatch_bus_effect_params_at_step(data.lg.0, &gate.effect_slots, step);
+            }
+        }
+        if (clock.last_target - target).abs() <= 0.0001 {
+            continue;
+        }
+        clock.last_target = target;
+        unsafe {
+            crate::audiograph::params_push_wrapper(
+                data.lg.0,
+                crate::audiograph::ParamMsg {
+                    idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                    logical_id: gate.gate_id as u64,
+                    fvalue: target,
+                },
+            );
+        }
+    }
+    if let Ok(mut shared_playheads) = data.bus_gate_playheads.try_lock() {
+        *shared_playheads = playheads;
+    }
+}
+
 fn interleaved_peak(output: &[f32], num_channels: usize) -> (f32, f32) {
     let mut peak_l = 0.0f32;
     let mut peak_r = 0.0f32;
@@ -1432,6 +1633,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     }
     let block_start_sample = data.rendered_samples.load(Ordering::Acquire);
     let block_end_sample = block_start_sample + nframes as u64;
+    sync_bus_gate_params(data, block_start_sample);
 
     // Sync voice pools against current runtime bindings. Project loads can
     // replace tracks in-place, so growth-only sync leaves dead logical IDs.
@@ -1976,6 +2178,8 @@ pub fn build_output_stream(
     block_size: usize,
     master_recorder: Arc<MasterRecorder>,
     keyboard_rx: std::sync::mpsc::Receiver<KeyboardTrigger>,
+    bus_gate_runtime: Arc<Mutex<Vec<BusGateRuntimeState>>>,
+    bus_gate_playheads: Arc<Mutex<Vec<(BusId, usize)>>>,
 ) -> Result<Stream, String> {
     let chop_state = (0..MAX_TRACKS)
         .map(|_| ChopTracker {
@@ -2059,6 +2263,11 @@ pub fn build_output_stream(
         pending_accum_reset: [false; MAX_TRACKS],
         scheduled_events: Arc::clone(&scheduled_events),
         rendered_samples: Arc::clone(&rendered_samples),
+        bus_gate_runtime,
+        bus_gate_playheads,
+        bus_gate_clocks: Vec::new(),
+        bus_gate_was_playing: false,
+        bus_gate_play_start_sample: 0,
         dropped_scheduled_events: 0,
         late_scheduled_events: 0,
         events_heap: BinaryHeap::new(),
@@ -2124,8 +2333,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        instrument_sound_fingerprint, resolve_live_keyboard_transpose, resolved_chord_transpose,
-        swing_delay_samples, CustomEnginePool, GateOffTracker,
+        bus_gate_target_at, instrument_sound_fingerprint, resolve_live_keyboard_transpose,
+        resolved_chord_transpose, swing_delay_samples, CustomEnginePool, GateOffTracker,
     };
     use crate::accumulator::AccumulatorRuntimeState;
     use crate::sequencer::{SequencerState, SwingResolution};
@@ -2206,6 +2415,45 @@ mod tests {
 
         let straight = swing_delay_samples(48_000.0, 120.0, 50.0, SwingResolution::Sixteenth);
         assert_eq!(straight, 0.0);
+    }
+
+    #[test]
+    fn bus_gate_default_sequence_stays_open_across_steps() {
+        let sequence = crate::ui::BusGateSequence::default();
+        assert_eq!(bus_gate_target_at(&sequence, 0.0), 1.0);
+        assert_eq!(bus_gate_target_at(&sequence, 0.24), 1.0);
+        assert_eq!(bus_gate_target_at(&sequence, 0.25), 1.0);
+        assert_eq!(bus_gate_target_at(&sequence, 1.99), 1.0);
+    }
+
+    #[test]
+    fn bus_gate_sequence_follows_step_activity_and_duration() {
+        let mut sequence = crate::ui::BusGateSequence::default();
+        sequence.num_steps = 4;
+        sequence.timebase = crate::sequencer::Timebase::Quarter;
+        sequence.steps = [false; crate::sequencer::MAX_STEPS];
+        sequence.steps[1] = true;
+        sequence.velocities[1] = 0.5;
+        sequence.durations[1] = 0.5;
+
+        assert_eq!(bus_gate_target_at(&sequence, 0.25), 0.0);
+        assert_eq!(bus_gate_target_at(&sequence, 1.10), 0.5);
+        assert_eq!(bus_gate_target_at(&sequence, 1.60), 0.0);
+        assert_eq!(bus_gate_target_at(&sequence, 2.10), 0.0);
+    }
+
+    #[test]
+    fn bus_gate_sync_steps_snap_boundaries_to_grid() {
+        let mut sequence = crate::ui::BusGateSequence::default();
+        sequence.num_steps = 4;
+        sequence.timebase = crate::sequencer::Timebase::Sixteenth;
+        sequence.steps = [false; crate::sequencer::MAX_STEPS];
+        sequence.steps[1] = true;
+        sequence.syncs[1] = 3.0; // 1/4
+
+        assert_eq!(bus_gate_target_at(&sequence, 0.50), 0.0);
+        assert_eq!(bus_gate_target_at(&sequence, 1.01), 1.0);
+        assert_eq!(bus_gate_target_at(&sequence, 1.30), 0.0);
     }
 
     #[test]

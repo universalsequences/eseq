@@ -1144,7 +1144,7 @@ impl App {
         }
 
         let slot_id = (crate::sequencer::MAX_TRACKS + bus_idx) * MAX_CUSTOM_FX + slot_idx;
-        let mut predecessor_id = bus_nodes.merge_id;
+        let mut predecessor_id = bus_nodes.gate_id;
         let mut predecessor_outputs = 2;
         for idx in (0..slot_idx).rev() {
             let node_id = bus.effect_slots[idx].node_id;

@@ -1,5 +1,5 @@
 use std::ffi::CString;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cpal::Stream;
 
@@ -8,7 +8,7 @@ use crate::audiograph::{self, LiveGraphPtr};
 use crate::recorder::MasterRecorder;
 use crate::reverb;
 use crate::sequencer::{BusId, KeyboardTrigger, SequencerState};
-use crate::ui::{AudioBuses, BusNodeIds};
+use crate::ui::{AudioBuses, BusGateRuntimeState, BusNodeIds};
 
 pub struct Engine {
     pub state: Arc<SequencerState>,
@@ -73,6 +73,7 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
     let bus_l_id = unsafe { audiograph::live_add_gain(lg, 1.0, bus_l_name.as_ptr()) };
     let bus_r_id = unsafe { audiograph::live_add_gain(lg, 1.0, bus_r_name.as_ptr()) };
     let mix_merge_name = CString::new("mix_merge").unwrap();
+    let mix_gate_name = CString::new("mix_gate").unwrap();
     let mix_volume_name = CString::new("mix_volume").unwrap();
     let mix_merge_id = unsafe {
         audiograph::add_node(
@@ -98,13 +99,27 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
             0,
         )
     };
+    let mix_gate_id = unsafe {
+        audiograph::add_node(
+            lg,
+            crate::stereo_panner::stereo_panner_vtable(),
+            crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+            mix_gate_name.as_ptr(),
+            2,
+            2,
+            std::ptr::null(),
+            0,
+        )
+    };
 
     // bus_L / bus_R collect the mix, then the Mix bus FX chain feeds the DAC.
     unsafe {
         audiograph::graph_connect(lg, bus_l_id, 0, mix_merge_id, 0);
         audiograph::graph_connect(lg, bus_r_id, 0, mix_merge_id, 1);
-        audiograph::graph_connect(lg, mix_merge_id, 0, mix_volume_id, 0);
-        audiograph::graph_connect(lg, mix_merge_id, 1, mix_volume_id, 1);
+        audiograph::graph_connect(lg, mix_merge_id, 0, mix_gate_id, 0);
+        audiograph::graph_connect(lg, mix_merge_id, 1, mix_gate_id, 1);
+        audiograph::graph_connect(lg, mix_gate_id, 0, mix_volume_id, 0);
+        audiograph::graph_connect(lg, mix_gate_id, 1, mix_volume_id, 1);
         audiograph::graph_connect(lg, mix_volume_id, 0, 0, 0);
         if channels > 1 {
             audiograph::graph_connect(lg, mix_volume_id, 1, 0, 1);
@@ -118,12 +133,14 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
         left_id: bus_l_id,
         right_id: bus_r_id,
         merge_id: mix_merge_id,
+        gate_id: mix_gate_id,
         volume_id: mix_volume_id,
     }];
     for (id, label) in [(BusId::DEFAULT_A, "bus_A"), (BusId::DEFAULT_B, "bus_B")] {
         let left_name = CString::new(format!("{label}_L")).unwrap();
         let right_name = CString::new(format!("{label}_R")).unwrap();
         let merge_name = CString::new(format!("{label}_merge")).unwrap();
+        let gate_name = CString::new(format!("{label}_gate")).unwrap();
         let volume_name = CString::new(format!("{label}_volume")).unwrap();
         let left_id = unsafe { audiograph::live_add_gain(lg, 1.0, left_name.as_ptr()) };
         let right_id = unsafe { audiograph::live_add_gain(lg, 1.0, right_name.as_ptr()) };
@@ -151,11 +168,25 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
                 0,
             )
         };
+        let gate_id = unsafe {
+            audiograph::add_node(
+                lg,
+                crate::stereo_panner::stereo_panner_vtable(),
+                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                gate_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
         unsafe {
             audiograph::graph_connect(lg, left_id, 0, merge_id, 0);
             audiograph::graph_connect(lg, right_id, 0, merge_id, 1);
-            audiograph::graph_connect(lg, merge_id, 0, volume_id, 0);
-            audiograph::graph_connect(lg, merge_id, 1, volume_id, 1);
+            audiograph::graph_connect(lg, merge_id, 0, gate_id, 0);
+            audiograph::graph_connect(lg, merge_id, 1, gate_id, 1);
+            audiograph::graph_connect(lg, gate_id, 0, volume_id, 0);
+            audiograph::graph_connect(lg, gate_id, 1, volume_id, 1);
             audiograph::graph_connect(lg, volume_id, 0, bus_l_id, 0);
             audiograph::graph_connect(lg, volume_id, 1, bus_r_id, 0);
         }
@@ -164,9 +195,27 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
             left_id,
             right_id,
             merge_id,
+            gate_id,
             volume_id,
         });
     }
+    let bus_gate_runtime = Arc::new(Mutex::new(
+        default_bus_nodes
+            .iter()
+            .map(|nodes| BusGateRuntimeState {
+                id: nodes.id,
+                gate_id: nodes.gate_id,
+                sequence: crate::ui::BusGateSequence::default(),
+                effect_slots: crate::ui::BusChannelState::default_effect_slots(),
+            })
+            .collect(),
+    ));
+    let bus_gate_playheads = Arc::new(Mutex::new(
+        default_bus_nodes
+            .iter()
+            .map(|nodes| (nodes.id, 0usize))
+            .collect(),
+    ));
 
     // Create global reverb bus and reverb node
     let reverb_bus_name = CString::new("reverb_bus").unwrap();
@@ -229,6 +278,8 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
         block_size,
         Arc::clone(&master_recorder),
         keyboard_rx,
+        Arc::clone(&bus_gate_runtime),
+        Arc::clone(&bus_gate_playheads),
     )?;
 
     let lg_ptr = LiveGraphPtr(lg);
@@ -236,6 +287,8 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
         bus_l_id,
         bus_r_id,
         default_bus_nodes,
+        bus_gate_runtime,
+        bus_gate_playheads,
         reverb_bus_id,
         reverb_node_id,
     };

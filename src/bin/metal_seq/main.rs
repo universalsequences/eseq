@@ -213,6 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_peak_l_level = -1.0f64;
     let mut prev_peak_r_level = -1.0f64;
     let mut prev_track_peak_levels: Vec<f64> = Vec::new();
+    let mut prev_bus_playheads: Vec<usize> = Vec::new();
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
     let mut prev_auto_follow = true;
@@ -1145,6 +1146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(bus_idx), Some(step)) = (bus_idx, step) {
                                 if let Some(bus) = app.buses.get_mut(bus_idx) {
                                     bus.gate_sequence.toggle_step(step);
+                                    app.publish_bus_gate_runtime();
                                     let rt = editor.runtime_mut();
                                     sync_bus_mixer_state(rt, &app);
                                     rt.run_reactive_cycle();
@@ -1168,15 +1170,443 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "duration" | "dur" => {
                                             bus.gate_sequence.set_step_duration(step, value);
                                         }
+                                        "sync" | "syn" => {
+                                            bus.gate_sequence.set_step_sync(step, value);
+                                        }
                                         _ => {
                                             bus.gate_sequence.set_step_velocity(step, value);
                                         }
                                     }
+                                    app.publish_bus_gate_runtime();
                                     let rt = editor.runtime_mut();
                                     sync_bus_mixer_state(rt, &app);
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-selected-bus-step-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let param = map_string(map, "param");
+                            let value = map_number(map, "value").map(|value| value as f32);
+                            if let (Some(bus_idx), Some(param), Some(value)) =
+                                (bus_idx, param, value)
+                            {
+                                if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                    let steps: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    for step in steps {
+                                        if step >= bus.gate_sequence.num_steps {
+                                            continue;
+                                        }
+                                        match param.as_str() {
+                                            "duration" | "dur" => {
+                                                bus.gate_sequence.set_step_duration(step, value);
+                                            }
+                                            "sync" | "syn" => {
+                                                bus.gate_sequence.set_step_sync(step, value);
+                                            }
+                                            _ => {
+                                                bus.gate_sequence.set_step_velocity(step, value);
+                                            }
+                                        }
+                                    }
+                                    app.publish_bus_gate_runtime();
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "select-bus-step-range" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let start = map_number(map, "start").map(|value| value as usize);
+                            let end = map_number(map, "end").map(|value| value as usize);
+                            if let (Some(bus_idx), Some(start), Some(end)) = (bus_idx, start, end) {
+                                if let Some(bus) = app.buses.get(bus_idx) {
+                                    let num_steps = bus.gate_sequence.num_steps.max(1);
+                                    let a = start.min(num_steps - 1);
+                                    let b = end.min(num_steps - 1);
+                                    let lo = a.min(b);
+                                    let hi = a.max(b);
+                                    {
+                                        let mut set = selected_steps.lock().unwrap();
+                                        set.clear();
+                                        set.extend(lo..=hi);
+                                    }
+                                    editor.runtime_mut().set_reactive(
+                                        "SEQ",
+                                        "selected-steps",
+                                        build_selection_value(&selected_steps),
+                                    );
+                                    editor.runtime_mut().run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "select-all-bus-steps" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            if let Some(bus_idx) = bus_idx {
+                                if let Some(bus) = app.buses.get(bus_idx) {
+                                    let mut set = selected_steps.lock().unwrap();
+                                    set.clear();
+                                    set.extend(0..bus.gate_sequence.num_steps);
+                                    drop(set);
+                                    editor.runtime_mut().set_reactive(
+                                        "SEQ",
+                                        "selected-steps",
+                                        build_selection_value(&selected_steps),
+                                    );
+                                    editor.runtime_mut().run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "delete-selected-bus-steps" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            if let Some(bus_idx) = bus_idx {
+                                if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                    let steps: Vec<usize> = {
+                                        let mut set = selected_steps.lock().unwrap();
+                                        let mut steps: Vec<usize> = set.iter().copied().collect();
+                                        steps.sort_unstable();
+                                        set.clear();
+                                        steps
+                                    };
+                                    for step in steps {
+                                        if step >= bus.gate_sequence.num_steps {
+                                            continue;
+                                        }
+                                        bus.gate_sequence.steps[step] = false;
+                                        bus.gate_sequence.velocities[step] = 1.0;
+                                        bus.gate_sequence.durations[step] = 1.0;
+                                        bus.gate_sequence.syncs[step] = 0.0;
+                                        bus.gate_sequence.timebase_plocks[step] = None;
+                                        bus.gate_sequence.swing_plocks[step] = None;
+                                        bus.gate_sequence.swing_resolution_plocks[step] = None;
+                                        for slot in &mut bus.effect_slots {
+                                            if let Some(step_plocks) = slot.plocks.get_mut(step) {
+                                                for value in step_plocks {
+                                                    *value = None;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    app.publish_bus_gate_runtime();
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "selected-steps",
+                                        build_selection_value(&selected_steps),
+                                    );
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "move-bus-step-drag" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let start = map_number(map, "start").map(|value| value as usize);
+                            let target = map_number(map, "target").map(|value| value as usize);
+                            if let (Some(bus_idx), Some(start), Some(target)) =
+                                (bus_idx, start, target)
+                            {
+                                if start != target {
+                                    if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                        let num_steps = bus.gate_sequence.num_steps;
+                                        if start < num_steps && target < num_steps {
+                                            let delta = target as isize - start as isize;
+                                            let mut move_selection = false;
+                                            let steps: Vec<usize> = {
+                                                let set = selected_steps.lock().unwrap();
+                                                if set.contains(&start) {
+                                                    move_selection = true;
+                                                    let mut steps: Vec<usize> =
+                                                        set.iter().copied().collect();
+                                                    steps.sort_unstable();
+                                                    steps
+                                                } else {
+                                                    vec![start]
+                                                }
+                                            };
+                                            if let (Some(&first), Some(&last)) =
+                                                (steps.first(), steps.last())
+                                            {
+                                                let new_first = first as isize + delta;
+                                                let new_last = last as isize + delta;
+                                                if new_first >= 0 && new_last < num_steps as isize {
+                                                    let snapshots: Vec<_> = steps
+                                                        .iter()
+                                                        .map(|&step| {
+                                                            (
+                                                                step,
+                                                                bus.gate_sequence.steps[step],
+                                                                bus.gate_sequence.velocities[step],
+                                                                bus.gate_sequence.durations[step],
+                                                                bus.gate_sequence.syncs[step],
+                                                                bus.gate_sequence.timebase_plocks
+                                                                    [step],
+                                                                bus.gate_sequence.swing_plocks
+                                                                    [step],
+                                                                bus.gate_sequence
+                                                                    .swing_resolution_plocks[step],
+                                                                bus.effect_slots
+                                                                    .iter()
+                                                                    .map(|slot| {
+                                                                        slot.plocks
+                                                                            .get(step)
+                                                                            .cloned()
+                                                                            .unwrap_or_default()
+                                                                    })
+                                                                    .collect::<Vec<_>>(),
+                                                            )
+                                                        })
+                                                        .collect();
+                                                    for &step in &steps {
+                                                        bus.gate_sequence.steps[step] = false;
+                                                        bus.gate_sequence.velocities[step] = 1.0;
+                                                        bus.gate_sequence.durations[step] = 1.0;
+                                                        bus.gate_sequence.syncs[step] = 0.0;
+                                                        bus.gate_sequence.timebase_plocks[step] =
+                                                            None;
+                                                        bus.gate_sequence.swing_plocks[step] = None;
+                                                        bus.gate_sequence.swing_resolution_plocks
+                                                            [step] = None;
+                                                        for slot in &mut bus.effect_slots {
+                                                            if let Some(step_plocks) =
+                                                                slot.plocks.get_mut(step)
+                                                            {
+                                                                for value in step_plocks {
+                                                                    *value = None;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    let moved_steps: Vec<usize> = snapshots
+                                                        .iter()
+                                                        .map(|(step, ..)| {
+                                                            (*step as isize + delta) as usize
+                                                        })
+                                                        .collect();
+                                                    for (snapshot, dst_step) in snapshots
+                                                        .iter()
+                                                        .zip(moved_steps.iter().copied())
+                                                    {
+                                                        bus.gate_sequence.steps[dst_step] =
+                                                            snapshot.1;
+                                                        bus.gate_sequence.velocities[dst_step] =
+                                                            snapshot.2;
+                                                        bus.gate_sequence.durations[dst_step] =
+                                                            snapshot.3;
+                                                        bus.gate_sequence.syncs[dst_step] =
+                                                            snapshot.4;
+                                                        bus.gate_sequence.timebase_plocks
+                                                            [dst_step] = snapshot.5;
+                                                        bus.gate_sequence.swing_plocks[dst_step] =
+                                                            snapshot.6;
+                                                        bus.gate_sequence.swing_resolution_plocks
+                                                            [dst_step] = snapshot.7;
+                                                        for (slot_idx, slot_plocks) in
+                                                            snapshot.8.iter().enumerate()
+                                                        {
+                                                            let Some(slot) =
+                                                                bus.effect_slots.get_mut(slot_idx)
+                                                            else {
+                                                                continue;
+                                                            };
+                                                            let Some(dst_plocks) =
+                                                                slot.plocks.get_mut(dst_step)
+                                                            else {
+                                                                continue;
+                                                            };
+                                                            for (param_idx, value) in
+                                                                slot_plocks.iter().enumerate()
+                                                            {
+                                                                if param_idx < dst_plocks.len() {
+                                                                    dst_plocks[param_idx] = *value;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if move_selection {
+                                                        let mut set =
+                                                            selected_steps.lock().unwrap();
+                                                        set.clear();
+                                                        set.extend(moved_steps);
+                                                    }
+                                                    app.publish_bus_gate_runtime();
+                                                    let rt = editor.runtime_mut();
+                                                    rt.set_reactive(
+                                                        "SEQ",
+                                                        "selected-steps",
+                                                        build_selection_value(&selected_steps),
+                                                    );
+                                                    sync_bus_mixer_state(rt, &app);
+                                                    rt.run_reactive_cycle();
+                                                    editor.refresh_runtime_side_effects();
+                                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "shift-selected-bus-steps" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let direction =
+                                map_number(map, "direction").map(|value| value.signum() as isize);
+                            if let (Some(bus_idx), Some(delta)) = (bus_idx, direction) {
+                                if delta != 0 {
+                                    if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                        let steps: Vec<usize> = {
+                                            let set = selected_steps.lock().unwrap();
+                                            let mut steps: Vec<usize> =
+                                                set.iter().copied().collect();
+                                            steps.sort_unstable();
+                                            steps
+                                        };
+                                        if let (Some(&first), Some(&last)) =
+                                            (steps.first(), steps.last())
+                                        {
+                                            let num_steps = bus.gate_sequence.num_steps;
+                                            let can_shift = if delta < 0 {
+                                                first > 0
+                                            } else {
+                                                last + 1 < num_steps
+                                            };
+                                            if can_shift {
+                                                let snapshots: Vec<_> = steps
+                                                    .iter()
+                                                    .map(|&step| {
+                                                        (
+                                                            step,
+                                                            bus.gate_sequence.steps[step],
+                                                            bus.gate_sequence.velocities[step],
+                                                            bus.gate_sequence.durations[step],
+                                                            bus.gate_sequence.syncs[step],
+                                                            bus.gate_sequence.timebase_plocks[step],
+                                                            bus.gate_sequence.swing_plocks[step],
+                                                            bus.gate_sequence
+                                                                .swing_resolution_plocks[step],
+                                                            bus.effect_slots
+                                                                .iter()
+                                                                .map(|slot| {
+                                                                    slot.plocks
+                                                                        .get(step)
+                                                                        .cloned()
+                                                                        .unwrap_or_default()
+                                                                })
+                                                                .collect::<Vec<_>>(),
+                                                        )
+                                                    })
+                                                    .collect();
+                                                for &step in &steps {
+                                                    bus.gate_sequence.steps[step] = false;
+                                                    bus.gate_sequence.velocities[step] = 1.0;
+                                                    bus.gate_sequence.durations[step] = 1.0;
+                                                    bus.gate_sequence.syncs[step] = 0.0;
+                                                    bus.gate_sequence.timebase_plocks[step] = None;
+                                                    bus.gate_sequence.swing_plocks[step] = None;
+                                                    bus.gate_sequence.swing_resolution_plocks
+                                                        [step] = None;
+                                                    for slot in &mut bus.effect_slots {
+                                                        if let Some(step_plocks) =
+                                                            slot.plocks.get_mut(step)
+                                                        {
+                                                            for value in step_plocks {
+                                                                *value = None;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                let shifted_steps: Vec<usize> = snapshots
+                                                    .iter()
+                                                    .map(|(step, ..)| {
+                                                        (*step as isize + delta) as usize
+                                                    })
+                                                    .collect();
+                                                for (snapshot, dst_step) in snapshots
+                                                    .iter()
+                                                    .zip(shifted_steps.iter().copied())
+                                                {
+                                                    bus.gate_sequence.steps[dst_step] = snapshot.1;
+                                                    bus.gate_sequence.velocities[dst_step] =
+                                                        snapshot.2;
+                                                    bus.gate_sequence.durations[dst_step] =
+                                                        snapshot.3;
+                                                    bus.gate_sequence.syncs[dst_step] = snapshot.4;
+                                                    bus.gate_sequence.timebase_plocks[dst_step] =
+                                                        snapshot.5;
+                                                    bus.gate_sequence.swing_plocks[dst_step] =
+                                                        snapshot.6;
+                                                    bus.gate_sequence.swing_resolution_plocks
+                                                        [dst_step] = snapshot.7;
+                                                    for (slot_idx, slot_plocks) in
+                                                        snapshot.8.iter().enumerate()
+                                                    {
+                                                        let Some(slot) =
+                                                            bus.effect_slots.get_mut(slot_idx)
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        let Some(dst_plocks) =
+                                                            slot.plocks.get_mut(dst_step)
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        for (param_idx, value) in
+                                                            slot_plocks.iter().enumerate()
+                                                        {
+                                                            if param_idx < dst_plocks.len() {
+                                                                dst_plocks[param_idx] = *value;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                {
+                                                    let mut set = selected_steps.lock().unwrap();
+                                                    set.clear();
+                                                    set.extend(shifted_steps);
+                                                }
+                                                app.publish_bus_gate_runtime();
+                                                let rt = editor.runtime_mut();
+                                                rt.set_reactive(
+                                                    "SEQ",
+                                                    "selected-steps",
+                                                    build_selection_value(&selected_steps),
+                                                );
+                                                sync_bus_mixer_state(rt, &app);
+                                                rt.run_reactive_cycle();
+                                                editor.refresh_runtime_side_effects();
+                                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1189,6 +1619,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let label = map_string(map, "label");
                             if let (Some(bus_idx), Some(param)) = (bus_idx, param) {
                                 if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                    let selected_bus_steps: Vec<usize> = selected_steps
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .copied()
+                                        .filter(|step| *step < bus.gate_sequence.num_steps)
+                                        .collect();
+                                    let write_plock =
+                                        !selected_bus_steps.is_empty() && param != "num-steps";
                                     match param.as_str() {
                                         "num-steps" => {
                                             if let Some(value) = value {
@@ -1197,7 +1636,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                         "swing" => {
                                             if let Some(value) = value {
-                                                bus.gate_sequence.swing = value.clamp(50.0, 75.0);
+                                                let swing = value.clamp(50.0, 75.0);
+                                                if write_plock {
+                                                    for step in &selected_bus_steps {
+                                                        bus.gate_sequence.swing_plocks[*step] =
+                                                            Some(swing);
+                                                    }
+                                                } else {
+                                                    bus.gate_sequence.swing = swing;
+                                                }
                                             }
                                         }
                                         "timebase" => {
@@ -1208,7 +1655,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         candidate.to_ascii_lowercase() == normalized
                                                     })
                                                 {
-                                                    bus.gate_sequence.timebase = Timebase::ALL[idx];
+                                                    let timebase = Timebase::ALL[idx];
+                                                    if write_plock {
+                                                        for step in &selected_bus_steps {
+                                                            bus.gate_sequence.timebase_plocks
+                                                                [*step] = Some(timebase);
+                                                        }
+                                                    } else {
+                                                        bus.gate_sequence.timebase = timebase;
+                                                    }
                                                 }
                                             }
                                         }
@@ -1221,13 +1676,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         candidate.to_ascii_lowercase() == normalized
                                                     })
                                                 {
-                                                    bus.gate_sequence.swing_resolution =
-                                                        SwingResolution::ALL[idx];
+                                                    let resolution = SwingResolution::ALL[idx];
+                                                    if write_plock {
+                                                        for step in &selected_bus_steps {
+                                                            bus.gate_sequence
+                                                                .swing_resolution_plocks[*step] =
+                                                                Some(resolution);
+                                                        }
+                                                    } else {
+                                                        bus.gate_sequence.swing_resolution =
+                                                            resolution;
+                                                    }
                                                 }
                                             }
                                         }
                                         _ => {}
                                     }
+                                    app.publish_bus_gate_runtime();
                                     let rt = editor.runtime_mut();
                                     sync_bus_mixer_state(rt, &app);
                                     rt.run_reactive_cycle();
@@ -1263,9 +1728,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match app.set_bus_effect_param(bus_idx, slot_idx, param_idx, value)
                                 {
                                     Ok(()) => {
+                                        app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
                                         let rt = editor.runtime_mut();
                                         sync_bus_mixer_state(rt, &app);
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "bus-effects",
+                                            build_bus_effects_value_for_selection(
+                                                &app,
+                                                Some(&selected_steps),
+                                            ),
+                                        );
                                         rt.run_reactive_cycle();
                                         editor.refresh_runtime_side_effects();
                                         fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1274,6 +1748,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Err(error) => editor.handle_host_event(HostEvent::Status(
                                         format!("Error setting bus effect param: {error}"),
                                     )),
+                                }
+                            }
+                        }
+                    }
+                    "set-bus-effect-plock" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
+                            if let (Some(bus_idx), Some(slot_idx), Some(param_idx), Some(value)) =
+                                (bus_idx, slot_idx, param_idx, value)
+                            {
+                                if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                    if let Some(slot) = bus.effect_slots.get_mut(slot_idx) {
+                                        let steps: Vec<usize> = selected_steps
+                                            .lock()
+                                            .unwrap()
+                                            .iter()
+                                            .copied()
+                                            .collect();
+                                        for step in steps {
+                                            if step < slot.plocks.len()
+                                                && param_idx < slot.plocks[step].len()
+                                            {
+                                                slot.plocks[step][param_idx] = Some(value);
+                                            }
+                                        }
+                                        app.publish_bus_gate_runtime();
+                                        *bus_state.lock().unwrap() = app.buses.clone();
+                                        let rt = editor.runtime_mut();
+                                        sync_bus_mixer_state(rt, &app);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
                             }
                         }
@@ -1327,9 +1852,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         selected_idx as f32,
                                     ) {
                                         Ok(()) => {
+                                            app.publish_bus_gate_runtime();
                                             *bus_state.lock().unwrap() = app.buses.clone();
                                             let rt = editor.runtime_mut();
                                             sync_bus_mixer_state(rt, &app);
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "bus-effects",
+                                                build_bus_effects_value_for_selection(
+                                                    &app,
+                                                    Some(&selected_steps),
+                                                ),
+                                            );
                                             rt.run_reactive_cycle();
                                             editor.refresh_runtime_side_effects();
                                             fx_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1338,6 +1872,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Err(error) => editor.handle_host_event(HostEvent::Status(
                                             format!("Error setting bus effect option: {error}"),
                                         )),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "set-bus-effect-plock-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            if let (Some(bus_idx), Some(slot_idx), Some(param_idx), Some(label)) =
+                                (bus_idx, slot_idx, param_idx, label)
+                            {
+                                if let Some(selected_idx) = app.bus_effect_param_option_index(
+                                    bus_idx, slot_idx, param_idx, &label,
+                                ) {
+                                    if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                        if let Some(slot) = bus.effect_slots.get_mut(slot_idx) {
+                                            let steps: Vec<usize> = selected_steps
+                                                .lock()
+                                                .unwrap()
+                                                .iter()
+                                                .copied()
+                                                .collect();
+                                            for step in steps {
+                                                if step < slot.plocks.len()
+                                                    && param_idx < slot.plocks[step].len()
+                                                {
+                                                    slot.plocks[step][param_idx] =
+                                                        Some(selected_idx as f32);
+                                                }
+                                            }
+                                            app.publish_bus_gate_runtime();
+                                            *bus_state.lock().unwrap() = app.buses.clone();
+                                            let rt = editor.runtime_mut();
+                                            sync_bus_mixer_state(rt, &app);
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
                                     }
                                 }
                             }
@@ -1646,6 +2236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(bus_idx), Some(effect_name)) = (bus_idx, effect_name) {
                                 match app.add_bus_effect_sync(bus_idx, &effect_name) {
                                     Ok(slot_idx) => {
+                                        app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
                                         let rt = editor.runtime_mut();
                                         sync_bus_mixer_state(rt, &app);
@@ -1764,6 +2355,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let (Some(bus_idx), Some(slot_idx)) = (bus_idx, slot_idx) {
                             match app.delete_bus_effect_slot(bus_idx, slot_idx) {
                                 Ok(()) => {
+                                    app.publish_bus_gate_runtime();
                                     *bus_state.lock().unwrap() = app.buses.clone();
                                     let rt = editor.runtime_mut();
                                     sync_bus_mixer_state(rt, &app);
@@ -2969,6 +3561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_peak_l_level = cached_peak_l_level;
                         prev_peak_r_level = cached_peak_r_level;
                         prev_track_peak_levels = cached_track_peak_levels.clone();
+                        prev_bus_playheads = bus_playhead_snapshot(&app);
                         prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
 
                         if let Some((status, _)) = app.editor.status_message.take() {
@@ -3015,6 +3608,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cpu_load_bits = cached_cpu_load_bits;
             let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
             let playhead = state.transport.track_playheads[ct].load(Ordering::Relaxed);
+            let bus_playheads = bus_playhead_snapshot(&app);
             let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
             let snap_ver = state.scheduler_snapshot_version();
             if last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL {
@@ -3134,6 +3728,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &cached_track_peak_levels,
                 );
                 prev_track_peak_levels = cached_track_peak_levels.clone();
+                needs_reactive_cycle = true;
+            }
+            if bus_playheads != prev_bus_playheads {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "bus-playheads",
+                    build_bus_playheads_value(&app),
+                );
+                prev_bus_playheads = bus_playheads;
                 needs_reactive_cycle = true;
             }
             if playhead != prev_playhead && !app.tracks.is_empty() {
@@ -3270,6 +3873,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         build_step_has_plocks(&state, ct, &app.graph.effect_descriptors)
                     },
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    "bus-effects",
+                    build_bus_effects_value_for_selection(&app, Some(&selected_steps)),
                 );
                 prev_fx_epoch = fx_ep;
                 needs_reactive_cycle = true;

@@ -99,6 +99,7 @@ impl GraphController<'_> {
         let left_name = CString::new(format!("{safe_name}_L")).unwrap();
         let right_name = CString::new(format!("{safe_name}_R")).unwrap();
         let merge_name = CString::new(format!("{safe_name}_merge")).unwrap();
+        let gate_name = CString::new(format!("{safe_name}_gate")).unwrap();
         let volume_name = CString::new(format!("{safe_name}_volume")).unwrap();
         let left_id = unsafe {
             crate::audiograph::live_add_gain(self.app.graph.lg.0, 1.0, left_name.as_ptr())
@@ -130,11 +131,25 @@ impl GraphController<'_> {
                 0,
             )
         };
+        let gate_id = unsafe {
+            crate::audiograph::add_node(
+                self.app.graph.lg.0,
+                crate::stereo_panner::stereo_panner_vtable(),
+                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                gate_name.as_ptr(),
+                2,
+                2,
+                std::ptr::null(),
+                0,
+            )
+        };
         unsafe {
             crate::audiograph::graph_connect(self.app.graph.lg.0, left_id, 0, merge_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, right_id, 0, merge_id, 1);
-            crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 0, volume_id, 0);
-            crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 1, volume_id, 1);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 0, gate_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 1, gate_id, 1);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, gate_id, 0, volume_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, gate_id, 1, volume_id, 1);
             crate::audiograph::graph_connect(
                 self.app.graph.lg.0,
                 volume_id,
@@ -155,8 +170,10 @@ impl GraphController<'_> {
             left_id,
             right_id,
             merge_id,
+            gate_id,
             volume_id,
         });
+        self.app.publish_bus_gate_runtime();
     }
 
     pub fn delete_bus_graph_node(&mut self, id: BusId) {
@@ -199,11 +216,41 @@ impl GraphController<'_> {
                 bus.merge_id,
                 1,
             );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.merge_id,
+                0,
+                bus.gate_id,
+                0,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.merge_id,
+                1,
+                bus.gate_id,
+                1,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.gate_id,
+                0,
+                bus.volume_id,
+                0,
+            );
+            crate::audiograph::graph_disconnect(
+                self.app.graph.lg.0,
+                bus.gate_id,
+                1,
+                bus.volume_id,
+                1,
+            );
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.merge_id);
+            crate::audiograph::delete_node(self.app.graph.lg.0, bus.gate_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.volume_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.left_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, bus.right_id);
         }
+        self.app.publish_bus_gate_runtime();
     }
 
     fn disconnect_delay_output_from_all(&self, delay_id: i32) {

@@ -138,7 +138,7 @@
   (do
     (fx-clear-selected-effect)
     (if (get fx :bus-fx)
-      (host-command "set-bus-effect-param"
+      (host-command (if (seq-has-selection?) "set-bus-effect-plock" "set-bus-effect-param")
         (dict :bus (get fx :bus-idx) :slot-idx (get fx :slot-idx)
               :param-idx (get p :idx) :value v))
     (if (get fx :midi-fx)
@@ -175,7 +175,7 @@
                   (if fx
                     (host-command
                       (if (get fx :bus-fx)
-                        "set-bus-effect-param-option"
+                        (if (seq-has-selection?) "set-bus-effect-plock-option" "set-bus-effect-param-option")
                         (if (get fx :midi-fx)
                         (if (seq-has-selection?) "set-midi-fx-plock-option" "set-midi-fx-param-option")
                         (if (seq-has-selection?) "set-effect-plock-option" "set-effect-param-option")))

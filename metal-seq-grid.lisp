@@ -1,5 +1,5 @@
 ; Minimal Metal Sequencer - Step Grid UI
-; C-p to toggle play/stop, Esc to deselect
+; C-p to toggle play/stop, Esc to clear step selection
 
 (load "../eseqlisp/themes.lisp")
 (mac-osx-theme)
@@ -22,7 +22,6 @@
 
 (def seq-clear-ui-selection ()
   (do
-    (set! selected-bus -1)
     (seq-clear-selection)))
 
 (bind-key "C-p" "seq-toggle-play")
@@ -101,7 +100,9 @@
   (if (seq-has-selection?)
     (do
       (cool-off-follow)
-      (seq-shift-selected-steps -1))
+      (if (seq-has-selected-bus?)
+        (bus-shift-selected-steps -1)
+        (seq-shift-selected-steps -1)))
     (do
       (cool-off-follow)
       (set! cursor-step (mod (- (current-step) 1) (max 1 SEQ.tp-num-steps))))))
@@ -110,7 +111,9 @@
   (if (seq-has-selection?)
     (do
       (cool-off-follow)
-      (seq-shift-selected-steps 1))
+      (if (seq-has-selected-bus?)
+        (bus-shift-selected-steps 1)
+        (seq-shift-selected-steps 1)))
     (do
       (cool-off-follow)
       (set! cursor-step (mod (+ (current-step) 1) (max 1 SEQ.tp-num-steps))))))
@@ -118,7 +121,9 @@
 (def cursor-toggle ()
   (do
     (cool-off-follow)
-    (seq-toggle-step (current-step))))
+    (if (seq-has-selected-bus?)
+      (bus-toggle-step (bus-current-step))
+      (seq-toggle-step (current-step)))))
 
 (def selection-click? (evt)
   (or (get evt :shift)
@@ -181,12 +186,16 @@
 (def select-all-steps ()
   (do
     (cool-off-follow)
-    (seq-select-all-steps)))
+    (if (seq-has-selected-bus?)
+      (bus-select-all-steps)
+      (seq-select-all-steps))))
 
 (def delete-selected-steps ()
   (do
     (cool-off-follow)
-    (seq-delete-selected-steps)))
+    (if (seq-has-selected-bus?)
+      (bus-delete-selected-steps)
+      (seq-delete-selected-steps))))
 
 (def step-param-value (v)
   (if (= param-mode 3)
@@ -440,6 +449,11 @@
     (nth lists selected-bus)
     '()))
 
+(def bus-seq-playhead ()
+  (if (seq-has-selected-bus?)
+    (nth SEQ.bus-playheads selected-bus)
+    0))
+
 (def bus-seq-num-steps ()
   (if (seq-has-selected-bus?)
     (nth SEQ.bus-num-steps selected-bus)
@@ -461,21 +475,27 @@
     "1/16"))
 
 (def bus-seq-param-values ()
-  (if (= param-mode 1)
-    (bus-seq-list SEQ.bus-durations)
-    (bus-seq-list SEQ.bus-velocities)))
+  (if (= param-mode 1) (bus-seq-list SEQ.bus-durations)
+    (if (= param-mode 2) (bus-seq-list SEQ.bus-syncs)
+      (bus-seq-list SEQ.bus-velocities))))
 
 (def bus-seq-param-name ()
-  (if (= param-mode 1) "Duration" "Gate Amount"))
+  (if (= param-mode 1) "Duration"
+    (if (= param-mode 2) "Sync"
+      "Gate Amount")))
 
 (def bus-seq-param-key ()
-  (if (= param-mode 1) "duration" "velocity"))
+  (if (= param-mode 1) "duration"
+    (if (= param-mode 2) "sync"
+      "velocity")))
 
 (def bus-seq-param-min ()
   (if (= param-mode 1) 0.1 0))
 
 (def bus-seq-param-max ()
-  (if (= param-mode 1) 2 1))
+  (if (= param-mode 1) 2
+    (if (= param-mode 2) (- (len SEQ.sync-labels) 1)
+      1)))
 
 (def bus-page-count ()
   (max 1 (floor (/ (+ (bus-seq-num-steps) (- page-size 1)) page-size))))
@@ -507,8 +527,80 @@
   (host-command "set-bus-step-param"
     (dict :bus selected-bus :step step :param (bus-seq-param-key) :value value)))
 
+(def bus-set-selected-step-param (value)
+  (host-command "set-selected-bus-step-param"
+    (dict :bus selected-bus :param (bus-seq-param-key) :value value)))
+
 (def bus-toggle-step (step)
-  (host-command "toggle-bus-step" (dict :bus selected-bus :step step)))
+  (do
+    (cool-off-follow)
+    (set! cursor-step step)
+    (host-command "toggle-bus-step" (dict :bus selected-bus :step step))))
+
+(def bus-select-step-range (start end)
+  (host-command "select-bus-step-range"
+    (dict :bus selected-bus :start start :end end)))
+
+(def bus-select-all-steps ()
+  (host-command "select-all-bus-steps" (dict :bus selected-bus)))
+
+(def bus-delete-selected-steps ()
+  (host-command "delete-selected-bus-steps" (dict :bus selected-bus)))
+
+(def bus-move-step-drag (start target)
+  (host-command "move-bus-step-drag"
+    (dict :bus selected-bus :start start :target target)))
+
+(def bus-shift-selected-steps (direction)
+  (host-command "shift-selected-bus-steps"
+    (dict :bus selected-bus :direction direction)))
+
+(def bus-step-select-drag-start (step evt)
+  (do
+    (cool-off-follow)
+    (set! cursor-step step)
+    (set! step-click-pending nil)
+    (set! step-drag-anchor step)
+    (bus-select-step-range step step)))
+
+(def bus-step-select-drag-over (step evt)
+  (if (selection-click? evt)
+    (do
+      (set! step-click-pending nil)
+      (set! step-move-last nil)
+      (cool-off-follow)
+      (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
+      (set! cursor-step step)
+      (bus-select-step-range step-drag-anchor step))
+    (if (= step-move-last nil)
+      nil
+      (if (= step step-move-last)
+        nil
+        (do
+          (set! step-click-pending nil)
+          (cool-off-follow)
+          (bus-move-step-drag step-move-last step)
+          (set! step-move-last step)
+          (set! cursor-step step))))))
+
+(def bus-step-pointer-down (step evt)
+  (if (selection-click? evt)
+    (bus-step-select-drag-start step evt)
+    (do
+      (cool-off-follow)
+      (set! cursor-step step)
+      (set! step-drag-anchor nil)
+      (set! step-move-last step)
+      (set! step-click-pending step))))
+
+(def bus-step-pointer-up (step evt)
+  (do
+    (if (and (= step-click-pending step) (not (selection-click? evt)))
+      (bus-toggle-step step)
+      nil)
+    (set! step-click-pending nil)
+    (set! step-drag-anchor nil)
+    (set! step-move-last nil)))
 
 (def bus-set-sequencer-param (param value)
   (host-command "set-bus-sequencer-param"
@@ -536,6 +628,12 @@
         (label "dur" :font-size 12
           :color (if (= param-mode 1) :white :gray)
           :bg :transparent))
+      (box :width 8 :height 2
+        :bg (if (= param-mode 2) :magenta :dark-gray)
+        :on-click |x y r| (set! param-mode 2)
+        (label "syn" :font-size 12
+          :color (if (= param-mode 2) :white :gray)
+          :bg :transparent))
       (box :width 11 :height 2
         (label (selected-bus-name)
           :font-size 12 :color :white :bg :transparent)))
@@ -552,7 +650,14 @@
               (if visible
                 (do
                   (cool-off-follow)
-                  (set! cursor-step step))
+                  (set! cursor-step step)
+                  (if (selection-click? evt)
+                    (bus-step-select-drag-start step evt)
+                    (seq-clear-selection)))
+                nil))
+            :on-drag (lambda (evt)
+              (if visible
+                (bus-step-select-drag-over step evt)
                 nil))
             (v-stack :align :center :gap 0.5
               (vslider :height 4
@@ -560,6 +665,7 @@
                 :min (bus-seq-param-min) :max (bus-seq-param-max)
                 :origin (bus-seq-param-min)
                 :value (nth (bus-seq-param-values) step)
+                :items (if (= param-mode 2) SEQ.sync-labels '())
                 :font-size 11
                 :color (if visible
                          (if (nth bus-steps step) :white :gray)
@@ -570,33 +676,47 @@
                     (do
                       (cool-off-follow)
                       (set! cursor-step step)
-                      (bus-set-step-param step v))
+                      (if (seq-has-selection?)
+                        (bus-set-selected-step-param v)
+                        (bus-set-step-param step v)))
                     nil)))
               (box
                 :active (if visible (if (nth bus-steps step) 1 0) 0)
                 :plocked 1
-                :selected 0
+                :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
                 :background "aqua-button"
                 :align :center :width 3 :height 1.5
-                :on-click |x y r|
+                :on-mouse-down (lambda (evt)
                   (if visible
-                    (do
-                      (cool-off-follow)
-                      (set! cursor-step step)
-                      (bus-toggle-step step))
-                    nil)
+                    (bus-step-pointer-down step evt)
+                    nil))
+                :on-drag (lambda (evt)
+                  (if visible
+                    (bus-step-select-drag-over step evt)
+                    nil))
+                :on-mouse-up (lambda (evt)
+                  (if visible
+                    (bus-step-pointer-up step evt)
+                    nil))
                 (tick :active (if visible (if (nth bus-steps step) 1 0) 0)
                       :plocked (if visible (if (nth bus-plocks step) 1 0) 0)
-                      :selected 0))
+                      :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)))
               (label (if visible (str (+ step 1)) "")
-                :font-size 10 :bg :transparent :color :gray))))))
+                :font-size 10 :bg :transparent
+                :color (if visible
+                         (if (nth SEQ.selected-steps step) :yellow
+                           (if (and SEQ.playing (= (bus-seq-playhead) step)) :white :gray))
+                         :gray))
+              (subtree :key (str "bus-step-playhead-probe-" step)
+                (step-playhead-dot
+                  :active (if (and visible SEQ.playing (= (bus-seq-playhead) step)) 1 0))))))))
 
     (h-stack :gap 1 :align :center
       (box :width 14 :height 1.3
         (label (fmt "Bus Step {}  {}" (+ (bus-current-step) 1) (bus-seq-param-name))
           :font-size 11 :width 14 :color :gray :bg :transparent))
       (number-picker :value (nth (bus-seq-param-values) (bus-current-step))
-        :min (bus-seq-param-min) :max (bus-seq-param-max) :decimals 2
+        :min (bus-seq-param-min) :max (bus-seq-param-max) :decimals (if (= param-mode 2) 0 2)
         :on-change (lambda (v)
           (do
             (cool-off-follow)

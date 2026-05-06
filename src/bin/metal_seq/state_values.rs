@@ -245,6 +245,7 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
         "bus-durations",
         build_bus_param_lists(app, "duration"),
     );
+    rt.set_reactive("SEQ", "bus-syncs", build_bus_param_lists(app, "sync"));
     rt.set_reactive("SEQ", "bus-num-steps", build_bus_num_steps_value(app));
     rt.set_reactive("SEQ", "bus-timebases", build_bus_timebase_value(app));
     rt.set_reactive("SEQ", "bus-swings", build_bus_swing_value(app));
@@ -254,6 +255,7 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
         build_bus_swing_resolution_value(app),
     );
     rt.set_reactive("SEQ", "bus-step-has-plocks", build_bus_step_has_plocks(app));
+    rt.set_reactive("SEQ", "bus-playheads", build_bus_playheads_value(app));
 }
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
@@ -268,11 +270,36 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "bus-steps", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-velocities", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-durations", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-syncs", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-num-steps", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-timebases", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-swings", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-swing-resolutions", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-step-has-plocks", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-playheads", Value::List(vec![]));
+}
+
+pub(crate) fn build_bus_playheads_value(app: &ui::App) -> Value {
+    Value::List(
+        bus_playhead_snapshot(app)
+            .into_iter()
+            .map(|step| Rc::new(RefCell::new(Value::Number(step as f64))))
+            .collect(),
+    )
+}
+
+pub(crate) fn bus_playhead_snapshot(app: &ui::App) -> Vec<usize> {
+    let playheads = app.graph.bus_gate_playheads.lock().unwrap();
+    app.buses
+        .iter()
+        .map(|bus| {
+            playheads
+                .iter()
+                .find(|(id, _)| *id == bus.id)
+                .map(|(_, step)| *step)
+                .unwrap_or(0)
+        })
+        .collect()
 }
 
 pub(crate) fn build_bus_steps_value(app: &ui::App) -> Value {
@@ -299,6 +326,7 @@ pub(crate) fn build_bus_param_lists(app: &ui::App, param: &str) -> Value {
             .map(|bus| {
                 let values = match param {
                     "duration" => &bus.gate_sequence.durations,
+                    "sync" => &bus.gate_sequence.syncs,
                     _ => &bus.gate_sequence.velocities,
                 };
                 Rc::new(RefCell::new(Value::List(
@@ -368,8 +396,14 @@ pub(crate) fn build_bus_step_has_plocks(app: &ui::App) -> Value {
                 Rc::new(RefCell::new(Value::List(
                     (0..MAX_STEPS)
                         .map(|step| {
+                            let effect_has_plock = bus.effect_slots.iter().any(|slot| {
+                                slot.plocks
+                                    .get(step)
+                                    .map(|params| params.iter().any(Option::is_some))
+                                    .unwrap_or(false)
+                            });
                             Rc::new(RefCell::new(Value::Bool(
-                                bus.gate_sequence.has_step_plock(step),
+                                bus.gate_sequence.has_step_plock(step) || effect_has_plock,
                             )))
                         })
                         .collect(),
@@ -797,8 +831,17 @@ pub(crate) fn build_effects_value(
 }
 
 pub(crate) fn build_bus_effects_value(app: &ui::App) -> Value {
+    build_bus_effects_value_for_selection(app, None)
+}
+
+pub(crate) fn build_bus_effects_value_for_selection(
+    app: &ui::App,
+    selected: Option<&Arc<Mutex<HashSet<usize>>>>,
+) -> Value {
     use sequencer::effects::ParamKind;
     use std::collections::HashMap;
+
+    let plock_step = selected.and_then(|selected| selected.lock().unwrap().iter().copied().min());
 
     let buses: Vec<Rc<RefCell<Value>>> = app
         .buses
@@ -836,7 +879,17 @@ pub(crate) fn build_bus_effects_value(app: &ui::App) -> Value {
                             let current_val = bus
                                 .effect_slots
                                 .get(slot_idx)
-                                .and_then(|slot| slot.defaults.get(param_idx).copied())
+                                .and_then(|slot| {
+                                    plock_step
+                                        .and_then(|step| {
+                                            slot.plocks
+                                                .get(step)
+                                                .and_then(|step_plocks| step_plocks.get(param_idx))
+                                                .copied()
+                                                .flatten()
+                                        })
+                                        .or_else(|| slot.defaults.get(param_idx).copied())
+                                })
                                 .unwrap_or(pdesc.default);
                             let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
                             pmap.insert(

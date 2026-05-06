@@ -73,6 +73,8 @@ pub struct ProjectBusGateSequence {
     pub velocities: Vec<f32>,
     #[serde(default = "default_bus_gate_values")]
     pub durations: Vec<f32>,
+    #[serde(default = "default_bus_gate_syncs")]
+    pub syncs: Vec<f32>,
     #[serde(default = "default_num_steps")]
     pub num_steps: usize,
     #[serde(default = "default_timebase")]
@@ -95,6 +97,7 @@ impl Default for ProjectBusGateSequence {
             steps: default_bus_gate_steps(),
             velocities: default_bus_gate_values(),
             durations: default_bus_gate_values(),
+            syncs: default_bus_gate_syncs(),
             num_steps: default_num_steps(),
             timebase: default_timebase(),
             swing: default_swing(),
@@ -112,6 +115,10 @@ fn default_bus_gate_steps() -> Vec<bool> {
 
 fn default_bus_gate_values() -> Vec<f32> {
     vec![1.0; MAX_STEPS]
+}
+
+fn default_bus_gate_syncs() -> Vec<f32> {
+    vec![0.0; MAX_STEPS]
 }
 
 pub fn default_project_buses() -> Vec<ProjectBusChannel> {
