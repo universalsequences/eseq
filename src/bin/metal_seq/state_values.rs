@@ -2310,6 +2310,28 @@ mod tests {
             .expect("parse metal-seq-fx.lisp");
     }
 
+    #[test]
+    fn metal_seq_metal_lisp_parses() {
+        let src = std::fs::read_to_string("metal-seq-metal.lisp").expect("read metal lisp");
+        let tokens = Parser::new(src)
+            .parse()
+            .expect("tokenize metal-seq-metal.lisp");
+        let mut pos = 0;
+        while pos < tokens.len() {
+            if let Err(err) = parse_expression_at(&tokens, &mut pos) {
+                let start = pos.saturating_sub(8);
+                let end = (pos + 8).min(tokens.len());
+                panic!(
+                    "parse metal-seq-metal.lisp at token {pos}: {err:?}\ncontext: {:?}",
+                    &tokens[start..end]
+                );
+            }
+        }
+        ASTParser::new(tokens)
+            .parse()
+            .expect("parse metal-seq-metal.lisp");
+    }
+
     fn test_list(values: Vec<Value>) -> Value {
         Value::List(
             values

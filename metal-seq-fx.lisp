@@ -20,6 +20,142 @@
     (set! selected-midi-fx-slot -1)
     (set! selected-bus-fx-slot -1)))
 
+(def fx-track-bus-send-control (send)
+  (v-stack :align :center :gap 0.25
+    (h-stack :gap 0.25 :align :baseline
+      (label (substring (get send :name) 0 8) :font-size 9 :color :gray :bg :transparent)
+      (number-picker :value (get send :amount) :min 0 :max 1 :decimals 2
+        :noui true :font-size 9 :text-color :gray
+        :on-change (lambda (v)
+          (do
+            (cool-off-follow)
+            (host-command "set-track-bus-send"
+              (dict :bus (get send :bus-idx) :amount v))))
+        :width 4 :height 1))
+    (box :width 8 :height 2
+      (hslider :min 0 :max 1
+        :value (get send :amount)
+        :material (aqua-slider-material)
+        :on-change (lambda (v)
+          (do
+            (cool-off-follow)
+            (host-command "set-track-bus-send"
+              (dict :bus (get send :bus-idx) :amount v))))))))
+
+(def fx-track-parameters-panel ()
+  (box :background "fx-panel-bg" :debug-name "track-parameters-panel" :selected 0 :padding 0
+    (v-stack :gap 0
+      (box :height 1 :padding 0 :v-align :center :h-align :start
+        (h-stack :gap 0.5 :align :center
+          (box :width 0.75 :height 0)
+          (label "Track" :font-size 11 :color :white :bg :transparent)))
+      (box :padding 1.2
+        (v-stack :gap 1.1
+          (h-stack :gap 1.5
+            (v-stack :align :center :gap 0.25
+              (label "gate" :font-size 9 :color :gray :bg :transparent)
+              (box :width 4 :height 2
+                :bg (if SEQ.tp-gate :blue :dark-gray)
+                :on-click |x y r|
+                  (do
+                    (cool-off-follow)
+                    (seq-set-track-param :gate (if SEQ.tp-gate 0 1)))
+                (label (if SEQ.tp-gate "ON" "OFF")
+                  :font-size 11 :color :white :bg :transparent)))
+            (v-stack :align :center :gap 0.25
+              (label "poly" :font-size 9 :color :gray :bg :transparent)
+              (box :width 4 :height 2
+                :bg (if SEQ.tp-poly :blue :dark-gray)
+                :on-click |x y r|
+                  (do
+                    (cool-off-follow)
+                    (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))
+                (label (if SEQ.tp-poly "ON" "OFF")
+                  :font-size 11 :color :white :bg :transparent)))
+            (v-stack :align :center :gap 0.25
+              (label "fts" :font-size 9 :color :gray :bg :transparent)
+              (dropdown :value SEQ.tp-fts
+                :options SEQ.fts-options
+                :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
+                :width 10 :height 1.5 :font-size 10))
+            (v-stack :align :center :gap 0.25
+              (label "timebase" :font-size 9 :color :gray :bg :transparent)
+              (dropdown :value SEQ.tp-timebase
+                :options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh")
+                :on-change (lambda (v)
+                  (do
+                    (cool-off-follow)
+                    (if (seq-has-selection?)
+                      (seq-plock-timebase v)
+                      (seq-set-timebase v))))
+                :width 6 :height 1.5 :font-size 11))
+            (v-stack :align :center :gap 0.25
+              (h-stack :gap 0.25 :align :baseline
+                (label "swg" :font-size 9 :color :gray :bg :transparent)
+                (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
+                  :noui true :font-size 9 :text-color :gray
+                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v)))
+                  :width 4 :height 1))
+              (box :width 8 :height 2
+                (hslider :min 50 :max 75
+                  :value SEQ.tp-swing
+                  :material (aqua-slider-material)
+                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v))))))
+            (v-stack :align :center :gap 0.25
+              (label "swg resolution" :font-size 9 :color :gray :bg :transparent)
+              (dropdown :value SEQ.tp-swing-resolution
+                :options '("1/16" "1/8" "1/4" "1/2")
+                :on-change (lambda (v) (do (cool-off-follow) (seq-set-swing-resolution v)))
+                :width 5 :height 1.5 :font-size 11))
+            (v-stack :align :center :gap 0.25
+              (h-stack :gap 0.25 :align :baseline
+                (label "steps" :font-size 9 :color :gray :bg :transparent)
+                (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
+                  :noui true :font-size 9 :text-color :gray
+                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))
+                  :width 3 :height 1))
+              (box :width 8 :height 2
+                (hslider :min 1 :max 256
+                  :value SEQ.tp-num-steps
+                  :material (aqua-slider-material)
+                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))))))
+          (h-stack :gap 1.5
+            (v-stack :align :center :gap 0.25
+              (label "out" :font-size 9 :color :gray :bg :transparent)
+              (dropdown :value SEQ.tp-output
+                :options SEQ.track-output-options
+                :on-change (lambda (v)
+                  (do
+                    (cool-off-follow)
+                    (host-command "set-track-output" (dict :label v))))
+                :width 10 :height 1.5 :font-size 10))
+            (each SEQ.tp-bus-sends |send idx|
+              (fx-track-bus-send-control send))
+            (v-stack :align :center :gap 0.25
+              (label "acc fn" :font-size 9 :color :gray :bg :transparent)
+              (dropdown :value SEQ.tp-accumulator
+                :options SEQ.accumulator-options
+                :on-change (lambda (v) (do (cool-off-follow) (seq-set-accumulator v)))
+                :width 10 :height 1.5 :font-size 10))
+            (v-stack :align :center :gap 0.25
+              (label "acc mode" :font-size 9 :color :gray :bg :transparent)
+              (dropdown :value SEQ.tp-accum-mode
+                :options SEQ.accum-mode-options
+                :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-mode v)))
+                :width 8 :height 1.5 :font-size 10))
+            (v-stack :align :center :gap 0.25
+              (h-stack :gap 0.25 :align :baseline
+                (label "acc lim" :font-size 9 :color :gray :bg :transparent)
+                (number-picker :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
+                  :noui true :font-size 9 :text-color :gray
+                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))
+                  :width 4 :height 1))
+              (box :width 8 :height 2
+                (hslider :min 0 :max 127
+                  :value SEQ.tp-accum-limit
+                  :material (aqua-slider-material)
+                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v))))))))))))
+
 (def fx-select-effect (slot)
   (do
     (set! selected-fx-slot slot)
@@ -601,6 +737,7 @@
     (fx-empty-track-fallback)
     (v-stack :padding 0.5 :gap 1 
       (h-stack :gap 1
+        (fx-track-parameters-panel)
         (each SEQ.instrument-panel |inst inst-idx|
           (instrument-panel inst))
         (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
