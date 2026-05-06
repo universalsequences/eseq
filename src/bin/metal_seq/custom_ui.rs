@@ -48,6 +48,35 @@ fn custom_ui_param_name(expr: &eseqlisp::parser::Expression) -> Option<String> {
     }
 }
 
+fn is_fill_expr(expr: &eseqlisp::parser::Expression) -> bool {
+    use eseqlisp::parser::Expression;
+    match expr {
+        Expression::Keyword(value) | Expression::Symbol(value) => value == "fill",
+        _ => false,
+    }
+}
+
+fn transform_layout_items_without_unbounded_width(
+    items: &[eseqlisp::parser::Expression],
+    transform: fn(&eseqlisp::parser::Expression) -> String,
+) -> Vec<String> {
+    use eseqlisp::parser::Expression;
+
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < items.len() {
+        if matches!(&items[i], Expression::Keyword(key) if key == "width")
+            && items.get(i + 1).is_some_and(is_fill_expr)
+        {
+            i += 2;
+            continue;
+        }
+        out.push(transform(&items[i]));
+        i += 1;
+    }
+    out
+}
+
 fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     use eseqlisp::parser::Expression;
     match expr {
@@ -95,10 +124,7 @@ fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
             }
             format!(
                 "({})",
-                items
-                    .iter()
-                    .map(transform_synth_ui_expr)
-                    .collect::<Vec<_>>()
+                transform_layout_items_without_unbounded_width(items, transform_synth_ui_expr)
                     .join(" ")
             )
         }
@@ -137,10 +163,7 @@ fn transform_midi_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
             }
             format!(
                 "({})",
-                items
-                    .iter()
-                    .map(transform_midi_fx_ui_expr)
-                    .collect::<Vec<_>>()
+                transform_layout_items_without_unbounded_width(items, transform_midi_fx_ui_expr)
                     .join(" ")
             )
         }

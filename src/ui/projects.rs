@@ -13,6 +13,77 @@ use crate::sequencer::{BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_
 
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
 
+fn project_bus_gate_sequence_from_ui(
+    sequence: &super::BusGateSequence,
+) -> project::ProjectBusGateSequence {
+    project::ProjectBusGateSequence {
+        steps: sequence.steps.to_vec(),
+        velocities: sequence.velocities.to_vec(),
+        durations: sequence.durations.to_vec(),
+        num_steps: sequence.num_steps,
+        timebase: sequence.timebase as u8,
+        swing: sequence.swing,
+        swing_resolution: sequence.swing_resolution as u8,
+        timebase_plocks: sequence
+            .timebase_plocks
+            .iter()
+            .map(|value| value.map(|timebase| timebase as u32))
+            .collect(),
+        swing_plocks: sequence.swing_plocks.to_vec(),
+        swing_resolution_plocks: sequence
+            .swing_resolution_plocks
+            .iter()
+            .map(|value| value.map(|resolution| resolution as u32))
+            .collect(),
+    }
+}
+
+fn project_bus_gate_sequence_to_ui(
+    sequence: project::ProjectBusGateSequence,
+) -> super::BusGateSequence {
+    let mut restored = super::BusGateSequence::default();
+    for (idx, value) in sequence.steps.into_iter().take(MAX_STEPS).enumerate() {
+        restored.steps[idx] = value;
+    }
+    for (idx, value) in sequence.velocities.into_iter().take(MAX_STEPS).enumerate() {
+        restored.velocities[idx] = value.clamp(0.0, 1.0);
+    }
+    for (idx, value) in sequence.durations.into_iter().take(MAX_STEPS).enumerate() {
+        restored.durations[idx] = value.clamp(0.1, 2.0);
+    }
+    restored.set_num_steps(sequence.num_steps);
+    restored.timebase = crate::sequencer::Timebase::from_index(sequence.timebase as u32);
+    restored.swing = sequence.swing.clamp(50.0, 75.0);
+    restored.swing_resolution =
+        crate::sequencer::SwingResolution::from_index(sequence.swing_resolution as u32);
+    for (idx, value) in sequence
+        .timebase_plocks
+        .into_iter()
+        .take(MAX_STEPS)
+        .enumerate()
+    {
+        restored.timebase_plocks[idx] = value.map(crate::sequencer::Timebase::from_index);
+    }
+    for (idx, value) in sequence
+        .swing_plocks
+        .into_iter()
+        .take(MAX_STEPS)
+        .enumerate()
+    {
+        restored.swing_plocks[idx] = value.map(|swing| swing.clamp(50.0, 75.0));
+    }
+    for (idx, value) in sequence
+        .swing_resolution_plocks
+        .into_iter()
+        .take(MAX_STEPS)
+        .enumerate()
+    {
+        restored.swing_resolution_plocks[idx] =
+            value.map(crate::sequencer::SwingResolution::from_index);
+    }
+    restored
+}
+
 impl From<BusChannelState> for ProjectBusChannel {
     fn from(value: BusChannelState) -> Self {
         Self {
@@ -21,6 +92,7 @@ impl From<BusChannelState> for ProjectBusChannel {
             volume: value.volume,
             mute: value.mute,
             solo: value.solo,
+            gate_sequence: project_bus_gate_sequence_from_ui(&value.gate_sequence),
             custom_effects: value.custom_effect_names,
             effect_slots: value
                 .effect_slots
@@ -37,6 +109,7 @@ impl From<ProjectBusChannel> for BusChannelState {
         bus.volume = value.volume.clamp(0.0, 2.0);
         bus.mute = value.mute;
         bus.solo = value.solo;
+        bus.gate_sequence = project_bus_gate_sequence_to_ui(value.gate_sequence);
         for (idx, name) in value.custom_effects.into_iter().enumerate() {
             if idx < bus.custom_effect_names.len() {
                 bus.custom_effect_names[idx] = name;

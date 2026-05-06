@@ -234,6 +234,26 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
     rt.set_reactive("SEQ", "bus-mutes", Value::List(mutes));
     rt.set_reactive("SEQ", "bus-solos", Value::List(solos));
     rt.set_reactive("SEQ", "bus-effects", build_bus_effects_value(app));
+    rt.set_reactive("SEQ", "bus-steps", build_bus_steps_value(app));
+    rt.set_reactive(
+        "SEQ",
+        "bus-velocities",
+        build_bus_param_lists(app, "velocity"),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "bus-durations",
+        build_bus_param_lists(app, "duration"),
+    );
+    rt.set_reactive("SEQ", "bus-num-steps", build_bus_num_steps_value(app));
+    rt.set_reactive("SEQ", "bus-timebases", build_bus_timebase_value(app));
+    rt.set_reactive("SEQ", "bus-swings", build_bus_swing_value(app));
+    rt.set_reactive(
+        "SEQ",
+        "bus-swing-resolutions",
+        build_bus_swing_resolution_value(app),
+    );
+    rt.set_reactive("SEQ", "bus-step-has-plocks", build_bus_step_has_plocks(app));
 }
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
@@ -245,6 +265,118 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "bus-volumes", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "bus-solos", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-steps", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-velocities", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-durations", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-num-steps", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-timebases", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-swings", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-swing-resolutions", Value::List(vec![]));
+    rt.set_reactive("SEQ", "bus-step-has-plocks", Value::List(vec![]));
+}
+
+pub(crate) fn build_bus_steps_value(app: &ui::App) -> Value {
+    Value::List(
+        app.buses
+            .iter()
+            .map(|bus| {
+                Rc::new(RefCell::new(Value::List(
+                    bus.gate_sequence
+                        .steps
+                        .iter()
+                        .map(|active| Rc::new(RefCell::new(Value::Bool(*active))))
+                        .collect(),
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_bus_param_lists(app: &ui::App, param: &str) -> Value {
+    Value::List(
+        app.buses
+            .iter()
+            .map(|bus| {
+                let values = match param {
+                    "duration" => &bus.gate_sequence.durations,
+                    _ => &bus.gate_sequence.velocities,
+                };
+                Rc::new(RefCell::new(Value::List(
+                    values
+                        .iter()
+                        .map(|value| Rc::new(RefCell::new(Value::Number(*value as f64))))
+                        .collect(),
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_bus_num_steps_value(app: &ui::App) -> Value {
+    Value::List(
+        app.buses
+            .iter()
+            .map(|bus| {
+                Rc::new(RefCell::new(Value::Number(
+                    bus.gate_sequence.num_steps as f64,
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_bus_timebase_value(app: &ui::App) -> Value {
+    Value::List(
+        app.buses
+            .iter()
+            .map(|bus| {
+                Rc::new(RefCell::new(Value::String(
+                    bus.gate_sequence.timebase.label().to_string(),
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_bus_swing_value(app: &ui::App) -> Value {
+    Value::List(
+        app.buses
+            .iter()
+            .map(|bus| Rc::new(RefCell::new(Value::Number(bus.gate_sequence.swing as f64))))
+            .collect(),
+    )
+}
+
+pub(crate) fn build_bus_swing_resolution_value(app: &ui::App) -> Value {
+    Value::List(
+        app.buses
+            .iter()
+            .map(|bus| {
+                Rc::new(RefCell::new(Value::String(
+                    bus.gate_sequence.swing_resolution.label().to_string(),
+                )))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn build_bus_step_has_plocks(app: &ui::App) -> Value {
+    Value::List(
+        app.buses
+            .iter()
+            .map(|bus| {
+                Rc::new(RefCell::new(Value::List(
+                    (0..MAX_STEPS)
+                        .map(|step| {
+                            Rc::new(RefCell::new(Value::Bool(
+                                bus.gate_sequence.has_step_plock(step),
+                            )))
+                        })
+                        .collect(),
+                )))
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn push_panner_bool(
@@ -1855,12 +1987,6 @@ fn build_track_bus_sends(app: &ui::App, tp: &sequencer::sequencer::TrackParams) 
 pub(crate) fn build_track_params(state: &Arc<SequencerState>, track: usize) -> Value {
     use std::collections::HashMap;
     let tp = &state.pattern.track_params[track];
-    eprintln!(
-        "build_track_params: track={track} attack={} gate={} vol={}",
-        tp.get_attack_ms(),
-        tp.is_gate_on(),
-        tp.get_volume()
-    );
     let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
     map.insert(
         "gate".into(),
@@ -2340,7 +2466,10 @@ mod tests {
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
-                ("available-effects", test_list(vec![Value::String("limiter".to_string())])),
+                (
+                    "available-effects",
+                    test_list(vec![Value::String("limiter".to_string())]),
+                ),
                 ("available-midi-effects", test_list(vec![])),
                 (
                     "bus-names",
@@ -2350,13 +2479,19 @@ mod tests {
                         Value::String("Bus B".to_string()),
                     ]),
                 ),
-                ("effects", test_list(vec![Value::Map(test_fx_map(
-                    "track-fx",
-                    2,
-                    vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
-                ))])),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "track-fx",
+                        2,
+                        vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
+                    ))]),
+                ),
                 ("midi-effects", test_list(vec![])),
-                ("instrument-panel", test_list(vec![Value::Map(test_instrument_map())])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
                 (
                     "bus-effects",
                     test_list(vec![
@@ -2376,7 +2511,7 @@ mod tests {
                                 Value::Map(test_param_map("shimmer", 7, 0.28, 0.0, 1.0)),
                             ],
                         ))]),
-                    test_list(vec![]),
+                        test_list(vec![]),
                     ]),
                 ),
             ],
@@ -2427,6 +2562,104 @@ mod tests {
         let tree = fx.widget_tree.as_ref().expect("bus fx tree");
         assert!(value_contains_string(tree, "bus-fx"));
         assert!(value_contains_string(tree, "Add Bus FX"));
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_custom_instrument_ui_without_unbounded_width() {
+        fn assert_finite_layout(node: &eseqlisp::layout::LayoutNode) {
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.col.is_finite()
+                    && node.rect.row.is_finite()
+                    && node.rect.width < 10_000.0
+                    && node.rect.col.abs() < 10_000.0,
+                "non-finite or runaway layout node: type={} rect=({:.2},{:.2},{:.2},{:.2})",
+                node.widget_type,
+                node.rect.row,
+                node.rect.col,
+                node.rect.width,
+                node.rect.height
+            );
+            for child in &node.children {
+                assert_finite_layout(child);
+            }
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument/".to_string(),
+            "test/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (h-stack :width :fill :gap 0.5
+                (v-stack :width 20 :gap 0.25
+                  (label "CUSTOM_OK" :font-size 10 :color :gray :bg :transparent)
+                  (box :width :fill :height 2
+                    (h-stack :width :fill :gap 0.25
+                      (param "cutoff"))))))
+            "#
+            .to_string(),
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(120, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom instrument fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor.widget_layout().expect("custom instrument fx layout");
+        assert_finite_layout(&layout);
+        let tree = editor
+            .active_buffer()
+            .widget_tree
+            .as_ref()
+            .expect("fx tree");
+        assert!(value_contains_string(tree, "CUSTOM_OK"));
     }
 
     #[test]

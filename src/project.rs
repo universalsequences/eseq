@@ -58,9 +58,60 @@ pub struct ProjectBusChannel {
     #[serde(default)]
     pub solo: bool,
     #[serde(default)]
+    pub gate_sequence: ProjectBusGateSequence,
+    #[serde(default)]
     pub custom_effects: Vec<Option<String>>,
     #[serde(default)]
     pub effect_slots: Vec<ProjectEffectSlot>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ProjectBusGateSequence {
+    #[serde(default = "default_bus_gate_steps")]
+    pub steps: Vec<bool>,
+    #[serde(default = "default_bus_gate_values")]
+    pub velocities: Vec<f32>,
+    #[serde(default = "default_bus_gate_values")]
+    pub durations: Vec<f32>,
+    #[serde(default = "default_num_steps")]
+    pub num_steps: usize,
+    #[serde(default = "default_timebase")]
+    pub timebase: u8,
+    #[serde(default = "default_swing")]
+    pub swing: f32,
+    #[serde(default = "default_swing_resolution")]
+    pub swing_resolution: u8,
+    #[serde(default)]
+    pub timebase_plocks: Vec<Option<u32>>,
+    #[serde(default)]
+    pub swing_plocks: Vec<Option<f32>>,
+    #[serde(default)]
+    pub swing_resolution_plocks: Vec<Option<u32>>,
+}
+
+impl Default for ProjectBusGateSequence {
+    fn default() -> Self {
+        Self {
+            steps: default_bus_gate_steps(),
+            velocities: default_bus_gate_values(),
+            durations: default_bus_gate_values(),
+            num_steps: default_num_steps(),
+            timebase: default_timebase(),
+            swing: default_swing(),
+            swing_resolution: default_swing_resolution(),
+            timebase_plocks: vec![None; MAX_STEPS],
+            swing_plocks: vec![None; MAX_STEPS],
+            swing_resolution_plocks: vec![None; MAX_STEPS],
+        }
+    }
+}
+
+fn default_bus_gate_steps() -> Vec<bool> {
+    vec![true; MAX_STEPS]
+}
+
+fn default_bus_gate_values() -> Vec<f32> {
+    vec![1.0; MAX_STEPS]
 }
 
 pub fn default_project_buses() -> Vec<ProjectBusChannel> {
@@ -71,6 +122,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: 1.0,
             mute: false,
             solo: false,
+            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
         },
@@ -80,6 +132,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: 1.0,
             mute: false,
             solo: false,
+            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
         },
@@ -89,6 +142,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
             volume: 1.0,
             mute: false,
             solo: false,
+            gate_sequence: ProjectBusGateSequence::default(),
             custom_effects: Vec::new(),
             effect_slots: Vec::new(),
         },
@@ -728,6 +782,18 @@ fn default_accum_limit() -> f32 {
 
 fn default_track_volume() -> f32 {
     1.0
+}
+
+fn default_num_steps() -> usize {
+    16
+}
+
+fn default_timebase() -> u8 {
+    Timebase::Sixteenth as u8
+}
+
+fn default_swing() -> f32 {
+    50.0
 }
 
 fn default_swing_resolution() -> u8 {

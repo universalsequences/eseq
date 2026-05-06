@@ -16,7 +16,8 @@ use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScali
 use crate::lisp_effect::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
 use crate::recorder::{MasterRecorder, RecordingTake};
 use crate::sequencer::{
-    BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, StepSnapshot, STEPS_PER_PAGE,
+    BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, StepSnapshot,
+    SwingResolution, Timebase, MAX_STEPS, STEPS_PER_PAGE,
 };
 
 mod browser;
@@ -497,9 +498,72 @@ pub struct BusChannelState {
     pub volume: f32,
     pub mute: bool,
     pub solo: bool,
+    pub gate_sequence: BusGateSequence,
     pub effect_descriptors: Vec<EffectDescriptor>,
     pub effect_slots: Vec<EffectSlotSnapshot>,
     pub custom_effect_names: Vec<Option<String>>,
+}
+
+#[derive(Clone)]
+pub struct BusGateSequence {
+    pub steps: [bool; MAX_STEPS],
+    pub velocities: [f32; MAX_STEPS],
+    pub durations: [f32; MAX_STEPS],
+    pub num_steps: usize,
+    pub timebase: Timebase,
+    pub swing: f32,
+    pub swing_resolution: SwingResolution,
+    pub timebase_plocks: [Option<Timebase>; MAX_STEPS],
+    pub swing_plocks: [Option<f32>; MAX_STEPS],
+    pub swing_resolution_plocks: [Option<SwingResolution>; MAX_STEPS],
+}
+
+impl Default for BusGateSequence {
+    fn default() -> Self {
+        Self {
+            steps: [true; MAX_STEPS],
+            velocities: [1.0; MAX_STEPS],
+            durations: [1.0; MAX_STEPS],
+            num_steps: 16,
+            timebase: Timebase::Sixteenth,
+            swing: 50.0,
+            swing_resolution: SwingResolution::Sixteenth,
+            timebase_plocks: [None; MAX_STEPS],
+            swing_plocks: [None; MAX_STEPS],
+            swing_resolution_plocks: [None; MAX_STEPS],
+        }
+    }
+}
+
+impl BusGateSequence {
+    pub fn toggle_step(&mut self, step: usize) -> Option<bool> {
+        let value = self.steps.get_mut(step)?;
+        *value = !*value;
+        Some(*value)
+    }
+
+    pub fn set_step_velocity(&mut self, step: usize, value: f32) -> Option<f32> {
+        let slot = self.velocities.get_mut(step)?;
+        *slot = value.clamp(0.0, 1.0);
+        Some(*slot)
+    }
+
+    pub fn set_step_duration(&mut self, step: usize, value: f32) -> Option<f32> {
+        let slot = self.durations.get_mut(step)?;
+        *slot = value.clamp(0.1, 2.0);
+        Some(*slot)
+    }
+
+    pub fn set_num_steps(&mut self, value: usize) {
+        self.num_steps = value.clamp(1, MAX_STEPS);
+    }
+
+    pub fn has_step_plock(&self, step: usize) -> bool {
+        step < MAX_STEPS
+            && (self.timebase_plocks[step].is_some()
+                || self.swing_plocks[step].is_some()
+                || self.swing_resolution_plocks[step].is_some())
+    }
 }
 
 impl BusChannelState {
@@ -510,6 +574,7 @@ impl BusChannelState {
             volume: 1.0,
             mute: false,
             solo: false,
+            gate_sequence: BusGateSequence::default(),
             effect_descriptors: Self::default_effect_descriptors(),
             effect_slots: Self::default_effect_slots(),
             custom_effect_names: vec![None; crate::lisp_effect::MAX_CUSTOM_FX],

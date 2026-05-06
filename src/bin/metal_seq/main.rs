@@ -85,6 +85,26 @@ fn pull_shared_bus_state(
     }
 }
 
+fn map_number(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Option<f64> {
+    map.get(key).and_then(|cell| match &*cell.borrow() {
+        Value::Number(value) => Some(*value),
+        _ => None,
+    })
+}
+
+fn map_string(
+    map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+) -> Option<String> {
+    map.get(key).and_then(|cell| match &*cell.borrow() {
+        Value::String(value) => Some(value.clone()),
+        _ => None,
+    })
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     sequencer::crash::install()?;
 
@@ -1115,6 +1135,105 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    "toggle-bus-step" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let step = map_number(map, "step").map(|value| value as usize);
+                            if let (Some(bus_idx), Some(step)) = (bus_idx, step) {
+                                if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                    bus.gate_sequence.toggle_step(step);
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-bus-step-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let step = map_number(map, "step").map(|value| value as usize);
+                            let param = map_string(map, "param");
+                            let value = map_number(map, "value").map(|value| value as f32);
+                            if let (Some(bus_idx), Some(step), Some(param), Some(value)) =
+                                (bus_idx, step, param, value)
+                            {
+                                if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                    match param.as_str() {
+                                        "duration" | "dur" => {
+                                            bus.gate_sequence.set_step_duration(step, value);
+                                        }
+                                        _ => {
+                                            bus.gate_sequence.set_step_velocity(step, value);
+                                        }
+                                    }
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-bus-sequencer-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let param = map_string(map, "param");
+                            let value = map_number(map, "value").map(|value| value as f32);
+                            let label = map_string(map, "label");
+                            if let (Some(bus_idx), Some(param)) = (bus_idx, param) {
+                                if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                    match param.as_str() {
+                                        "num-steps" => {
+                                            if let Some(value) = value {
+                                                bus.gate_sequence.set_num_steps(value as usize);
+                                            }
+                                        }
+                                        "swing" => {
+                                            if let Some(value) = value {
+                                                bus.gate_sequence.swing = value.clamp(50.0, 75.0);
+                                            }
+                                        }
+                                        "timebase" => {
+                                            if let Some(label) = label {
+                                                let normalized = label.to_ascii_lowercase();
+                                                if let Some(idx) =
+                                                    Timebase::LABELS.iter().position(|candidate| {
+                                                        candidate.to_ascii_lowercase() == normalized
+                                                    })
+                                                {
+                                                    bus.gate_sequence.timebase = Timebase::ALL[idx];
+                                                }
+                                            }
+                                        }
+                                        "swing-resolution" => {
+                                            if let Some(label) = label {
+                                                let normalized = label.to_ascii_lowercase();
+                                                if let Some(idx) = SwingResolution::LABELS
+                                                    .iter()
+                                                    .position(|candidate| {
+                                                        candidate.to_ascii_lowercase() == normalized
+                                                    })
+                                                {
+                                                    bus.gate_sequence.swing_resolution =
+                                                        SwingResolution::ALL[idx];
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                         }
                     }
