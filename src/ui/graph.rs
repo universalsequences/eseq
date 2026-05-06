@@ -144,6 +144,11 @@ impl GraphController<'_> {
             )
         };
         unsafe {
+            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, merge_id);
+            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, gate_id);
+            crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, volume_id);
+        }
+        unsafe {
             crate::audiograph::graph_connect(self.app.graph.lg.0, left_id, 0, merge_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, right_id, 0, merge_id, 1);
             crate::audiograph::graph_connect(self.app.graph.lg.0, merge_id, 0, gate_id, 0);
@@ -188,6 +193,9 @@ impl GraphController<'_> {
         };
         let bus = self.app.graph.bus_node_ids.remove(pos);
         unsafe {
+            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.merge_id);
+            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.gate_id);
+            crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, bus.volume_id);
             crate::audiograph::graph_disconnect(
                 self.app.graph.lg.0,
                 bus.volume_id,

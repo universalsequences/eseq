@@ -111,6 +111,11 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
             0,
         )
     };
+    unsafe {
+        audiograph::add_node_to_watchlist(lg, mix_merge_id);
+        audiograph::add_node_to_watchlist(lg, mix_gate_id);
+        audiograph::add_node_to_watchlist(lg, mix_volume_id);
+    }
 
     // bus_L / bus_R collect the mix, then the Mix bus FX chain feeds the DAC.
     unsafe {
@@ -180,6 +185,11 @@ pub fn init_engine() -> Result<Engine, Box<dyn std::error::Error>> {
                 0,
             )
         };
+        unsafe {
+            audiograph::add_node_to_watchlist(lg, merge_id);
+            audiograph::add_node_to_watchlist(lg, gate_id);
+            audiograph::add_node_to_watchlist(lg, volume_id);
+        }
         unsafe {
             audiograph::graph_connect(lg, left_id, 0, merge_id, 0);
             audiograph::graph_connect(lg, right_id, 0, merge_id, 1);

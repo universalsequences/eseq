@@ -213,6 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_peak_l_level = -1.0f64;
     let mut prev_peak_r_level = -1.0f64;
     let mut prev_track_peak_levels: Vec<f64> = Vec::new();
+    let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
     let mut prev_bus_playheads: Vec<usize> = Vec::new();
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
@@ -222,6 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cached_peak_l_level = 0.0f64;
     let mut cached_peak_r_level = 0.0f64;
     let mut cached_track_peak_levels = vec![0.0; track_names.len()];
+    let mut cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
     let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
     let mut last_cpu_ui_poll_at = Instant::now() - CPU_UI_POLL_INTERVAL;
     let mut last_voice_count_log_at = Instant::now() - VOICE_COUNT_LOG_INTERVAL;
@@ -523,6 +525,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_track_mixer_state(rt, &app, &state);
                                     sync_bus_mixer_state(rt, &app);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
+                                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                                     rt.set_reactive(
                                         "SEQ",
                                         "effects",
@@ -644,6 +647,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.graph.lg,
                                     &track_pan_ids.lock().unwrap(),
                                 );
+                                cached_bus_peak_levels =
+                                    read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
                                 last_meter_poll_at = Instant::now();
                                 *record_armed.lock().unwrap() = app.graph.record_armed.clone();
 
@@ -660,6 +665,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &record_armed,
                                     &cached_track_peak_levels,
                                 );
+                                sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2623,6 +2629,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_track_mixer_state(rt, &app, &state);
                                     sync_bus_mixer_state(rt, &app);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
+                                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                                     rt.set_reactive(
                                         "SEQ",
                                         "effects",
@@ -2746,6 +2753,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             sync_track_mixer_state(rt, &app, &state);
                             sync_bus_mixer_state(rt, &app);
                             sync_track_peak_fields(rt, &cached_track_peak_levels);
+                            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                             rt.set_reactive(
                                 "SEQ",
                                 "effects",
@@ -2920,6 +2928,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             sync_track_mixer_state(rt, &app, &state);
                                             sync_bus_mixer_state(rt, &app);
                                             sync_track_peak_fields(rt, &cached_track_peak_levels);
+                                            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                                             rt.set_reactive(
                                                 "SEQ",
                                                 "effects",
@@ -3554,6 +3563,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .collect();
                             push_solo_mutes(lg_raw, &state, &pan_ids);
                         }
+                        *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
                         *record_armed.lock().unwrap() = vec![false; track_names.len()];
 
                         let ct = current_track.load(Ordering::Relaxed);
@@ -3581,6 +3591,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ));
                         cached_track_peak_levels =
                             read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
+                        cached_bus_peak_levels =
+                            read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
                         last_meter_poll_at = Instant::now();
                         let rt = editor.runtime_mut();
 
@@ -3596,6 +3608,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.set_reactive("SEQ", "cpu-load-pct", Value::Number(cpu_load_pct as f64));
                         rt.set_reactive("SEQ", "master-peak-l", Value::Number(cached_peak_l_level));
                         rt.set_reactive("SEQ", "master-peak-r", Value::Number(cached_peak_r_level));
+                        sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                         rt.set_reactive(
                             "SEQ",
                             "num-tracks",
@@ -3643,6 +3656,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             sync_step_param_lists(rt, &state, ct);
                             sync_track_mixer_state(rt, &app, &state);
                             sync_track_peak_fields(rt, &cached_track_peak_levels);
+                            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                             rt.set_reactive(
                                 "SEQ",
                                 "effects",
@@ -3746,6 +3760,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ));
                 cached_track_peak_levels =
                     read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
+                cached_bus_peak_levels =
+                    read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
                 last_meter_poll_at = Instant::now();
             }
 
@@ -3776,6 +3792,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
+                sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                 rt.set_reactive(
                     "SEQ",
                     "effects",
@@ -3857,6 +3874,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_track_peak_levels = cached_track_peak_levels.clone();
                 needs_reactive_cycle = true;
             }
+            if cached_bus_peak_levels != prev_bus_peak_levels {
+                sync_bus_peak_field_delta(
+                    editor.runtime_mut(),
+                    &prev_bus_peak_levels,
+                    &cached_bus_peak_levels,
+                );
+                prev_bus_peak_levels = cached_bus_peak_levels.clone();
+                needs_reactive_cycle = true;
+            }
             if bus_playheads != prev_bus_playheads {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
@@ -3893,6 +3919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
+                sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
@@ -3922,11 +3949,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &record_armed,
                         &cached_track_peak_levels,
                     );
+                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                 } else {
                     sync_track_name_state(rt, &mut track_names, &app);
                     sync_track_mixer_state(rt, &app, &state);
                     sync_bus_mixer_state(rt, &app);
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
+                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                     sync_track_params(rt, &app, &state, ct, &selected_steps);
                     rt.set_reactive(

@@ -502,35 +502,55 @@ pub(crate) fn push_solo_mutes(
     }
 }
 
+fn read_panner_peak_levels(lg: sequencer::audiograph::LiveGraphPtr, node_ids: &[i32]) -> Vec<f64> {
+    node_ids
+        .iter()
+        .map(|&node_id| read_panner_peak_level(lg, node_id))
+        .collect()
+}
+
+fn read_panner_peak_level(lg: sequencer::audiograph::LiveGraphPtr, node_id: i32) -> f64 {
+    const PANNER_STATE_LEN: usize = sequencer::stereo_panner::STEREO_PANNER_STATE_SIZE;
+    const PANNER_STATE_BYTES: usize = PANNER_STATE_LEN * std::mem::size_of::<f32>();
+    if node_id < 0 {
+        return 0.0;
+    }
+    let mut state_size = 0usize;
+    let mut state = [0.0_f32; PANNER_STATE_LEN];
+    let copied = unsafe {
+        sequencer::audiograph::get_node_state_into(
+            lg.0,
+            node_id,
+            state.as_mut_ptr().cast(),
+            PANNER_STATE_BYTES,
+            &mut state_size as *mut usize,
+        )
+    };
+    if !copied || state_size < PANNER_STATE_BYTES {
+        return 0.0;
+    }
+    let peak = state[sequencer::stereo_panner::STATE_PEAK_L]
+        .max(state[sequencer::stereo_panner::STATE_PEAK_R]);
+    meter_display_level(peak)
+}
+
 pub(crate) fn read_track_peak_levels(
     lg: sequencer::audiograph::LiveGraphPtr,
     pan_ids: &[i32],
 ) -> Vec<f64> {
-    const PANNER_STATE_LEN: usize = sequencer::stereo_panner::STEREO_PANNER_STATE_SIZE;
-    const PANNER_STATE_BYTES: usize = PANNER_STATE_LEN * std::mem::size_of::<f32>();
-    pan_ids
+    read_panner_peak_levels(lg, pan_ids)
+}
+
+pub(crate) fn read_bus_peak_levels(
+    lg: sequencer::audiograph::LiveGraphPtr,
+    bus_nodes: &[ui::BusNodeIds],
+) -> Vec<f64> {
+    bus_nodes
         .iter()
-        .map(|&pan_id| {
-            if pan_id < 0 {
-                return 0.0;
-            }
-            let mut state_size = 0usize;
-            let mut state = [0.0_f32; PANNER_STATE_LEN];
-            let copied = unsafe {
-                sequencer::audiograph::get_node_state_into(
-                    lg.0,
-                    pan_id,
-                    state.as_mut_ptr().cast(),
-                    PANNER_STATE_BYTES,
-                    &mut state_size as *mut usize,
-                )
-            };
-            if !copied || state_size < PANNER_STATE_BYTES {
-                return 0.0;
-            }
-            let peak = state[sequencer::stereo_panner::STATE_PEAK_L]
-                .max(state[sequencer::stereo_panner::STATE_PEAK_R]);
-            meter_display_level(peak)
+        .map(|bus| {
+            read_panner_peak_level(lg, bus.merge_id)
+                .max(read_panner_peak_level(lg, bus.gate_id))
+                .max(read_panner_peak_level(lg, bus.volume_id))
         })
         .collect()
 }
@@ -549,6 +569,12 @@ pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) {
     }
 }
 
+pub(crate) fn sync_bus_peak_fields(rt: &mut Runtime, levels: &[f64]) {
+    for (idx, &level) in levels.iter().enumerate() {
+        rt.set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(level));
+    }
+}
+
 pub(crate) fn sync_track_peak_field_delta(rt: &mut Runtime, previous: &[f64], levels: &[f64]) {
     if previous.len() != levels.len() {
         sync_track_peak_fields(rt, levels);
@@ -561,6 +587,22 @@ pub(crate) fn sync_track_peak_field_delta(rt: &mut Runtime, previous: &[f64], le
     for (idx, (&old_level, &level)) in previous.iter().zip(levels.iter()).enumerate() {
         if old_level != level {
             rt.set_reactive("SEQ", &format!("track-peak-{idx}"), Value::Number(level));
+        }
+    }
+}
+
+pub(crate) fn sync_bus_peak_field_delta(rt: &mut Runtime, previous: &[f64], levels: &[f64]) {
+    if previous.len() != levels.len() {
+        sync_bus_peak_fields(rt, levels);
+        for idx in levels.len()..previous.len() {
+            rt.set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(0.0));
+        }
+        return;
+    }
+
+    for (idx, (&old_level, &level)) in previous.iter().zip(levels.iter()).enumerate() {
+        if old_level != level {
+            rt.set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(level));
         }
     }
 }
@@ -2582,6 +2624,8 @@ mod tests {
                 ("track-peak-0", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
+                ("bus-peak-0", Value::Number(0.0)),
+                ("bus-peak-1", Value::Number(0.0)),
                 (
                     "bus-names",
                     test_list(vec![
@@ -2677,6 +2721,35 @@ mod tests {
                 .iter()
                 .any(|key| key == "mixer-v2-track-0"),
             "track peak updates must not invalidate the whole track strip: {peak_subtree_keys:?}"
+        );
+
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "bus-peak-1", Value::Number(0.5));
+        editor.runtime_mut().run_reactive_cycle();
+        let bus_peak_subtree_keys: Vec<String> = editor
+            .runtime_mut()
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .filter_map(|update| match update {
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => {
+                    stable_key_from_tree(&tree)
+                }
+                eseqlisp::vm::PendingUiUpdate::FullTree(_) => Some("<full-tree>".to_string()),
+            })
+            .collect();
+        assert!(
+            bus_peak_subtree_keys
+                .iter()
+                .any(|key| key == "mixer-v2-bus-meter-1"),
+            "bus peak updates should target only the nested bus meter subtree: {bus_peak_subtree_keys:?}"
+        );
+        assert!(
+            !bus_peak_subtree_keys
+                .iter()
+                .any(|key| key == "mixer-v2-bus-1"),
+            "bus peak updates must not invalidate the whole bus strip: {bus_peak_subtree_keys:?}"
         );
     }
 
@@ -3026,6 +3099,9 @@ mod tests {
                 ("track-peak-0", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
+                ("bus-peak-0", Value::Number(0.0)),
+                ("bus-peak-1", Value::Number(0.0)),
+                ("bus-peak-2", Value::Number(0.0)),
                 (
                     "bus-names",
                     test_list(vec![

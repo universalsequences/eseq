@@ -392,6 +392,12 @@ pub(crate) fn init_runtime(
                     Value::Number(0.0),
                 ));
             }
+            for idx in 0..app.buses.len() {
+                fields.push((
+                    Box::leak(format!("bus-peak-{idx}").into_boxed_str()),
+                    Value::Number(0.0),
+                ));
+            }
             for idx in 0..MAX_STEPS {
                 fields.push((
                     Box::leak(format!("playhead-active-{idx}").into_boxed_str()),

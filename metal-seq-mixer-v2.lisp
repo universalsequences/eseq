@@ -5,9 +5,9 @@
   (reactive-get "SEQ" (str "track-peak-" i)))
 
 (def bus-peak (i)
-  (if (= i 0)
+  (if (= (nth SEQ.bus-names i) "Mix")
     (max SEQ.master-peak-l SEQ.master-peak-r)
-    0.0))
+    (reactive-get "SEQ" (str "bus-peak-" i))))
 
 (def mixer-v2-muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
@@ -48,7 +48,7 @@
         (sdf/translate 0 marker-y
           (let ((tx x)
                 (ty (* y aspect))
-                (p1x -0.82) (p1y -0.22) (p2x -0.82) (p2y 0.22) (p3x 0.70) (p3y 0.0))
+                (p1x -0.82) (p1y -0.15) (p2x -0.82) (p2y 0.15) (p3x 0.70) (p3y 0.0))
             (let ((d1 (- (* (- p2x p1x) (- ty p1y)) (* (- p2y p1y) (- tx p1x))))
                   (d2 (- (* (- p3x p2x) (- ty p2y)) (* (- p3y p2y) (- tx p2x))))
                   (d3 (- (* (- p1x p3x) (- ty p3y)) (* (- p1y p3y) (- tx p3x)))))
@@ -99,14 +99,21 @@
         :on-drag (lambda (sx sy region) (seq-set-bus-volume i (mixer-v2-pointer-volume sy))))
       (mixer-v2-bus-meter i))))
 
+(def mixer-v2-send-label (name)
+  (if (= name "Bus A")
+    "A"
+    (if (= name "Bus B")
+      "B"
+      (substring name 0 3))))
+
 (def mixer-v2-send-knob (track send)
-  (knob-number :label (substring (get send :name) 0 7)
+  (knob-number :label (mixer-v2-send-label (get send :name))
     :key (str "mixer-v2-track-" track "-send-" (get send :bus-idx))
     :value (get send :amount)
     :min 0 :max 1 :decimals 2
     :font-size 9 :label-font-size 8
     :text-color :gray :label-color :gray
-    :width 4.7 :height 1.8
+    :width 4.1 :height 1.8
     :on-change (lambda (v)
       (host-command "set-track-bus-send"
         (dict :track track :bus (get send :bus-idx) :amount v)))))
@@ -128,7 +135,7 @@
           :on-change (lambda (v)
             (host-command "set-track-output" (dict :track i :label v)))
           :width 8.5 :height 1.2 :font-size 10)
-        (h-stack :gap 0.25
+        (h-stack :gap 0.05
           (each sends |send send-idx|
             (mixer-v2-send-knob i send)))
         (h-stack :gap 0.45 :align :center
