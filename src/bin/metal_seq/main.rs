@@ -3850,7 +3850,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let fx_ep = fx_epoch.load(Ordering::Relaxed);
             if fx_ep != prev_fx_epoch {
-                editor.reset_widget_scroll_for_buffer_named("*fx*");
                 let rt = editor.runtime_mut();
                 rt.set_reactive(
                     "SEQ",
