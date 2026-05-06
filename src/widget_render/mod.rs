@@ -9,6 +9,7 @@ pub mod image;
 pub mod knob;
 pub mod knob_number;
 pub mod label;
+pub mod mixer_meter;
 pub mod number_picker;
 pub mod scroll;
 pub mod sdf_widget;
@@ -618,6 +619,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &toggle::TOGGLE_WIDGET,
     &knob::KNOB_WIDGET,
     &knob_number::KNOB_NUMBER_WIDGET,
+    &mixer_meter::MIXER_METER_WIDGET,
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,

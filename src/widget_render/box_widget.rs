@@ -56,11 +56,45 @@ pub struct BoxWidget;
 
 pub static BOX_WIDGET: BoxWidget = BoxWidget;
 
-fn box_mouse_info(phase: &str, modifiers: KeyModifiers) -> Value {
+fn box_mouse_info(
+    phase: &str,
+    modifiers: KeyModifiers,
+    node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+) -> Value {
     let mut info = std::collections::HashMap::new();
     info.insert(
         "phase".to_string(),
         Rc::new(RefCell::new(Value::String(phase.to_string()))),
+    );
+    let wc = local_col - node.rect.col;
+    let wr = local_row - node.rect.row;
+    let sx = if node.rect.width > 0.0 {
+        wc / node.rect.width * 2.0 - 1.0
+    } else {
+        0.0
+    };
+    let sy = if node.rect.height > 0.0 {
+        wr / node.rect.height * 2.0 - 1.0
+    } else {
+        0.0
+    };
+    info.insert(
+        "x".to_string(),
+        Rc::new(RefCell::new(Value::Number(wc as f64))),
+    );
+    info.insert(
+        "y".to_string(),
+        Rc::new(RefCell::new(Value::Number(wr as f64))),
+    );
+    info.insert(
+        "sx".to_string(),
+        Rc::new(RefCell::new(Value::Number(sx as f64))),
+    );
+    info.insert(
+        "sy".to_string(),
+        Rc::new(RefCell::new(Value::Number(sy as f64))),
     );
     info.insert(
         "shift".to_string(),
@@ -305,8 +339,8 @@ impl WidgetDefinition for BoxWidget {
         &self,
         node: &LayoutNode,
         mouse_kind: MouseEventKind,
-        _local_col: f32,
-        _local_row: f32,
+        local_col: f32,
+        local_row: f32,
         _drag_start: Option<(f32, f32)>,
         _gesture: Option<&Value>,
         modifiers: KeyModifiers,
@@ -315,21 +349,23 @@ impl WidgetDefinition for BoxWidget {
             MouseEventKind::Down(MouseButton::Left) => {
                 if node.props.contains_key("on-mouse-down") {
                     return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
-                        "down", modifiers,
+                        "down", modifiers, node, local_col, local_row,
                     )));
                 }
                 if node.props.contains_key("on-click") {
-                    return MouseEventOutcome::Dispatch(WidgetEvent::Activate(modifiers));
+                    return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
+                        "click", modifiers, node, local_col, local_row,
+                    )));
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) if node.props.contains_key("on-drag") => {
                 return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
-                    "drag", modifiers,
+                    "drag", modifiers, node, local_col, local_row,
                 )));
             }
             MouseEventKind::Up(MouseButton::Left) if node.props.contains_key("on-mouse-up") => {
                 return MouseEventOutcome::Dispatch(WidgetEvent::Custom(box_mouse_info(
-                    "up", modifiers,
+                    "up", modifiers, node, local_col, local_row,
                 )));
             }
             _ => {}
@@ -339,7 +375,10 @@ impl WidgetDefinition for BoxWidget {
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
         let (callback_name, arg) = match event {
-            WidgetEvent::Activate(modifiers) => ("on-click", box_mouse_info("click", modifiers)),
+            WidgetEvent::Activate(modifiers) => (
+                "on-click",
+                box_mouse_info("click", modifiers, node, node.rect.col, node.rect.row),
+            ),
             WidgetEvent::Custom(value) => {
                 let phase = match &value {
                     Value::Map(map) => map.get("phase").and_then(|v| match &*v.borrow() {
@@ -349,6 +388,7 @@ impl WidgetDefinition for BoxWidget {
                     _ => None,
                 }?;
                 let callback_name = match phase.as_str() {
+                    "click" => "on-click",
                     "down" => "on-mouse-down",
                     "drag" => "on-drag",
                     "up" => "on-mouse-up",
@@ -435,10 +475,7 @@ impl WidgetDefinition for BoxWidget {
             }
         } else if let Some(color) = background_color {
             if color.a > 0.0 {
-                prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
-                    rect: node.rect,
-                    color,
-                }));
+                push_rounded_rect(&mut prims, node.rect, color, viewport, 0.0);
             }
         }
 

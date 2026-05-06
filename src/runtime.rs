@@ -1748,7 +1748,7 @@ impl Runtime {
         self.shared.borrow_mut().pending_widget_tree.take()
     }
 
-    pub(crate) fn take_pending_buffer_widget_trees(&mut self) -> Vec<PendingUiUpdate> {
+    pub fn take_pending_buffer_widget_trees(&mut self) -> Vec<PendingUiUpdate> {
         std::mem::take(&mut self.shared.borrow_mut().pending_buffer_widget_trees)
     }
 
