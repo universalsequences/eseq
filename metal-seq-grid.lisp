@@ -18,7 +18,7 @@
 (load "metal-seq-browser.lisp")
 (load "metal-seq-fx.lisp")
 (load "metal-seq-piano-roll.lisp")
-(load "metal-seq-mixer.lisp")
+(load "metal-seq-mixer-v2.lisp")
 (load "metal-seq-transport.lisp")
 
 (def seq-clear-ui-selection ()
@@ -491,10 +491,12 @@
 
 (load "metal-seq-metal.lisp")
 
-; Layout: samples | metal | mixer on top, fx on bottom
+; Layout: samples on the left; metal + mixer on the right; fx spans the bottom.
 (set-layout '(:rows
   0.05 (:buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-  0.8 (:cols 0.2 (:buf "*samples*" :hide-status true :borderless true :min-width 25 :max-width 32)
-         0.6 (:buf "*metal*" :hide-status false :min-width 25)
-         0.2 (:buf "*mixer*" :hide-status true :borderless true :min-width 25 :max-width 25))
-  0.2 (:buf "*fx*" :hide-status true :min-height 13 :max-height 50)))
+  0.95 (:cols
+    0.2 (:buf "*samples*" :hide-status true :borderless true :min-width 25 :max-width 32)
+    0.8 (:rows
+      0.55 (:buf "*metal*" :hide-status false :min-width 25)
+      0.45 (:buf "*mixer*" :hide-status true :borderless true :min-height 12 :max-height 14)))
+  0.33 (:buf "*fx*" :hide-status true :min-height 13 :max-height 50)))

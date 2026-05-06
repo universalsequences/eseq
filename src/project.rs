@@ -126,7 +126,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
         ProjectBusChannel {
             id: crate::sequencer::MIX_BUS_ID,
             name: "Mix".to_string(),
-            volume: 1.0,
+            volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
             gate_sequence: ProjectBusGateSequence::default(),
@@ -136,7 +136,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
         ProjectBusChannel {
             id: crate::sequencer::DEFAULT_BUS_A_ID,
             name: "Bus A".to_string(),
-            volume: 1.0,
+            volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
             gate_sequence: ProjectBusGateSequence::default(),
@@ -146,7 +146,7 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
         ProjectBusChannel {
             id: crate::sequencer::DEFAULT_BUS_B_ID,
             name: "Bus B".to_string(),
-            volume: 1.0,
+            volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
             gate_sequence: ProjectBusGateSequence::default(),
@@ -801,7 +801,7 @@ fn default_accum_limit() -> f32 {
 }
 
 fn default_track_volume() -> f32 {
-    1.0
+    crate::mixer_volume::default_fader()
 }
 
 fn default_num_steps() -> usize {

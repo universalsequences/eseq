@@ -164,6 +164,44 @@ pub(crate) fn build_track_volumes(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn build_track_pans(state: &Arc<SequencerState>) -> Value {
+    let count = state.active_track_count();
+    let items: Vec<Rc<RefCell<Value>>> = (0..count)
+        .map(|t| {
+            Rc::new(RefCell::new(Value::Number(
+                state.pattern.track_params[t].get_pan() as f64,
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
+pub(crate) fn build_track_outputs(app: &ui::App, state: &Arc<SequencerState>) -> Value {
+    let count = state.active_track_count();
+    let items: Vec<Rc<RefCell<Value>>> = (0..count)
+        .map(|t| {
+            Rc::new(RefCell::new(build_track_output_label(
+                app,
+                &state.pattern.track_params[t],
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
+pub(crate) fn build_all_track_bus_sends(app: &ui::App, state: &Arc<SequencerState>) -> Value {
+    let count = state.active_track_count();
+    let items: Vec<Rc<RefCell<Value>>> = (0..count)
+        .map(|t| {
+            Rc::new(RefCell::new(build_track_bus_sends(
+                app,
+                &state.pattern.track_params[t],
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
 pub(crate) fn build_track_mutes(state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
@@ -201,8 +239,15 @@ pub(crate) fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, state: &Arc<SequencerState>) {
+pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Arc<SequencerState>) {
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
+    rt.set_reactive("SEQ", "track-pans", build_track_pans(state));
+    rt.set_reactive("SEQ", "track-outputs", build_track_outputs(app, state));
+    rt.set_reactive(
+        "SEQ",
+        "track-bus-sends",
+        build_all_track_bus_sends(app, state),
+    );
     rt.set_reactive("SEQ", "track-mutes", build_track_mutes(state));
     rt.set_reactive("SEQ", "track-solos", build_track_solos(state));
     rt.set_reactive(
@@ -260,6 +305,9 @@ pub(crate) fn sync_bus_mixer_state(rt: &mut Runtime, app: &ui::App) {
 
 pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-muted-by-solo", Value::List(vec![]));
@@ -601,7 +649,7 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "auxas", Value::List(vec![]));
         rt.set_reactive("SEQ", "pans", Value::List(vec![]));
         rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
-        sync_track_mixer_state(rt, state);
+        sync_track_mixer_state(rt, app, state);
         sync_bus_mixer_state(rt, app);
         rt.set_reactive("SEQ", "effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
@@ -618,7 +666,7 @@ pub(crate) fn sync_track_topology_state(
     rt.set_reactive("SEQ", "steps", build_steps_value(state, current_track_idx));
     sync_piano_roll_state(rt, state, current_track_idx, piano_roll_selection);
     sync_step_param_lists(rt, state, current_track_idx);
-    sync_track_mixer_state(rt, state);
+    sync_track_mixer_state(rt, app, state);
     sync_bus_mixer_state(rt, app);
     sync_track_peak_fields(rt, track_peak_levels);
     rt.set_reactive(
@@ -2268,24 +2316,24 @@ mod tests {
 
     #[test]
     fn metal_seq_mixer_lisp_parses() {
-        let src = std::fs::read_to_string("metal-seq-mixer.lisp").expect("read mixer lisp");
+        let src = std::fs::read_to_string("metal-seq-mixer-v2.lisp").expect("read mixer lisp");
         let tokens = Parser::new(src)
             .parse()
-            .expect("tokenize metal-seq-mixer.lisp");
+            .expect("tokenize metal-seq-mixer-v2.lisp");
         let mut pos = 0;
         while pos < tokens.len() {
             if let Err(err) = parse_expression_at(&tokens, &mut pos) {
                 let start = pos.saturating_sub(8);
                 let end = (pos + 8).min(tokens.len());
                 panic!(
-                    "parse metal-seq-mixer.lisp at token {pos}: {err:?}\ncontext: {:?}",
+                    "parse metal-seq-mixer-v2.lisp at token {pos}: {err:?}\ncontext: {:?}",
                     &tokens[start..end]
                 );
             }
         }
         ASTParser::new(tokens)
             .parse()
-            .expect("parse metal-seq-mixer.lisp");
+            .expect("parse metal-seq-mixer-v2.lisp");
     }
 
     #[test]
@@ -2464,7 +2512,7 @@ mod tests {
 
     #[test]
     fn metal_seq_mixer_lisp_loads_and_builds_widget_tree() {
-        let src = std::fs::read_to_string("metal-seq-mixer.lisp").expect("read mixer lisp");
+        let src = std::fs::read_to_string("metal-seq-mixer-v2.lisp").expect("read mixer lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.runtime_mut().register_reactive(
             "SEQ",
@@ -2480,7 +2528,60 @@ mod tests {
                 ("track-solos", test_list(vec![Value::Bool(false)])),
                 ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
+                ("track-pans", test_list(vec![Value::Number(0.0)])),
+                (
+                    "track-outputs",
+                    test_list(vec![Value::String("main".to_string())]),
+                ),
+                (
+                    "track-output-options",
+                    test_list(vec![
+                        Value::String("main".to_string()),
+                        Value::String("sends only".to_string()),
+                        Value::String("Bus A".to_string()),
+                        Value::String("Bus B".to_string()),
+                    ]),
+                ),
+                (
+                    "track-bus-sends",
+                    test_list(vec![test_list(vec![
+                        Value::Map({
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(
+                                "bus-idx".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map.insert(
+                                "name".to_string(),
+                                Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
+                            );
+                            map.insert(
+                                "amount".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map
+                        }),
+                        Value::Map({
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(
+                                "bus-idx".to_string(),
+                                Rc::new(RefCell::new(Value::Number(1.0))),
+                            );
+                            map.insert(
+                                "name".to_string(),
+                                Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
+                            );
+                            map.insert(
+                                "amount".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map
+                        }),
+                    ])]),
+                ),
                 ("track-peak-0", Value::Number(0.0)),
+                ("master-peak-l", Value::Number(0.0)),
+                ("master-peak-r", Value::Number(0.0)),
                 (
                     "bus-names",
                     test_list(vec![
@@ -2538,6 +2639,44 @@ mod tests {
         assert!(
             value_contains_string(tree, "Bus A") && value_contains_string(tree, "Bus B"),
             "mixer widget tree should contain bus rows"
+        );
+        fn stable_key_from_tree(tree: &Value) -> Option<String> {
+            let Value::Map(map) = tree else {
+                return None;
+            };
+            match map.get("__stable-key").map(|value| value.borrow().clone()) {
+                Some(Value::String(key)) => Some(key),
+                _ => None,
+            }
+        }
+
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "track-peak-0", Value::Number(0.5));
+        editor.runtime_mut().run_reactive_cycle();
+        let peak_subtree_keys: Vec<String> = editor
+            .runtime_mut()
+            .take_pending_buffer_widget_trees()
+            .into_iter()
+            .filter_map(|update| match update {
+                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => {
+                    stable_key_from_tree(&tree)
+                }
+                eseqlisp::vm::PendingUiUpdate::FullTree(_) => Some("<full-tree>".to_string()),
+            })
+            .collect();
+        assert!(
+            peak_subtree_keys
+                .iter()
+                .any(|key| key == "mixer-v2-track-meter-0"),
+            "track peak updates should target only the nested meter subtree: {peak_subtree_keys:?}"
+        );
+        assert!(
+            !peak_subtree_keys
+                .iter()
+                .any(|key| key == "mixer-v2-track-0"),
+            "track peak updates must not invalidate the whole track strip: {peak_subtree_keys:?}"
         );
     }
 
@@ -2782,44 +2921,43 @@ mod tests {
                 .find_map(|child| find_button_by_text(child, text))
         }
 
-        fn find_bus_solo_button(node: &LayoutNode) -> Option<&LayoutNode> {
-            fn walk<'a>(
-                node: &'a LayoutNode,
-                seen_first_solo: &mut bool,
-            ) -> Option<&'a LayoutNode> {
-                if node.widget_type == "button" && node_text(node).as_deref() == Some("S") {
-                    if *seen_first_solo {
-                        return Some(node);
-                    }
-                    *seen_first_solo = true;
-                }
-                node.children
-                    .iter()
-                    .find_map(|child| walk(child, seen_first_solo))
+        fn find_node_by_stable_key<'a>(node: &'a LayoutNode, key: &str) -> Option<&'a LayoutNode> {
+            if node.stable_key.as_deref() == Some(key) {
+                return Some(node);
             }
-            walk(node, &mut false)
+            node.children
+                .iter()
+                .find_map(|child| find_node_by_stable_key(child, key))
         }
 
-        fn find_track_solo_button(node: &LayoutNode) -> Option<&LayoutNode> {
-            find_button_by_text(node, "S")
+        fn find_descendant_button_by_text<'a>(
+            node: &'a LayoutNode,
+            text: &str,
+        ) -> Option<&'a LayoutNode> {
+            if node.widget_type == "button" && node_text(node).as_deref() == Some(text) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_descendant_button_by_text(child, text))
         }
 
         fn click_node(editor: &mut eseqlisp::Editor, node: &LayoutNode) {
-            let col = (1.0 + node.rect.col + node.rect.width * 0.5).ceil() as u16;
-            let row = (1.0 + node.rect.row + node.rect.height * 0.5).ceil() as u16;
+            let col = (node.rect.col + node.rect.width * 0.5).ceil() as u16;
+            let row = (node.rect.row + node.rect.height * 0.5).ceil() as u16;
             editor.handle_mouse(
                 mouse_event(MouseEventKind::Down(MouseButton::Left), col, row),
                 1,
                 1,
-                80,
-                12,
+                120,
+                30,
             );
         }
 
-        let src = std::fs::read_to_string("metal-seq-mixer.lisp").expect("read mixer lisp");
+        let src = std::fs::read_to_string("metal-seq-mixer-v2.lisp").expect("read mixer lisp");
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.set_layout_viewport(80, 12);
+        editor.set_layout_viewport(120, 30);
         editor.runtime_mut().register_reactive(
             "SEQ",
             vec![
@@ -2834,25 +2972,91 @@ mod tests {
                 ("track-solos", test_list(vec![Value::Bool(false)])),
                 ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
+                ("track-pans", test_list(vec![Value::Number(0.0)])),
+                (
+                    "track-outputs",
+                    test_list(vec![Value::String("main".to_string())]),
+                ),
+                (
+                    "track-output-options",
+                    test_list(vec![
+                        Value::String("main".to_string()),
+                        Value::String("sends only".to_string()),
+                        Value::String("Bus A".to_string()),
+                        Value::String("Bus B".to_string()),
+                    ]),
+                ),
+                (
+                    "track-bus-sends",
+                    test_list(vec![test_list(vec![
+                        Value::Map({
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(
+                                "bus-idx".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map.insert(
+                                "name".to_string(),
+                                Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
+                            );
+                            map.insert(
+                                "amount".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map
+                        }),
+                        Value::Map({
+                            let mut map = std::collections::HashMap::new();
+                            map.insert(
+                                "bus-idx".to_string(),
+                                Rc::new(RefCell::new(Value::Number(1.0))),
+                            );
+                            map.insert(
+                                "name".to_string(),
+                                Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
+                            );
+                            map.insert(
+                                "amount".to_string(),
+                                Rc::new(RefCell::new(Value::Number(0.0))),
+                            );
+                            map
+                        }),
+                    ])]),
+                ),
                 ("track-peak-0", Value::Number(0.0)),
+                ("master-peak-l", Value::Number(0.0)),
+                ("master-peak-r", Value::Number(0.0)),
                 (
                     "bus-names",
                     test_list(vec![
+                        Value::String("Mix".to_string()),
                         Value::String("Bus A".to_string()),
                         Value::String("Bus B".to_string()),
                     ]),
                 ),
                 (
                     "bus-volumes",
-                    test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
+                    test_list(vec![
+                        Value::Number(1.0),
+                        Value::Number(1.0),
+                        Value::Number(1.0),
+                    ]),
                 ),
                 (
                     "bus-mutes",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                    test_list(vec![
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                    ]),
                 ),
                 (
                     "bus-solos",
-                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                    test_list(vec![
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                    ]),
                 ),
             ],
             true,
@@ -2874,6 +3078,7 @@ mod tests {
             "seq-toggle-track-solo",
             "seq-set-track",
             "seq-set-track-volume",
+            "seq-set-track-pan",
             "seq-toggle-bus-mute",
             "seq-toggle-bus-solo",
             "seq-set-bus-volume",
@@ -2900,7 +3105,7 @@ mod tests {
             .id;
         editor.set_active_buffer(mixer_id);
         editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
-        editor.set_layout_viewport(80, 12);
+        editor.set_layout_viewport(120, 30);
         editor.refresh_runtime_side_effects();
 
         let layout = editor
@@ -2908,36 +3113,106 @@ mod tests {
             .current_layout
             .clone()
             .expect("mixer layout should be available");
-        let track_mute = find_button_by_text(&layout, "1").expect("track mute button");
-        click_node(&mut editor, track_mute);
+        let track_select = find_button_by_text(&layout, "1").expect("track selector button");
+        click_node(&mut editor, track_select);
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
             Some("seq-toggle-track-mute:[0]")
         );
-
-        let layout = editor
-            .runtime_mut()
-            .current_layout
-            .clone()
-            .expect("mixer layout should still be available");
-        let track_solo = find_track_solo_button(&layout).expect("track solo button");
-        click_node(&mut editor, track_solo);
+        let track_label = find_button_by_text(&layout, "kick").expect("track label button");
+        click_node(&mut editor, track_label);
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
-            Some("seq-toggle-track-solo:[0]")
+            Some("seq-set-track:[0]")
         );
 
-        let layout = editor
-            .runtime_mut()
-            .current_layout
-            .clone()
-            .expect("mixer layout should still be available");
-        let bus_solo = find_bus_solo_button(&layout).expect("bus solo button");
-        click_node(&mut editor, bus_solo);
-        assert_eq!(
-            calls.lock().unwrap().last().map(String::as_str),
-            Some("seq-toggle-bus-solo:[0]")
-        );
+        let bus_a_strip =
+            find_node_by_stable_key(&layout, "mixer-v2-bus-1").expect("Bus A mixer strip");
+        find_descendant_button_by_text(bus_a_strip, "A").expect("Bus A mute button");
+        find_descendant_button_by_text(bus_a_strip, "S").expect("Bus A solo button");
+        find_descendant_button_by_text(bus_a_strip, "Bus A").expect("Bus A label button");
+
+        #[cfg(target_os = "macos")]
+        {
+            use eseqlisp::widget_render::{MetalPrimitive, WidgetViewport};
+
+            let viewport = WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 10.0,
+                vp_w: 1200.0,
+                vp_h: 300.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                tile_content_rows: 30.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            };
+
+            fn instance_center_cells(
+                instance: &eseqlisp::widget_render::WidgetInstance,
+                viewport: WidgetViewport,
+            ) -> (f32, f32) {
+                let center_ndc_x = (instance.ndc_min[0] + instance.ndc_max[0]) * 0.5;
+                let center_ndc_y = (instance.ndc_min[1] + instance.ndc_max[1]) * 0.5;
+                let px_x = ((center_ndc_x + 1.0) * 0.5) * viewport.vp_w;
+                let px_y = ((1.0 - center_ndc_y) * 0.5) * viewport.vp_h;
+                (px_x / viewport.cell_w, px_y / viewport.cell_h)
+            }
+
+            fn rect_contains_node(rect: eseqlisp::layout::Rect, col: f32, row: f32) -> bool {
+                col >= rect.col
+                    && col <= rect.col + rect.width
+                    && row >= rect.row
+                    && row <= rect.row + rect.height
+            }
+
+            let (full_primitives, _) =
+                eseqlisp::widget_render::collect_metal_primitives(&layout, viewport, 0.0, 30);
+            let full_bus_button_backgrounds = full_primitives
+                .iter()
+                .filter(|primitive| {
+                    let MetalPrimitive::WidgetInstance {
+                        widget_type,
+                        instance,
+                        is_background: true,
+                    } = primitive
+                    else {
+                        return false;
+                    };
+                    if widget_type != "button" {
+                        return false;
+                    }
+                    let (col, row) = instance_center_cells(instance, viewport);
+                    rect_contains_node(bus_a_strip.rect, col, row)
+                })
+                .count();
+            assert_eq!(
+                full_bus_button_backgrounds, 3,
+                "full mixer Metal primitive stream should dispatch styled button backgrounds for Bus A mute, solo, and label"
+            );
+
+            let bus_primitives =
+                eseqlisp::widget_render::collect_metal_primitives(bus_a_strip, viewport, 0.0, 30).0;
+            let subtree_bus_button_backgrounds = bus_primitives
+                .iter()
+                .filter(|primitive| {
+                    matches!(
+                        primitive,
+                        MetalPrimitive::WidgetInstance {
+                            widget_type,
+                            is_background: true,
+                            ..
+                        } if widget_type == "button"
+                    )
+                })
+                .count();
+            assert_eq!(
+                subtree_bus_button_backgrounds, 3,
+                "Bus A strip should render styled button backgrounds for mute, solo, and label"
+            );
+        }
     }
 
     #[test]

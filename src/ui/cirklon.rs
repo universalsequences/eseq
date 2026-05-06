@@ -46,11 +46,7 @@ pub(super) fn track_list_row_layout(area: Rect) -> TrackListRowLayout {
 }
 
 fn gain_db_label(volume: f32) -> String {
-    if volume <= 0.0001 {
-        "-inf".to_string()
-    } else {
-        format!("{:+}dB", (20.0 * volume.log10()).round() as i32)
-    }
+    crate::mixer_volume::fader_db_label(volume)
 }
 
 // ── App impl: cirklon input ──

@@ -57,6 +57,7 @@ mod filter;
 mod gatepitch;
 #[allow(dead_code)]
 pub mod lisp_effect;
+pub mod mixer_volume;
 pub mod project;
 pub mod recorder;
 #[allow(dead_code)]

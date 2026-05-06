@@ -68,7 +68,7 @@ pub(crate) fn handle_add_track_instrument_command(payload: &Value, ctx: AddTrack
             rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
             rt.set_reactive("SEQ", "steps", build_steps_value(state, idx));
             sync_step_param_lists(rt, state, idx);
-            sync_track_mixer_state(rt, state);
+            sync_track_mixer_state(rt, app, state);
             sync_track_peak_fields(rt, cached_track_peak_levels);
             rt.set_reactive(
                 "SEQ",

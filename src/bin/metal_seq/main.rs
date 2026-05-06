@@ -520,7 +520,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
                                     sync_step_param_lists(rt, &state, idx);
-                                    sync_track_mixer_state(rt, &state);
+                                    sync_track_mixer_state(rt, &app, &state);
                                     sync_bus_mixer_state(rt, &app);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     rt.set_reactive(
@@ -1073,8 +1073,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Value::String(s) => Some(s.clone()),
                                 _ => None,
                             });
+                            let payload_track =
+                                map.get("track").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
                             if let Some(label) = label {
-                                let track = current_track.load(Ordering::Relaxed);
+                                let track = payload_track
+                                    .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
                                 let output = if label == "main" {
                                     Some(TrackOutput::Mix)
                                 } else if label == "sends only" {
@@ -1092,7 +1098,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         ui::AppCommand::SetTrackOutput { track, output },
                                     );
                                     let rt = editor.runtime_mut();
-                                    sync_track_params(rt, &app, &state, track, &selected_steps);
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    if track == current_track.load(Ordering::Relaxed) {
+                                        sync_track_params(rt, &app, &state, track, &selected_steps);
+                                    }
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -1110,11 +1119,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Value::Number(n) => Some(*n as f32),
                                 _ => None,
                             });
+                            let payload_track =
+                                map.get("track").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
                             if let (Some(bus_idx), Some(amount)) = (bus_idx, amount) {
                                 let Some(bus) = app.buses.get(bus_idx) else {
                                     continue;
                                 };
-                                let track = current_track.load(Ordering::Relaxed);
+                                let track = payload_track
+                                    .unwrap_or_else(|| current_track.load(Ordering::Relaxed));
                                 let mut sends = app.state.pattern.track_params[track].sends();
                                 if let Some(send) =
                                     sends.iter_mut().find(|send| send.destination == bus.id)
@@ -1132,7 +1147,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ui::AppCommand::SetTrackSends { track, sends },
                                 );
                                 let rt = editor.runtime_mut();
-                                sync_track_params(rt, &app, &state, track, &selected_steps);
+                                sync_track_mixer_state(rt, &app, &state);
+                                if track == current_track.load(Ordering::Relaxed) {
+                                    sync_track_params(rt, &app, &state, track, &selected_steps);
+                                }
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
@@ -2602,7 +2620,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_pattern_state(rt, &state);
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                                     sync_step_param_lists(rt, &state, ct);
-                                    sync_track_mixer_state(rt, &state);
+                                    sync_track_mixer_state(rt, &app, &state);
                                     sync_bus_mixer_state(rt, &app);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     rt.set_reactive(
@@ -2725,7 +2743,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             sync_pattern_state(rt, &state);
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
-                            sync_track_mixer_state(rt, &state);
+                            sync_track_mixer_state(rt, &app, &state);
                             sync_bus_mixer_state(rt, &app);
                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                             rt.set_reactive(
@@ -2899,7 +2917,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 build_steps_value(&state, idx),
                                             );
                                             sync_step_param_lists(rt, &state, idx);
-                                            sync_track_mixer_state(rt, &state);
+                                            sync_track_mixer_state(rt, &app, &state);
                                             sync_bus_mixer_state(rt, &app);
                                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                                             rt.set_reactive(
@@ -3623,7 +3641,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                             sync_step_param_lists(rt, &state, ct);
-                            sync_track_mixer_state(rt, &state);
+                            sync_track_mixer_state(rt, &app, &state);
                             sync_track_peak_fields(rt, &cached_track_peak_levels);
                             rt.set_reactive(
                                 "SEQ",
@@ -3755,7 +3773,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
-                sync_track_mixer_state(rt, &state);
+                sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
                 rt.set_reactive(
@@ -3872,7 +3890,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
-                sync_track_mixer_state(rt, &state);
+                sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
@@ -3906,7 +3924,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 } else {
                     sync_track_name_state(rt, &mut track_names, &app);
-                    sync_track_mixer_state(rt, &state);
+                    sync_track_mixer_state(rt, &app, &state);
                     sync_bus_mixer_state(rt, &app);
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(&app);

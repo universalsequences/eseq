@@ -126,6 +126,9 @@ pub(crate) fn init_runtime(
                 ),
                 ("sync-labels", build_sync_labels()),
                 ("track-volumes", build_track_volumes(&state)),
+                ("track-pans", build_track_pans(&state)),
+                ("track-outputs", build_track_outputs(&app, &state)),
+                ("track-bus-sends", build_all_track_bus_sends(&app, &state)),
                 ("track-mutes", build_track_mutes(&state)),
                 ("track-solos", build_track_solos(&state)),
                 ("track-muted-by-solo", build_track_muted_by_solo(&state)),
@@ -517,12 +520,44 @@ pub(crate) fn init_runtime(
                     sequencer::audiograph::ParamMsg {
                         idx: sequencer::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
                         logical_id: pan_id as u64,
-                        fvalue: vol,
+                        fvalue: sequencer::mixer_volume::fader_to_gain(vol),
                     },
                 );
             }
         }
         Ok(Value::Number(vol as f64))
+    });
+
+    // seq-set-track-pan — (seq-set-track-pan track-idx pan)
+    let st = state.clone();
+    let pan_ids = track_pan_ids.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-track-pan", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(pan))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-set-track-pan: expected (track pan)".into());
+        };
+        let track = *track as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-set-track-pan: track {track} out of range").into());
+        }
+        let pan = (*pan as f32).clamp(-1.0, 1.0);
+        st.pattern.track_params[track].set_pan(pan);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        let pan_ids_lock = pan_ids.lock().unwrap();
+        if let Some(&pan_id) = pan_ids_lock.get(track) {
+            unsafe {
+                sequencer::audiograph::params_push_wrapper(
+                    lg_raw,
+                    sequencer::audiograph::ParamMsg {
+                        idx: sequencer::stereo_panner::STEREO_PANNER_PARAM_PAN,
+                        logical_id: pan_id as u64,
+                        fvalue: pan,
+                    },
+                );
+            }
+        }
+        Ok(Value::Number(pan as f64))
     });
 
     // seq-toggle-track-mute — (seq-toggle-track-mute track-idx)
@@ -594,7 +629,7 @@ pub(crate) fn init_runtime(
                     sequencer::audiograph::ParamMsg {
                         idx: sequencer::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
                         logical_id: nodes.volume_id as u64,
-                        fvalue: vol,
+                        fvalue: sequencer::mixer_volume::fader_to_gain(vol),
                     },
                 );
             }
@@ -626,7 +661,7 @@ pub(crate) fn init_runtime(
                     sequencer::audiograph::ParamMsg {
                         idx: sequencer::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
                         logical_id: nodes.volume_id as u64,
-                        fvalue: volume,
+                        fvalue: sequencer::mixer_volume::fader_to_gain(volume),
                     },
                 );
                 sequencer::audiograph::params_push_wrapper(

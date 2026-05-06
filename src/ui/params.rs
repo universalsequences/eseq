@@ -517,7 +517,7 @@ impl App {
                 crate::audiograph::ParamMsg {
                     idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
                     logical_id: node.pan_id as u64,
-                    fvalue: tp.get_volume(),
+                    fvalue: crate::mixer_volume::fader_to_gain(tp.get_volume()),
                 },
             );
         }

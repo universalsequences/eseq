@@ -26,9 +26,9 @@
 
 (defmacro aqua-slider-material ()
   `(material
-     :lighting (lighting :edge-min -0.215 :edge-max 0.413
-       :light (vec3 -0.1 -1.1 1.5) :shininess 81.0)
-     :color (aqua-color (rgba 0.15 0.15 0.88 1.0) (rgba 0.50 0.50 0.92 1.0))))
+     :lighting (lighting :edge-min -0.215 :edge-max 0.3413
+       :light (vec3 -0.1 -1.1 3.5) :shininess 81.0)
+     :color (aqua-color (rgba 0.35 0.35 0.6 1.0) (rgba 0.20 0.20 0.92 1.0))))
 
      
 
@@ -38,15 +38,15 @@
   `(let ((__ny (+ y (* 0.3 (dot normal (vec3 0 1 0)))))
             (__base (mix ,base1
                 ,base2
-                (smoothstep -0.1 3 __ny)))
-            (__glass (smoothstep 0.05 -0.65 __ny))
+                (smoothstep 1 5 __ny)))
+            (__glass (smoothstep 0.25 -0.865 __ny))
             (__edge-fade (smoothstep 0.01 -0.16 d))
             (__hi (* __glass __edge-fade 0.2655))
             (__spec (* specular __edge-fade 0.3))
-            (__bot (* (smoothstep 0.3 0.15 __ny)
+            (__bot (* (smoothstep 0.9 -0.15 __ny)
                 (smoothstep 0.65 0.5 __ny)
-                __edge-fade 0.02))
-            (__rim (smoothstep 0.9 -0.0183 d)))
+                __edge-fade 0.12))
+            (__rim (smoothstep 0.8 -0.16183 d)))
           (+ (* __base (rgba __rim __rim __rim 1.0))
             (rgba (+ __hi __spec __bot)
               (+ __hi __spec __bot)

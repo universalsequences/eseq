@@ -144,7 +144,7 @@ impl From<BusChannelState> for ProjectBusChannel {
 impl From<ProjectBusChannel> for BusChannelState {
     fn from(value: ProjectBusChannel) -> Self {
         let mut bus = Self::new(BusId(value.id), value.name);
-        bus.volume = value.volume.clamp(0.0, 2.0);
+        bus.volume = value.volume.clamp(0.0, 1.0);
         bus.mute = value.mute;
         bus.solo = value.solo;
         bus.gate_sequence = project_bus_gate_sequence_to_ui(value.gate_sequence);
@@ -901,7 +901,7 @@ impl App {
                     crate::audiograph::ParamMsg {
                         idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
                         logical_id: nodes.volume_id as u64,
-                        fvalue: bus.volume,
+                        fvalue: crate::mixer_volume::fader_to_gain(bus.volume),
                     },
                 );
                 crate::audiograph::params_push_wrapper(

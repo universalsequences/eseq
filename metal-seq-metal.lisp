@@ -19,7 +19,7 @@
 (def metal-bus-selection-panel ()
   (v-stack
     :padding 1
-    :gap 1
+    :gap 0.1
 
     (h-stack :gap 0.5
       (box :width 8 :height 2
@@ -187,7 +187,7 @@
     (metal-empty-track-fallback)
     (v-stack
       :padding 1
-      :gap 1
+      :gap 0.1
       
       ; Param mode selector
       (h-stack :gap 0.5

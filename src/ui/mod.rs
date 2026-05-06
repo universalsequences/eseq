@@ -602,7 +602,7 @@ impl BusChannelState {
         Self {
             id,
             name: name.into(),
-            volume: 1.0,
+            volume: crate::mixer_volume::default_fader(),
             mute: false,
             solo: false,
             gate_sequence: BusGateSequence::default(),
