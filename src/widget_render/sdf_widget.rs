@@ -620,7 +620,29 @@ fn numeric_literal(expr: &Expression) -> Option<f32> {
 }
 
 fn prop_uniform_value(props: &HashMap<String, Value>, name: &str) -> f32 {
-    resolve_state_prop(props, name).unwrap_or(0.0) as f32
+    resolve_state_prop(props, name)
+        .or_else(|| resolve_color_component_prop(props, name))
+        .unwrap_or(0.0) as f32
+}
+
+fn resolve_color_component_prop(props: &HashMap<String, Value>, name: &str) -> Option<f64> {
+    let (base, component) = name
+        .strip_suffix("-r")
+        .map(|base| (base, 'r'))
+        .or_else(|| name.strip_suffix("-g").map(|base| (base, 'g')))
+        .or_else(|| name.strip_suffix("-b").map(|base| (base, 'b')))
+        .or_else(|| name.strip_suffix("-a").map(|base| (base, 'a')))?;
+    let value = props
+        .get(base)
+        .or_else(|| props.get(&shader_state_prop_name(base)))?;
+    let color = crate::theme::parse_color_value(value)?;
+    Some(match component {
+        'r' => color.r,
+        'g' => color.g,
+        'b' => color.b,
+        'a' => color.a,
+        _ => return None,
+    } as f64)
 }
 
 fn vec2_literal(expr: &Expression) -> Option<(f32, f32)> {
@@ -843,7 +865,12 @@ pub fn sdf_widget_background_primitives(
             itime: viewport.time_seconds,
             uniform_a,
             uniform_b,
-            color_a: [0.0; 4],
+            color_a: super::resolve_named_color(
+                props,
+                "color",
+                crate::backend::Color::rgba(0.0, 0.0, 0.0, 0.0),
+            )
+            .to_rgba(),
             color_b: [
                 hit.hit_region as f32,
                 if hit.hit_pressed { 1.0 } else { 0.0 },

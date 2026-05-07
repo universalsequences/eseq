@@ -11,6 +11,7 @@ use super::{
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
 };
+use crate::theme;
 use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
@@ -327,12 +328,7 @@ impl WidgetDefinition for NumberPickerWidget {
             format!("{value_text} {unit}")
         };
         let text = format!("▶ {display_value}");
-        let fg = crate::backend::Color {
-            r: 0.9,
-            g: 0.9,
-            b: 0.9,
-            a: 1.0,
-        };
+        let fg = resolve_named_color(props, "text-color", theme::BUTTON_SECONDARY_FG());
         let row = rect.row.round() as u16;
         let col_start = rect.col.round() as u16;
         let max_col = col_start + rect.width.round() as u16;
@@ -381,16 +377,8 @@ impl WidgetDefinition for NumberPickerWidget {
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
-        let text_color = resolve_named_color(
-            &node.props,
-            "text-color",
-            Color {
-                r: 0.90,
-                g: 0.90,
-                b: 0.92,
-                a: 1.0,
-            },
-        );
+        let text_color =
+            resolve_named_color(&node.props, "text-color", theme::BUTTON_SECONDARY_FG());
         let edit_color = resolve_named_color(
             &node.props,
             "edit-color",
@@ -415,36 +403,11 @@ impl WidgetDefinition for NumberPickerWidget {
         let mut prims = Vec::new();
 
         if !noui {
-            let bg_color = resolve_named_color(
-                &node.props,
-                "bg-color",
-                Color {
-                    r: 0.14,
-                    g: 0.14,
-                    b: 0.16,
-                    a: 1.0,
-                },
-            );
-            let ring_color = resolve_named_color(
-                &node.props,
-                "ring-color",
-                Color {
-                    r: 0.25,
-                    g: 0.52,
-                    b: 0.96,
-                    a: 1.0,
-                },
-            );
-            let tri_color = resolve_named_color(
-                &node.props,
-                "tri-color",
-                Color {
-                    r: 0.60,
-                    g: 0.60,
-                    b: 0.65,
-                    a: 1.0,
-                },
-            );
+            let bg_color = resolve_named_color(&node.props, "bg-color", theme::DROPDOWN_BG());
+            let ring_color =
+                resolve_named_color(&node.props, "ring-color", theme::DROPDOWN_RING());
+            let tri_color =
+                resolve_named_color(&node.props, "tri-color", theme::BUTTON_SECONDARY_FG());
 
             // ── Focus ring ──
             if is_focused {

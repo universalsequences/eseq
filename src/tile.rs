@@ -2,6 +2,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::backend::Color;
 use crate::host::BufferId;
 use crate::layout::{LayoutNode, Rect};
 use crate::mode::{BufferMode, TokenSpan};
@@ -26,6 +27,14 @@ pub struct TileLeaf {
     pub buffer_idx: usize,
     pub show_status: bool,
     pub show_border: bool,
+    /// Pixel width for Metal tile borders. TUI rendering ignores this.
+    pub border_width_px: f32,
+    /// Pixel radius for Metal tile borders. TUI rendering ignores this.
+    pub border_radius_px: f32,
+    /// Default Metal background color for this tile's buffer content.
+    pub background_color: Option<Color>,
+    /// Theme color name to resolve for the Metal background each frame.
+    pub background_color_name: Option<String>,
     /// Minimum tile width in cells (enforced during divider drag).
     pub min_width: Option<f32>,
     /// Minimum tile height in cells (enforced during divider drag).
@@ -69,6 +78,7 @@ pub struct TileSplit {
     pub id: TileId,
     pub dir: SplitDir,
     pub ratio: f32, // 0.0..1.0, portion for child `a`
+    pub gap: f32,
     pub a: Box<TileNode>,
     pub b: Box<TileNode>,
 }
@@ -123,6 +133,10 @@ impl TileLeaf {
             buffer_idx,
             show_status: true,
             show_border: true,
+            border_width_px: 2.0,
+            border_radius_px: 0.0,
+            background_color: None,
+            background_color_name: None,
             min_width: None,
             min_height: None,
             max_width: None,
@@ -147,13 +161,24 @@ impl TileLeaf {
 
 impl TileNode {
     /// Compute the screen rect for each leaf tile given the total available area.
-    pub fn compute_rects(&self, area: Rect) -> Vec<(TileId, Rect)> {
+    pub fn compute_rects(
+        &self,
+        area: Rect,
+        gap_px_per_unit: f32,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> Vec<(TileId, Rect)> {
         match self {
             TileNode::Leaf(leaf) => vec![(leaf.id, area)],
             TileNode::Split(s) => {
-                let (a_rect, b_rect) = split_rect(area, s.dir, s.ratio);
-                let mut r = s.a.compute_rects(a_rect);
-                r.extend(s.b.compute_rects(b_rect));
+                let (a_rect, b_rect) = split_rect(
+                    area,
+                    s.dir,
+                    s.ratio,
+                    gap_to_cells(s.dir, s.gap, gap_px_per_unit, cell_w, cell_h),
+                );
+                let mut r = s.a.compute_rects(a_rect, gap_px_per_unit, cell_w, cell_h);
+                r.extend(s.b.compute_rects(b_rect, gap_px_per_unit, cell_w, cell_h));
                 r
             }
         }
@@ -314,15 +339,39 @@ impl TileNode {
         col: f32,
         row: f32,
         tolerance: f32,
+        gap_px_per_unit: f32,
+        cell_w: f32,
+        cell_h: f32,
     ) -> Option<SplitDividerHit> {
         match self {
             TileNode::Leaf(_) => None,
             TileNode::Split(s) => {
-                let (a_rect, b_rect) = split_rect(area, s.dir, s.ratio);
-                if let Some(hit) = s.a.hit_test_split_divider(a_rect, col, row, tolerance) {
+                let (a_rect, b_rect) = split_rect(
+                    area,
+                    s.dir,
+                    s.ratio,
+                    gap_to_cells(s.dir, s.gap, gap_px_per_unit, cell_w, cell_h),
+                );
+                if let Some(hit) = s.a.hit_test_split_divider(
+                    a_rect,
+                    col,
+                    row,
+                    tolerance,
+                    gap_px_per_unit,
+                    cell_w,
+                    cell_h,
+                ) {
                     return Some(hit);
                 }
-                if let Some(hit) = s.b.hit_test_split_divider(b_rect, col, row, tolerance) {
+                if let Some(hit) = s.b.hit_test_split_divider(
+                    b_rect,
+                    col,
+                    row,
+                    tolerance,
+                    gap_px_per_unit,
+                    cell_w,
+                    cell_h,
+                ) {
                     return Some(hit);
                 }
 
@@ -372,6 +421,7 @@ impl TileNode {
                     id: split_id,
                     dir,
                     ratio: 0.5,
+                    gap: 0.0,
                     a: Box::new(TileNode::Leaf(existing_leaf)),
                     b: Box::new(TileNode::Leaf(new_leaf)),
                 });
@@ -430,13 +480,16 @@ impl TileNode {
 }
 
 /// Divide a rect by direction and ratio.
-pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
+pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32, gap: f32) -> (Rect, Rect) {
     let ratio = ratio.clamp(0.0, 1.0);
+    let gap = gap.max(0.0);
     match dir {
         SplitDir::Horizontal => {
             // Stacked top/bottom — split height
-            let a_height = (area.height * ratio).round();
-            let b_height = (area.height - a_height).max(0.0);
+            let effective_gap = gap.min(area.height.max(0.0));
+            let content_height = (area.height - effective_gap).max(0.0);
+            let a_height = (content_height * ratio).round();
+            let b_height = (content_height - a_height).max(0.0);
             (
                 Rect {
                     row: area.row,
@@ -445,7 +498,7 @@ pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
                     height: a_height,
                 },
                 Rect {
-                    row: area.row + a_height,
+                    row: area.row + a_height + effective_gap,
                     col: area.col,
                     width: area.width,
                     height: b_height,
@@ -454,8 +507,10 @@ pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
         }
         SplitDir::Vertical => {
             // Stacked left/right — split width
-            let a_width = (area.width * ratio).round();
-            let b_width = (area.width - a_width).max(0.0);
+            let effective_gap = gap.min(area.width.max(0.0));
+            let content_width = (area.width - effective_gap).max(0.0);
+            let a_width = (content_width * ratio).round();
+            let b_width = (content_width - a_width).max(0.0);
             (
                 Rect {
                     row: area.row,
@@ -465,12 +520,26 @@ pub fn split_rect(area: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect) {
                 },
                 Rect {
                     row: area.row,
-                    col: area.col + a_width,
+                    col: area.col + a_width + effective_gap,
                     width: b_width,
                     height: area.height,
                 },
             )
         }
+    }
+}
+
+pub fn gap_to_cells(
+    dir: SplitDir,
+    gap_units: f32,
+    px_per_unit: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> f32 {
+    let px = (gap_units * px_per_unit).max(0.0);
+    match dir {
+        SplitDir::Horizontal => px / cell_h.max(1.0),
+        SplitDir::Vertical => px / cell_w.max(1.0),
     }
 }
 

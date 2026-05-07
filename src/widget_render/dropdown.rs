@@ -11,6 +11,7 @@ use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_map,
     get_prop_num,
 };
+use crate::theme;
 use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
@@ -581,12 +582,7 @@ impl WidgetDefinition for DropdownWidget {
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         let selected = get_selected(props);
         let text = format!("{} ▾", selected);
-        let fg = crate::backend::Color {
-            r: 0.9,
-            g: 0.9,
-            b: 0.92,
-            a: 1.0,
-        };
+        let fg = resolve_named_color(props, "text-color", theme::DROPDOWN_FG());
         let row = rect.row.round() as u16;
         let col_start = rect.col.round() as u16 + 1;
         let max_col = col_start + rect.width.round() as u16;
@@ -622,76 +618,14 @@ impl WidgetDefinition for DropdownWidget {
 
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
 
-        let bg_color = resolve_named_color(
-            &node.props,
-            "bg-color",
-            Color {
-                r: 0.22,
-                g: 0.22,
-                b: 0.24,
-                a: 1.0,
-            },
-        );
-        let text_color = resolve_named_color(
-            &node.props,
-            "text-color",
-            Color {
-                r: 0.90,
-                g: 0.90,
-                b: 0.92,
-                a: 1.0,
-            },
-        );
-        let ring_color = resolve_named_color(
-            &node.props,
-            "ring-color",
-            Color {
-                r: 0.25,
-                g: 0.52,
-                b: 0.96,
-                a: 1.0,
-            },
-        );
-        let chevron_color = resolve_named_color(
-            &node.props,
-            "chevron-color",
-            Color {
-                r: 0.95,
-                g: 0.95,
-                b: 0.97,
-                a: 1.0,
-            },
-        );
-        let menu_bg = resolve_named_color(
-            &node.props,
-            "menu-bg",
-            Color {
-                r: 0.12,
-                g: 0.12,
-                b: 0.14,
-                a: 1.0,
-            },
-        );
-        let hover_bg = resolve_named_color(
-            &node.props,
-            "hover-bg",
-            Color {
-                r: 0.00,
-                g: 0.35,
-                b: 0.82,
-                a: 1.0,
-            },
-        );
-        let check_color = resolve_named_color(
-            &node.props,
-            "check-color",
-            Color {
-                r: 0.90,
-                g: 0.90,
-                b: 0.92,
-                a: 1.0,
-            },
-        );
+        let bg_color = resolve_named_color(&node.props, "bg-color", theme::DROPDOWN_BG());
+        let text_color = resolve_named_color(&node.props, "text-color", theme::DROPDOWN_FG());
+        let ring_color = resolve_named_color(&node.props, "ring-color", theme::DROPDOWN_RING());
+        let chevron_color =
+            resolve_named_color(&node.props, "chevron-color", theme::DROPDOWN_CHEVRON());
+        let menu_bg = resolve_named_color(&node.props, "menu-bg", theme::DROPDOWN_MENU_BG());
+        let hover_bg = resolve_named_color(&node.props, "hover-bg", theme::DROPDOWN_HOVER_BG());
+        let check_color = resolve_named_color(&node.props, "check-color", theme::DROPDOWN_CHECK());
 
         let transparent = Color {
             r: 0.0,
@@ -757,16 +691,8 @@ impl WidgetDefinition for DropdownWidget {
         // ── Chevron badge + arrows ──
         {
             // Badge background behind chevrons
-            let badge_color = resolve_named_color(
-                &node.props,
-                "badge-color",
-                Color {
-                    r: 0.00,
-                    g: 0.35,
-                    b: 0.82,
-                    a: 1.0,
-                },
-            );
+            let badge_color =
+                resolve_named_color(&node.props, "badge-color", theme::DROPDOWN_BADGE_BG());
             let badge_pad = 0.1;
             let badge_rect = Rect {
                 row: ch_rect.row - badge_pad,
@@ -858,12 +784,11 @@ impl WidgetDefinition for DropdownWidget {
                 width: menu_rect.width + border_col * 2.0,
                 height: menu_rect.height + border_row * 2.0,
             };
-            let border_color = Color {
-                r: 0.45,
-                g: 0.45,
-                b: 0.48,
-                a: 1.0,
-            };
+            let border_color = resolve_named_color(
+                &node.props,
+                "menu-border-color",
+                theme::DROPDOWN_MENU_BORDER(),
+            );
             emit_rounded_rect_overlay(border_rect, border_color, 11.0, viewport);
 
             // Menu background. The matching pixel radii avoid the "lumpy" corners that
@@ -959,12 +884,11 @@ impl WidgetDefinition for DropdownWidget {
                     width: SCROLLBAR_WIDTH,
                     height: thumb_height,
                 };
-                let thumb_color = Color {
-                    r: 1.0,
-                    g: 1.0,
-                    b: 1.0,
-                    a: 0.25,
-                };
+                let thumb_color = resolve_named_color(
+                    &node.props,
+                    "scrollbar-color",
+                    theme::DROPDOWN_SCROLLBAR(),
+                );
                 emit_rounded_rect_overlay(thumb_rect, thumb_color, 3.0, viewport);
             }
         } else if !state.open {

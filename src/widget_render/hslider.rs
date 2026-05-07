@@ -21,6 +21,10 @@ fn fill_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED())
 }
 
+fn dot_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "dot-color", theme::WIDGET_SLIDER_DOT())
+}
+
 /// TUI render for horizontal slider: filled bar + dot track.
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
     let value = get_f32_prop(props, "value", 0.0);
@@ -50,7 +54,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             buf.set(
                 row_u16,
                 col,
-                styled_cell(ch, theme::WIDGET_SLIDER_TRACK(), None),
+                styled_cell(ch, dot_color(props), None),
             );
         }
     }
@@ -209,7 +213,7 @@ impl WidgetDefinition for HorizontalSliderWidget {
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
                         color_a: fill_color(&node.props).to_rgba(),
-                        color_b: theme::WIDGET_SLIDER_TRACK().to_rgba(),
+                        color_b: dot_color(&node.props).to_rgba(),
                         color_c: [0.0; 4],
                         color_d: [0.0; 4],
                         corner_radius: 0.0,
@@ -240,7 +244,7 @@ impl WidgetDefinition for HorizontalSliderWidget {
                 uniform_a: [0.0; 4],
                 uniform_b: [0.0; 4],
                 color_a: fill_color(&node.props).to_rgba(),
-                color_b: theme::WIDGET_SLIDER_TRACK().to_rgba(),
+                color_b: dot_color(&node.props).to_rgba(),
                 color_c: [0.0; 4],
                 color_d: [0.0; 4],
                 corner_radius: 0.0,

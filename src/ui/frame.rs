@@ -533,6 +533,10 @@ fn build_tiled_render_frame_impl(
                 leaf.buffer_idx,
                 leaf.show_status,
                 leaf.show_border,
+                leaf.border_width_px,
+                leaf.border_radius_px,
+                leaf.background_color,
+                leaf.background_color_name.clone(),
                 leaf.focused_widget_id,
                 leaf.widget_scroll_top,
                 leaf.widget_scroll_left,
@@ -559,6 +563,10 @@ fn build_tiled_render_frame_impl(
         buffer_idx,
         show_status,
         show_border,
+        border_width_px,
+        border_radius_px,
+        background_color,
+        background_color_name,
         focused_widget_id,
         widget_scroll_top,
         widget_scroll_left,
@@ -633,6 +641,10 @@ fn build_tiled_render_frame_impl(
                 is_active: true,
                 show_status,
                 show_border,
+                border_width_px,
+                border_radius_px,
+                background_color,
+                background_color_name,
                 frame,
             });
         } else {
@@ -669,6 +681,10 @@ fn build_tiled_render_frame_impl(
                 is_active: false,
                 show_status,
                 show_border,
+                border_width_px,
+                border_radius_px,
+                background_color,
+                background_color_name,
                 frame,
             });
         }

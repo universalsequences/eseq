@@ -4,9 +4,10 @@
 (def mac-osx-theme () 
   (apply-theme (dict
       ;; Main editor
-      :bg             '(0.11 0.11 0.12)     ; #1c1c1e — System dark bg
+      :bg             '(0.14 0.14 0.14)     ; #1c1c1e — System dark bg
       :fg             '(0.88 0.88 0.89)     ; #e0e0e3
       :fg-muted       '(0.56 0.56 0.58)     ; #8e8e93 — System gray
+      :dim            '(0.66 0.66 0.68)     ; Secondary sequencer text
       :black          '(0.07 0.07 0.07)     ;
       :white          '(0.92 0.92 0.94)     ;
       :bright-black   '(0.30 0.30 0.32)     ; Subtle separators
@@ -40,6 +41,9 @@
       :bg-match-paren '(0.00 0.48 0.95)     ;
       :fg-match-paren '(1.00 1.00 1.00)     ;
       
+      ;; Buffer/panel surfaces
+      :buffer-bg        '(0.18 0.18 0.180)  ; Main rounded buffer surface
+      
       ;; Status bar — Xcode-style dark gray bar with black borders
       :status-fg         '(0.58 0.58 0.60)   ; Muted text
       :status-bg         '(0.14 0.14 0.15)   ; Dark gray bar
@@ -57,13 +61,52 @@
       :status-accent     '(0.58 0.58 0.60)   ; Gray accent, not blue
       
       ;; Tile borders
-      :border-active   '(0.00 0.48 0.95)     ; System blue for active tile
-      :border-inactive '(0.05 0.05 0.06)     ; Near-black, like status edge
+      :border-active   '(0.42 0.42 0.44)     ; Lighter gray for active tile
+      :border-inactive '(0.07 0.07 0.075)    ; Match buffer background
+      :tree-row-alt-bg '(0.105 0.105 0.11)   ; Subtle tree zebra stripe
+
+      ;; Sequencer panels
+      :fx-panel-bg       '(0.18 0.18 0.18)
+      :fx-panel-selected-bg '(0.22 0.22 0.23)
+      :fx-panel-header-bg '(0.16 0.16 0.16)
+      :fx-panel-header-selected-bg '(0.22 0.22 0.23)
+      :fx-panel-border   '(0.26 0.26 0.27)
+      :instrument-panel-bg '(0.18 0.18 0.18)
+      :instrument-control-bg '(0.10 0.10 0.105)
+      :instrument-group-bg '(0.10 0.10 0.105)
+      :instrument-group-selected-bg '(0.16 0.165 0.18)
+      :mixer-strip-bg    '(0.18 0.18 0.18)
+      :mixer-strip-selected-bg '(0.18 0.18 0.185)
+      :mixer-strip-muted-bg '(0.095 0.095 0.10)
+      :mixer-strip-border '(0.22 0.22 0.23)
+      :mixer-strip-selected-border '(0.42 0.42 0.44)
+      :mixer-control-bg  '(0.07 0.075 0.08)
+      :mixer-label-bg    '(0.13 0.13 0.14)
+      :mixer-label-muted-bg '(0.09 0.09 0.09)
+      :button-primary-bg '(0.00 0.48 0.95)
+      :button-primary-fg '(0.96 0.96 0.98)
+      :button-secondary-bg '(0.22 0.23 0.25)
+      :button-secondary-fg '(0.94 0.94 0.96)
+      :button-ghost-bg   '(0.16 0.165 0.18)
+      :button-ghost-fg   '(0.94 0.94 0.96)
+      :button-danger-bg  '(1.00 0.23 0.19)
+      :button-danger-fg  '(0.96 0.96 0.98)
+      :dropdown-bg       '(0.22 0.23 0.25)
+      :dropdown-fg       '(0.94 0.94 0.96)
+      :dropdown-ring     '(0.00 0.48 0.95)
+      :dropdown-chevron  '(0.96 0.96 0.98)
+      :dropdown-badge-bg '(0.00 0.48 0.95)
+      :dropdown-menu-bg  '(0.16 0.165 0.18)
+      :dropdown-menu-border '(0.36 0.36 0.38)
+      :dropdown-hover-bg '(0.00 0.35 0.82)
+      :dropdown-check    '(0.96 0.96 0.98)
+      :dropdown-scrollbar '(1.00 1.00 1.00 0.25)
       
       ;; Widgets
       :widget-focus-bg      '(0.00 0.35 0.82 1) ; Selection blue
       :widget-label-fg      '(0.88 0.88 0.89)   ;
       :widget-slider-filled '(0.00 0.48 0.95)   ;
       :widget-slider-track  '(0.25 0.25 0.27)   ;
+      :widget-slider-dot    '(0.36 0.36 0.38)   ;
+      :widget-knob-track    '(0.04 0.04 0.04)   ;
       )))
-

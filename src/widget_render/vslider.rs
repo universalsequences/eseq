@@ -23,6 +23,10 @@ fn fill_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED())
 }
 
+fn dot_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(props, "dot-color", theme::WIDGET_SLIDER_DOT())
+}
+
 fn items(props: &HashMap<String, Value>) -> Vec<String> {
     match props.get("items") {
         Some(Value::List(list)) => list
@@ -122,11 +126,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
                 buf.set(row, col, styled_cell('\u{2588}', fill_color(props), None));
             } else {
                 let ch = if row_offset % 2 == 0 { '\u{2022}' } else { ' ' };
-                buf.set(
-                    row,
-                    col,
-                    styled_cell(ch, theme::WIDGET_SLIDER_TRACK(), None),
-                );
+                buf.set(row, col, styled_cell(ch, dot_color(props), None));
             }
         }
     }
@@ -315,7 +315,7 @@ impl WidgetDefinition for VerticalSliderWidget {
                         uniform_a: [0.0; 4],
                         uniform_b: [0.0; 4],
                         color_a: fill_color(&node.props).to_rgba(),
-                        color_b: theme::WIDGET_SLIDER_TRACK().to_rgba(),
+                        color_b: dot_color(&node.props).to_rgba(),
                         color_c: [0.0; 4],
                         color_d: [0.0; 4],
                         corner_radius: 0.0,
@@ -346,7 +346,7 @@ impl WidgetDefinition for VerticalSliderWidget {
                 uniform_a: [origin_t, 0.0, 0.0, 0.0],
                 uniform_b: [0.0; 4],
                 color_a: fill_color(&node.props).to_rgba(),
-                color_b: theme::WIDGET_SLIDER_TRACK().to_rgba(),
+                color_b: dot_color(&node.props).to_rgba(),
                 color_c: [0.0; 4],
                 color_d: [0.0; 4],
                 corner_radius: 0.0,

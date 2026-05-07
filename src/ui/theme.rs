@@ -11,6 +11,7 @@ pub struct Theme {
     pub bg: Color,
     pub fg: Color,
     pub fg_muted: Color,
+    pub dim: Color,
     pub black: Color,
     pub red: Color,
     pub green: Color,
@@ -36,6 +37,7 @@ pub struct Theme {
     pub bg_eval_flash: Color,
     pub bg_match_paren: Color,
     pub fg_match_paren: Color,
+    pub buffer_bg: Color,
     pub status_fg: Color,
     pub status_bg: Color,
     pub status_edge: Color,
@@ -56,10 +58,47 @@ pub struct Theme {
     pub comp_doc_bg: Color,
     pub comp_doc_fg: Color,
     pub comp_doc_title_fg: Color,
+    pub tree_row_alt_bg: Color,
+    pub fx_panel_bg: Color,
+    pub fx_panel_selected_bg: Color,
+    pub fx_panel_header_bg: Color,
+    pub fx_panel_header_selected_bg: Color,
+    pub fx_panel_border: Color,
+    pub instrument_panel_bg: Color,
+    pub instrument_control_bg: Color,
+    pub instrument_group_bg: Color,
+    pub instrument_group_selected_bg: Color,
+    pub mixer_strip_bg: Color,
+    pub mixer_strip_selected_bg: Color,
+    pub mixer_strip_muted_bg: Color,
+    pub mixer_strip_border: Color,
+    pub mixer_strip_selected_border: Color,
+    pub mixer_control_bg: Color,
+    pub mixer_label_bg: Color,
+    pub mixer_label_muted_bg: Color,
+    pub button_primary_bg: Color,
+    pub button_primary_fg: Color,
+    pub button_secondary_bg: Color,
+    pub button_secondary_fg: Color,
+    pub button_ghost_bg: Color,
+    pub button_ghost_fg: Color,
+    pub button_danger_bg: Color,
+    pub button_danger_fg: Color,
+    pub dropdown_bg: Color,
+    pub dropdown_fg: Color,
+    pub dropdown_ring: Color,
+    pub dropdown_chevron: Color,
+    pub dropdown_badge_bg: Color,
+    pub dropdown_menu_bg: Color,
+    pub dropdown_menu_border: Color,
+    pub dropdown_hover_bg: Color,
+    pub dropdown_check: Color,
+    pub dropdown_scrollbar: Color,
     pub widget_focus_bg: Color,
     pub widget_label_fg: Color,
     pub widget_slider_filled: Color,
     pub widget_slider_track: Color,
+    pub widget_slider_dot: Color,
     pub widget_knob_filled: Color,
     pub widget_knob_track: Color,
     pub widget_toggle_on: Color,
@@ -90,7 +129,11 @@ macro_rules! theme_slots {
             let prev = theme;
             if let Value::Map(map) = value {
                 $(
-                    if let Some(value) = map.get(stringify!($field)) {
+                    if let Some(value) = map.get(stringify!($field)).or_else(|| {
+                        map.iter()
+                            .find(|(key, _)| normalize_name(key) == stringify!($field))
+                            .map(|(_, value)| value)
+                    }) {
                         if let Some(color) = parse_color_value(&value.borrow()) {
                             theme.$field = color;
                         }
@@ -108,7 +151,8 @@ macro_rules! theme_slots {
             match normalized.as_str() {
                 "primary" => Some(theme.accent),
                 "secondary" => Some(theme.red),
-                "gray" | "grey" | "dim" => Some(theme.bright_black),
+                "gray" | "grey" => Some(theme.bright_black),
+                "dim" => Some(theme.dim),
                 $(
                     stringify!($field) => Some(theme.$field),
                 )+
@@ -130,6 +174,7 @@ theme_slots!(
     (bg, BG, Color::from_hex(0x0a, 0x0a, 0x0a)),
     (fg, FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
     (fg_muted, FG_MUTED, Color::from_hex(0x50, 0x50, 0x50)),
+    (dim, DIM, Color::from_hex(0x6c, 0x6c, 0x70)),
     (black, BLACK, Color::from_hex(0x05, 0x05, 0x05)),
     (red, RED, Color::from_hex(0xff, 0x3b, 0x3b)),
     (green, GREEN, Color::from_hex(0xc8, 0xff, 0x00)),
@@ -179,6 +224,7 @@ theme_slots!(
         FG_MATCH_PAREN,
         Color::from_hex(0x05, 0x05, 0x05)
     ),
+    (buffer_bg, BUFFER_BG, Color::from_hex(0x12, 0x12, 0x13)),
     (status_fg, STATUS_FG, Color::from_hex(0xe0, 0xe0, 0xe0)),
     (status_bg, STATUS_BG, Color::from_hex(0x14, 0x14, 0x14)),
     (status_edge, STATUS_EDGE, Color::from_hex(0x23, 0x23, 0x23)),
@@ -256,6 +302,174 @@ theme_slots!(
         Color::from_hex(0xc8, 0xff, 0x00)
     ),
     (
+        tree_row_alt_bg,
+        TREE_ROW_ALT_BG,
+        Color::from_hex(0x18, 0x18, 0x19)
+    ),
+    (fx_panel_bg, FX_PANEL_BG, Color::from_hex(0x22, 0x22, 0x23)),
+    (
+        fx_panel_selected_bg,
+        FX_PANEL_SELECTED_BG,
+        Color::from_hex(0x2a, 0x2a, 0x2d)
+    ),
+    (
+        fx_panel_header_bg,
+        FX_PANEL_HEADER_BG,
+        Color::from_hex(0x20, 0x20, 0x21)
+    ),
+    (
+        fx_panel_header_selected_bg,
+        FX_PANEL_HEADER_SELECTED_BG,
+        Color::from_hex(0x2a, 0x2a, 0x2d)
+    ),
+    (
+        fx_panel_border,
+        FX_PANEL_BORDER,
+        Color::from_hex(0x30, 0x30, 0x33)
+    ),
+    (
+        instrument_panel_bg,
+        INSTRUMENT_PANEL_BG,
+        Color::from_hex(0x22, 0x22, 0x23)
+    ),
+    (
+        instrument_control_bg,
+        INSTRUMENT_CONTROL_BG,
+        Color::from_hex(0x17, 0x17, 0x18)
+    ),
+    (
+        instrument_group_bg,
+        INSTRUMENT_GROUP_BG,
+        Color::from_hex(0x12, 0x12, 0x13)
+    ),
+    (
+        instrument_group_selected_bg,
+        INSTRUMENT_GROUP_SELECTED_BG,
+        Color::from_hex(0x20, 0x20, 0x22)
+    ),
+    (
+        mixer_strip_bg,
+        MIXER_STRIP_BG,
+        Color::from_hex(0x22, 0x22, 0x24)
+    ),
+    (
+        mixer_strip_selected_bg,
+        MIXER_STRIP_SELECTED_BG,
+        Color::from_hex(0x28, 0x28, 0x2b)
+    ),
+    (
+        mixer_strip_muted_bg,
+        MIXER_STRIP_MUTED_BG,
+        Color::from_hex(0x18, 0x18, 0x1a)
+    ),
+    (
+        mixer_strip_border,
+        MIXER_STRIP_BORDER,
+        Color::from_hex(0x38, 0x38, 0x3a)
+    ),
+    (
+        mixer_strip_selected_border,
+        MIXER_STRIP_SELECTED_BORDER,
+        Color::from_hex(0x6b, 0x6b, 0x70)
+    ),
+    (
+        mixer_control_bg,
+        MIXER_CONTROL_BG,
+        Color::from_hex(0x12, 0x13, 0x14)
+    ),
+    (
+        mixer_label_bg,
+        MIXER_LABEL_BG,
+        Color::from_hex(0x21, 0x21, 0x24)
+    ),
+    (
+        mixer_label_muted_bg,
+        MIXER_LABEL_MUTED_BG,
+        Color::from_hex(0x17, 0x17, 0x18)
+    ),
+    (
+        button_primary_bg,
+        BUTTON_PRIMARY_BG,
+        Color::from_hex(0x00, 0x7a, 0xff)
+    ),
+    (
+        button_primary_fg,
+        BUTTON_PRIMARY_FG,
+        Color::from_hex(0xf4, 0xf4, 0xf5)
+    ),
+    (
+        button_secondary_bg,
+        BUTTON_SECONDARY_BG,
+        Color::from_hex(0x36, 0x38, 0x3d)
+    ),
+    (
+        button_secondary_fg,
+        BUTTON_SECONDARY_FG,
+        Color::from_hex(0xf0, 0xf0, 0xf2)
+    ),
+    (
+        button_ghost_bg,
+        BUTTON_GHOST_BG,
+        Color::from_hex(0x22, 0x23, 0x26)
+    ),
+    (
+        button_ghost_fg,
+        BUTTON_GHOST_FG,
+        Color::from_hex(0xf0, 0xf0, 0xf2)
+    ),
+    (
+        button_danger_bg,
+        BUTTON_DANGER_BG,
+        Color::from_hex(0xff, 0x3b, 0x30)
+    ),
+    (
+        button_danger_fg,
+        BUTTON_DANGER_FG,
+        Color::from_hex(0xf4, 0xf4, 0xf5)
+    ),
+    (dropdown_bg, DROPDOWN_BG, Color::from_hex(0x36, 0x38, 0x3d)),
+    (dropdown_fg, DROPDOWN_FG, Color::from_hex(0xf0, 0xf0, 0xf2)),
+    (
+        dropdown_ring,
+        DROPDOWN_RING,
+        Color::from_hex(0x00, 0x7a, 0xff)
+    ),
+    (
+        dropdown_chevron,
+        DROPDOWN_CHEVRON,
+        Color::from_hex(0xf4, 0xf4, 0xf5)
+    ),
+    (
+        dropdown_badge_bg,
+        DROPDOWN_BADGE_BG,
+        Color::from_hex(0x00, 0x7a, 0xff)
+    ),
+    (
+        dropdown_menu_bg,
+        DROPDOWN_MENU_BG,
+        Color::from_hex(0x16, 0x16, 0x18)
+    ),
+    (
+        dropdown_menu_border,
+        DROPDOWN_MENU_BORDER,
+        Color::from_hex(0x46, 0x46, 0x4a)
+    ),
+    (
+        dropdown_hover_bg,
+        DROPDOWN_HOVER_BG,
+        Color::from_hex(0x00, 0x5a, 0xd1)
+    ),
+    (
+        dropdown_check,
+        DROPDOWN_CHECK,
+        Color::from_hex(0xf0, 0xf0, 0xf2)
+    ),
+    (
+        dropdown_scrollbar,
+        DROPDOWN_SCROLLBAR,
+        Color::rgba(1.0, 1.0, 1.0, 0.25)
+    ),
+    (
         widget_focus_bg,
         WIDGET_FOCUS_BG,
         Color::from_hex(0x2f, 0x36, 0x12)
@@ -276,6 +490,11 @@ theme_slots!(
         Color::from_hex(0x3a, 0x3a, 0x3a)
     ),
     (
+        widget_slider_dot,
+        WIDGET_SLIDER_DOT,
+        Color::from_hex(0x58, 0x58, 0x5c)
+    ),
+    (
         widget_knob_filled,
         WIDGET_KNOB_FILLED,
         Color::from_hex(0xc8, 0xff, 0x00)
@@ -283,7 +502,7 @@ theme_slots!(
     (
         widget_knob_track,
         WIDGET_KNOB_TRACK,
-        Color::from_hex(0x3a, 0x3a, 0x3a)
+        Color::from_hex(0x08, 0x08, 0x08)
     ),
     (
         widget_toggle_on,
@@ -348,6 +567,10 @@ pub fn current() -> Theme {
         cell.set((current_gen, theme));
         theme
     })
+}
+
+pub fn generation() -> u64 {
+    THEME_GENERATION.load(Ordering::Relaxed)
 }
 
 pub fn set_current(theme: Theme) {

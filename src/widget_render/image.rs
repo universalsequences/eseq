@@ -38,6 +38,27 @@ fn radius_px(props: &HashMap<String, Value>) -> f32 {
     }
 }
 
+fn rotation(props: &HashMap<String, Value>) -> f32 {
+    match props.get("rotation") {
+        Some(Value::Number(value)) => *value as f32,
+        _ => 0.0,
+    }
+}
+
+fn rotation_speed(props: &HashMap<String, Value>) -> f32 {
+    match props.get("rotation-speed") {
+        Some(Value::Number(value)) => *value as f32,
+        _ => 0.0,
+    }
+}
+
+fn clip_circle(props: &HashMap<String, Value>) -> bool {
+    matches!(
+        props.get("clip"),
+        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "circle"
+    )
+}
+
 impl WidgetDefinition for ImageWidget {
     fn names(&self) -> &'static [&'static str] {
         &["image"]
@@ -126,11 +147,15 @@ impl WidgetDefinition for ImageWidget {
             return Vec::new();
         }
         vec![MetalPrimitive::Image(MetalImagePrimitive {
+            widget_id: node.widget_id,
             rect: node.rect,
             src,
             fit: image_fit(&node.props),
             radius_px: radius_px(&node.props),
             opacity: opacity(&node.props),
+            rotation: rotation(&node.props),
+            rotation_speed: rotation_speed(&node.props),
+            clip_circle: clip_circle(&node.props),
         })]
     }
 }

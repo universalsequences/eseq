@@ -177,11 +177,15 @@ use crate::tile::TileId;
 /// One tile's worth of rendering data, positioned within the full screen.
 pub struct TileFrame {
     pub tile_id: TileId,
-    pub rect: Rect,         // screen position for this tile
-    pub is_active: bool,    // colored border for active tile
-    pub show_status: bool,  // whether to render per-tile status bar
-    pub show_border: bool,  // whether to render tile border
-    pub frame: RenderFrame, // the per-buffer frame
+    pub rect: Rect,                            // screen position for this tile
+    pub is_active: bool,                       // colored border for active tile
+    pub show_status: bool,                     // whether to render per-tile status bar
+    pub show_border: bool,                     // whether to render tile border
+    pub border_width_px: f32,                  // Metal tile border width in pixels
+    pub border_radius_px: f32,                 // Metal tile border radius in pixels
+    pub background_color: Option<Color>,       // Metal default buffer background color
+    pub background_color_name: Option<String>, // Theme color name for live-resolved backgrounds
+    pub frame: RenderFrame,                    // the per-buffer frame
 }
 
 /// A complete frame with all tiles rendered, plus global UI elements.

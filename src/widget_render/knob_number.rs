@@ -394,20 +394,12 @@ impl WidgetDefinition for KnobNumberWidget {
             },
         );
         let arc_color = resolve_named_color(&node.props, "arc-color", theme::WIDGET_FOCUS_BG());
-        let track_color = resolve_named_color(
-            &node.props,
-            "track-color",
-            Color {
-                r: 0.42,
-                g: 0.42,
-                b: 0.46,
-                a: 1.0,
-            },
-        );
+        let track_color =
+            resolve_named_color(&node.props, "track-color", theme::WIDGET_KNOB_TRACK());
 
         let knob_size = get_f32_prop(&node.props, "knob-size", node.rect.height * 0.53)
             .max(0.72)
-            .min(node.rect.height * 0.64);
+            .min(node.rect.height * 0.9);
         let knob_width = if viewport.cell_w > 0.0 {
             knob_size * viewport.cell_h / viewport.cell_w
         } else {
@@ -526,19 +518,19 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float inRange = step(rel, sweep);
     float active = step(rel, sweep * in.value_t);
 
-    float ring = abs(r - 0.74) - 0.11;
+    float ring = abs(r - 0.74) - 0.088;
     float aa = max(fwidth(r), 0.0015);
     float ringMask = smoothstep(aa, -aa, ring) * inRange;
     float activeMask = ringMask * active;
 
     float notchAngle = start + sweep * in.value_t;
     float2 n = float2(cos(notchAngle), sin(notchAngle));
-    float notch = length(p - n * 0.74) - 0.105;
+    float notch = length(p - n * 0.74) - 0.084;
     float notchMask = smoothstep(aa, -aa, notch);
     float lineAlong = dot(p, n);
     float lineAcross = abs(p.x * n.y - p.y * n.x);
     float lineSegment = step(0.0, lineAlong) * step(lineAlong, 0.68);
-    float line = lineAcross - 0.11;
+    float line = lineAcross - 0.088;
     float lineMask = smoothstep(aa, -aa, line) * lineSegment;
 
     float4 col = float4(0.0);

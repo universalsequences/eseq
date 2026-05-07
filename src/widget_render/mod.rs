@@ -415,11 +415,15 @@ pub struct MetalWaveformPrimitive {
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct MetalImagePrimitive {
+    pub widget_id: u64,
     pub rect: Rect,
     pub src: String,
     pub fit: ImageFit,
     pub radius_px: f32,
     pub opacity: f32,
+    pub rotation: f32,
+    pub rotation_speed: f32,
+    pub clip_circle: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -718,6 +722,7 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     node.rect.width.to_bits().hash(&mut hasher);
     node.rect.height.to_bits().hash(&mut hasher);
     widget_state_generation().hash(&mut hasher);
+    theme::generation().hash(&mut hasher);
     viewport.cell_w.to_bits().hash(&mut hasher);
     viewport.cell_h.to_bits().hash(&mut hasher);
     viewport.vp_w.to_bits().hash(&mut hasher);

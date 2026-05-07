@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::audio::register_audio_natives;
+use crate::backend::Color;
 use crate::buffer::{BufferTextStyle, CommittedBufferUiSnapshot};
 use crate::host::{BufferId, HostCommand};
 use crate::layout::{
@@ -582,13 +583,23 @@ pub enum LayoutSpec {
         name: String,
         hide_status: bool,
         borderless: bool,
+        border_width_px: f32,
+        border_radius_px: f32,
+        background_color: Option<Color>,
+        background_color_name: Option<String>,
         min_width: Option<f32>,
         min_height: Option<f32>,
         max_width: Option<f32>,
         max_height: Option<f32>,
     },
-    Rows(Vec<(f32, LayoutSpec)>),
-    Cols(Vec<(f32, LayoutSpec)>),
+    Rows {
+        gap: f32,
+        panes: Vec<(f32, LayoutSpec)>,
+    },
+    Cols {
+        gap: f32,
+        panes: Vec<(f32, LayoutSpec)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

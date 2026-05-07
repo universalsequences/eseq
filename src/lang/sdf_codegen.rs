@@ -77,6 +77,7 @@ impl MetalEmitter {
         match name {
             "itime" => return "itime".to_string(),
             "aspect" => return "aspect".to_string(),
+            "input-color" => return "in.color_a".to_string(),
             "hit/hover" => {
                 return if let Some(rid) = self.current_region_id {
                     format!("(hit_region == {})", rid)
@@ -119,6 +120,7 @@ impl MetalEmitter {
     fn expr_type(&self, expr: &Expression) -> Option<&'static str> {
         match expr {
             Expression::Keyword(_) => Some("float4"),
+            Expression::Symbol(name) if name == "input-color" => Some("float4"),
             Expression::Symbol(name) => self.resolve_symbol_type(name),
             Expression::List(items) if items.is_empty() => None,
             Expression::List(items) => {
@@ -1160,6 +1162,7 @@ pub fn collect_state_symbols(expr: &Expression, state_bindings: &HashSet<String>
         "hit/hover".to_string(),
         "hit/active".to_string(),
         "hit/region".to_string(),
+        "input-color".to_string(),
     ])];
     collect_state_symbols_impl(expr, state_bindings, &mut scope_stack, &mut out);
     out

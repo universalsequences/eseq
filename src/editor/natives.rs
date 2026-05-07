@@ -717,6 +717,10 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                         name: s.clone(),
                         hide_status: false,
                         borderless: false,
+                        border_width_px: 2.0,
+                        border_radius_px: 0.0,
+                        background_color: None,
+                        background_color_name: None,
                         min_width: None,
                         min_height: None,
                         max_width: None,
@@ -736,6 +740,10 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                             .ok_or("(:buf ...) requires a buffer name string")?;
                         let mut hide_status = false;
                         let mut borderless = false;
+                        let mut border_width_px = 2.0f32;
+                        let mut border_radius_px = 0.0f32;
+                        let mut background_color = None;
+                        let mut background_color_name = None;
                         let mut min_width: Option<f32> = None;
                         let mut min_height: Option<f32> = None;
                         let mut max_width: Option<f32> = None;
@@ -759,6 +767,26 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                                             Value::Symbol(s) if s == "true" => borderless = true,
                                             Value::Symbol(s) if s == "false" => borderless = false,
                                             _ => {}
+                                        },
+                                        "border-radius" => {
+                                            if let Value::Number(n) = &*v {
+                                                border_radius_px = (*n as f32).max(0.0)
+                                            }
+                                        }
+                                        "border-width" => {
+                                            if let Value::Number(n) = &*v {
+                                                border_width_px = (*n as f32).max(0.0)
+                                            }
+                                        }
+                                        "background-color" => match &*v {
+                                            Value::Keyword(name) | Value::String(name) => {
+                                                background_color_name = Some(name.clone());
+                                            }
+                                            _ => {
+                                                background_color =
+                                                    crate::theme::parse_color_value(&v);
+                                                background_color_name = None;
+                                            }
                                         },
                                         "min-width" => {
                                             if let Value::Number(n) = &*v {
@@ -790,6 +818,10 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                             name,
                             hide_status,
                             borderless,
+                            border_width_px,
+                            border_radius_px,
+                            background_color,
+                            background_color_name,
                             min_width,
                             min_height,
                             max_width,
@@ -806,10 +838,31 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                             Value::Keyword(k) if k == "cols" => "cols",
                             _ => return Err("layout list must start with :rows or :cols".into()),
                         };
-                        // Parse alternating ratio/spec pairs: :rows 0.7 spec1 0.3 spec2
+                        // Parse optional split options, then alternating ratio/spec pairs:
+                        // (:rows :gap 1 0.7 spec1 0.3 spec2)
                         let mut panes = Vec::new();
                         let mut i = 1;
+                        let mut gap = 0.0f32;
                         while i < items.len() {
+                            if let Value::Keyword(k) = &*items[i].borrow() {
+                                let key = k.clone();
+                                i += 1;
+                                if i >= items.len() {
+                                    return Err(format!("expected value after :{key}"));
+                                }
+                                match key.as_str() {
+                                    "gap" => {
+                                        let gap_val = items[i].borrow();
+                                        match &*gap_val {
+                                            Value::Number(n) => gap = (*n as f32).max(0.0),
+                                            _ => return Err(":gap expects a number".into()),
+                                        }
+                                        i += 1;
+                                        continue;
+                                    }
+                                    _ => return Err(format!("unknown layout option :{key}")),
+                                }
+                            }
                             let ratio_val = items[i].borrow();
                             let ratio = match &*ratio_val {
                                 Value::Number(n) => *n as f32,
@@ -828,8 +881,8 @@ pub(super) fn register_editor_natives(runtime: &mut Runtime) {
                             return Err("no panes in layout spec".into());
                         }
                         Ok(match dir {
-                            "rows" => LayoutSpec::Rows(panes),
-                            _ => LayoutSpec::Cols(panes),
+                            "rows" => LayoutSpec::Rows { gap, panes },
+                            _ => LayoutSpec::Cols { gap, panes },
                         })
                     }
                     _ => Err("layout spec must be a string or list".into()),

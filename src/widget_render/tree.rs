@@ -673,14 +673,7 @@ impl WidgetDefinition for TreeWidget {
 
         let rh = ROW_HEIGHT;
 
-        let bg = theme::BG();
-        let default_odd = Color {
-            r: bg.r + 0.04,
-            g: bg.g + 0.04,
-            b: bg.b + 0.04,
-            a: 1.0,
-        };
-        let bg_odd = resolve_named_color(&node.props, "row-bg-odd", default_odd);
+        let bg_alt = resolve_named_color(&node.props, "row-bg-alt", theme::TREE_ROW_ALT_BG());
         let selected_bg = resolve_named_color(&node.props, "selected-bg", theme::WIDGET_FOCUS_BG());
         let folder_fg = resolve_named_color(&node.props, "folder-color", theme::FG());
         let fg = theme::FG();
@@ -705,12 +698,12 @@ impl WidgetDefinition for TreeWidget {
         for (i, row) in rows.iter().enumerate() {
             let y = node.rect.row + i as f32 * rh;
 
-            // Row background — Finder-style: even rows transparent, odd rows
-            // subtle rounded rect, selected row blue rounded rect.
+            // Row background — only draw the alternate stripe. The other rows
+            // are left as the underlying panel background.
             let is_selected = i == state.selected_row;
             let show_bg = is_selected || i % 2 == 1;
             if show_bg {
-                let bg = if is_selected { selected_bg } else { bg_odd };
+                let bg = if is_selected { selected_bg } else { bg_alt };
                 let row_inset = 0.15; // horizontal inset for rounded rect
                 let row_rect = Rect {
                     row: y,

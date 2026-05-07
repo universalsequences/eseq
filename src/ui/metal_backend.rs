@@ -165,6 +165,8 @@ struct ImageVertex {
     packed_float2 local_pos;
     packed_float2 half_size;
     float  radius;
+    float  rotation;
+    float  clip_circle;
 };
 
 struct ImageVaryings {
@@ -174,6 +176,8 @@ struct ImageVaryings {
     float2 local_pos;
     float2 half_size;
     float  radius;
+    float  rotation;
+    float  clip_circle;
 };
 
 vertex ImageVaryings image_vert(
@@ -188,6 +192,8 @@ vertex ImageVaryings image_vert(
     out.local_pos = v.local_pos;
     out.half_size = v.half_size;
     out.radius = v.radius;
+    out.rotation = v.rotation;
+    out.clip_circle = v.clip_circle;
     return out;
 }
 
@@ -201,8 +207,19 @@ fragment float4 image_frag(
     texture2d<float> image_tex [[texture(0)]])
 {
     constexpr sampler s(address::clamp_to_edge, filter::linear);
-    float4 color = image_tex.sample(s, in.uv);
-    if (in.radius > 0.0) {
+    float2 uv = in.uv;
+    if (abs(in.rotation) > 0.0001) {
+        float c = cos(in.rotation);
+        float sn = sin(in.rotation);
+        float2 p = uv - float2(0.5, 0.5);
+        uv = float2(c * p.x - sn * p.y, sn * p.x + c * p.y) + float2(0.5, 0.5);
+    }
+    float4 color = image_tex.sample(s, uv);
+    if (in.clip_circle > 0.5) {
+        float d = length(in.local_pos) - min(in.half_size.x, in.half_size.y);
+        float aa = max(fwidth(d), 0.001);
+        color.a *= smoothstep(aa, -aa, d);
+    } else if (in.radius > 0.0) {
         float radius = min(in.radius, min(in.half_size.x, in.half_size.y));
         float d = image_rounded_rect_sdf(in.local_pos, in.half_size, radius);
         float aa = max(fwidth(d), 0.001);
@@ -578,6 +595,8 @@ fragment float4 waveform_frag(
         local_pos: [f32; 2],
         half_size: [f32; 2],
         radius: f32,
+        rotation: f32,
+        clip_circle: f32,
     }
 
     #[repr(C)]
@@ -651,6 +670,13 @@ fragment float4 waveform_frag(
         image: Option<DecodedImageData>,
     }
 
+    struct ImageRotationState {
+        src: String,
+        angle: f32,
+        speed: f32,
+        time_seconds: f32,
+    }
+
     fn decode_image_job(job: ImageDecodeJob) -> ImageDecodeResult {
         let path = job.path;
         let modified = job.modified;
@@ -693,6 +719,7 @@ fragment float4 waveform_frag(
         layout_identity: usize,
         layout_cache_key: u64,
         widget_state_generation: u64,
+        theme_generation: u64,
         focused_widget_id: Option<u64>,
         scroll_top_bits: u32,
         max_rows: u16,
@@ -736,6 +763,7 @@ fragment float4 waveform_frag(
         cached_text_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
         cached_text_vertex_count: usize,
         cached_widget_scenes: HashMap<u64, CachedWidgetScene>,
+        image_rotation_states: HashMap<u64, ImageRotationState>,
         stats: RenderStats,
         // Winit
         event_loop: Option<EventLoop<()>>,
@@ -758,7 +786,7 @@ fragment float4 waveform_frag(
 
     impl MetalBackend {
         pub fn new() -> Result<Self, BackendError> {
-            Self::new_with_size(1200, 800)
+            Self::new_with_size(1350, 900)
         }
 
         pub fn new_with_size(width: u32, height: u32) -> Result<Self, BackendError> {
@@ -807,6 +835,7 @@ fragment float4 waveform_frag(
                 cached_text_buffer: None,
                 cached_text_vertex_count: 0,
                 cached_widget_scenes: HashMap::new(),
+                image_rotation_states: HashMap::new(),
                 stats: RenderStats::new(),
                 event_loop: None,
                 window: None,
@@ -849,6 +878,7 @@ fragment float4 waveform_frag(
                 layout_identity: layout as *const crate::layout::LayoutNode as usize,
                 layout_cache_key,
                 widget_state_generation: widget_render::widget_state_generation(),
+                theme_generation: theme::generation(),
                 focused_widget_id: viewport.focused_widget_id,
                 scroll_top_bits: scroll_top.to_bits(),
                 max_rows,
@@ -1353,6 +1383,7 @@ fragment float4 waveform_frag(
             cell_h: f32,
             vp_w: f32,
             vp_h: f32,
+            time_seconds: f32,
         ) {
             for image in images {
                 if let Some(scissor) = scissor {
@@ -1366,7 +1397,10 @@ fragment float4 waveform_frag(
                 let texture = resource.texture.clone();
                 let image_w = resource.width;
                 let image_h = resource.height;
-                let verts = image_vertices(image, image_w, image_h, cell_w, cell_h, vp_w, vp_h);
+                let rotation = self.effective_image_rotation(image, time_seconds);
+                let verts = image_vertices(
+                    image, image_w, image_h, cell_w, cell_h, vp_w, vp_h, rotation,
+                );
                 if verts.is_empty() {
                     continue;
                 }
@@ -1391,6 +1425,37 @@ fragment float4 waveform_frag(
                     );
                 }
             }
+        }
+
+        fn effective_image_rotation(
+            &mut self,
+            image: &widget_render::MetalImagePrimitive,
+            time_seconds: f32,
+        ) -> f32 {
+            const SEEK_SNAP_THRESHOLD_RADIANS: f32 = 1.0;
+
+            let base_angle = image.rotation;
+            let mut angle = base_angle;
+            if let Some(state) = self.image_rotation_states.get(&image.widget_id)
+                && state.src == image.src
+            {
+                let dt = (time_seconds - state.time_seconds).max(0.0);
+                let predicted = state.angle + state.speed * dt;
+                if angular_distance(predicted, base_angle) < SEEK_SNAP_THRESHOLD_RADIANS {
+                    angle = predicted;
+                }
+            }
+
+            self.image_rotation_states.insert(
+                image.widget_id,
+                ImageRotationState {
+                    src: image.src.clone(),
+                    angle,
+                    speed: image.rotation_speed,
+                    time_seconds,
+                },
+            );
+            angle
         }
 
         /// Render a tiled frame with per-tile scissor clipping.
@@ -1436,7 +1501,6 @@ fragment float4 waveform_frag(
             let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
             let to_rgba = |c: Color| [c.r, c.g, c.b, c.a];
             let has_multiple_tiles = tiled.tiles.len() > 1;
-            let border_px = 2.0f32;
 
             // ── Render pass setup ────────────────────────────────────────────
             let desc = MTLRenderPassDescriptor::new();
@@ -1496,20 +1560,56 @@ fragment float4 waveform_frag(
                 let row_off = tile.rect.row.round() as usize;
                 let tile_w = tile.rect.width.round() as usize;
                 let tile_h = tile.rect.height.round() as usize;
+                let tile_left_px = tile.rect.col * cell_w;
+                let tile_top_px = tile.rect.row * cell_h;
+                let tile_width_px = tile.rect.width * cell_w;
+                let tile_height_px = tile.rect.height * cell_h;
 
                 // Set scissor rect to clip to tile content area (exclude status row)
                 let scissor_rows = if tile.show_status {
-                    tile_h.saturating_sub(1)
+                    (tile.rect.height - 1.0).max(0.0)
                 } else {
-                    tile_h
+                    tile.rect.height.max(0.0)
                 };
+                let scissor_left = tile_left_px.floor().max(0.0);
+                let scissor_top = tile_top_px.floor().max(0.0);
+                let scissor_right = (tile_left_px + tile_width_px).ceil().max(scissor_left);
+                let scissor_bottom = (tile_top_px + scissor_rows * cell_h)
+                    .ceil()
+                    .max(scissor_top);
                 let scissor = MTLScissorRect {
-                    x: (col_off as f32 * cell_w) as usize,
-                    y: (row_off as f32 * cell_h) as usize,
-                    width: (tile_w as f32 * cell_w) as usize,
-                    height: (scissor_rows as f32 * cell_h) as usize,
+                    x: scissor_left as usize,
+                    y: scissor_top as usize,
+                    width: (scissor_right - scissor_left) as usize,
+                    height: (scissor_bottom - scissor_top) as usize,
                 };
                 enc.setScissorRect(scissor);
+
+                let tile_bg = tile
+                    .background_color_name
+                    .as_deref()
+                    .and_then(theme::named_color)
+                    .or(tile.background_color)
+                    .unwrap_or(theme::BG());
+                let mut tile_bg_verts = Vec::new();
+                push_rounded_rect_fill_px(
+                    &mut tile_bg_verts,
+                    tile_left_px,
+                    tile_top_px,
+                    tile_width_px,
+                    scissor_rows as f32 * cell_h,
+                    tile.border_radius_px,
+                    tile_bg,
+                    vp_w,
+                    vp_h,
+                );
+                draw_text_verts(
+                    &enc,
+                    &self.device,
+                    &pipeline,
+                    &atlas_texture,
+                    &tile_bg_verts,
+                );
 
                 // ── Text content (shifted by horizontal scroll) ──────────────
                 let hscroll = tile.frame.widget_scroll_left.round() as i32;
@@ -1519,7 +1619,7 @@ fragment float4 waveform_frag(
                 };
                 let text_verts = {
                     let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                    build_text_quads_offset(&tile.frame, atlas, vp_w, vp_h, offset)
+                    build_text_quads_offset(&tile.frame, atlas, vp_w, vp_h, offset, tile_bg)
                 };
                 draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &text_verts);
 
@@ -1639,6 +1739,7 @@ fragment float4 waveform_frag(
                                 cell_h,
                                 vp_w,
                                 vp_h,
+                                render_time_seconds,
                             );
                         }
 
@@ -1772,6 +1873,7 @@ fragment float4 waveform_frag(
                                 cell_h,
                                 vp_w,
                                 vp_h,
+                                render_time_seconds,
                             );
                         }
 
@@ -1914,62 +2016,21 @@ fragment float4 waveform_frag(
                     let border_color = if tile.is_active {
                         theme::BORDER_ACTIVE()
                     } else {
-                        theme::BORDER_INACTIVE()
+                        tile_bg
                     };
-                    let bc = to_rgba(border_color);
-                    let bv = |px, py| Vertex {
-                        position: [px, py],
-                        uv: [0.0, 0.0],
-                        fg: bc,
-                        bg: bc,
-                    };
-                    let left_px = col_off as f32 * cell_w;
-                    let right_px = (col_off + tile_w) as f32 * cell_w;
-                    let top_px = row_off as f32 * cell_h;
-                    let bottom_px = (row_off + tile_h) as f32 * cell_h;
                     let mut bverts = Vec::new();
-                    // Right edge
-                    let (rx0, rx1) = (ndc_x(right_px - border_px), ndc_x(right_px));
-                    let (ry0, ry1) = (ndc_y(top_px), ndc_y(bottom_px));
-                    bverts.extend_from_slice(&[
-                        bv(rx0, ry0),
-                        bv(rx0, ry1),
-                        bv(rx1, ry0),
-                        bv(rx1, ry0),
-                        bv(rx0, ry1),
-                        bv(rx1, ry1),
-                    ]);
-                    // Left edge
-                    let (lx0, lx1) = (ndc_x(left_px), ndc_x(left_px + border_px));
-                    bverts.extend_from_slice(&[
-                        bv(lx0, ry0),
-                        bv(lx0, ry1),
-                        bv(lx1, ry0),
-                        bv(lx1, ry0),
-                        bv(lx0, ry1),
-                        bv(lx1, ry1),
-                    ]);
-                    // Top edge
-                    let (tx0, tx1) = (ndc_x(left_px), ndc_x(right_px));
-                    let (ty0, ty1) = (ndc_y(top_px), ndc_y(top_px + border_px));
-                    bverts.extend_from_slice(&[
-                        bv(tx0, ty0),
-                        bv(tx0, ty1),
-                        bv(tx1, ty0),
-                        bv(tx1, ty0),
-                        bv(tx0, ty1),
-                        bv(tx1, ty1),
-                    ]);
-                    // Bottom edge
-                    let (by0, by1) = (ndc_y(bottom_px - border_px), ndc_y(bottom_px));
-                    bverts.extend_from_slice(&[
-                        bv(tx0, by0),
-                        bv(tx0, by1),
-                        bv(tx1, by0),
-                        bv(tx1, by0),
-                        bv(tx0, by1),
-                        bv(tx1, by1),
-                    ]);
+                    push_rounded_rect_border_px(
+                        &mut bverts,
+                        tile_left_px,
+                        tile_top_px,
+                        tile_width_px,
+                        tile_height_px,
+                        tile.border_width_px,
+                        tile.border_radius_px,
+                        border_color,
+                        vp_w,
+                        vp_h,
+                    );
                     draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &bverts);
                 }
             }
@@ -2861,6 +2922,7 @@ fragment float4 waveform_frag(
                     cell_h,
                     vp_w,
                     vp_h,
+                    time_seconds,
                 );
             }
 
@@ -3211,7 +3273,7 @@ fragment float4 waveform_frag(
         vp_w: f32,
         vp_h: f32,
     ) -> Vec<Vertex> {
-        build_text_quads_offset(frame, atlas, vp_w, vp_h, TileOffset::default())
+        build_text_quads_offset(frame, atlas, vp_w, vp_h, TileOffset::default(), theme::BG())
     }
 
     fn build_text_quads_offset(
@@ -3220,6 +3282,7 @@ fragment float4 waveform_frag(
         vp_w: f32,
         vp_h: f32,
         offset: TileOffset,
+        default_bg: Color,
     ) -> Vec<Vertex> {
         let cell_w = atlas.cell_w as f32;
         let cell_h = atlas.cell_h as f32;
@@ -3252,7 +3315,7 @@ fragment float4 waveform_frag(
                 } else {
                     (
                         to_rgba(cell.style.fg),
-                        to_rgba(cell.style.bg.unwrap_or(theme::BG())),
+                        to_rgba(cell.style.bg.unwrap_or(default_bg)),
                     )
                 };
 
@@ -3595,6 +3658,7 @@ fragment float4 waveform_frag(
         cell_h: f32,
         vp_w: f32,
         vp_h: f32,
+        rotation: f32,
     ) -> Vec<ImageVertex> {
         if image.rect.width <= 0.0 || image.rect.height <= 0.0 || image_w == 0 || image_h == 0 {
             return Vec::new();
@@ -3651,6 +3715,8 @@ fragment float4 waveform_frag(
                 v1,
                 image.opacity,
                 image.radius_px,
+                rotation,
+                image.clip_circle,
                 image.rect.width * cell_w,
                 image.rect.height * cell_h,
             );
@@ -3667,6 +3733,8 @@ fragment float4 waveform_frag(
             v1,
             image.opacity,
             image.radius_px,
+            rotation,
+            image.clip_circle,
             image.rect.width * cell_w,
             image.rect.height * cell_h,
         )
@@ -3689,6 +3757,15 @@ fragment float4 waveform_frag(
         x1 > sx0 && x0 < sx1 && y1 > sy0 && y0 < sy1
     }
 
+    fn angular_distance(a: f32, b: f32) -> f32 {
+        let tau = std::f32::consts::TAU;
+        let mut d = (a - b).rem_euclid(tau);
+        if d > std::f32::consts::PI {
+            d = tau - d;
+        }
+        d.abs()
+    }
+
     fn image_vertex_quad(
         x0: f32,
         x1: f32,
@@ -3700,10 +3777,13 @@ fragment float4 waveform_frag(
         v1: f32,
         opacity: f32,
         radius: f32,
+        rotation: f32,
+        clip_circle: bool,
         width_px: f32,
         height_px: f32,
     ) -> Vec<ImageVertex> {
         let half_size = [width_px.max(0.0) * 0.5, height_px.max(0.0) * 0.5];
+        let clip_circle = if clip_circle { 1.0 } else { 0.0 };
         let v = |position, uv, local_pos| ImageVertex {
             position,
             uv,
@@ -3711,6 +3791,8 @@ fragment float4 waveform_frag(
             local_pos,
             half_size,
             radius,
+            rotation,
+            clip_circle,
         };
         vec![
             v([x0, y0], [u0, v0], [-half_size[0], -half_size[1]]),
@@ -3829,6 +3911,134 @@ fragment float4 waveform_frag(
         vp_h: f32,
     ) {
         push_rect_px_rgba(verts, x, y, width, height, color.to_rgba(), vp_w, vp_h);
+    }
+
+    fn rounded_rect_points_px(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        segments_per_corner: usize,
+    ) -> Vec<(f32, f32)> {
+        if width <= 0.0 || height <= 0.0 {
+            return Vec::new();
+        }
+        let radius = radius.clamp(0.0, width.min(height) * 0.5);
+        if radius <= 0.0 {
+            return vec![
+                (x, y),
+                (x + width, y),
+                (x + width, y + height),
+                (x, y + height),
+            ];
+        }
+
+        let segments = segments_per_corner.max(2);
+        let corners = [
+            (x + width - radius, y + radius, -90.0f32, 0.0f32),
+            (x + width - radius, y + height - radius, 0.0f32, 90.0f32),
+            (x + radius, y + height - radius, 90.0f32, 180.0f32),
+            (x + radius, y + radius, 180.0f32, 270.0f32),
+        ];
+        let mut points = Vec::with_capacity(corners.len() * (segments + 1));
+        for (cx, cy, start_deg, end_deg) in corners {
+            for i in 0..=segments {
+                let t = i as f32 / segments as f32;
+                let angle = (start_deg + (end_deg - start_deg) * t).to_radians();
+                points.push((cx + angle.cos() * radius, cy + angle.sin() * radius));
+            }
+        }
+        points
+    }
+
+    fn push_rounded_rect_fill_px(
+        verts: &mut Vec<Vertex>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        color: Color,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        if width <= 0.0 || height <= 0.0 {
+            return;
+        }
+        let points = rounded_rect_points_px(x, y, width, height, radius, 8);
+        if points.len() < 3 {
+            return;
+        }
+
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let rgba = color.to_rgba();
+        let center = (x + width * 0.5, y + height * 0.5);
+        let v = |point: (f32, f32)| Vertex {
+            position: [ndc_x(point.0), ndc_y(point.1)],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        };
+
+        for i in 0..points.len() {
+            let j = (i + 1) % points.len();
+            verts.extend_from_slice(&[v(center), v(points[i]), v(points[j])]);
+        }
+    }
+
+    fn push_rounded_rect_border_px(
+        verts: &mut Vec<Vertex>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        border_width: f32,
+        radius: f32,
+        color: Color,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        if width <= 0.0 || height <= 0.0 || border_width <= 0.0 {
+            return;
+        }
+        let inset = border_width.min(width * 0.5).min(height * 0.5);
+        let radius = radius.clamp(0.0, width.min(height) * 0.5);
+        let outer = rounded_rect_points_px(x, y, width, height, radius, 8);
+        let inner = rounded_rect_points_px(
+            x + inset,
+            y + inset,
+            (width - inset * 2.0).max(0.0),
+            (height - inset * 2.0).max(0.0),
+            (radius - inset).max(0.0),
+            8,
+        );
+        if outer.len() < 3 || outer.len() != inner.len() {
+            return;
+        }
+
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let rgba = color.to_rgba();
+        let v = |point: (f32, f32)| Vertex {
+            position: [ndc_x(point.0), ndc_y(point.1)],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        };
+
+        for i in 0..outer.len() {
+            let j = (i + 1) % outer.len();
+            verts.extend_from_slice(&[
+                v(outer[i]),
+                v(inner[i]),
+                v(outer[j]),
+                v(outer[j]),
+                v(inner[i]),
+                v(inner[j]),
+            ]);
+        }
     }
 
     fn push_rect_px_rgba(
@@ -4359,6 +4569,142 @@ fragment float4 waveform_frag(
             WMouseButton::Right => Some(MouseButton::Right),
             WMouseButton::Middle => Some(MouseButton::Middle),
             _ => None,
+        }
+    }
+
+    #[cfg(test)]
+    mod render_dispatch_tests {
+        use super::*;
+        use crate::layout::LayoutNode;
+        use crate::vm::Value;
+        use crate::widget_render::{MetalPrimitive, WidgetViewport};
+
+        fn prop_string(value: &str) -> Value {
+            Value::String(value.to_string())
+        }
+
+        fn prop_number(value: f64) -> Value {
+            Value::Number(value)
+        }
+
+        fn prop_keyword(value: &str) -> Value {
+            Value::Keyword(value.to_string())
+        }
+
+        fn rect_contains(outer: Rect, inner: Rect) -> bool {
+            inner.col >= outer.col
+                && inner.row >= outer.row
+                && inner.col + inner.width <= outer.col + outer.width
+                && inner.row + inner.height <= outer.row + outer.height
+        }
+
+        fn widget_instance_rect(instance: &WidgetInstance, viewport: WidgetViewport) -> Rect {
+            let ndc_x_to_col = |x: f32| ((x + 1.0) * 0.5 * viewport.vp_w) / viewport.cell_w;
+            let ndc_y_to_row = |y: f32| ((1.0 - y) * 0.5 * viewport.vp_h) / viewport.cell_h;
+            let left = ndc_x_to_col(instance.ndc_min[0]);
+            let right = ndc_x_to_col(instance.ndc_max[0]);
+            let top = ndc_y_to_row(instance.ndc_min[1]);
+            let bottom = ndc_y_to_row(instance.ndc_max[1]);
+            Rect {
+                col: left.min(right),
+                row: top.min(bottom),
+                width: (right - left).abs(),
+                height: (bottom - top).abs(),
+            }
+        }
+
+        #[test]
+        fn metal_button_background_is_not_followed_by_covering_box_rect() {
+            let viewport = WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 10.0,
+                vp_w: 400.0,
+                vp_h: 240.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                tile_content_rows: 24.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            };
+
+            let button = LayoutNode {
+                widget_id: 2,
+                stable_widget_id: None,
+                subtree_root_id: None,
+                parent_subtree_root_id: None,
+                stable_key: None,
+                widget_type: "button".to_string(),
+                rect: Rect {
+                    col: 2.0,
+                    row: 6.0,
+                    width: 3.0,
+                    height: 1.0,
+                },
+                props: HashMap::from([
+                    ("text".to_string(), prop_string("A")),
+                    ("width".to_string(), prop_number(3.0)),
+                    ("height".to_string(), prop_number(1.0)),
+                    ("padding".to_string(), prop_number(0.0)),
+                    ("font-size".to_string(), prop_number(10.0)),
+                    ("background-color".to_string(), prop_keyword("orange")),
+                    ("color".to_string(), prop_keyword("black")),
+                ]),
+                children: Vec::new(),
+                focusable: true,
+            };
+
+            let strip = LayoutNode {
+                widget_id: 1,
+                stable_widget_id: None,
+                subtree_root_id: None,
+                parent_subtree_root_id: None,
+                stable_key: None,
+                widget_type: "box".to_string(),
+                rect: Rect {
+                    col: 0.0,
+                    row: 0.0,
+                    width: 8.0,
+                    height: 12.0,
+                },
+                props: HashMap::from([(
+                    "background-color".to_string(),
+                    Value::List(vec![
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.13))),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.13))),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Number(0.14))),
+                        std::rc::Rc::new(std::cell::RefCell::new(Value::Number(1.0))),
+                    ]),
+                )]),
+                children: vec![button],
+                focusable: false,
+            };
+
+            let (primitives, _) =
+                widget_render::collect_metal_primitives(&strip, viewport, 0.0, 24);
+            let button_bg_rect = primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    MetalPrimitive::WidgetInstance {
+                        widget_type,
+                        instance,
+                        is_background: true,
+                    } if widget_type == "button" => Some(widget_instance_rect(instance, viewport)),
+                    _ => None,
+                })
+                .expect("button should emit a background instance");
+
+            let covering_rect_dispatched_after_button_background =
+                primitives.iter().find(|primitive| match primitive {
+                    MetalPrimitive::Rect(rect) => rect_contains(rect.rect, button_bg_rect),
+                    _ => false,
+                });
+
+            assert!(
+                covering_rect_dispatched_after_button_background.is_none(),
+                "the backend dispatches widget backgrounds before Rect primitives; this covering Rect paints over the button chrome"
+            );
         }
     }
 }

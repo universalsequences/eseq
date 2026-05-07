@@ -49,18 +49,20 @@ fn prop_text(props: &HashMap<String, Value>) -> String {
 
 fn variant_bg(props: &HashMap<String, Value>) -> Color {
     let default = match variant(props) {
-        ButtonVariant::Primary => theme::BLUE(),
-        ButtonVariant::Secondary => Color::from_hex(0x32, 0x35, 0x3a),
-        ButtonVariant::Ghost => Color::rgba(0.18, 0.19, 0.21, 0.45),
-        ButtonVariant::Danger => theme::RED(),
+        ButtonVariant::Primary => theme::BUTTON_PRIMARY_BG(),
+        ButtonVariant::Secondary => theme::BUTTON_SECONDARY_BG(),
+        ButtonVariant::Ghost => theme::BUTTON_GHOST_BG(),
+        ButtonVariant::Danger => theme::BUTTON_DANGER_BG(),
     };
     resolve_named_color(props, "background-color", default)
 }
 
 fn variant_fg(props: &HashMap<String, Value>) -> Color {
     let default = match variant(props) {
-        ButtonVariant::Secondary | ButtonVariant::Ghost => theme::WHITE(),
-        ButtonVariant::Primary | ButtonVariant::Danger => theme::WHITE(),
+        ButtonVariant::Primary => theme::BUTTON_PRIMARY_FG(),
+        ButtonVariant::Secondary => theme::BUTTON_SECONDARY_FG(),
+        ButtonVariant::Ghost => theme::BUTTON_GHOST_FG(),
+        ButtonVariant::Danger => theme::BUTTON_DANGER_FG(),
     };
     resolve_named_color(props, "color", default)
 }

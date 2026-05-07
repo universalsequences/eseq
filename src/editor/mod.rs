@@ -31,6 +31,8 @@ use crate::widget_render::WidgetCursor;
 use commands::key_str;
 use natives::register_editor_natives;
 
+const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
+
 fn layout_matches_viewport_width(layout: &crate::layout::LayoutNode, cols: u16) -> bool {
     (layout.rect.width - cols as f32).abs() < 0.5
 }
@@ -244,6 +246,8 @@ pub struct Editor {
     redo_stack: Vec<TextUndoSnapshot>,
     /// Cached tile rects, recomputed when tiles change or viewport resizes.
     cached_tile_rects: Vec<(TileId, Rect)>,
+    /// Outer margin around the tiled layout, in cell units.
+    tile_outer_gap: f32,
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
     pointer_drag_started_on_slider: bool,
@@ -318,6 +322,7 @@ impl Editor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             cached_tile_rects: vec![],
+            tile_outer_gap: 0.0,
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
             pointer_drag_started_on_slider: false,
@@ -373,17 +378,23 @@ impl Editor {
 
     /// Recompute cached tile rects for the given viewport.
     pub fn update_tile_rects(&mut self, total_width: u16, total_height: u16) {
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        let horizontal_margin = (self.tile_outer_gap.max(0.0) * TILE_GAP_PX_PER_UNIT
+            / cell_w.max(1.0))
+        .min(total_width as f32 * 0.5);
         let area = Rect {
             row: 0.0,
-            col: 0.0,
-            width: total_width as f32,
+            col: horizontal_margin,
+            width: (total_width as f32 - horizontal_margin * 2.0).max(0.0),
             // Reserve 1 row for global status bar
             height: (total_height as f32 - 1.0).max(0.0),
         };
         // Enforce min-size constraints before computing rects
-        Self::enforce_min_sizes_node(&mut self.tile_root, area);
+        Self::enforce_min_sizes_node(&mut self.tile_root, area, cell_w, cell_h);
         let old_rects = std::mem::take(&mut self.cached_tile_rects);
-        self.cached_tile_rects = self.tile_root.compute_rects(area);
+        self.cached_tile_rects =
+            self.tile_root
+                .compute_rects(area, TILE_GAP_PX_PER_UNIT, cell_w, cell_h);
         // If rects changed, invalidate all inactive tile layouts so they recompute
         if old_rects != self.cached_tile_rects {
             let mut buf_indices: Vec<usize> = Vec::new();
@@ -568,6 +579,10 @@ impl Editor {
         use crate::tile::TileSplit;
 
         let fallback_buf = self.active_leaf().buffer_idx;
+        let outer_gap = match &spec {
+            LayoutSpec::Rows { gap, .. } | LayoutSpec::Cols { gap, .. } => *gap,
+            LayoutSpec::Buffer { .. } => 0.0,
+        };
 
         fn build(
             spec: LayoutSpec,
@@ -580,6 +595,10 @@ impl Editor {
                     name,
                     hide_status,
                     borderless,
+                    border_width_px,
+                    border_radius_px,
+                    background_color,
+                    background_color_name,
                     min_width,
                     min_height,
                     max_width,
@@ -591,17 +610,21 @@ impl Editor {
                     let mut leaf = TileLeaf::new(id, buf_idx);
                     leaf.show_status = !hide_status;
                     leaf.show_border = !borderless;
+                    leaf.border_width_px = border_width_px;
+                    leaf.border_radius_px = border_radius_px;
+                    leaf.background_color = background_color;
+                    leaf.background_color_name = background_color_name;
                     leaf.min_width = min_width;
                     leaf.min_height = min_height;
                     leaf.max_width = max_width;
                     leaf.max_height = max_height;
                     TileNode::Leaf(leaf)
                 }
-                LayoutSpec::Rows(panes) => {
-                    build_split(panes, SplitDir::Horizontal, bufs, fallback, next_id)
+                LayoutSpec::Rows { gap, panes } => {
+                    build_split(panes, SplitDir::Horizontal, gap, bufs, fallback, next_id)
                 }
-                LayoutSpec::Cols(panes) => {
-                    build_split(panes, SplitDir::Vertical, bufs, fallback, next_id)
+                LayoutSpec::Cols { gap, panes } => {
+                    build_split(panes, SplitDir::Vertical, gap, bufs, fallback, next_id)
                 }
             }
         }
@@ -609,6 +632,7 @@ impl Editor {
         fn build_split(
             panes: Vec<(f32, LayoutSpec)>,
             dir: SplitDir,
+            gap: f32,
             bufs: &[Buf],
             fallback: usize,
             next_id: &mut TileId,
@@ -631,7 +655,7 @@ impl Editor {
                 } else {
                     rest
                 };
-                build_split(rescaled, dir, bufs, fallback, next_id)
+                build_split(rescaled, dir, gap, bufs, fallback, next_id)
             };
 
             let split_id = *next_id;
@@ -640,6 +664,7 @@ impl Editor {
                 id: split_id,
                 dir,
                 ratio,
+                gap,
                 a: Box::new(child_a),
                 b: Box::new(child_b),
             })
@@ -647,6 +672,7 @@ impl Editor {
 
         let new_root = build(spec, &self.buffers, fallback_buf, &mut self.next_tile_id);
         self.tile_root = new_root;
+        self.tile_outer_gap = outer_gap;
         // Enforce min-size constraints on initial ratios
         self.enforce_min_sizes_recursive();
         // Set active tile to first leaf
@@ -684,10 +710,11 @@ impl Editor {
                 height: max_row - min_row,
             }
         };
-        Self::enforce_min_sizes_node(&mut self.tile_root, total_area);
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        Self::enforce_min_sizes_node(&mut self.tile_root, total_area, cell_w, cell_h);
     }
 
-    fn enforce_min_sizes_node(node: &mut TileNode, area: Rect) {
+    fn enforce_min_sizes_node(node: &mut TileNode, area: Rect, cell_w: f32, cell_h: f32) {
         let TileNode::Split(split) = node else { return };
         let total = match split.dir {
             SplitDir::Vertical => area.width,
@@ -725,9 +752,11 @@ impl Editor {
                 split.ratio = split.ratio.max(1.0 - b_max / total);
             }
         }
-        let (a_rect, b_rect) = crate::tile::split_rect(area, split.dir, split.ratio);
-        Self::enforce_min_sizes_node(&mut split.a, a_rect);
-        Self::enforce_min_sizes_node(&mut split.b, b_rect);
+        let gap =
+            crate::tile::gap_to_cells(split.dir, split.gap, TILE_GAP_PX_PER_UNIT, cell_w, cell_h);
+        let (a_rect, b_rect) = crate::tile::split_rect(area, split.dir, split.ratio, gap);
+        Self::enforce_min_sizes_node(&mut split.a, a_rect, cell_w, cell_h);
+        Self::enforce_min_sizes_node(&mut split.b, b_rect, cell_w, cell_h);
     }
 
     /// Cycle active tile to the next leaf in order.
@@ -1055,10 +1084,16 @@ impl Editor {
             return false;
         };
         let tolerance = if border_inset == 0 { 0.5 } else { 1.0 };
-        let Some(hit) =
-            self.tile_root
-                .hit_test_split_divider(root_area, precise_col, precise_row, tolerance)
-        else {
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        let Some(hit) = self.tile_root.hit_test_split_divider(
+            root_area,
+            precise_col,
+            precise_row,
+            tolerance,
+            TILE_GAP_PX_PER_UNIT,
+            cell_w,
+            cell_h,
+        ) else {
             return false;
         };
         self.active_tile_resize_drag = Some(TileResizeDrag {
@@ -4404,6 +4439,8 @@ impl Editor {
 
         if let Some(theme_map) = self.runtime.take_pending_apply_theme() {
             self.runtime.apply_theme_map(theme_map);
+            crate::widget_render::bump_widget_state_generation();
+            self.mark_needs_redraw();
         }
 
         if self.runtime.take_pending_cycle_view_mode() {
