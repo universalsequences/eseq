@@ -322,15 +322,7 @@ impl Editor {
                 self.mark_needs_redraw();
             }
             KeyCode::Down | KeyCode::Right => {
-                let max_scroll = self
-                    .runtime
-                    .current_layout
-                    .as_ref()
-                    .map(|l| {
-                        let viewport_height = self.runtime.layout_rows();
-                        (l.rect.row + l.rect.height).ceil() - viewport_height as f32
-                    })
-                    .unwrap_or(0.0);
+                let max_scroll = self.max_widget_vertical_scroll();
                 let leaf = self.active_leaf_mut();
                 leaf.widget_scroll_top = (leaf.widget_scroll_top + 3.0).min(max_scroll).max(0.0);
                 self.mark_needs_redraw();

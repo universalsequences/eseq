@@ -36,8 +36,10 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float aa = max(fwidth(r), 0.0015);
     float ring = abs(r - 0.74) - 0.11;
+    float activeRing = abs(r - 0.74) - 0.125;
     float ringMask = smoothstep(aa, -aa, ring) * inRange;
-    float activeMask = ringMask * active;
+    float activeMask = smoothstep(aa, -aa, activeRing) * inRange * active;
+    float trackMask = ringMask * (1.0 - active);
 
     float notchAngle = start + sweep * in.value_t;
     float2 valueDir = float2(cos(notchAngle), sin(notchAngle));
@@ -51,7 +53,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float lineMask = smoothstep(aa, -aa, line) * lineSegment;
 
     float4 col = float4(0.0);
-    col = mix(col, in.color_b, ringMask);
+    col = mix(col, in.color_b, trackMask);
     col = mix(col, in.color_a, activeMask);
     col = mix(col, in.color_b, lineMask);
     col = mix(col, in.color_a, notchMask);
@@ -211,7 +213,7 @@ impl WidgetDefinition for KnobWidget {
                 itime: 0.0,
                 uniform_a: [0.0; 4],
                 uniform_b: [0.0; 4],
-                color_a: theme::WIDGET_FOCUS_BG().to_rgba(),
+                color_a: theme::WIDGET_KNOB_FILLED().to_rgba(),
                 color_b: theme::WIDGET_KNOB_TRACK().to_rgba(),
                 color_c: [0.0; 4],
                 color_d: [0.0; 4],

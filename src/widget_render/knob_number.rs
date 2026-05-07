@@ -393,7 +393,7 @@ impl WidgetDefinition for KnobNumberWidget {
                 a: 1.0,
             },
         );
-        let arc_color = resolve_named_color(&node.props, "arc-color", theme::WIDGET_FOCUS_BG());
+        let arc_color = resolve_named_color(&node.props, "arc-color", theme::WIDGET_KNOB_FILLED());
         let track_color =
             resolve_named_color(&node.props, "track-color", theme::WIDGET_KNOB_TRACK());
 
@@ -519,9 +519,11 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float active = step(rel, sweep * in.value_t);
 
     float ring = abs(r - 0.74) - 0.088;
+    float activeRing = abs(r - 0.74) - 0.103;
     float aa = max(fwidth(r), 0.0015);
     float ringMask = smoothstep(aa, -aa, ring) * inRange;
-    float activeMask = ringMask * active;
+    float activeMask = smoothstep(aa, -aa, activeRing) * inRange * active;
+    float trackMask = ringMask * (1.0 - active);
 
     float notchAngle = start + sweep * in.value_t;
     float2 n = float2(cos(notchAngle), sin(notchAngle));
@@ -534,7 +536,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float lineMask = smoothstep(aa, -aa, line) * lineSegment;
 
     float4 col = float4(0.0);
-    col = mix(col, in.color_b, ringMask);
+    col = mix(col, in.color_b, trackMask);
     col = mix(col, in.color_a, activeMask);
     col = mix(col, in.color_b, lineMask);
     col = mix(col, in.color_a, notchMask);

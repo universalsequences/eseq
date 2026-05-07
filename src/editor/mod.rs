@@ -1747,17 +1747,26 @@ impl Editor {
         mode != ViewMode::TextOnly && self.runtime.current_layout.is_some()
     }
 
-    /// Apply smooth (sub-cell) scroll deltas to the widget viewport.
-    /// `delta_cells_x` and `delta_cells_y` are in cell units (fractional).
-    pub fn apply_smooth_widget_scroll(&mut self, delta_cells_x: f32, delta_cells_y: f32) {
-        let content_height = self.runtime.layout_rows();
-        let max_v = self
+    pub(super) fn max_widget_vertical_scroll(&self) -> f32 {
+        const SCROLL_SLOP_ROWS: f32 = 0.5;
+        let viewport_rows = self.runtime.layout_rows() as f32;
+        let overflow = self
             .runtime
             .current_layout
             .as_ref()
-            .map(|l| (l.rect.row + l.rect.height).ceil() - content_height as f32)
-            .unwrap_or(0.0)
-            .max(0.0);
+            .map(|layout| layout.rect.row + layout.rect.height - viewport_rows)
+            .unwrap_or(0.0);
+        if overflow <= SCROLL_SLOP_ROWS {
+            0.0
+        } else {
+            overflow.max(0.0)
+        }
+    }
+
+    /// Apply smooth (sub-cell) scroll deltas to the widget viewport.
+    /// `delta_cells_x` and `delta_cells_y` are in cell units (fractional).
+    pub fn apply_smooth_widget_scroll(&mut self, delta_cells_x: f32, delta_cells_y: f32) {
+        let max_v = self.max_widget_vertical_scroll();
 
         let max_h = {
             let vp = self.runtime.layout_cols() as f32;
@@ -3151,13 +3160,7 @@ impl Editor {
                 }
                 if !text_visible {
                     // UI-only: scroll widget viewport, clamped to widget bounds
-                    let max_scroll = self
-                        .runtime
-                        .current_layout
-                        .as_ref()
-                        .map(|l| ((l.rect.row + l.rect.height).ceil()) - content_height as f32)
-                        .unwrap_or(0.0)
-                        .max(0.0);
+                    let max_scroll = self.max_widget_vertical_scroll();
                     let leaf = self.active_leaf_mut();
                     leaf.widget_scroll_top = (leaf.widget_scroll_top + 3.0).min(max_scroll);
                     self.mark_needs_redraw();
