@@ -130,21 +130,19 @@
             (cool-off-follow)
             (bus-set-step-param (bus-current-step) v)))
         :width 8 :height 1.3 :font-size 11)
-      (box :background "transport-btn-bg" :padding 0 :height 1.8
-        (box :width (bus-page-panel-width) :height 1.7 :padding 0.0525
-          (h-stack :gap 0.4 :padding 0.3
-            (h-stack :gap 0.4
-              (each (range 0 (bus-page-count)) |page|
-                (box :width page-button-width :height 1.25 :align :center
-                    :background "pattern-pill-bg"
-                    :active (if (= page (bus-current-page)) 1 0)
-                    :style pattern-control-style
-                    :on-click |x y r| (bus-goto-page page)
-                    (v-stack :gap 0.02 :align :center
-                      (label (str (+ page 1))
-                        :font-size 10
-                        :color (if (= page (bus-current-page)) :white :dim)
-                        :bg :transparent)))))))))
+      (box :background "transport-btn-bg" :padding 0.2 :height 1.4
+        (h-stack :gap 0.1 :align :center
+          (each (range 0 (bus-page-count)) |page|
+            (box :width page-button-width :height 1.1
+              :background "pattern-pill-bg"
+              :active (if (= page (bus-current-page)) 1 0)
+              :style pattern-control-style
+              :on-click |x y r| (bus-goto-page page)
+              (v-stack :align :center
+                (label (fmt " {} " (+ page 1))
+                  :font-size 11
+                  :color (if (= page (bus-current-page)) :white :dim)
+                  :bg :transparent)))))))
 
     ))
 
@@ -154,7 +152,7 @@
     (if (= SEQ.num-tracks 0)
     (metal-empty-track-fallback)
     (v-stack
-      :padding 1
+      :padding 2
       :gap 0.1
       
       ; Param mode selector
@@ -309,23 +307,21 @@
               :font-size 12
               :color :white
               :bg :transparent)))
-        (box :background "transport-btn-bg" :padding 0 :height 1.8
-          (box :width (page-panel-width) :height 1.7 :padding 0.0525
-            (h-stack :gap 0.4 :padding 0.3
-              (h-stack :gap 0.4
-                (each (range 0 (page-count)) |page|
-                  (box :width page-button-width :height 1.25 :align :center
-                      :background "pattern-pill-bg"
-                      :active (if (= page (visible-page)) 1 0)
-                      :style pattern-control-style
-                      :on-click |x y r| (goto-page page)
-                      (v-stack :align :center
-                        (label (str (+ page 1))
-                          :font-size 10
-                          :color (if (= page (visible-page)) :white :dim)
-                          :bg :transparent)))))))))))
+        (box :background "transport-btn-bg" :padding 0.2 :height 1.4
+          (h-stack :gap 0.1 :align :center
+            (each (range 0 (page-count)) |page|
+              (box :width page-button-width :height 1.1
+                :background "pattern-pill-bg"
+                :active (if (= page (visible-page)) 1 0)
+                :style pattern-control-style
+                :on-click |x y r| (goto-page page)
+                (v-stack :align :center
+                  (label (fmt " {} " (+ page 1))
+                    :font-size 11
+                    :color (if (= page (visible-page)) :white :dim)
+                    :bg :transparent))))))))
 
-    )))
+    ))))
 
 ; Set mode after buffer exists (effect-buffer creates it above)
 (set-buffer-mode-for "*metal*" "seq-grid-mode")

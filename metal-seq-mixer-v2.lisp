@@ -191,6 +191,57 @@
       0
       (+ display-i 1))))
 
+(def mixer-v2-bus-display-index (bus-i)
+  (if (or (not (mixer-v2-has-mix-bus?)) (<= (len SEQ.bus-names) 1))
+    bus-i
+    (if (= bus-i 0)
+      (- (len SEQ.bus-names) 1)
+      (- bus-i 1))))
+
+(def mixer-v2-channel-count ()
+  (+ SEQ.num-tracks (len SEQ.bus-names)))
+
+(def mixer-v2-current-channel-index ()
+  (if (and (>= selected-bus 0) (< selected-bus (len SEQ.bus-names)))
+    (+ SEQ.num-tracks (mixer-v2-bus-display-index selected-bus))
+    (min (max SEQ.current-track 0) (- (max SEQ.num-tracks 1) 1))))
+
+(def mixer-v2-select-channel-index (idx)
+  (let ((clamped (min (max idx 0) (- (max (mixer-v2-channel-count) 1) 1))))
+    (if (< clamped SEQ.num-tracks)
+      (do
+        (set! selected-bus -1)
+        (seq-set-track clamped))
+      (do
+        (seq-clear-selection)
+        (set! selected-bus (mixer-v2-display-bus-index (- clamped SEQ.num-tracks)))))))
+
+(def mixer-v2-select-prev-channel ()
+  (do
+    (mixer-v2-select-channel-index (- (mixer-v2-current-channel-index) 1))
+    true))
+
+(def mixer-v2-select-next-channel ()
+  (do
+    (mixer-v2-select-channel-index (+ (mixer-v2-current-channel-index) 1))
+    true))
+
+(def mixer-v2-delete-selected-track ()
+  (if (and (< selected-bus 0) (> SEQ.num-tracks 0) (< SEQ.current-track SEQ.num-tracks))
+    (do
+      (host-command "delete-track" (dict :track SEQ.current-track))
+      true)
+    false))
+
+(def mixer-v2-handle-key (key text)
+  (if (= key "LEFT")
+    (mixer-v2-select-prev-channel)
+    (if (= key "RIGHT")
+      (mixer-v2-select-next-channel)
+      (if (or (= key "BS") (= key "Delete"))
+        (mixer-v2-delete-selected-track)
+        false))))
+
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
     (box :width 9.3 :height 11.0
@@ -227,8 +278,15 @@
     (each (range 0 SEQ.num-tracks) |i|
       (subtree :key (str "mixer-v2-track-" i)
         (mixer-v2-track-strip i)))
-    (box :width 1.2 :height 12.4)
+    (box :width 1.2 :height 11.0)
     (each (range 0 (len SEQ.bus-names)) |display-i|
       (let ((i (mixer-v2-display-bus-index display-i)))
         (subtree :key (str "mixer-v2-bus-" i)
           (mixer-v2-bus-strip i))))))
+
+(define-mode "seq-mixer-mode" :read-only true :on-key "mixer-v2-handle-key")
+(mode-bind-key "seq-mixer-mode" "LEFT" "mixer-v2-select-prev-channel")
+(mode-bind-key "seq-mixer-mode" "RIGHT" "mixer-v2-select-next-channel")
+(mode-bind-key "seq-mixer-mode" "BS" "mixer-v2-delete-selected-track")
+(mode-bind-key "seq-mixer-mode" "Delete" "mixer-v2-delete-selected-track")
+(set-buffer-mode-for "*mixer*" "seq-mixer-mode")

@@ -108,5 +108,6 @@
       :widget-slider-filled '(0.00 0.48 0.95)   ;
       :widget-slider-track  '(0.25 0.25 0.27)   ;
       :widget-slider-dot    '(0.36 0.36 0.38)   ;
+      :widget-knob-filled   '(0.00 0.48 0.95)   ;
       :widget-knob-track    '(0.04 0.04 0.04)   ;
       )))

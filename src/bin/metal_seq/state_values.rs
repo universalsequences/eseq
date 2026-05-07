@@ -3158,6 +3158,7 @@ mod tests {
             "seq-toggle-bus-mute",
             "seq-toggle-bus-solo",
             "seq-set-bus-volume",
+            "seq-clear-selection",
         ] {
             let calls = Arc::clone(&calls);
             editor
@@ -3183,6 +3184,67 @@ mod tests {
         editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
         editor.set_layout_viewport(120, 30);
         editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-select-next-channel)")
+            .expect("right arrow should select next mixer channel");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("selected-bus")
+                .expect("read selected bus"),
+            Some(Value::Number(1.0)),
+            "next channel from the only track should select Bus A in display order"
+        );
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "selecting a bus should not queue a host command"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-delete-selected-track)")
+            .expect("delete on bus selection should be handled safely");
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "delete with a bus selected should not delete a track"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-select-prev-channel)")
+            .expect("left arrow should select previous mixer channel");
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-set-track:[0]"),
+            "previous channel from Bus A should return to track 1"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("selected-bus")
+                .expect("read selected bus"),
+            Some(Value::Number(-1.0)),
+            "track selection should clear selected-bus"
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-delete-selected-track)")
+            .expect("delete on track selection should queue host command");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "delete-track");
+                let Value::Map(payload) = payload else {
+                    panic!("delete-track payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+            }
+            other => panic!("expected delete-track host command, got {other:?}"),
+        }
 
         let layout = editor
             .runtime_mut()
