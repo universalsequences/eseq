@@ -23,9 +23,9 @@
 (def fx-track-bus-send-control (send)
   (v-stack :align :center :gap 0.25
     (h-stack :gap 0.25 :align :baseline
-      (label (substring (get send :name) 0 8) :font-size 9 :color :gray :bg :transparent)
+      (label (substring (get send :name) 0 8) :font-size 9 :color :dim :bg :transparent)
       (number-picker :value (get send :amount) :min 0 :max 1 :decimals 2
-        :noui true :font-size 9 :text-color :gray
+        :noui true :font-size 9 :text-color :dim
         :on-change (lambda (v)
           (do
             (cool-off-follow)
@@ -43,118 +43,83 @@
               (dict :bus (get send :bus-idx) :amount v))))))))
 
 (def fx-track-parameters-panel ()
-  (box :background "fx-panel-bg" :debug-name "track-parameters-panel" :selected 0 :padding 0
-    (v-stack :gap 0
-      (box :height 1 :padding 0 :v-align :center :h-align :start
-        (h-stack :gap 0.5 :align :center
-          (box :width 0.75 :height 0)
-          (label "Track" :font-size 11 :color :white :bg :transparent)))
-      (box :padding 1.2
-        (v-stack :gap 1.1
-          (h-stack :gap 1.5
-            (v-stack :align :center :gap 0.25
-              (label "gate" :font-size 9 :color :gray :bg :transparent)
-              (box :width 4 :height 2
-                :bg (if SEQ.tp-gate :blue :dark-gray)
-                :on-click |x y r|
-                  (do
-                    (cool-off-follow)
-                    (seq-set-track-param :gate (if SEQ.tp-gate 0 1)))
-                (label (if SEQ.tp-gate "ON" "OFF")
-                  :font-size 11 :color :white :bg :transparent)))
-            (v-stack :align :center :gap 0.25
-              (label "poly" :font-size 9 :color :gray :bg :transparent)
-              (box :width 4 :height 2
-                :bg (if SEQ.tp-poly :blue :dark-gray)
-                :on-click |x y r|
-                  (do
-                    (cool-off-follow)
-                    (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))
-                (label (if SEQ.tp-poly "ON" "OFF")
-                  :font-size 11 :color :white :bg :transparent)))
-            (v-stack :align :center :gap 0.25
-              (label "fts" :font-size 9 :color :gray :bg :transparent)
-              (dropdown :value SEQ.tp-fts
-                :options SEQ.fts-options
-                :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
-                :width 10 :height 1.5 :font-size 10))
-            (v-stack :align :center :gap 0.25
-              (label "timebase" :font-size 9 :color :gray :bg :transparent)
-              (dropdown :value SEQ.tp-timebase
-                :options '("1" "2" "4" "8" "16" "32" "64" "2T" "4T" "8T" "16T" "32T" "64T" "Prh")
-                :on-change (lambda (v)
-                  (do
-                    (cool-off-follow)
-                    (if (seq-has-selection?)
-                      (seq-plock-timebase v)
-                      (seq-set-timebase v))))
-                :width 6 :height 1.5 :font-size 11))
-            (v-stack :align :center :gap 0.25
-              (h-stack :gap 0.25 :align :baseline
-                (label "swg" :font-size 9 :color :gray :bg :transparent)
-                (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
-                  :noui true :font-size 9 :text-color :gray
-                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v)))
-                  :width 4 :height 1))
-              (box :width 8 :height 2
-                (hslider :min 50 :max 75
-                  :value SEQ.tp-swing
-                  :material (aqua-slider-material)
-                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v))))))
-            (v-stack :align :center :gap 0.25
-              (label "swg resolution" :font-size 9 :color :gray :bg :transparent)
-              (dropdown :value SEQ.tp-swing-resolution
-                :options '("1/16" "1/8" "1/4" "1/2")
-                :on-change (lambda (v) (do (cool-off-follow) (seq-set-swing-resolution v)))
-                :width 5 :height 1.5 :font-size 11))
-            (v-stack :align :center :gap 0.25
-              (h-stack :gap 0.25 :align :baseline
-                (label "steps" :font-size 9 :color :gray :bg :transparent)
-                (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
-                  :noui true :font-size 9 :text-color :gray
-                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))
-                  :width 3 :height 1))
-              (box :width 8 :height 2
-                (hslider :min 1 :max 256
-                  :value SEQ.tp-num-steps
-                  :material (aqua-slider-material)
-                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))))))
-          (h-stack :gap 1.5
-            (v-stack :align :center :gap 0.25
-              (label "out" :font-size 9 :color :gray :bg :transparent)
-              (dropdown :value SEQ.tp-output
-                :options SEQ.track-output-options
-                :on-change (lambda (v)
-                  (do
-                    (cool-off-follow)
-                    (host-command "set-track-output" (dict :label v))))
-                :width 10 :height 1.5 :font-size 10))
-            (each SEQ.tp-bus-sends |send idx|
-              (fx-track-bus-send-control send))
-            (v-stack :align :center :gap 0.25
-              (label "acc fn" :font-size 9 :color :gray :bg :transparent)
-              (dropdown :value SEQ.tp-accumulator
-                :options SEQ.accumulator-options
-                :on-change (lambda (v) (do (cool-off-follow) (seq-set-accumulator v)))
-                :width 10 :height 1.5 :font-size 10))
-            (v-stack :align :center :gap 0.25
-              (label "acc mode" :font-size 9 :color :gray :bg :transparent)
-              (dropdown :value SEQ.tp-accum-mode
-                :options SEQ.accum-mode-options
-                :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-mode v)))
-                :width 8 :height 1.5 :font-size 10))
-            (v-stack :align :center :gap 0.25
-              (h-stack :gap 0.25 :align :baseline
-                (label "acc lim" :font-size 9 :color :gray :bg :transparent)
-                (number-picker :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
-                  :noui true :font-size 9 :text-color :gray
-                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))
-                  :width 4 :height 1))
-              (box :width 8 :height 2
-                (hslider :min 0 :max 127
-                  :value SEQ.tp-accum-limit
-                  :material (aqua-slider-material)
-                  :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v))))))))))))
+  (box :debug-name "track-parameters-strip" :padding 0.9
+    (v-stack :gap 0.75
+      (h-stack :gap 0.55 :align :center
+        (v-stack :align :center :gap 0.24
+          (label "gate" :font-size 8 :color :dim :bg :transparent)
+          (box :width 3.2 :height 1.3
+            :bg (if SEQ.tp-gate :blue :dark-gray)
+            :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1)))
+            (label (if SEQ.tp-gate "ON" "OFF") :font-size 9 :color :white :bg :transparent)))
+        (v-stack :align :center :gap 0.24
+          (label "poly" :font-size 8 :color :dim :bg :transparent)
+          (box :width 3.2 :height 1.3
+            :bg (if SEQ.tp-poly :blue :dark-gray)
+            :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))
+            (label (if SEQ.tp-poly "ON" "OFF") :font-size 9 :color :white :bg :transparent)))
+        (v-stack :align :center :gap 0.30
+          (label "fts" :font-size 8 :color :dim :bg :transparent)
+          (dropdown :value SEQ.tp-fts
+            :options SEQ.fts-options
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-fts v)))
+            :width 7.0 :height 1.25 :font-size 9)))
+      (h-stack :gap 0.55 :align :center
+        (v-stack :align :center :gap 0.30
+          (label "swg res" :font-size 8 :color :dim :bg :transparent)
+          (dropdown :value SEQ.tp-swing-resolution
+            :options '("1/16" "1/8" "1/4" "1/2")
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-swing-resolution v)))
+            :width 5.0 :height 1.25 :font-size 9))
+        (v-stack :align :center :gap 0.22
+          (h-stack :gap 0.2 :align :baseline
+            (label "steps" :font-size 8 :color :dim :bg :transparent)
+            (number-picker :value SEQ.tp-num-steps :min 1 :max 256 :decimals 0
+              :noui true :font-size 8 :text-color :dim
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))
+              :width 3.2 :height 0.85))
+          (box :width 6.0 :height 1.2
+            (hslider :min 1 :max 256
+              :value SEQ.tp-num-steps
+              :material (aqua-slider-material)
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v)))))))
+      (h-stack :gap 0.55 :align :center
+        (v-stack :align :center :gap 0.22
+          (h-stack :gap 0.2 :align :baseline
+            (label "swg" :font-size 8 :color :dim :bg :transparent)
+            (number-picker :value SEQ.tp-swing :min 50 :max 75 :decimals 1
+              :noui true :font-size 8 :text-color :dim
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v)))
+              :width 3.2 :height 0.85))
+          (box :width 5.8 :height 1.2
+            (hslider :min 50 :max 75
+              :value SEQ.tp-swing
+              :material (aqua-slider-material)
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v))))))
+        (v-stack :align :center :gap 0.30
+          (label "acc fn" :font-size 8 :color :dim :bg :transparent)
+          (dropdown :value SEQ.tp-accumulator
+            :options SEQ.accumulator-options
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accumulator v)))
+            :width 7.0 :height 1.25 :font-size 9))
+        (v-stack :align :center :gap 0.30
+          (label "acc mode" :font-size 8 :color :dim :bg :transparent)
+          (dropdown :value SEQ.tp-accum-mode
+            :options SEQ.accum-mode-options
+            :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-mode v)))
+            :width 6.0 :height 1.25 :font-size 9))
+        (v-stack :align :center :gap 0.22
+          (h-stack :gap 0.2 :align :baseline
+            (label "acc lim" :font-size 8 :color :dim :bg :transparent)
+            (number-picker :value SEQ.tp-accum-limit :min 0 :max 127 :decimals 0
+              :noui true :font-size 8 :text-color :dim
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v)))
+              :width 3.2 :height 0.85))
+          (box :width 5.8 :height 1.2
+            (hslider :min 0 :max 127
+              :value SEQ.tp-accum-limit
+              :material (aqua-slider-material)
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-accum-limit v))))))))))
 
 (def fx-select-effect (slot)
   (do
@@ -197,7 +162,7 @@
 
 (defwidget fx-panel-bg
   :width 1 :height 1
-  :state (selected)
+  :state (selected header-r header-g header-b selected-header-r selected-header-g selected-header-b)
   :shader
   (let ((panel-radius (min (* 8 (fwidth y)) (* 0.5 (min width height))))
       (panel (sdf/rounded-rect (* 1 width) (* 1 height) (* 2 panel-radius)))
@@ -208,29 +173,21 @@
       (header-bottom (+ (- height) header-h))
       (header-shape (max panel (- y header-bottom))))
     (sdf/layer
-      
-      (sdf/fill 
-        (sdf/rounded-rect (* 1 width) (* 1 height) (* 2 panel-radius))
+      (sdf/fill
+        panel
         (material
-                 :color
+          :color
           (let ((header-aa (max (fwidth header-shape) (fwidth y)))
-              (border-w (max (* 1.5 (fwidth d)) (fwidth y)))
-              (base
-                (mix (rgba 0.3 0.3 0.3 1.0) 
-                  (mix 
-                    (rgba 0.10 0.10 0.10 1) 
-                    (rgba 0.07 0.07 0.07 1) 
-                    (smoothstep 0 header-aa header-shape))
-                  (smoothstep (- (* -1 border-w)) (* 1 border-w) (- (abs d) border-w))))
-              (lit 1)
-              (shine 0))
-            (+ (* base (rgba lit lit lit 1.0)) (rgba shine shine shine 0.0)))))
+                (border-w (max (* 1.5 (fwidth d)) (fwidth y)))
+                (body input-color)
+                (header (rgba header-r header-g header-b 1.0))
+                (base
+                  (mix header body (smoothstep 0 header-aa header-shape))))
+            base)))
       (if selected
         (sdf/fill header-shape
-          (material :color (rgba 0.30 0.30 0.33 1.0)))
-        (rgba 0 0 0 0))
-      )))
-  
+          (material :color (rgba selected-header-r selected-header-g selected-header-b 1.0)))
+        (rgba 0 0 0 0)))))
 
 (defwidget compile-progress
   :width 12 :height 0.3
@@ -292,7 +249,7 @@
         (box :width 13.2 :height 1.25
           (h-stack :gap 0.25 :align :baseline
             (label (substring (get p :name) 0 9) :font-size 12 :width 7
-                   :color :gray :bg :transparent)
+                   :color :dim :bg :transparent)
             (if (get p :boolean)
               (box :width 5.5 :height 1.25 :align :center
                    :bg :transparent
@@ -321,7 +278,7 @@
                 :width 5.8 :height 1.2 :font-size 11)
               (number-picker :value (get p :value)
                 :min (get p :min) :max (get p :max) :decimals 2
-                :noui true :font-size 12 :text-color :gray
+                :noui true :font-size 12 :text-color :dim
                 :on-change (lambda (v)
                   (if fx
                     (fx-set-effect-value fx p v)
@@ -369,7 +326,7 @@
         (source-p (instrument-mod-source-param params base)))
     (subtree :key subtree-key
       (box :width 12.6 :height 2.35
-           :background-color (rgba 0.09 0.09 0.09 1)
+           :background-color :instrument-group-bg
            :border-width 1
            :corner-radius 16
            :padding 0.25
@@ -384,7 +341,7 @@
             :value (get amount-p :value)
             :min (get amount-p :min) :max (get amount-p :max) :decimals 2
             :font-size 10.5 :label-font-size 9
-            :text-color :gray :label-color :gray
+            :text-color :dim :label-color :dim
             :width 5.2 :height 2.05
             :on-change (lambda (v) (fx-set-instrument-value amount-p v))))))))
 
@@ -449,17 +406,17 @@
         (material :color fg-col)))))
 
 (def fx-panel (title params fx)
+  (let ((selected (fx-panel-selected? fx)))
   (box :background "fx-panel-bg"
+       :color :fx-panel-bg
+       :header :fx-panel-header-bg
+       :selected-header :fx-panel-header-selected-bg
        :debug-name (if (get fx :midi-fx)
          (str "midi-fx-panel-root-" (get fx :slot-idx) "-" (get fx :name))
          (if (get fx :bus-fx)
            (str "bus-fx-panel-root-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" title)
            (str "audio-fx-panel-root-" (get fx :slot-idx) "-" title)))
-       :selected (if (get fx :midi-fx)
-         (if (= selected-midi-fx-slot (get fx :slot-idx)) 1 0)
-         (if (get fx :bus-fx)
-           (if (= selected-bus-fx-slot (get fx :slot-idx)) 1 0)
-           (if (= selected-fx-slot (get fx :slot-idx)) 1 0)))
+       :selected (if selected 1 0)
        :padding 0
     (v-stack :gap 0
       (box :height 1.0 :padding 0 :v-align :center :h-align :start
@@ -485,19 +442,23 @@
                   (if (get fx :bus-fx)
                     (dict :name title :slot (get fx :slot-idx) :bus (get fx :bus-idx))
                     (dict :name title :slot (get fx :slot-idx)))))
-              (label "edit" :font-size 8 :color :gray :bg :transparent))
+              (label "edit" :font-size 8 :color :dim :bg :transparent))
             (box))))
       (box :padding 1
            :debug-name (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
            :on-click |x y r| (fx-clear-selected-effect)
         (if (get fx :midi-fx)
           (midi-fx-panel-body fx)
-          (fx-param-grid params fx))))))
+          (fx-param-grid params fx)))))))
 
 (def midi-fx-panel (title params fx)
+  (let ((selected (= selected-midi-fx-slot (get fx :slot-idx))))
   (box :background "fx-panel-bg"
+       :color :fx-panel-bg
+       :header :fx-panel-header-bg
+       :selected-header :fx-panel-header-selected-bg
        :debug-name (str "midi-fx-panel-bg-" (get fx :slot-idx) "-" (get fx :name))
-       :selected (if (= selected-midi-fx-slot (get fx :slot-idx)) 1 0)
+       :selected (if selected 1 0)
        :padding 0
     (v-stack :gap 0
       (box :height 1.0 :padding 0 :v-align :center :h-align :start
@@ -510,14 +471,14 @@
            :debug-name "midi-fx-panel-content"
            :on-click |x y r| (fx-clear-selected-effect)
         (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
-          (midi-fx-panel-body fx))))))
+          (midi-fx-panel-body fx)))))))
 
 (def instrument-tab-button (text idx width)
   (box :width width :height 1.2 :align :center
     :bg (if (= instrument-panel-tab idx) :dark-gray :transparent)
     :on-click |x y r| (set! instrument-panel-tab idx)
     (label text :font-size 11
-      :color (if (= instrument-panel-tab idx) :white :gray)
+      :color (if (= instrument-panel-tab idx) :white :dim)
       :bg :transparent)))
 
 (def inst-param (inst name)
@@ -566,6 +527,16 @@
       (box :debug-name "fallback-midi-fx-wrapper"
         (fx-param-grid (get fx :params) fx)))))
 
+(def fx-panel-selected? (fx)
+  (if (get fx :midi-fx)
+    (= selected-midi-fx-slot (get fx :slot-idx))
+    (if (get fx :bus-fx)
+      (= selected-bus-fx-slot (get fx :slot-idx))
+      (= selected-fx-slot (get fx :slot-idx)))))
+
+(def fx-panel-header-bg (selected)
+  (if selected :fx-panel-header-selected-bg :fx-panel-header-bg))
+
 (defstate sampler-view-start 0.0)
 (defstate sampler-view-duration 0)
 (defstate sampler-cursor-time 0.0)
@@ -601,8 +572,23 @@
     _
     nil))
 
+(def sampler-param-knob (p key)
+  (subtree :key key
+    (knob-number :label (substring (get p :name) 0 12)
+      :value (get p :value)
+      :min (get p :min) :max (get p :max) :decimals 1
+      :font-size 10.5 :label-font-size 10
+      :text-color :dim :label-color :dim
+      :width 4.0 :height 2.05
+      :on-change (lambda (v) (fx-set-instrument-value p v)))))
+
+(def sampler-param-knobs (params)
+  (h-stack :gap 0.65 :padding 0.35 :align :center
+    (each params |p pi|
+      (sampler-param-knob p (str "sampler-param-knob-" (get p :idx))))))
+
 (def sampler-panel (inst)
-  (box :background "fx-panel-bg" :selected 0 :padding 0
+  (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     (v-stack :gap 0
       (box :height 1 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0 :align :center
@@ -612,16 +598,16 @@
         (v-stack :gap 0.8
           (if (get inst :buffer)
             (subtree :key (str "sampler-waveform-" (get inst :buffer))
-              (box :width 25 :height 2.5
+              (box :width 50 :height 3.75
                 (waveform
-                  :height 2.5
+                  :height 3.75
                   :header-height 0.3
                   :ruler-font-size 8
-                  :ruler-color :gray
-                  :ruler-bg :black
-                  :grid-major-color (rgba 0.15 0.15 0.15 1)
-                  :grid-minor-color (rgba 0.10 0.10 0.10 1)
-                  :bg :black
+                  :ruler-color :dim
+                  :ruler-bg :fx-panel-header-bg
+                  :grid-major-color :fx-panel-border
+                  :grid-minor-color :mixer-strip-border
+                  :bg :instrument-control-bg
                   :focusable true
                   :buffer (get inst :buffer)
                   :view-start sampler-view-start
@@ -632,13 +618,13 @@
                   :selection-end (get inst :end-time)
                   :time-ruler (dict :mode :seconds)
                   :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
-            (label "No sample" :font-size 12 :color :gray :bg :transparent))
-          (fx-param-grid (get inst :params) false))))))
+            (label "No sample" :font-size 12 :color :dim :bg :transparent))
+          (sampler-param-knobs (get inst :params)))))))
 
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
     (sampler-panel inst)
-    (box :debug-name "instrument-panel" :background "fx-panel-bg" :padding 0
+    (box :debug-name "instrument-panel" :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :padding 0
          :selected 0
       (v-stack :debug-name "instrument-panel-vstack" :gap 0
         (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :start :h-align :start
@@ -658,7 +644,7 @@
               :on-click |x y r|
               (host-command "enter-edit-instrument"
                 (dict :name SEQ.sidebar-instrument-name))
-              (label "edit" :font-size 11 :color :gray :bg :transparent))
+              (label "edit" :font-size 11 :color :dim :bg :transparent))
             (box :debug-name "instrument-preset-button" :padding 0.3 :width 4 :align :center
               (v-stack
                 (box :width 1 :height 0.1)
@@ -686,7 +672,7 @@
       (box :flex 1)
       (v-stack :gap 0.4 :align :center
         (label "Instrument and effects appear here"
-          :font-size 12 :color :gray :bg :transparent)
+          :font-size 12 :color :dim :bg :transparent)
         (compile-progress
           :active (if SEQ.compiling 1 0)
           :width 12 :height 0.3))
@@ -704,10 +690,10 @@
       (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
         (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
           (fx-panel (get fx :name) (get fx :params) fx)))
-      (box :background "fx-panel-bg" :selected 0 :padding 1.5
+      (box :background "fx-panel-bg" :color :fx-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 1.5
            :on-click |x y r| (fx-clear-selected-effect)
         (v-stack :gap 0.5 :align :center
-          (label "+" :font-size 15 :color :gray :bg :transparent)
+          (label "+" :font-size 15 :color :dim :bg :transparent)
           (dropdown :value ""
             :options SEQ.available-builtin-effects
             :placeholder "Add Built-in"
@@ -730,6 +716,12 @@
             :active (if SEQ.compiling 1 0)
             :width 12 :height 0.3))))))
 
+(effect-buffer "*track*"
+  (if (= SEQ.num-tracks 0)
+    (fx-empty-track-fallback)
+    (box :padding 0.6
+      (fx-track-parameters-panel))))
+
 (effect-buffer "*fx*"
   (if (fx-has-selected-bus?)
     (fx-bus-selection-panel)
@@ -737,7 +729,6 @@
     (fx-empty-track-fallback)
     (v-stack :padding 0.5 :gap 1 
       (h-stack :gap 1
-        (fx-track-parameters-panel)
         (each SEQ.instrument-panel |inst inst-idx|
           (instrument-panel inst))
         (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
@@ -746,10 +737,10 @@
           (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
             (fx-panel (get fx :name) (get fx :params) fx)))
         ;; Add MIDI FX
-        (box :background "fx-panel-bg" :selected 0 :padding 1.5
+        (box :background "fx-panel-bg" :color :fx-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 1.5
              :on-click |x y r| (fx-clear-selected-effect)
           (v-stack :gap 0.5 :align :center
-            (label "+" :font-size 15 :color :gray :bg :transparent)
+            (label "+" :font-size 15 :color :dim :bg :transparent)
             (dropdown :value ""
               :options SEQ.available-midi-effects
               :placeholder "Add MIDI FX"
@@ -758,10 +749,10 @@
                 (host-command "add-midi-fx" (dict :name v)))
               :width 12 :height 1.5 :font-size 14)))
         ;; Add audio effect
-        (box :background "fx-panel-bg" :selected 0 :padding 1.5
+        (box :background "fx-panel-bg" :color :fx-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 1.5
              :on-click |x y r| (fx-clear-selected-effect)
           (v-stack :gap 0.5 :align :center
-            (label "+" :font-size 15 :color :gray :bg :transparent)
+            (label "+" :font-size 15 :color :dim :bg :transparent)
             (dropdown :value ""
               :options SEQ.available-builtin-effects
               :placeholder "Add Built-in"

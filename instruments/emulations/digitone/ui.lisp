@@ -4,7 +4,7 @@
 
 (def digitone-section (title body)
   (v-stack :gap 0.35
-    (label title :font-size 11 :color :gray :bg :transparent)
+    (label title :font-size 11 :color :dim :bg :transparent)
     body))
 
 (def digitone-select (section)
@@ -12,10 +12,10 @@
 
 (def digitone-panel-bg (section)
   (if (= section 0)
-    (rgba 0.09 0.09 0.09 1)
+    :instrument-group-bg
     (if (= digitone-selected-section section)
-      (rgba 0.12 0.12 0.12 1)
-      (rgba 0.09 0.09 0.09 1))))
+      :instrument-group-selected-bg
+      :instrument-group-bg)))
 
 (def digitone-cell-width 4.0)
 (def digitone-filter-cell-width 5.15)
@@ -29,7 +29,7 @@
           :min (get p :min) :max (get p :max) :decimals decimals
           :step step
           :font-size 10.5 :label-font-size 10
-          :text-color :gray :label-color :gray
+          :text-color :dim :label-color :dim
           :width width :height 2.05
           :on-change (lambda (v)
             (do
@@ -56,7 +56,7 @@
       (subtree :key (str "digitone-mode-dropdown-" name)
         (v-stack :width 4.9 :height 2.05 :gap 0.0 :align :center
           (label "mode" :font-size 10
-                 :color :gray :bg :transparent)
+                 :color :dim :bg :transparent)
           (box :width 0.1 :height 0.18)
           (dropdown :value (digitone-filter-mode-label (get p :value))
             :options '("lowpass" "highpass" "bandpass")
@@ -85,7 +85,7 @@
       (subtree :key (str "digitone-adsr-number-" name)
         (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
           (label title :font-size 10
-                 :color :gray :bg :transparent)
+                 :color :dim :bg :transparent)
           (number-picker :value (get p :value)
             :min (get p :min) :max (get p :max) :decimals decimals
             :unit unit
@@ -118,7 +118,7 @@
     :sustain (digitone-param-value sustain 0.5)
     :release (digitone-param-value release 0)
     :width 22.0 :height 3.55
-    :background-color (rgba 0.0 0.0 0.0 1)
+    :background-color :instrument-control-bg
     :on-change (lambda (env)
       (do
         (digitone-select section)
@@ -138,23 +138,23 @@
         (box :width 5.2 :height 1.75
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label "rel" :font-size 10
-                   :color :gray :bg :transparent)
+                   :color :dim :bg :transparent)
             (number-picker :value 0
               :min 0 :max 0 :decimals 0
               :unit "ms"
               :noui true :font-size 10.5
               :text-align :center
-              :text-color :gray :edit-color :gray
+              :text-color :dim :edit-color :dim
               :width 5.0 :height 0.95)))))))
 
 
 (def digitone-adsr-caption (title)
   (box :width :fill :height 0.35 :h-align :center :v-align :center
-    (label title :font-size 8.5 :color :gray :bg :transparent)))
+    (label title :font-size 8.5 :color :dim :bg :transparent)))
 (def digitone-selected-adsr ()
   (if (= digitone-selected-section 1)
     (box :width :fill :height 6.55
-         :background-color (rgba 0.0 0.0 0.0 1)
+         :background-color :instrument-control-bg
          :border-width 1 :corner-radius 16 :padding 0.15
       (v-stack :width :fill :gap 0.10
       (digitone-adsr-view "A ENV" "a_env_attack" "a_env_decay" "a_env_sustain" false 1)
@@ -162,7 +162,7 @@
         (digitone-adsr-caption "A ENV")))
     (if (= digitone-selected-section 2)
       (box :width :fill :height 6.55
-           :background-color (rgba 0.0 0.0 0.0 1)
+           :background-color :instrument-control-bg
            :border-width 1 :corner-radius 16 :padding 0.15
         (v-stack :width :fill :gap 0.10
         (digitone-adsr-view "B ENV" "b_env_attack" "b_env_decay" "b_env_sustain" false 2)
@@ -170,14 +170,14 @@
           (digitone-adsr-caption "B ENV")))
       (if (= digitone-selected-section 3)
         (box :width :fill :height 6.55
-             :background-color (rgba 0.0 0.0 0.0 1)
+             :background-color :instrument-control-bg
              :border-width 1 :corner-radius 16 :padding 0.15
           (v-stack :width :fill :gap 0.10
           (digitone-adsr-view "F ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release" 3)
             (digitone-adsr-controls "filt_attack" "filt_decay" "filt_sustain" "filt_release" 3)
             (digitone-adsr-caption "FILTER ENV")))
         (box :width :fill :height 6.55
-             :background-color (rgba 0.0 0.0 0.0 1)
+             :background-color :instrument-control-bg
              :border-width 1 :corner-radius 16 :padding 0.15
           (v-stack :width :fill :gap 0.10
           (digitone-adsr-view "AMP" "amp_attack" "amp_decay" "amp_sustain" "amp_release" 0)
@@ -187,7 +187,7 @@
 (def digitone-row-label (title)
   (box :width 1.65 :height 2.1 :h-align :center :v-align :center :padding 0.1
     (label title :font-size 8.5 :width 1.3
-           :color :gray :bg :transparent)))
+           :color :dim :bg :transparent)))
 
 (def digitone-panel-3-section (section c1 c2 c3)
   (box :width :fill :height 2.35
@@ -248,7 +248,7 @@
       (box :width 1.65 :height 2.1 :h-align :center :v-align :center
         (v-stack :gap 0.1 :align :center
           (label op-name :font-size 9.5 :width 1.3
-                 :color :gray :bg :transparent)))
+                 :color :dim :bg :transparent)))
       (digitone-param-cell-step-section ratio "ratio" 2 0.25 section)
       (digitone-param-cell-section detune "detune" 2 section)
       (digitone-param-cell-section level "level" 2 section)

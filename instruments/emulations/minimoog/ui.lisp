@@ -4,10 +4,10 @@
   (set! minimoog-selected-section section))
 (def minimoog-panel-bg (section)
   (if (= section 0)
-    (rgba 0.09 0.09 0.09 1)
+    :instrument-group-bg
     (if (= minimoog-selected-section section)
-      (rgba 0.12 0.12 0.12 1)
-      (rgba 0.09 0.09 0.09 1))))
+      :instrument-group-selected-bg
+      :instrument-group-bg)))
 (def minimoog-cell-width 4.0)
 (def minimoog-param-cell-step-section-width (name title decimals step section width)
   (let ((p (inst-param synth-ui-current-inst name)))
@@ -18,7 +18,7 @@
           :min (get p :min) :max (get p :max) :decimals decimals
           :step step
           :font-size 10.5 :label-font-size 10
-          :text-color :gray :label-color :gray
+          :text-color :dim :label-color :dim
           :width width :height 2.05
           :on-change (lambda (v)
             (do
@@ -38,7 +38,7 @@
           :min (get p :min) :max (get p :max) :decimals 0
           :step 1
           :font-size 10.5 :label-font-size 10
-          :text-color :gray :label-color :gray
+          :text-color :dim :label-color :dim
           :width minimoog-cell-width :height 2.05
           :on-change (lambda (v)
             (do
@@ -51,7 +51,7 @@
       (if p
         (subtree :key (str "minimoog-adsr-number-" name)
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-            (label title :font-size 10 :color :gray :bg :transparent)
+            (label title :font-size 10 :color :dim :bg :transparent)
             (number-picker :value (get p :value)
               :min (get p :min) :max (get p :max) :decimals decimals
               :unit unit
@@ -66,10 +66,10 @@
         (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
     (box :width 5.2 :height 1.75
       (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-        (label title :font-size 10 :color :gray :bg :transparent)
+        (label title :font-size 10 :color :dim :bg :transparent)
         (number-picker :value 0 :min 0 :max 0 :decimals decimals
           :unit unit :noui true :font-size 10.5
-          :text-align :center :text-color :gray :edit-color :gray
+          :text-align :center :text-color :dim :edit-color :dim
           :width 5.0 :height 0.95)))))
 (def minimoog-param-value (name fallback)
   (if name
@@ -88,7 +88,7 @@
     :sustain (minimoog-param-value sustain 0.5)
     :release (minimoog-param-value release 0)
     :width 22.0 :height 3.55
-    :background-color (rgba 0.0 0.0 0.0 1)
+    :background-color :instrument-control-bg
     :on-change (lambda (env)
       (do
         (minimoog-select section)
@@ -106,18 +106,18 @@
 
 (def minimoog-adsr-caption (title)
   (box :width :fill :height 0.35 :h-align :center :v-align :center
-    (label title :font-size 8.5 :color :gray :bg :transparent)))
+    (label title :font-size 8.5 :color :dim :bg :transparent)))
 (def minimoog-selected-adsr ()
   (if (= minimoog-selected-section 1)
     (box :width :fill :height 6.55
-       :background-color (rgba 0.0 0.0 0.0 1)
+       :background-color :instrument-control-bg
        :border-width 1 :corner-radius 16 :padding 0.15
   (v-stack :width :fill :gap 0.10
     (minimoog-adsr-view "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)
     (minimoog-adsr-controls "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)
     (minimoog-adsr-caption "FILTER ENV")))
     (box :width :fill :height 6.55
-       :background-color (rgba 0.0 0.0 0.0 1)
+       :background-color :instrument-control-bg
        :border-width 1 :corner-radius 16 :padding 0.15
   (v-stack :width :fill :gap 0.10
     (minimoog-adsr-view "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 0)
@@ -125,7 +125,7 @@
     (minimoog-adsr-caption "AMP ENV")))))
 (def minimoog-row-label (title)
   (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
-    (label title :font-size 8.0 :width 2.7 :color :gray :bg :transparent)))
+    (label title :font-size 8.0 :width 2.7 :color :dim :bg :transparent)))
 (def minimoog-panel-1 (title section c1)
   (box :width :fill :height 2.35
        :background-color (minimoog-panel-bg section)

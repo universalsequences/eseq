@@ -4,10 +4,10 @@
   (set! monomachine-dpro-wave-v2-selected-section section))
 (def mdp2-panel-bg (section)
   (if (= section 0)
-    (rgba 0.075 0.075 0.075 1)
+    :instrument-group-bg
     (if (= monomachine-dpro-wave-v2-selected-section section)
-      (rgba 0.12 0.12 0.12 1)
-      (rgba 0.075 0.075 0.075 1))))
+      :instrument-group-selected-bg
+      :instrument-group-bg)))
 (def mdp2-cell-width 4.0)
 (def mdp2-param-cell-step-section-width (name title decimals step section width)
   (let ((p (inst-param synth-ui-current-inst name)))
@@ -18,7 +18,7 @@
           :min (get p :min) :max (get p :max) :decimals decimals
           :step step
           :font-size 10.5 :label-font-size 10
-          :text-color :gray :label-color :gray
+          :text-color :dim :label-color :dim
           :width width :height 2.05
           :on-change (lambda (v)
             (do
@@ -38,7 +38,7 @@
           :min (get p :min) :max (get p :max) :decimals 0
           :step 1
           :font-size 10.5 :label-font-size 10
-          :text-color :gray :label-color :gray
+          :text-color :dim :label-color :dim
           :width mdp2-cell-width :height 2.05
           :on-change (lambda (v)
             (do
@@ -60,7 +60,7 @@
     (if p
       (subtree :key (str "mdp2-number-" name)
         (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-          (label title :font-size 10 :color :gray :bg :transparent)
+          (label title :font-size 10 :color :dim :bg :transparent)
           (number-picker :value (get p :value)
             :min (get p :min) :max (get p :max) :decimals decimals
             :unit unit
@@ -80,7 +80,7 @@
     :sustain (mdp2-param-value sustain 0.78)
     :release (mdp2-param-value release 90)
     :width 22.0 :height 3.55
-    :background-color (rgba 0.0 0.0 0.0 1)
+    :background-color :instrument-control-bg
     :on-change (lambda (env)
       (do
         (mdp2-select section)
@@ -98,10 +98,10 @@
 
 (def mdp2-adsr-caption (title)
   (box :width :fill :height 0.35 :h-align :center :v-align :center
-    (label title :font-size 8.5 :color :gray :bg :transparent)))
+    (label title :font-size 8.5 :color :dim :bg :transparent)))
 (def mdp2-adsr-panel-for (title attack decay sustain release section)
   (box :width :fill :height 6.55
-       :background-color (rgba 0.0 0.0 0.0 1)
+       :background-color :instrument-control-bg
        :border-width 1 :corner-radius 8 :padding 0.15
     (v-stack :width :fill :gap 0.10
       (mdp2-adsr-view attack decay sustain release section)
@@ -113,7 +113,7 @@
     (mdp2-adsr-panel-for "AMP ENV" "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 1)))
 (def mdp2-row-label (title)
   (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
-    (label title :font-size 8.0 :width 2.7 :color :gray :bg :transparent)))
+    (label title :font-size 8.0 :width 2.7 :color :dim :bg :transparent)))
 (def mdp2-panel-1 (title section c1)
   (box :width :fill :height 2.35
        :background-color (mdp2-panel-bg section)

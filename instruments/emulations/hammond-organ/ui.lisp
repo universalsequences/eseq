@@ -4,10 +4,10 @@
   (set! hammond-organ-selected-section section))
 (def hammond_organ-panel-bg (section)
   (if (= section 0)
-    (rgba 0.09 0.09 0.09 1)
+    :instrument-group-bg
     (if (= hammond-organ-selected-section section)
-      (rgba 0.12 0.12 0.12 1)
-      (rgba 0.09 0.09 0.09 1))))
+      :instrument-group-selected-bg
+      :instrument-group-bg)))
 (def hammond_organ-cell-width 4.0)
 (def hammond_organ-param-cell-step-section-width (name title decimals step section width)
   (let ((p (inst-param synth-ui-current-inst name)))
@@ -18,7 +18,7 @@
           :min (get p :min) :max (get p :max) :decimals decimals
           :step step
           :font-size 10.5 :label-font-size 10
-          :text-color :gray :label-color :gray
+          :text-color :dim :label-color :dim
           :width width :height 2.05
           :on-change (lambda (v)
             (do
@@ -38,7 +38,7 @@
           :min (get p :min) :max (get p :max) :decimals 0
           :step 1
           :font-size 10.5 :label-font-size 10
-          :text-color :gray :label-color :gray
+          :text-color :dim :label-color :dim
           :width hammond_organ-cell-width :height 2.05
           :on-change (lambda (v)
             (do
@@ -51,7 +51,7 @@
       (if p
         (subtree :key (str "hammond_organ-adsr-number-" name)
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-            (label title :font-size 10 :color :gray :bg :transparent)
+            (label title :font-size 10 :color :dim :bg :transparent)
             (number-picker :value (get p :value)
               :min (get p :min) :max (get p :max) :decimals decimals
               :unit unit
@@ -66,14 +66,14 @@
         (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
     (box :width 5.2 :height 1.75
       (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-        (label title :font-size 10 :color :gray :bg :transparent)
+        (label title :font-size 10 :color :dim :bg :transparent)
         (number-picker :value 0 :min 0 :max 0 :decimals decimals
           :unit unit :noui true :font-size 10.5
-          :text-align :center :text-color :gray :edit-color :gray
+          :text-align :center :text-color :dim :edit-color :dim
           :width 5.0 :height 0.95)))))
 (def hammond_organ-row-label (title)
   (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
-    (label title :font-size 8.0 :width 2.7 :color :gray :bg :transparent)))
+    (label title :font-size 8.0 :width 2.7 :color :dim :bg :transparent)))
 (def hammond_organ-panel-1 (title section c1)
   (box :width :fill :height 2.35
        :background-color (hammond_organ-panel-bg section)

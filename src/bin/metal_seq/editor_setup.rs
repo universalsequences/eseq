@@ -55,6 +55,7 @@ fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {
     for name in [
         "*metal*",
         "*samples*",
+        "*track*",
         "*fx*",
         "*piano-roll*",
         "*mixer*",

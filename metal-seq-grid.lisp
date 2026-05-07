@@ -1,7 +1,7 @@
 ; Minimal Metal Sequencer - Step Grid UI
 ; C-p to toggle play/stop, Esc to clear step selection
 
-(load "../eseqlisp/themes.lisp")
+(load "mac-osx-dark.lisp")
 (mac-osx-theme)
 (load "metal-seq-materials.lisp")
 
@@ -492,11 +492,13 @@
 (load "metal-seq-metal.lisp")
 
 ; Layout: samples on the left; metal + mixer on the right; fx spans the bottom.
-(set-layout '(:rows
+(set-layout '(:rows :gap 1
   0.05 (:buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-  0.95 (:cols
-    0.2 (:buf "*samples*" :hide-status true :borderless true :min-width 25 :max-width 32)
-    0.8 (:rows
-      0.55 (:buf "*metal*" :hide-status false :min-width 25)
-      0.45 (:buf "*mixer*" :hide-status true :borderless true :min-height 12 :max-height 14)))
-  0.33 (:buf "*fx*" :hide-status true :min-height 13 :max-height 50)))
+  0.95 (:cols :gap 1
+    0.2 (:buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 32)
+    0.8 (:rows :gap 1
+      0.55 (:cols :gap 1
+        0.78 (:buf "*metal*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
+        0.22 (:buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))
+      0.45 (:buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 12 :max-height 12)))
+  0.33 (:buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 50)))

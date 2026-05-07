@@ -98,7 +98,7 @@
   :width 1 :height 1
   :shader (sdf/layer
             (sdf/fill (sdf/rounded-rect (* width 1) (* height 1) 0.02)
-              (material :color (rgba 0.16 0.16 0.17 1)))))
+              (material :color :buffer-bg))))
 
 (defwidget browser-pill-btn-bg
   :width 1 :height 1
@@ -311,10 +311,11 @@
     (sbrowser-create-search-bar)
     (sbrowser-create-toolbar)
     (sbrowser-library-label)
-    (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :width :fill :flex 1
         (tree
           :width :fill
+          :background-color :buffer-bg
           :items (sbrowser-create-items)
           :expand-all (not (= sbrowser-filter ""))
           :on-select (lambda (item) (sbrowser-select-create-item item))
@@ -335,10 +336,11 @@
 (def sbrowser-presets-panel ()
   (v-stack :width :fill :gap 0.5 :flex 1
     (sbrowser-preset-search-bar)
-    (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (scroll :width :fill :flex 1
         (tree
           :width :fill
+          :background-color :buffer-bg
           :items (seq-preset-tree SEQ.sidebar-presets sbrowser-preset-filter)
           :selected-label SEQ.sidebar-loaded-preset
           :expand-all false
@@ -347,7 +349,7 @@
 
 (def sbrowser-projects-panel ()
   (let ((items (seq-project-tree sbrowser-filter)))
-    (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
       (if (= (len items) 0)
         (box :padding 1
           (label "No projects found."
@@ -357,6 +359,7 @@
         (scroll :width :fill :flex 1
           (tree
             :width :fill
+            :background-color :buffer-bg
             :items items
             :selected-label SEQ.current-project-name
             :expand-all false
@@ -364,7 +367,7 @@
             :on-activate (lambda (item) (sbrowser-load-project (get item :label)))))))))
 
 (def sbrowser-project-save-panel ()
-  (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1))
+  (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
 
 ;; ── Preset save sidebar ──
 
@@ -425,7 +428,7 @@
         (box)))))
 
 (def sbrowser-preset-save-panel ()
-  (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1))
+  (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
 
 ;; ── Editor sidebar panels ──
 
@@ -489,7 +492,7 @@
         :color :white))))
 
 (def sbrowser-editor-panel ()
-  (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1))
+  (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1))
 
 ;; ── Build widgets ──
 
@@ -519,10 +522,11 @@
           (let ((header (sbrowser-header)))
             (list
               header
-              (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+              (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
                 (scroll :width :fill :flex 1
                   (tree
                     :width :fill
+                    :background-color :buffer-bg
                     :items (seq-filter-sample-tree sbrowser-filter)
                     :selected-path SEQ.sidebar-selected-sample
                     :expand-all (not (= sbrowser-filter ""))
@@ -535,10 +539,11 @@
           (let ((header (sbrowser-header)))
             (list
               header
-              (box :width :fill :background "browser-panel-bg" :padding 0 :flex 1
+              (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
                 (scroll :width :fill :flex 1
                   (tree
                     :width :fill
+                    :background-color :buffer-bg
                     :items (seq-filter-sample-tree sbrowser-filter)
                     :selected-path SEQ.sidebar-selected-sample
                     :expand-all (not (= sbrowser-filter ""))
