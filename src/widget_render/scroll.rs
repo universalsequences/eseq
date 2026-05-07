@@ -69,6 +69,24 @@ fn clamp_offset(state: &mut ScrollState) {
     state.offset_y = state.offset_y.clamp(0.0, max_scroll);
 }
 
+fn current_content_height(node: &LayoutNode) -> f32 {
+    if let Some(child) = node.children.first()
+        && let Some(height) = super::tree::current_content_height(child)
+    {
+        return height;
+    }
+    node.props
+        .get("_content_height")
+        .and_then(|v| {
+            if let Value::Number(n) = v {
+                Some(*n as f32)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0.0)
+}
+
 fn sync_selected_child_into_view(node: &LayoutNode, state: &mut ScrollState) {
     let Some(child) = node.children.first() else {
         return;
@@ -94,17 +112,7 @@ fn sync_selected_child_into_view(node: &LayoutNode, state: &mut ScrollState) {
 }
 
 pub(crate) fn sync_node_state(node: &LayoutNode) -> ScrollState {
-    let content_height = node
-        .props
-        .get("_content_height")
-        .and_then(|v| {
-            if let Value::Number(n) = v {
-                Some(*n as f32)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(0.0);
+    let content_height = current_content_height(node);
     let viewport_height = node.rect.height;
 
     let key = scroll_state_key(node);
@@ -228,18 +236,9 @@ impl WidgetDefinition for ScrollWidget {
         let key = scroll_state_key(node);
         let mut state = get_scroll_state(key);
 
-        // Update dimensions from layout props
-        state.content_height = node
-            .props
-            .get("_content_height")
-            .and_then(|v| {
-                if let Value::Number(n) = v {
-                    Some(*n as f32)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(state.content_height);
+        // Update dimensions from current child state; tree children can change
+        // visible height via expand/collapse without changing widget props.
+        state.content_height = current_content_height(node);
         state.viewport_height = node
             .props
             .get("_viewport_height")

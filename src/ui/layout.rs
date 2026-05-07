@@ -1011,7 +1011,11 @@ fn measure_builtin_leaf(node: &Value, widget_type: &str, aspect: f32) -> Size {
 mod tests {
     use super::*;
     use crate::vm::Value;
+    use crate::widget_render::{WidgetDefinition, WidgetKeyEvent};
     use crate::widgets::build_widget;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     /// Helper: keyword value
     fn kw(s: &str) -> Value {
@@ -1143,6 +1147,93 @@ mod tests {
         )
     }
 
+    fn value_cell(value: Value) -> Rc<RefCell<Value>> {
+        Rc::new(RefCell::new(value))
+    }
+
+    fn tree_item(label: &str, children: Vec<Value>) -> Value {
+        let mut map = std::collections::HashMap::new();
+        map.insert("label".to_string(), value_cell(s(label)));
+        if !children.is_empty() {
+            map.insert(
+                "children".to_string(),
+                value_cell(Value::List(children.into_iter().map(value_cell).collect())),
+            );
+        }
+        Value::Map(map)
+    }
+
+    fn scroll_with_stable_tree(stable_id: f64) -> Value {
+        let items = Value::List(
+            vec![
+                tree_item(
+                    "root-a",
+                    vec![
+                        tree_item("a-1", vec![]),
+                        tree_item("a-2", vec![]),
+                        tree_item("a-3", vec![]),
+                        tree_item("a-4", vec![]),
+                    ],
+                ),
+                tree_item("root-b", vec![]),
+            ]
+            .into_iter()
+            .map(value_cell)
+            .collect(),
+        );
+        build_widget(
+            "scroll",
+            vec![
+                kw("width"),
+                num(20.0),
+                kw("height"),
+                num(3.0),
+                build_widget(
+                    "tree",
+                    vec![
+                        kw("__stable-widget-id"),
+                        num(stable_id),
+                        kw("width"),
+                        kw("fill"),
+                        kw("items"),
+                        items,
+                    ],
+                ),
+            ],
+        )
+    }
+
+    fn scroll_with_flat_selected_tree(stable_id: f64, labels: &[&str], selected: &str) -> Value {
+        let items = Value::List(
+            labels
+                .iter()
+                .map(|label| value_cell(tree_item(label, vec![])))
+                .collect(),
+        );
+        build_widget(
+            "scroll",
+            vec![
+                kw("width"),
+                num(20.0),
+                kw("height"),
+                num(3.0),
+                build_widget(
+                    "tree",
+                    vec![
+                        kw("__stable-widget-id"),
+                        num(stable_id),
+                        kw("width"),
+                        kw("fill"),
+                        kw("items"),
+                        items,
+                        kw("selected-label"),
+                        s(selected),
+                    ],
+                ),
+            ],
+        )
+    }
+
     fn get_prop_num_from_layout(node: &LayoutNode, key: &str) -> Option<f64> {
         match node.props.get(key) {
             Some(Value::Number(value)) => Some(*value),
@@ -1180,6 +1271,123 @@ mod tests {
             get_prop_num_from_layout(&reused, "_viewport_height"),
             Some(5.0)
         );
+    }
+
+    #[test]
+    fn tree_measure_uses_expansion_state_for_the_same_stable_tree_only() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let expanded_tree = scroll_with_stable_tree(200.0);
+        let initial_layout = engine.layout(&expanded_tree).unwrap();
+        assert_eq!(
+            get_prop_num_from_layout(&initial_layout, "_content_height"),
+            Some(2.5)
+        );
+
+        let tree_node = initial_layout.children.first().expect("tree child");
+        let _ = crate::widget_render::tree::TREE_WIDGET.key_event(
+            tree_node,
+            WidgetKeyEvent {
+                code: KeyCode::Right,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        let expanded_layout = engine.layout(&expanded_tree).unwrap();
+        assert_eq!(
+            get_prop_num_from_layout(&expanded_layout, "_content_height"),
+            Some(7.5)
+        );
+
+        let collapsed_sibling_tree = scroll_with_stable_tree(100.0);
+        let sibling_layout = engine.layout(&collapsed_sibling_tree).unwrap();
+        assert_eq!(
+            get_prop_num_from_layout(&sibling_layout, "_content_height"),
+            Some(2.5)
+        );
+    }
+
+    #[test]
+    fn scroll_state_uses_collapsed_tree_height_even_when_layout_is_stale() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let tree = scroll_with_stable_tree(300.0);
+        let collapsed_layout = engine.layout(&tree).unwrap();
+        let tree_node = collapsed_layout.children.first().expect("tree child");
+        let _ = crate::widget_render::tree::TREE_WIDGET.key_event(
+            tree_node,
+            WidgetKeyEvent {
+                code: KeyCode::Right,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        let expanded_layout = engine.layout(&tree).unwrap();
+        assert_eq!(
+            get_prop_num_from_layout(&expanded_layout, "_content_height"),
+            Some(7.5)
+        );
+
+        let expanded_tree_node = expanded_layout.children.first().expect("tree child");
+        let _ = crate::widget_render::tree::TREE_WIDGET.key_event(
+            expanded_tree_node,
+            WidgetKeyEvent {
+                code: KeyCode::Left,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        let state = crate::widget_render::scroll::sync_node_state(&expanded_layout);
+        assert_eq!(state.content_height, 2.5);
+        assert_eq!(state.viewport_height, 3.0);
+        assert_eq!(state.offset_y, 0.0);
+    }
+
+    #[test]
+    fn tree_selection_resyncs_when_items_change_but_selected_label_does_not() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = scroll_with_flat_selected_tree(
+            400.0,
+            &["a", "b", "c", "d", "shared", "e"],
+            "shared",
+        );
+        let first_layout = engine.layout(&first).unwrap();
+        let first_state = crate::widget_render::scroll::sync_node_state(&first_layout);
+        assert!(
+            first_state.offset_y > 0.0,
+            "selected row should scroll into view"
+        );
+
+        let second = scroll_with_flat_selected_tree(400.0, &["shared", "x", "y"], "shared");
+        let second_layout = engine.layout(&second).unwrap();
+        let second_state = crate::widget_render::scroll::sync_node_state(&second_layout);
+        assert_eq!(second_state.offset_y, 0.0);
+    }
+
+    #[test]
+    fn tree_internal_selection_can_move_after_external_selection_syncs() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let tree = scroll_with_flat_selected_tree(500.0, &["a", "b", "c"], "a");
+        let layout = engine.layout(&tree).unwrap();
+        let tree_node = layout.children.first().expect("tree child");
+        let _ = crate::widget_render::tree::TREE_WIDGET.key_event(
+            tree_node,
+            WidgetKeyEvent {
+                code: KeyCode::Down,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+
+        let state = crate::widget_render::scroll::sync_node_state(&layout);
+        assert_eq!(state.offset_y, 0.0);
+
+        let _ = crate::widget_render::tree::TREE_WIDGET.key_event(
+            tree_node,
+            WidgetKeyEvent {
+                code: KeyCode::Down,
+                modifiers: KeyModifiers::empty(),
+            },
+        );
+        let state = crate::widget_render::scroll::sync_node_state(&layout);
+        assert_eq!(state.offset_y, 0.75);
     }
 
     #[test]

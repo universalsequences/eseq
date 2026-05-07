@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
@@ -9,6 +11,7 @@ use super::{
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    get_prop_u64,
 };
 use crate::vm::Value;
 
@@ -23,11 +26,12 @@ use crate::theme;
 
 // ── Tree state ───────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct TreeState {
     expanded: HashSet<Vec<usize>>,
     selected_row: usize,
     synced_selection: Option<String>,
+    synced_items_hash: Option<u64>,
 }
 
 thread_local! {
@@ -40,9 +44,17 @@ fn get_tree_state(widget_id: u64) -> TreeState {
 
 fn set_tree_state(widget_id: u64, state: TreeState) {
     // Always sync LAST_EXPANDED so measure() picks up the latest state
-    update_last_known_expanded(&state.expanded);
+    update_last_known_expanded(widget_id, &state.expanded);
     TREE_STATES.with(|s| s.borrow_mut().insert(widget_id, state));
     super::bump_widget_state_generation();
+}
+
+fn tree_state_key(node: &LayoutNode) -> u64 {
+    node.stable_widget_id.unwrap_or(node.widget_id)
+}
+
+fn tree_state_key_from_value(node: &Value) -> Option<u64> {
+    get_prop_u64(node, "__stable-widget-id")
 }
 
 // ── Flattened row ────────────────────────────────────────────────────────────
@@ -269,6 +281,69 @@ fn external_selection_key_from_value(node: &Value) -> Option<(String, &'static s
     None
 }
 
+fn hash_tree_item_value(value: &Value, state: &mut DefaultHasher) {
+    match value {
+        Value::Nil => {
+            0_u8.hash(state);
+        }
+        Value::Bool(value) => {
+            1_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Number(value) => {
+            2_u8.hash(state);
+            value.to_bits().hash(state);
+        }
+        Value::String(value) => {
+            3_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Keyword(value) => {
+            4_u8.hash(state);
+            value.hash(state);
+        }
+        Value::Symbol(value) => {
+            5_u8.hash(state);
+            value.hash(state);
+        }
+        Value::List(values) => {
+            6_u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                hash_tree_item_value(&value.borrow(), state);
+            }
+        }
+        Value::Map(map) => {
+            7_u8.hash(state);
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            for key in keys {
+                key.hash(state);
+                if let Some(value) = map.get(key) {
+                    hash_tree_item_value(&value.borrow(), state);
+                }
+            }
+        }
+        Value::Closure(index, _) | Value::Function(index) => {
+            8_u8.hash(state);
+            index.hash(state);
+        }
+        Value::NodeRef(index) => {
+            9_u8.hash(state);
+            index.hash(state);
+        }
+        Value::NativeFunction(_) => {
+            10_u8.hash(state);
+        }
+    }
+}
+
+fn tree_items_hash(items: &Value) -> u64 {
+    let mut state = DefaultHasher::new();
+    hash_tree_item_value(items, &mut state);
+    state.finish()
+}
+
 fn sync_state_with_external_selection(
     widget_id: u64,
     items: &Value,
@@ -276,17 +351,23 @@ fn sync_state_with_external_selection(
     expand_all: bool,
     state: &mut TreeState,
 ) {
+    let original_state = state.clone();
+    let items_hash = tree_items_hash(items);
     let Some((selection_key, field, needle)) = external_selection_key(props) else {
-        if state.synced_selection.is_some() {
-            state.synced_selection = None;
+        state.synced_selection = None;
+        state.synced_items_hash = Some(items_hash);
+        if *state != original_state {
             set_tree_state(widget_id, state.clone());
         }
         return;
     };
-    if state.synced_selection.as_deref() == Some(selection_key.as_str()) {
+    if state.synced_selection.as_deref() == Some(selection_key.as_str())
+        && state.synced_items_hash == Some(items_hash)
+    {
         return;
     }
 
+    state.selected_row = 0;
     if let Some(path) = find_item_path_by_field(items, field, &needle, &[]) {
         if !expand_all {
             state.expanded.extend(ancestor_paths(&path));
@@ -298,7 +379,10 @@ fn sync_state_with_external_selection(
         }
     }
     state.synced_selection = Some(selection_key);
-    set_tree_state(widget_id, state.clone());
+    state.synced_items_hash = Some(items_hash);
+    if *state != original_state {
+        set_tree_state(widget_id, state.clone());
+    }
 }
 
 pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f32)> {
@@ -308,10 +392,31 @@ pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f
 
     let items = get_items_from_props(&node.props);
     let expand_all = get_expand_all_prop(&node.props);
-    let mut state = get_tree_state(node.widget_id);
-    sync_state_with_external_selection(node.widget_id, &items, &node.props, expand_all, &mut state);
+    let widget_key = tree_state_key(node);
+    let mut state = get_tree_state(widget_key);
+    sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
     let selection_key = state.synced_selection.clone()?;
-    Some((selection_key, state.selected_row, ROW_HEIGHT))
+    let view_key = format!(
+        "{selection_key}:items:{}:row:{}",
+        state.synced_items_hash.unwrap_or(0),
+        state.selected_row
+    );
+    Some((view_key, state.selected_row, ROW_HEIGHT))
+}
+
+pub(crate) fn current_content_height(node: &LayoutNode) -> Option<f32> {
+    if node.widget_type != "tree" {
+        return None;
+    }
+
+    let items = get_items_from_props(&node.props);
+    let expand_all = get_expand_all_prop(&node.props);
+    let widget_key = tree_state_key(node);
+    let mut state = get_tree_state(widget_key);
+    sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
+    let mut rows = Vec::new();
+    flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
+    Some(rows.len() as f32 * ROW_HEIGHT)
 }
 
 /// Build an action map for event dispatch.
@@ -370,10 +475,11 @@ impl WidgetDefinition for TreeWidget {
     ) -> Option<Size> {
         let items = get_items_value(node);
         let expand_all = get_expand_all_value(node);
-        // widget_id isn't available during measure, so we use LAST_EXPANDED
-        // (synced from set_tree_state) to get the current expanded set.
+        // widget_id isn't available during measure, but stable widget IDs are.
+        // Use the tree-local cached expansion set so sibling trees do not
+        // contaminate each other's measured content height.
         let mut rows = Vec::new();
-        let mut expanded = get_last_known_expanded(&items);
+        let mut expanded = get_last_known_expanded(tree_state_key_from_value(node));
         if !expand_all
             && let Some((_, field, needle)) = external_selection_key_from_value(node)
             && let Some(path) = find_item_path_by_field(&items, field, &needle, &[])
@@ -403,7 +509,7 @@ impl WidgetDefinition for TreeWidget {
     fn tui_render(&self, props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
         let items = get_items_from_props(props);
         let expand_all = get_expand_all_prop(props);
-        let mut expanded = get_last_known_expanded(&items);
+        let mut expanded = get_last_known_expanded(None);
         if !expand_all
             && let Some((_, field, needle)) = external_selection_key(props)
             && let Some(path) = find_item_path_by_field(&items, field, &needle, &[])
@@ -469,14 +575,9 @@ impl WidgetDefinition for TreeWidget {
 
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);
-        let mut state = get_tree_state(node.widget_id);
-        sync_state_with_external_selection(
-            node.widget_id,
-            &items,
-            &node.props,
-            expand_all,
-            &mut state,
-        );
+        let widget_key = tree_state_key(node);
+        let mut state = get_tree_state(widget_key);
+        sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
 
@@ -493,14 +594,14 @@ impl WidgetDefinition for TreeWidget {
 
         if row.has_children {
             toggle_expand(&mut state, &row.path);
-            set_tree_state(node.widget_id, state);
+            set_tree_state(widget_key, state);
             MouseEventOutcome::Dispatch(WidgetEvent::Custom(make_action_value(
                 "toggle",
                 &row.item_value,
             )))
         } else {
             state.selected_row = row_idx;
-            set_tree_state(node.widget_id, state);
+            set_tree_state(widget_key, state);
             MouseEventOutcome::Dispatch(WidgetEvent::Custom(make_action_value(
                 "select",
                 &row.item_value,
@@ -511,14 +612,9 @@ impl WidgetDefinition for TreeWidget {
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);
-        let mut state = get_tree_state(node.widget_id);
-        sync_state_with_external_selection(
-            node.widget_id,
-            &items,
-            &node.props,
-            expand_all,
-            &mut state,
-        );
+        let widget_key = tree_state_key(node);
+        let mut state = get_tree_state(widget_key);
+        sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
         if rows.is_empty() {
@@ -528,24 +624,24 @@ impl WidgetDefinition for TreeWidget {
         match key.code {
             KeyCode::Up => {
                 state.selected_row = state.selected_row.saturating_sub(1);
-                set_tree_state(node.widget_id, state);
+                set_tree_state(widget_key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Down => {
                 state.selected_row = (state.selected_row + 1).min(rows.len() - 1);
-                set_tree_state(node.widget_id, state);
+                set_tree_state(widget_key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Right => {
                 let row = &rows[state.selected_row];
                 if row.has_children && !row.expanded {
                     toggle_expand(&mut state, &row.path);
-                    set_tree_state(node.widget_id, state);
+                    set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else if row.has_children && row.expanded {
                     // Move to first child
                     state.selected_row = (state.selected_row + 1).min(rows.len() - 1);
-                    set_tree_state(node.widget_id, state);
+                    set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else {
                     None
@@ -555,14 +651,14 @@ impl WidgetDefinition for TreeWidget {
                 let row = &rows[state.selected_row];
                 if row.has_children && row.expanded {
                     toggle_expand(&mut state, &row.path);
-                    set_tree_state(node.widget_id, state);
+                    set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else if row.depth > 0 {
                     // Move to parent
                     let parent_path: Vec<usize> = row.path[..row.path.len() - 1].to_vec();
                     if let Some(parent_idx) = rows.iter().position(|r| r.path == parent_path) {
                         state.selected_row = parent_idx;
-                        set_tree_state(node.widget_id, state);
+                        set_tree_state(widget_key, state);
                         Some(WidgetEvent::Custom(Value::Nil))
                     } else {
                         None
@@ -575,13 +671,13 @@ impl WidgetDefinition for TreeWidget {
                 let row = &rows[state.selected_row];
                 if row.has_children {
                     toggle_expand(&mut state, &row.path);
-                    set_tree_state(node.widget_id, state);
+                    set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(make_action_value(
                         "toggle",
                         &row.item_value,
                     )))
                 } else {
-                    set_tree_state(node.widget_id, state);
+                    set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(make_action_value(
                         "activate",
                         &row.item_value,
@@ -648,19 +744,14 @@ impl WidgetDefinition for TreeWidget {
     ) -> Vec<MetalPrimitive> {
         let items = get_items_from_props(&node.props);
         let expand_all = get_expand_all_prop(&node.props);
-        let mut state = get_tree_state(node.widget_id);
-        sync_state_with_external_selection(
-            node.widget_id,
-            &items,
-            &node.props,
-            expand_all,
-            &mut state,
-        );
+        let widget_key = tree_state_key(node);
+        let mut state = get_tree_state(widget_key);
+        sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
 
         // Update the last-known expanded state for measure() to use
-        update_last_known_expanded(&state.expanded);
+        update_last_known_expanded(widget_key, &state.expanded);
 
         let font_size = node
             .props
@@ -803,20 +894,30 @@ impl WidgetDefinition for TreeWidget {
 
 // ── Helpers for measure/render coordination ──────────────────────────────────
 
-// Since measure() doesn't have widget_id, we cache the last known expanded
-// set keyed by items list identity so measure can produce the correct height.
+// Since measure() doesn't have the transient widget_id, cache expansion by the
+// stable widget ID embedded in the widget value. A fallback is kept for callers
+// without stable IDs (for example simple TUI tests).
 
 thread_local! {
-    static LAST_EXPANDED: RefCell<Option<HashSet<Vec<usize>>>> =
+    static LAST_EXPANDED: RefCell<HashMap<u64, HashSet<Vec<usize>>>> =
+        RefCell::new(HashMap::new());
+    static LAST_EXPANDED_FALLBACK: RefCell<Option<HashSet<Vec<usize>>>> =
         const { RefCell::new(None) };
 }
 
-fn get_last_known_expanded(_items: &Value) -> HashSet<Vec<usize>> {
-    LAST_EXPANDED.with(|cell| cell.borrow().clone().unwrap_or_default())
+fn get_last_known_expanded(widget_key: Option<u64>) -> HashSet<Vec<usize>> {
+    if let Some(widget_key) = widget_key {
+        return LAST_EXPANDED
+            .with(|cell| cell.borrow().get(&widget_key).cloned().unwrap_or_default());
+    }
+    LAST_EXPANDED_FALLBACK.with(|cell| cell.borrow().clone().unwrap_or_default())
 }
 
-fn update_last_known_expanded(expanded: &HashSet<Vec<usize>>) {
+fn update_last_known_expanded(widget_key: u64, expanded: &HashSet<Vec<usize>>) {
     LAST_EXPANDED.with(|cell| {
+        cell.borrow_mut().insert(widget_key, expanded.clone());
+    });
+    LAST_EXPANDED_FALLBACK.with(|cell| {
         *cell.borrow_mut() = Some(expanded.clone());
     });
 }
