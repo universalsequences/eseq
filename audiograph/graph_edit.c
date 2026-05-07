@@ -1002,6 +1002,9 @@ bool apply_delete_node_internal(LiveGraph *lg, int node_id) {
   }
 
   RTNode *node = &lg->nodes[node_id];
+  if (node_is_deleted(node)) {
+    return true;
+  }
 
   // Remove from watchlist before freeing node state. Otherwise deleted watched
   // nodes leave stale IDs/snapshots behind, which can accumulate in dynamic

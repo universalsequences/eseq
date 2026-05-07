@@ -1984,6 +1984,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
 
     let mut rendered_frames = 0usize;
     let mut zero_chunk_spins = 0usize;
+    const RENDER_CHUNK_ALIGNMENT: u64 = 4;
     while rendered_frames < nframes {
         let current_sample = block_start_sample + rendered_frames as u64;
         let current_pattern_epoch = data.state.transport.pattern_epoch.load(Ordering::Relaxed);
@@ -2001,12 +2002,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             data.event_seq += 1;
         }
 
+        let dispatch_horizon =
+            (current_sample + (RENDER_CHUNK_ALIGNMENT - 1)).min(block_end_sample);
         while let Some(std::cmp::Reverse(event)) = data.events_heap.peek() {
             if event.event.pattern_epoch != current_pattern_epoch {
                 let _ = data.events_heap.pop();
                 continue;
             }
-            if event.sample_time > current_sample {
+            if event.sample_time > dispatch_horizon {
                 break;
             }
             let event = data.events_heap.pop().unwrap().0;
@@ -2021,8 +2024,14 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             .peek()
             .map(|rev| rev.0.sample_time.min(block_end_sample))
             .unwrap_or(block_end_sample);
-        let chunk_frames = (next_sample.saturating_sub(current_sample)) as usize;
+        let mut chunk_frames = next_sample.saturating_sub(current_sample);
+        chunk_frames -= chunk_frames % RENDER_CHUNK_ALIGNMENT;
+        let chunk_frames = chunk_frames as usize;
         if chunk_frames == 0 {
+            if block_end_sample.saturating_sub(current_sample) < RENDER_CHUNK_ALIGNMENT {
+                zero_output_frames(output, rendered_frames, data.num_channels);
+                break;
+            }
             zero_chunk_spins += 1;
             if zero_chunk_spins >= 32 {
                 let next_event_sample = data.events_heap.peek().map(|rev| rev.0.sample_time);

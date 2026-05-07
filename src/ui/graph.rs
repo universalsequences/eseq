@@ -369,12 +369,70 @@ impl GraphController<'_> {
             return;
         };
         let delay_id = nodes.delay_id;
-        let old_sends = std::mem::take(&mut nodes.bus_send_ids);
+        let mut old_sends = std::mem::take(&mut nodes.bus_send_ids);
         let requested_sends = self.app.state.pattern.track_params[track_idx].sends();
         let bus_nodes = self.app.graph.bus_node_ids.clone();
         let lg = self.app.graph.lg.0;
 
         let _batch = GraphEditBatchGuard::new(lg);
+        let mut next_send_nodes = Vec::new();
+
+        for send in requested_sends {
+            if send.amount <= 0.0 {
+                continue;
+            }
+            let Some(bus) = bus_nodes.iter().find(|bus| bus.id == send.destination) else {
+                continue;
+            };
+
+            if let Some(pos) = old_sends
+                .iter()
+                .position(|nodes| nodes.destination == send.destination)
+            {
+                let existing = old_sends.remove(pos);
+                unsafe {
+                    crate::audiograph::params_push_wrapper(
+                        lg,
+                        crate::audiograph::ParamMsg {
+                            idx: 0,
+                            logical_id: existing.left_id as u64,
+                            fvalue: send.amount,
+                        },
+                    );
+                    crate::audiograph::params_push_wrapper(
+                        lg,
+                        crate::audiograph::ParamMsg {
+                            idx: 0,
+                            logical_id: existing.right_id as u64,
+                            fvalue: send.amount,
+                        },
+                    );
+                }
+                next_send_nodes.push(existing);
+                continue;
+            }
+
+            let left_name =
+                CString::new(format!("track_{track_idx}_send_{}_L", send.destination.0)).unwrap();
+            let right_name =
+                CString::new(format!("track_{track_idx}_send_{}_R", send.destination.0)).unwrap();
+            let left_id =
+                unsafe { crate::audiograph::live_add_gain(lg, send.amount, left_name.as_ptr()) };
+            let right_id =
+                unsafe { crate::audiograph::live_add_gain(lg, send.amount, right_name.as_ptr()) };
+            unsafe {
+                crate::audiograph::graph_connect(lg, delay_id, 0, left_id, 0);
+                crate::audiograph::graph_connect(lg, delay_id, 1, right_id, 0);
+                crate::audiograph::graph_connect(lg, left_id, 0, bus.left_id, 0);
+                crate::audiograph::graph_connect(lg, right_id, 0, bus.right_id, 0);
+            }
+            next_send_nodes.push(super::BusSendNodeIds {
+                destination: send.destination,
+                left_id,
+                right_id,
+            });
+        }
+
         for send in old_sends {
             if let Some(bus) = bus_nodes.iter().find(|bus| bus.id == send.destination) {
                 unsafe {
@@ -393,33 +451,7 @@ impl GraphController<'_> {
         let Some(nodes) = self.app.graph.track_node_ids.get_mut(track_idx) else {
             return;
         };
-        for send in requested_sends {
-            if send.amount <= 0.0 {
-                continue;
-            }
-            let Some(bus) = bus_nodes.iter().find(|bus| bus.id == send.destination) else {
-                continue;
-            };
-            let left_name =
-                CString::new(format!("track_{track_idx}_send_{}_L", send.destination.0)).unwrap();
-            let right_name =
-                CString::new(format!("track_{track_idx}_send_{}_R", send.destination.0)).unwrap();
-            let left_id =
-                unsafe { crate::audiograph::live_add_gain(lg, send.amount, left_name.as_ptr()) };
-            let right_id =
-                unsafe { crate::audiograph::live_add_gain(lg, send.amount, right_name.as_ptr()) };
-            unsafe {
-                crate::audiograph::graph_connect(lg, delay_id, 0, left_id, 0);
-                crate::audiograph::graph_connect(lg, delay_id, 1, right_id, 0);
-                crate::audiograph::graph_connect(lg, left_id, 0, bus.left_id, 0);
-                crate::audiograph::graph_connect(lg, right_id, 0, bus.right_id, 0);
-            }
-            nodes.bus_send_ids.push(super::BusSendNodeIds {
-                destination: send.destination,
-                left_id,
-                right_id,
-            });
-        }
+        nodes.bus_send_ids = next_send_nodes;
     }
 
     pub fn add_track(&mut self, wav_path: &Path) -> Result<usize, String> {
