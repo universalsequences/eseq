@@ -178,7 +178,7 @@
 ;; ── Search bar widget ──
 
 (def sbrowser-header ()
-  (box :width :fill :padding 0.25
+  (box :width :fill :height 2.0 :padding 0.25
     (h-stack :width :fill :gap 0.5 :align :center
       (text-input
         :flex 1
@@ -195,14 +195,14 @@
           :bg :transparent)))))
 
 (def sbrowser-instrument-header ()
-  (box :width :fill :padding 0.25
+  (box :key "instrument-header" :width :fill :height 1.1 :padding 0.15
     (label (if (= SEQ.sidebar-instrument-display-name "") "Instrument" SEQ.sidebar-instrument-display-name)
       :font-size 12
       :color :white
       :bg :transparent)))
 
 (def sbrowser-create-header ()
-  (box :width :fill :padding 0.25
+  (box :key "create-header" :width :fill :height 1.1 :padding 0.15
     (label "Create track"
       :font-size 12
       :color :white
@@ -268,7 +268,7 @@
         (status "Open a folder or choose an instrument")))))
 
 (def sbrowser-create-search-bar ()
-  (box :width :fill :padding 0.25
+  (box :key "create-search-bar" :width :fill :height 2.0 :padding 0.25
     (h-stack :width :fill :gap 0.5 :align :center
       (text-input
         :flex 1
@@ -307,13 +307,14 @@
       :bg :transparent)))
 
 (def sbrowser-create-picker ()
-  (v-stack :width :fill :gap 0.5 :flex 1
+  (v-stack :key "create-picker-panel" :width :fill :gap 0.5 :flex 1
     (sbrowser-create-search-bar)
     (sbrowser-create-toolbar)
     (sbrowser-library-label)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-      (scroll :width :fill :flex 1
+      (scroll :key "create-picker-scroll" :width :fill :flex 1
         (tree
+          :key "create-picker-tree"
           :width :fill
           :background-color :buffer-bg
           :items (sbrowser-create-items)
@@ -322,7 +323,7 @@
           :on-activate (lambda (item) (sbrowser-select-create-item item)))))))
 
 (def sbrowser-preset-search-bar ()
-  (box :width :fill :padding 0.25
+  (box :key "preset-search-bar" :width :fill :height 1.8 :padding 0.15
     (h-stack :width :fill :gap 0.5 :align :center
       (text-input
         :flex 1
@@ -334,11 +335,13 @@
         (mag-glass)))))
 
 (def sbrowser-presets-panel ()
-  (v-stack :width :fill :gap 0.5 :flex 1
+  (v-stack :key "preset-list-panel" :width :fill :gap 0.22 :flex 1
+    (sbrowser-instrument-header)
     (sbrowser-preset-search-bar)
     (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-      (scroll :width :fill :flex 1
+      (scroll :key "preset-list-scroll" :width :fill :flex 1
         (tree
+          :key "preset-list-tree"
           :width :fill
           :background-color :buffer-bg
           :items (seq-preset-tree SEQ.sidebar-presets sbrowser-preset-filter)
@@ -356,8 +359,9 @@
             :font-size 10
             :color :gray
             :bg :transparent))
-        (scroll :width :fill :flex 1
+        (scroll :key "project-list-scroll" :width :fill :flex 1
           (tree
+            :key "project-list-tree"
             :width :fill
             :background-color :buffer-bg
             :items items
@@ -523,8 +527,9 @@
             (list
               header
               (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-                (scroll :width :fill :flex 1
+                (scroll :key "create-sampler-scroll" :width :fill :flex 1
                   (tree
+                    :key "create-sampler-tree"
                     :width :fill
                     :background-color :buffer-bg
                     :items (seq-filter-sample-tree sbrowser-filter)
@@ -534,14 +539,14 @@
                     :on-activate (lambda (item) (sbrowser-select-item item)))))))
         (if (= SEQ.sidebar-kind "instrument")
           (list
-            (sbrowser-instrument-header)
             (sbrowser-presets-panel))
           (let ((header (sbrowser-header)))
             (list
               header
               (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-                (scroll :width :fill :flex 1
+                (scroll :key "sample-audition-scroll" :width :fill :flex 1
                   (tree
+                    :key "sample-audition-tree"
                     :width :fill
                     :background-color :buffer-bg
                     :items (seq-filter-sample-tree sbrowser-filter)
@@ -553,7 +558,7 @@
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──
 
 (effect-buffer "*samples*"
-  (v-stack :width :fill :gap 0.5 :padding 1 (sbrowser-build-widgets)))
+  (v-stack :width :fill :gap 0.4 :padding 1.2 (sbrowser-build-widgets)))
 
 ;; ── Entry point: just switch to the buffer ──
 
