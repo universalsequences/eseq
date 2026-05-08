@@ -837,6 +837,7 @@ fn run_midi_fx_chain_for_track(
         return events;
     }
     let names = runtime.midi_fx_names();
+    let descriptors = runtime.midi_fx_descriptors();
     let mut current = events;
     for (stage_idx, fx_name) in chain.into_iter().enumerate() {
         let Some(fx_idx) = names
@@ -861,6 +862,32 @@ fn run_midi_fx_chain_for_track(
                 ));
                 continue;
             }
+            let slot_snapshot = snapshot.tracks[event.track]
+                .midi_fx_slots
+                .get(stage_idx)
+                .cloned()
+                .unwrap_or_else(crate::effects::EffectSlotSnapshot::new_empty);
+            let enabled = descriptors
+                .get(fx_idx)
+                .and_then(|desc| {
+                    desc.params
+                        .iter()
+                        .position(|param| param.name.eq_ignore_ascii_case("enabled"))
+                })
+                .and_then(|param_idx| {
+                    slot_snapshot
+                        .plocks
+                        .get(event.step)
+                        .and_then(|step| step.get(param_idx))
+                        .copied()
+                        .flatten()
+                        .or_else(|| slot_snapshot.defaults.get(param_idx).copied())
+                })
+                .unwrap_or(1.0);
+            if enabled <= 0.5 {
+                next.push(event);
+                continue;
+            }
             runtime.set_position(event.track, event.step);
             match runtime.invoke_midi_fx_with_arp_phase_beats(
                 fx_idx,
@@ -872,11 +899,7 @@ fn run_midi_fx_chain_for_track(
                 event.chord_durations.clone(),
                 event.chord_step_transpose,
                 event.note_spans.clone(),
-                snapshot.tracks[event.track]
-                    .midi_fx_slots
-                    .get(stage_idx)
-                    .cloned()
-                    .unwrap_or_else(crate::effects::EffectSlotSnapshot::new_empty),
+                slot_snapshot,
                 event.arp_phase_beats,
                 event.step_beats,
                 snapshot.tracks[event.track].params.num_steps,

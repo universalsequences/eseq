@@ -815,7 +815,13 @@ pub(crate) fn build_effects_value(
                     };
                     let default_val = chain
                         .get(slot_idx)
-                        .map(|s| s.defaults.get(param_idx))
+                        .map(|s| {
+                            if param_idx < s.num_params.load(Ordering::Relaxed) as usize {
+                                s.defaults.get(param_idx)
+                            } else {
+                                pdesc.default
+                            }
+                        })
                         .unwrap_or(pdesc.default);
                     // Show p-lock value if steps are selected, fall back to default
                     let current_val = plock_step
@@ -1099,7 +1105,13 @@ pub(crate) fn build_midi_effects_value(
                 .enumerate()
                 .map(|(param_idx, pdesc)| {
                     let default_val = slot
-                        .map(|s| s.defaults.get(param_idx))
+                        .map(|s| {
+                            if param_idx < s.num_params.load(Ordering::Relaxed) as usize {
+                                s.defaults.get(param_idx)
+                            } else {
+                                pdesc.default
+                            }
+                        })
                         .unwrap_or(pdesc.default);
                     let current_val = plock_step
                         .and_then(|step| slot.and_then(|s| s.plocks.get(step, param_idx)))
@@ -1199,7 +1211,11 @@ pub(crate) fn build_sampler_panel_value(
 
     let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
-        let default_val = slot.defaults.get(param_idx);
+        let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+            slot.defaults.get(param_idx)
+        } else {
+            pdesc.default
+        };
         let current_val = plock_step
             .and_then(|step| slot.plocks.get(step, param_idx))
             .unwrap_or(default_val);
@@ -1598,7 +1614,11 @@ pub(crate) fn build_instrument_panel_value(
     );
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
-        let default_val = slot.defaults.get(param_idx);
+        let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+            slot.defaults.get(param_idx)
+        } else {
+            pdesc.default
+        };
         let current_val = plock_step
             .and_then(|step| slot.plocks.get(step, param_idx))
             .unwrap_or(default_val);
@@ -1650,7 +1670,11 @@ pub(crate) fn build_instrument_panel_value(
             if source_section_name(pdesc.node_param_idx) != section_name {
                 continue;
             }
-            let default_val = slot.defaults.get(param_idx);
+            let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                slot.defaults.get(param_idx)
+            } else {
+                pdesc.default
+            };
             let current_val = plock_step
                 .and_then(|step| slot.plocks.get(step, param_idx))
                 .unwrap_or(default_val);
@@ -2071,6 +2095,242 @@ pub(crate) fn sync_track_params(
     rt.set_reactive("SEQ", "accumulator-options", build_accumulator_options(app));
     rt.set_reactive("SEQ", "fts-options", build_fts_options());
     rt.set_reactive("SEQ", "accum-mode-options", build_accum_mode_options());
+    rt.set_reactive(
+        "SEQ",
+        "track-plocks",
+        build_track_plocks_value(app, state, track, selected),
+    );
+}
+
+fn plock_entry(
+    step: usize,
+    target: &str,
+    group: &str,
+    name: &str,
+    value: f32,
+    min: f32,
+    max: f32,
+    slot_idx: Option<usize>,
+    param_idx: Option<usize>,
+    options: Option<Vec<String>>,
+) -> Rc<RefCell<Value>> {
+    use std::collections::HashMap;
+
+    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+    map.insert(
+        "step".to_string(),
+        Rc::new(RefCell::new(Value::Number((step + 1) as f64))),
+    );
+    map.insert(
+        "step-idx".to_string(),
+        Rc::new(RefCell::new(Value::Number(step as f64))),
+    );
+    map.insert(
+        "target".to_string(),
+        Rc::new(RefCell::new(Value::String(target.to_string()))),
+    );
+    map.insert(
+        "group".to_string(),
+        Rc::new(RefCell::new(Value::String(group.to_string()))),
+    );
+    map.insert(
+        "name".to_string(),
+        Rc::new(RefCell::new(Value::String(name.to_string()))),
+    );
+    map.insert(
+        "value".to_string(),
+        Rc::new(RefCell::new(Value::Number(value as f64))),
+    );
+    map.insert(
+        "min".to_string(),
+        Rc::new(RefCell::new(Value::Number(min as f64))),
+    );
+    map.insert(
+        "max".to_string(),
+        Rc::new(RefCell::new(Value::Number(max as f64))),
+    );
+    if let Some(slot_idx) = slot_idx {
+        map.insert(
+            "slot-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
+        );
+    }
+    if let Some(param_idx) = param_idx {
+        map.insert(
+            "param-idx".to_string(),
+            Rc::new(RefCell::new(Value::Number(param_idx as f64))),
+        );
+    }
+    if let Some(options) = options {
+        let selected = options
+            .get(value.round().max(0.0) as usize)
+            .cloned()
+            .unwrap_or_default();
+        map.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String(selected))),
+        );
+        map.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(Value::List(
+                options
+                    .into_iter()
+                    .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                    .collect(),
+            ))),
+        );
+    }
+    Rc::new(RefCell::new(Value::Map(map)))
+}
+
+pub(crate) fn build_track_plocks_value(
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+    selected: &Arc<Mutex<HashSet<usize>>>,
+) -> Value {
+    use sequencer::effects::ParamKind;
+
+    let mut steps: Vec<usize> = selected.lock().unwrap().iter().copied().collect();
+    steps.sort_unstable();
+    let mut items = Vec::new();
+    if steps.is_empty() {
+        return Value::List(items);
+    }
+
+    let tp = &state.pattern.track_params[track];
+    for step in steps {
+        if let Some(timebase) = state.pattern.timebase_plocks[track].get(step) {
+            items.push(plock_entry(
+                step,
+                "timebase",
+                "track",
+                "timebase",
+                timebase as u32 as f32,
+                0.0,
+                (Timebase::ALL.len() - 1) as f32,
+                None,
+                None,
+                Some(
+                    Timebase::LABELS
+                        .iter()
+                        .map(|label| label.to_string())
+                        .collect(),
+                ),
+            ));
+        }
+        if let Some(swing) = state.pattern.swing_plocks[track].get(step) {
+            items.push(plock_entry(
+                step, "swing", "track", "swing", swing, 50.0, 75.0, None, None, None,
+            ));
+        }
+        if let Some(resolution) = state.pattern.swing_resolution_plocks[track].get(step) {
+            items.push(plock_entry(
+                step,
+                "swing-resolution",
+                "track",
+                "swing res",
+                resolution as u32 as f32,
+                0.0,
+                (SwingResolution::ALL.len() - 1) as f32,
+                None,
+                None,
+                Some(
+                    SwingResolution::LABELS
+                        .iter()
+                        .map(|label| label.to_string())
+                        .collect(),
+                ),
+            ));
+        }
+
+        if let Some(desc) = app.graph.instrument_descriptors.get(track) {
+            let slot = &state.pattern.instrument_slots[track];
+            for (param_idx, param) in desc.params.iter().enumerate() {
+                if let Some(value) = slot.plocks.get(step, param_idx) {
+                    let options = match &param.kind {
+                        ParamKind::Enum { labels } => Some(labels.clone()),
+                        ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                        ParamKind::Continuous { .. } => None,
+                    };
+                    items.push(plock_entry(
+                        step,
+                        "instrument",
+                        "inst",
+                        &param.name,
+                        param.stored_to_user(value),
+                        param.stored_to_user(param.min),
+                        param.stored_to_user(param.max),
+                        None,
+                        Some(param_idx),
+                        options,
+                    ));
+                }
+            }
+        }
+
+        if let Some(descs) = app.graph.effect_descriptors.get(track) {
+            for (slot_idx, desc) in descs.iter().enumerate() {
+                let Some(slot) = state.pattern.effect_chains[track].get(slot_idx) else {
+                    continue;
+                };
+                for (param_idx, param) in desc.params.iter().enumerate() {
+                    if let Some(value) = slot.plocks.get(step, param_idx) {
+                        let options = match &param.kind {
+                            ParamKind::Enum { labels } => Some(labels.clone()),
+                            ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                            ParamKind::Continuous { .. } => None,
+                        };
+                        items.push(plock_entry(
+                            step,
+                            "effect",
+                            &desc.name,
+                            &param.name,
+                            value,
+                            param.min,
+                            param.max,
+                            Some(slot_idx),
+                            Some(param_idx),
+                            options,
+                        ));
+                    }
+                }
+            }
+        }
+
+        let midi_chain = tp.midi_fx_chain();
+        for (slot_idx, slot) in state.pattern.midi_fx_slots[track].iter().enumerate() {
+            let Some(desc) = midi_chain
+                .get(slot_idx)
+                .and_then(|name| sequencer::lisp_effect::load_midi_fx_descriptor(name))
+            else {
+                continue;
+            };
+            for (param_idx, param) in desc.params.iter().enumerate() {
+                if let Some(value) = slot.plocks.get(step, param_idx) {
+                    let options = match &param.kind {
+                        ParamKind::Enum { labels } => Some(labels.clone()),
+                        ParamKind::Boolean => Some(vec!["off".to_string(), "on".to_string()]),
+                        ParamKind::Continuous { .. } => None,
+                    };
+                    items.push(plock_entry(
+                        step,
+                        "midi-fx",
+                        &desc.name,
+                        &param.name,
+                        value,
+                        param.min,
+                        param.max,
+                        Some(slot_idx),
+                        Some(param_idx),
+                        options,
+                    ));
+                }
+            }
+        }
+    }
+
+    Value::List(items)
 }
 
 fn build_track_output_label(app: &ui::App, tp: &sequencer::sequencer::TrackParams) -> Value {
@@ -3498,6 +3758,134 @@ mod tests {
         assert_eq!(
             state.pattern.step_data[track].get(5, StepParam::Duration),
             3.0
+        );
+    }
+
+    #[test]
+    fn piano_roll_create_floors_fractional_start_to_visible_step() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+
+        let action = map_value([
+            ("type", Value::Keyword("finish-create-item".to_string())),
+            ("lane", Value::Number(48.0)),
+            ("start", Value::Number(2.5)),
+            ("end", Value::Number(3.5)),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            .expect("create action");
+
+        assert!(state.pattern.patterns[track].is_active(2));
+        assert!(!state.pattern.patterns[track].is_active(3));
+        assert_eq!(
+            state.pattern.step_data[track].get(2, StepParam::Duration),
+            1.0
+        );
+    }
+
+    #[test]
+    fn piano_roll_bulk_resize_chord_uses_original_voice_indices() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+        let step = 2;
+        state.pattern.chord_data[track].add_note_with_duration(step, 7.0, 1.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 0.0, 8.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 4.0, 2.0);
+        state.pattern.patterns[track].set_step_active(step, true);
+        state.pattern.step_data[track].set(step, StepParam::Duration, 8.0);
+
+        let action = map_value([
+            ("type", Value::Keyword("resize-item-absolute".to_string())),
+            ("id", Value::Number(piano_roll_item_id(step, 0) as f64)),
+            (
+                "ids",
+                list_value(vec![
+                    Value::Number(piano_roll_item_id(step, 0) as f64),
+                    Value::Number(piano_roll_item_id(step, 1) as f64),
+                    Value::Number(piano_roll_item_id(step, 2) as f64),
+                ]),
+            ),
+            ("time", Value::Number(4.0)),
+            ("duration-delta", Value::Number(1.0)),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &action)
+            .expect("resize action");
+
+        let mut durations_by_transpose = (0..state.pattern.chord_data[track].count(step))
+            .map(|idx| {
+                (
+                    state.pattern.chord_data[track].get(step, idx),
+                    state.pattern.chord_data[track].get_duration(step, idx),
+                )
+            })
+            .collect::<Vec<_>>();
+        durations_by_transpose.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        assert_eq!(
+            durations_by_transpose,
+            vec![(0.0, 9.0), (4.0, 3.0), (7.0, 2.0)]
+        );
+    }
+
+    #[test]
+    fn piano_roll_repeated_bulk_resize_chord_keeps_anchor_identity() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let selection = Arc::new(Mutex::new(HashSet::new()));
+        let move_state = Arc::new(Mutex::new(None));
+        let track = 0;
+        let step = 2;
+        state.pattern.chord_data[track].add_note_with_duration(step, 7.0, 3.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 0.0, 4.0);
+        state.pattern.chord_data[track].add_note_with_duration(step, 4.0, 3.0);
+        state.pattern.patterns[track].set_step_active(step, true);
+        state.pattern.step_data[track].set(step, StepParam::Duration, 4.0);
+
+        let ids = || {
+            list_value(vec![
+                Value::Number(piano_roll_item_id(step, 0) as f64),
+                Value::Number(piano_roll_item_id(step, 1) as f64),
+                Value::Number(piano_roll_item_id(step, 2) as f64),
+            ])
+        };
+        let first = map_value([
+            ("type", Value::Keyword("resize-item-absolute".to_string())),
+            ("id", Value::Number(piano_roll_item_id(step, 0) as f64)),
+            ("ids", ids()),
+            ("time", Value::Number(6.0)),
+            ("duration-delta", Value::Number(1.0)),
+        ]);
+        let second = map_value([
+            ("type", Value::Keyword("resize-item-absolute".to_string())),
+            ("id", Value::Number(piano_roll_item_id(step, 0) as f64)),
+            ("ids", ids()),
+            ("time", Value::Number(4.0)),
+            ("duration-delta", Value::Number(-1.0)),
+        ]);
+
+        apply_piano_roll_action(&state, track, &selection, &move_state, &first)
+            .expect("first resize action");
+        apply_piano_roll_action(&state, track, &selection, &move_state, &second)
+            .expect("second resize action");
+
+        let mut durations_by_transpose = (0..state.pattern.chord_data[track].count(step))
+            .map(|idx| {
+                (
+                    state.pattern.chord_data[track].get(step, idx),
+                    state.pattern.chord_data[track].get_duration(step, idx),
+                )
+            })
+            .collect::<Vec<_>>();
+        durations_by_transpose.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        assert_eq!(
+            durations_by_transpose,
+            vec![(0.0, 3.0), (4.0, 2.0), (7.0, 2.0)]
         );
     }
 

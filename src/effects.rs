@@ -343,6 +343,19 @@ pub struct EffectDescriptor {
 impl EffectDescriptor {
     pub const BUILTIN_INSERT_PREFIX: &'static str = "builtin:";
 
+    pub fn enabled_param(node_param_idx: u32, default: f32) -> ParamDescriptor {
+        ParamDescriptor {
+            name: "enabled".to_string(),
+            min: 0.0,
+            max: 1.0,
+            default,
+            kind: ParamKind::Boolean,
+            scaling: ParamScaling::Linear,
+            node_param_idx,
+            host_control: None,
+        }
+    }
+
     pub fn builtin_insert_names() -> &'static [&'static str] {
         &["Filter", "Delay", "Reverb"]
     }
@@ -380,16 +393,7 @@ impl EffectDescriptor {
             input_channels: 2,
             output_channels: 2,
             params: vec![
-                ParamDescriptor {
-                    name: "enabled".to_string(),
-                    min: 0.0,
-                    max: 1.0,
-                    default: 0.0,
-                    kind: ParamKind::Boolean,
-                    scaling: ParamScaling::Linear,
-                    node_param_idx: 0,
-                    host_control: None,
-                },
+                Self::enabled_param(crate::filter::FILTER_PARAM_ENABLED as u32, 0.0),
                 ParamDescriptor {
                     name: "mode".to_string(),
                     min: 0.0,
@@ -503,6 +507,7 @@ impl EffectDescriptor {
                     node_param_idx: 5,
                     host_control: None,
                 },
+                Self::enabled_param(crate::delay::DELAY_PARAM_ENABLED as u32, 0.0),
             ],
         }
     }
@@ -557,6 +562,7 @@ impl EffectDescriptor {
                     node_param_idx: crate::reverb::REVERB_PARAM_REPLACE as u32,
                     host_control: None,
                 },
+                Self::enabled_param(crate::reverb::REVERB_PARAM_ENABLED as u32, 1.0),
             ],
         }
     }
@@ -616,6 +622,7 @@ impl EffectDescriptor {
                     node_param_idx: 3,
                     host_control: None,
                 },
+                Self::enabled_param(crate::sampler::SAMPLER_PARAM_ENABLED as u32, 1.0),
             ],
         }
     }
@@ -651,7 +658,7 @@ impl EffectDescriptor {
         input_channels: usize,
         output_channels: usize,
     ) -> Self {
-        let descriptors = params
+        let mut descriptors: Vec<ParamDescriptor> = params
             .iter()
             .filter(|p| !p.hidden)
             .map(|p| ParamDescriptor {
@@ -667,6 +674,10 @@ impl EffectDescriptor {
                 host_control: None,
             })
             .collect();
+        descriptors.push(Self::enabled_param(
+            crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+            1.0,
+        ));
         Self {
             name: name.to_string(),
             params: descriptors,

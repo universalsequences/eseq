@@ -56,12 +56,14 @@ const fn total_buf_floats() -> usize {
     total
 }
 
-pub const REVERB_STATE_SIZE: usize = ST_BUFS + total_buf_floats();
+const ST_ENABLED: usize = ST_BUFS + total_buf_floats();
+pub const REVERB_STATE_SIZE: usize = ST_ENABLED + 1;
 
 // Public param indices for UI control
 pub const REVERB_PARAM_REPLACE: u64 = ST_REPLACE as u64;
 pub const REVERB_PARAM_BRIGHT: u64 = ST_BRIGHT as u64;
 pub const REVERB_PARAM_SIZE: u64 = ST_BIGNESS as u64;
+pub const REVERB_PARAM_ENABLED: u64 = ST_ENABLED as u64;
 
 /// Pre-computed buffer offsets (from index 0 of state array).
 const fn buf_offsets() -> [usize; NDELAYS] {
@@ -147,6 +149,7 @@ unsafe extern "C" fn reverb_init(
         *s.add(meta) = 0.0; // count
         *s.add(meta + 1) = (DELAY_BUF_SIZES[i] / 2) as f32; // initial length
     }
+    *s.add(ST_ENABLED) = 1.0;
 }
 
 // ── Process ──
@@ -164,6 +167,12 @@ unsafe extern "C" fn reverb_process(
     let in0 = *inp.add(0); // Mono input (from reverb bus)
     let out0 = *out.add(0); // L output
     let out1 = *out.add(1); // R output
+
+    if *s.add(ST_ENABLED) <= 0.5 {
+        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
+        std::ptr::copy_nonoverlapping(in0 as *const f32, out1, nf);
+        return;
+    }
 
     // Read sample rate
     let mut sample_rate = *s.add(ST_SAMPLE_RATE);

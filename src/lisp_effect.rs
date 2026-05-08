@@ -69,12 +69,24 @@ fn set_dgen_process_fn(slot_id: usize, f: DGenProcessFn) {
 // state[1] = total_memory_slots (f32)
 // state[2] = canary
 // state[3] = declared input count (f32)
-// state[4..4+N] = DGenLisp read buffer
+// state[4] = enabled (0 = bypass/silent, 1 = active)
+// state[5..5+N] = DGenLisp read buffer
 // state[...]     = DGenLisp write buffer (separate to respect `restrict`)
 
-pub const HEADER_SLOTS: usize = 4;
+pub const DGEN_ENABLED_PARAM_IDX: usize = 4;
+pub const HEADER_SLOTS: usize = 5;
 pub const DGEN_STATE_REDZONE_SLOTS: usize = 256;
 const HEADER_CANARY: f32 = f32::from_bits(0x4cd35a1d);
+
+fn ensure_enabled_param(params: &mut Vec<crate::effects::ParamDescriptor>) {
+    if params
+        .iter()
+        .any(|param| param.name.eq_ignore_ascii_case("enabled"))
+    {
+        return;
+    }
+    params.push(EffectDescriptor::enabled_param(params.len() as u32, 1.0));
+}
 
 pub fn dgen_buffer_span_slots(total_memory_slots: usize) -> usize {
     total_memory_slots + DGEN_STATE_REDZONE_SLOTS
@@ -107,6 +119,21 @@ unsafe extern "C" fn dgenlisp_wrapper_process(
     if (*s.add(2)).to_bits() != HEADER_CANARY.to_bits() {
         return;
     }
+    if *s.add(DGEN_ENABLED_PARAM_IDX) <= 0.5 {
+        if inp.is_null() || out.is_null() {
+            return;
+        }
+        let nf = nframes as usize;
+        let input_count = (*s.add(3)).max(1.0) as usize;
+        for ch in 0..input_count.min(2) {
+            let in_ch = *inp.add(ch);
+            let out_ch = *out.add(ch);
+            if !in_ch.is_null() && !out_ch.is_null() {
+                std::ptr::copy_nonoverlapping(in_ch as *const f32, out_ch, nf);
+            }
+        }
+        return;
+    }
     let fn_ptr = DGEN_PROCESS_FNS[slot_id % REGISTRY_SIZE].load(Ordering::Acquire);
     if fn_ptr != 0 {
         let process_fn: DGenProcessFn = std::mem::transmute(fn_ptr);
@@ -131,8 +158,9 @@ unsafe extern "C" fn dgenlisp_wrapper_process(
 ///   [1] = total_memory_slots
 ///   [2] = canary
 ///   [3] = declared input count
-///   [4] = num_entries (N)
-///   [5..5+2N] = pairs of (index, value)
+///   [4] = enabled
+///   [5] = num_entries (N)
+///   [6..6+2N] = pairs of (index, value)
 unsafe extern "C" fn dgenlisp_init(
     state: *mut c_void,
     _sample_rate: c_int,
@@ -150,14 +178,15 @@ unsafe extern "C" fn dgenlisp_init(
     *dst.add(1) = *src.add(1); // total_memory_slots
     *dst.add(2) = *src.add(2); // canary
     *dst.add(3) = *src.add(3); // declared input count
+    *dst.add(DGEN_ENABLED_PARAM_IDX) = *src.add(4); // enabled
 
     // Apply sparse index/value pairs into the memory region
-    let num_entries = (*src.add(4)) as usize;
+    let num_entries = (*src.add(5)) as usize;
     let total_memory_slots = *dst.add(1) as usize;
     let mem = dgen_read_buffer_ptr(dst);
     for i in 0..num_entries {
-        let idx = (*src.add(5 + i * 2)) as usize;
-        let val = *src.add(5 + i * 2 + 1);
+        let idx = (*src.add(6 + i * 2)) as usize;
+        let val = *src.add(6 + i * 2 + 1);
         *mem.add(idx) = val;
     }
     let write_mem = dgen_write_buffer_ptr(dst, total_memory_slots);
@@ -761,7 +790,7 @@ pub fn load_dylib(path: &Path) -> Result<LoadedDGenLib, String> {
 // ── Build initial state message (compact) ──
 
 /// Build a compact init message:
-/// [slot_id, total_memory_slots, canary, declared_input_count, num_entries, idx0, val0, ...]
+/// [slot_id, total_memory_slots, canary, declared_input_count, enabled, num_entries, idx0, val0, ...]
 /// The engine zeroes state; init only needs to set non-zero values.
 fn build_init_message(slot_id: usize, manifest: &DGenManifest) -> Vec<f32> {
     // Collect all non-zero index/value pairs
@@ -787,12 +816,13 @@ fn build_init_message(slot_id: usize, manifest: &DGenManifest) -> Vec<f32> {
         }
     }
 
-    // Header (5) + pairs (2 * N)
-    let mut msg = Vec::with_capacity(5 + entries.len() * 2);
+    // Header (6) + pairs (2 * N)
+    let mut msg = Vec::with_capacity(6 + entries.len() * 2);
     msg.push(slot_id as f32);
     msg.push(manifest.total_memory_slots as f32);
     msg.push(HEADER_CANARY);
     msg.push(manifest.n_inputs as f32);
+    msg.push(1.0);
     msg.push(entries.len() as f32);
     for (idx, val) in &entries {
         msg.push(*idx as f32);
@@ -1341,6 +1371,23 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
     if (*s.add(2)).to_bits() != HEADER_CANARY.to_bits() {
         return;
     }
+    if *s.add(DGEN_ENABLED_PARAM_IDX) <= 0.5 {
+        let nf = nframes as usize;
+        let output_count = DGEN_INSTRUMENT_OUTPUT_COUNTS[slot_id % INSTRUMENT_REGISTRY_SIZE]
+            .load(Ordering::Acquire)
+            .max(1);
+        if !out.is_null() {
+            for ch in 0..output_count {
+                let out_ch = *out.add(ch);
+                if !out_ch.is_null() {
+                    for i in 0..nf {
+                        *out_ch.add(i) = 0.0;
+                    }
+                }
+            }
+        }
+        return;
+    }
     let engine_id = slot_id / MAX_VOICES;
     let voice_idx = slot_id % MAX_VOICES;
     if engine_id < MAX_TRACKS {
@@ -1442,11 +1489,12 @@ pub fn build_init_message_for_voice(
         }
     }
 
-    let mut msg = Vec::with_capacity(5 + entries.len() * 2);
+    let mut msg = Vec::with_capacity(6 + entries.len() * 2);
     msg.push(slot_id as f32);
     msg.push(manifest.total_memory_slots as f32);
     msg.push(HEADER_CANARY);
     msg.push(manifest.n_inputs as f32);
+    msg.push(1.0);
     msg.push(entries.len() as f32);
     for (idx, val) in &entries {
         msg.push(*idx as f32);
@@ -1732,10 +1780,10 @@ pub fn render_loaded_instrument_for_test(
     let mut memory_write = vec![0.0f32; total_slots];
     let slot_id = options.voice_index;
     let init_msg = build_init_message_for_voice(slot_id, manifest, options.voice_index);
-    let entry_count = init_msg.get(4).copied().unwrap_or(0.0) as usize;
+    let entry_count = init_msg.get(5).copied().unwrap_or(0.0) as usize;
     for i in 0..entry_count {
-        let idx = init_msg[5 + i * 2] as usize;
-        let value = init_msg[5 + i * 2 + 1];
+        let idx = init_msg[6 + i * 2] as usize;
+        let value = init_msg[6 + i * 2 + 1];
         if idx < total_slots {
             memory_read[idx] = value;
         }
@@ -2557,10 +2605,14 @@ fn register_sequencer_natives_with_accumulators(
                     RegisteredAccumulatorCallback::Source(eseqlisp::vm::format_lisp_source(other))
                 }
             };
-            let params = pending_params_for_register
+            let mut params = pending_params_for_register
                 .lock()
                 .map_err(|_| "failed to lock pending MIDI FX params".to_string())?
                 .drain(..)
+                .collect::<Vec<_>>();
+            ensure_enabled_param(&mut params);
+            let params = params
+                .into_iter()
                 .enumerate()
                 .map(|(idx, mut param)| {
                     param.node_param_idx = idx as u32;
@@ -4179,6 +4231,7 @@ fn register_sequencer_natives_with_accumulators(
                 .map(|desc| {
                     desc.params
                         .iter()
+                        .filter(|param| !param.name.eq_ignore_ascii_case("enabled"))
                         .map(|param| EValue::String(param.name.clone()))
                         .collect::<Vec<_>>()
                 })
@@ -7766,7 +7819,7 @@ mod tests {
         let slot = &state.pattern.midi_fx_slots[0][0];
         assert!(runtime.midi_fx_names().iter().any(|name| name == "arp"));
         assert_eq!(params.midi_fx_chain(), vec!["arp".to_string()]);
-        assert_eq!(slot.num_params.load(Ordering::Relaxed), 5);
+        assert_eq!(slot.num_params.load(Ordering::Relaxed), 6);
         assert_eq!(slot.defaults.get(0), 3.0);
         assert_eq!(slot.plocks.get(0, 0), Some(9.0));
     }

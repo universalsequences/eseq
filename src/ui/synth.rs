@@ -1142,6 +1142,26 @@ impl App {
         if crate::voice_modulator::is_bar_resync_param(idx as u32) {
             self.state.schedule_mod_resync();
         }
+        if self.is_sampler_track(track) {
+            if idx != crate::sampler::PARAM_ENABLED {
+                return;
+            }
+            if let Some(nodes) = self.graph.track_node_ids.get(track) {
+                for &node_id in &nodes.sampler_ids {
+                    unsafe {
+                        crate::audiograph::params_push_wrapper(
+                            self.graph.lg.0,
+                            crate::audiograph::ParamMsg {
+                                idx,
+                                logical_id: node_id as u64,
+                                fvalue: value,
+                            },
+                        );
+                    }
+                }
+            }
+            return;
+        }
         let Some(engine_id) = self.graph.track_engine_ids.get(track).and_then(|id| *id) else {
             return;
         };

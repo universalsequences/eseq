@@ -26,7 +26,9 @@ const STATE_RETRIGGER_OUT_L: usize = 17; // captured left sample at retrigger st
 const STATE_RETRIGGER_OUT_R: usize = 18; // captured right sample at retrigger start
 const STATE_START_POINT: usize = 19; // normalized 0.0–1.0 start position in buffer
 const STATE_END_POINT: usize = 20; // normalized 0.0–1.0 end position in buffer
-pub const SAMPLER_STATE_SIZE: usize = 21;
+const STATE_ENABLED: usize = 21;
+pub const SAMPLER_STATE_SIZE: usize = 22;
+pub const SAMPLER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 // Envelope phase constants
 const ENV_IDLE: f32 = 0.0;
@@ -56,6 +58,7 @@ pub const PARAM_GATE_MODE: u64 = STATE_GATE_MODE as u64;
 pub const PARAM_BUFFER_ID: u64 = STATE_BUFFER_ID as u64;
 pub const PARAM_START_POINT: u64 = STATE_START_POINT as u64;
 pub const PARAM_END_POINT: u64 = STATE_END_POINT as u64;
+pub const PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 pub struct SamplerTrack {
     pub name: String,
@@ -96,6 +99,7 @@ unsafe extern "C" fn sampler_init(
     *s.add(STATE_RETRIGGER_OUT_R) = 0.0;
     *s.add(STATE_START_POINT) = 0.0;
     *s.add(STATE_END_POINT) = 1.0;
+    *s.add(STATE_ENABLED) = 1.0;
 }
 
 /// extern "C" process — reads sample data from buffer, writes to output.
@@ -134,6 +138,7 @@ unsafe extern "C" fn sampler_process(
     let mut retrigger_out_r = *s.add(STATE_RETRIGGER_OUT_R);
     let start_point = (*s.add(STATE_START_POINT)).clamp(0.0, 1.0);
     let end_point = (*s.add(STATE_END_POINT)).clamp(0.0, 1.0);
+    let enabled = *s.add(STATE_ENABLED);
 
     let buf_desc = buffers as *const BufferDesc;
     let desc = &*buf_desc.add(buffer_id);
@@ -144,6 +149,14 @@ unsafe extern "C" fn sampler_process(
     let out1 = *out.add(1);
     let nf = nframes as usize;
     let channel_count = desc.channel_count.max(1) as usize;
+
+    if enabled <= 0.5 {
+        for i in 0..nf {
+            *out0.add(i) = 0.0;
+            *out1.add(i) = 0.0;
+        }
+        return;
+    }
 
     // Compute effective sample region from normalized start/end points
     let start_sample = (start_point * sample_len as f32) as usize;

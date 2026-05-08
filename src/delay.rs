@@ -23,10 +23,11 @@ const STATE_WRITE_POS_R: usize = 14;
 const STATE_DAMP_STATE_L: usize = 15;
 const STATE_DAMP_STATE_R: usize = 16;
 const STATE_BUF_OFFSET: usize = 17;
+const STATE_ENABLED: usize = STATE_BUF_OFFSET + MAX_DELAY_SAMPLES * 2;
 // L buffer: STATE_BUF_OFFSET .. STATE_BUF_OFFSET + MAX_DELAY_SAMPLES
 // R buffer: STATE_BUF_OFFSET + MAX_DELAY_SAMPLES .. STATE_BUF_OFFSET + 2*MAX_DELAY_SAMPLES
 
-pub const DELAY_STATE_SIZE: usize = STATE_BUF_OFFSET + MAX_DELAY_SAMPLES * 2;
+pub const DELAY_STATE_SIZE: usize = STATE_ENABLED + 1;
 
 // Param indices for external control
 #[allow(dead_code)]
@@ -42,6 +43,7 @@ pub const DELAY_PARAM_DAMPENING: u64 = STATE_DAMPENING as u64;
 #[allow(dead_code)]
 pub const DELAY_PARAM_STEREO_WIDTH: u64 = STATE_STEREO_WIDTH as u64;
 pub const DELAY_PARAM_BPM: u64 = STATE_BPM as u64;
+pub const DELAY_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 unsafe extern "C" fn delay_init(
     state: *mut c_void,
@@ -72,6 +74,7 @@ unsafe extern "C" fn delay_init(
     for i in 0..(MAX_DELAY_SAMPLES * 2) {
         *s.add(STATE_BUF_OFFSET + i) = 0.0;
     }
+    *s.add(STATE_ENABLED) = 0.0;
 }
 
 unsafe extern "C" fn delay_process(
@@ -88,6 +91,12 @@ unsafe extern "C" fn delay_process(
     let in1 = *inp.add(1);
     let out0 = *out.add(0); // L output
     let out1 = *out.add(1); // R output
+
+    if *s.add(STATE_ENABLED) <= 0.5 {
+        std::ptr::copy_nonoverlapping(in0 as *const f32, out0, nf);
+        std::ptr::copy_nonoverlapping(in1 as *const f32, out1, nf);
+        return;
+    }
 
     let target_wet = *s.add(STATE_WET);
     let synced = *s.add(STATE_SYNCED);

@@ -14,9 +14,9 @@ use crate::effects::EffectSlotSnapshot;
 use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
-    PARAM_ATTACK_SAMPLES, PARAM_END_POINT, PARAM_GATE_MODE, PARAM_GATE_SAMPLES, PARAM_PLAYHEAD,
-    PARAM_RELEASE_SAMPLES, PARAM_SPEED, PARAM_START_POINT, PARAM_TRANSPOSE, PARAM_TRIGGER,
-    PARAM_VELOCITY,
+    PARAM_ATTACK_SAMPLES, PARAM_ENABLED, PARAM_END_POINT, PARAM_GATE_MODE, PARAM_GATE_SAMPLES,
+    PARAM_PLAYHEAD, PARAM_RELEASE_SAMPLES, PARAM_SPEED, PARAM_START_POINT, PARAM_TRANSPOSE,
+    PARAM_TRIGGER, PARAM_VELOCITY,
 };
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
@@ -494,7 +494,16 @@ unsafe fn send_trigger(
     transpose: f32,
     start_point: f32,
     end_point: f32,
+    enabled: f32,
 ) {
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_ENABLED,
+            logical_id: lid,
+            fvalue: enabled,
+        },
+    );
     params_push_wrapper(
         lg,
         ParamMsg {
@@ -596,7 +605,16 @@ unsafe fn send_keyboard_trigger(
     gate_mode: f32,
     start_point: f32,
     end_point: f32,
+    enabled: f32,
 ) {
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_ENABLED,
+            logical_id: lid,
+            fvalue: enabled,
+        },
+    );
     params_push_wrapper(
         lg,
         ParamMsg {
@@ -1302,6 +1320,10 @@ fn fire_resolved(
         .plocks
         .get(step, 3)
         .unwrap_or_else(|| inst_slot.defaults.get(3));
+    let instrument_enabled = inst_slot
+        .plocks
+        .get(step, 4)
+        .unwrap_or_else(|| inst_slot.defaults.get(4));
     let velocity = resolved.velocity;
     let base_note_offset = f32::from_bits(
         data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
@@ -1463,6 +1485,7 @@ fn fire_resolved(
                         transpose,
                         start_point,
                         end_point,
+                        instrument_enabled,
                     );
                 }
             }
@@ -1570,6 +1593,7 @@ fn fire_resolved(
                     transpose,
                     start_point,
                     end_point,
+                    instrument_enabled,
                 );
             }
         }
@@ -1795,6 +1819,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
                 let kb_start = kb_inst_slot.defaults.get(2);
                 let kb_end = kb_inst_slot.defaults.get(3);
+                let kb_enabled = kb_inst_slot.defaults.get(4);
                 unsafe {
                     send_keyboard_trigger(
                         data.lg.0,
@@ -1806,6 +1831,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         gate_mode,
                         kb_start,
                         kb_end,
+                        kb_enabled,
                     );
                 }
                 store_active_keyboard_note(
@@ -1958,6 +1984,10 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         transpose,
                         chop_start,
                         chop_end,
+                        chop_inst_slot
+                            .plocks
+                            .get(cs.step, 4)
+                            .unwrap_or_else(|| chop_inst_slot.defaults.get(4)),
                     );
                 }
                 data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
