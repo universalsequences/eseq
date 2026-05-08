@@ -33,13 +33,30 @@ use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
 
-fn metal_tile_content_viewport(rect: &Rect, show_status: bool) -> (u16, u16) {
-    let cols = rect.width.max(0.0).floor() as u16;
-    let rows = if show_status {
-        (rect.height.max(0.0).floor() as u16).saturating_sub(1)
+fn metal_tile_content_viewport(
+    rect: &Rect,
+    show_status: bool,
+    show_border: bool,
+    border_width_px: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> (u16, u16) {
+    let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
+    let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
+    let border_inset_px = if show_border {
+        border_width_px
+            .max(0.0)
+            .min(tile_width_px * 0.5)
+            .min(tile_height_px * 0.5)
     } else {
-        rect.height.max(0.0).floor() as u16
+        0.0
     };
+    let cols = (rect.width - border_inset_px * 2.0 / cell_w.max(1.0))
+        .max(0.0)
+        .floor() as u16;
+    let content_height =
+        rect.height - border_inset_px * 2.0 / cell_h.max(1.0) - if show_status { 1.0 } else { 0.0 };
+    let rows = content_height.max(0.0).floor() as u16;
     (cols.max(1), rows.max(1))
 }
 
@@ -1002,16 +1019,16 @@ impl Editor {
         border_inset: u16,
     ) -> Option<(u16, u16, u16, u16)> {
         let rect = self.tile_rect(tile_id)?;
-        let border = border_inset as f32;
         let show_status = self.tile_effective_show_status(tile_id)?;
+        let (border_col, border_row) = self.tile_content_border_insets(tile_id, border_inset);
 
-        let content_col_f = rect.col + border;
-        let content_row_f = rect.row + border;
-        let content_width_f = (rect.width - border * 2.0).max(0.0);
+        let content_col_f = rect.col + border_col;
+        let content_row_f = rect.row + border_row;
+        let content_width_f = (rect.width - border_col * 2.0).max(0.0);
         let content_height_f = if show_status {
-            (rect.height - border * 2.0 - 1.0).max(0.0)
+            (rect.height - border_row * 2.0 - 1.0).max(0.0)
         } else {
-            (rect.height - border * 2.0).max(0.0)
+            (rect.height - border_row * 2.0).max(0.0)
         };
 
         if border_inset == 0 {
@@ -1062,6 +1079,9 @@ impl Editor {
             return (0.0, 0.0);
         }
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        if cell_w <= 1.0 || cell_h <= 1.0 {
+            return (0.0, 0.0);
+        }
         (
             leaf.border_width_px.max(0.0) / cell_w.max(1.0),
             leaf.border_width_px.max(0.0) / cell_h.max(1.0),
@@ -1823,13 +1843,32 @@ impl Editor {
             .runtime
             .current_layout
             .as_ref()
-            .map(|layout| layout.rect.row + layout.rect.height - viewport_rows)
+            .map(|layout| {
+                crate::ui::hit::max_extent(layout, self.runtime.layout_aspect()).1 as f32
+                    - viewport_rows
+            })
             .unwrap_or(0.0);
         if overflow <= SCROLL_SLOP_ROWS {
             0.0
         } else {
             overflow.max(0.0)
         }
+    }
+
+    pub fn clamp_widget_scroll_offsets(&mut self) {
+        let max_v = self.max_widget_vertical_scroll();
+        let max_h = {
+            let vp = self.runtime.layout_cols() as f32;
+            let aspect = self.runtime.layout_aspect();
+            self.runtime
+                .current_layout
+                .as_ref()
+                .map(|layout| (crate::ui::hit::max_extent(layout, aspect).0 as f32 - vp).max(0.0))
+                .unwrap_or(0.0)
+        };
+        let leaf = self.active_leaf_mut();
+        leaf.widget_scroll_top = leaf.widget_scroll_top.clamp(0.0, max_v);
+        leaf.widget_scroll_left = leaf.widget_scroll_left.clamp(0.0, max_h);
     }
 
     /// Apply smooth (sub-cell) scroll deltas to the widget viewport.
@@ -1902,6 +1941,10 @@ impl Editor {
 
     pub fn layout_aspect(&self) -> f32 {
         self.runtime.layout_aspect()
+    }
+
+    pub fn layout_cell_dims(&self) -> (f32, f32) {
+        self.runtime.layout_cell_dims()
     }
 
     pub fn set_text_measurer(
@@ -3681,6 +3724,7 @@ impl Editor {
         let tree = self.buffers[buffer_idx].widget_tree.clone();
         let buffer_id = self.buffers[buffer_idx].id as u64;
         let tile_ids = self.tile_root.leaf_ids();
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         // Collect tile viewports first to avoid borrow issues
         let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
             .into_iter()
@@ -3700,7 +3744,14 @@ impl Editor {
                     .tile_effective_show_status(id)
                     .unwrap_or(leaf.show_status);
                 let (cols, rows) = match rect {
-                    Some(r) => metal_tile_content_viewport(r, show_status),
+                    Some(r) => metal_tile_content_viewport(
+                        r,
+                        show_status,
+                        leaf.show_border,
+                        leaf.border_width_px,
+                        cell_w,
+                        cell_h,
+                    ),
                     None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
                 };
                 Some((id, cols, rows))
@@ -3769,6 +3820,7 @@ impl Editor {
         };
         let buffer_id = self.buffers[buffer_idx].id as u64;
         let tile_ids = self.tile_root.leaf_ids();
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
         let tiles_to_update: Vec<(TileId, u16, u16)> = tile_ids
             .into_iter()
             .filter(|id| *id != self.active_tile)
@@ -3786,7 +3838,14 @@ impl Editor {
                     .tile_effective_show_status(id)
                     .unwrap_or(leaf.show_status);
                 let (cols, rows) = match rect {
-                    Some(r) => metal_tile_content_viewport(r, show_status),
+                    Some(r) => metal_tile_content_viewport(
+                        r,
+                        show_status,
+                        leaf.show_border,
+                        leaf.border_width_px,
+                        cell_w,
+                        cell_h,
+                    ),
                     None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
                 };
                 Some((id, cols, rows))

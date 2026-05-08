@@ -1697,11 +1697,20 @@ fragment float4 waveform_frag(
                     let widget_scroll = tile.frame.widget_scroll_top;
                     let widget_col_off = content_col - tile.frame.widget_scroll_left;
                     let widget_row_off = content_row - text_scroll - widget_scroll;
+                    let content_width_cells =
+                        ((content_right_px - content_left_px) / cell_w).max(0.0);
+                    let fill_extra_cols = (content_width_cells - layout.rect.width).max(0.0);
                     let offset_prims: Vec<_> = primitives
                         .into_iter()
                         .map(|p| {
                             offset_primitive(
-                                p,
+                                extend_right_edge_primitive(
+                                    p,
+                                    layout.rect.width,
+                                    fill_extra_cols,
+                                    cell_w,
+                                    vp_w,
+                                ),
                                 widget_col_off,
                                 widget_row_off,
                                 cell_w,
@@ -4393,6 +4402,78 @@ fragment float4 waveform_frag(
             }
         }
         (bg_runs, fg_runs)
+    }
+
+    fn extend_right_edge_primitive(
+        prim: widget_render::MetalPrimitive,
+        layout_width: f32,
+        extra_cols: f32,
+        cell_w: f32,
+        vp_w: f32,
+    ) -> widget_render::MetalPrimitive {
+        if extra_cols <= 0.001 || layout_width <= 0.0 {
+            return prim;
+        }
+        let reaches_right = |right: f32| (right - layout_width).abs() <= 0.01;
+        match prim {
+            widget_render::MetalPrimitive::Rect(mut r) => {
+                if reaches_right(r.rect.col + r.rect.width) {
+                    r.rect.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::Rect(r)
+            }
+            widget_render::MetalPrimitive::Quad(mut q) => {
+                if reaches_right(q.x + q.width) {
+                    q.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::Quad(q)
+            }
+            widget_render::MetalPrimitive::ProportionalText(mut p) => {
+                if p.align_width > 0.0 && reaches_right(p.col + p.align_width) {
+                    p.align_width += extra_cols;
+                }
+                widget_render::MetalPrimitive::ProportionalText(p)
+            }
+            widget_render::MetalPrimitive::Waveform(mut w) => {
+                if reaches_right(w.rect.col + w.rect.width) {
+                    w.rect.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::Waveform(w)
+            }
+            widget_render::MetalPrimitive::Image(mut i) => {
+                if reaches_right(i.rect.col + i.rect.width) {
+                    i.rect.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::Image(i)
+            }
+            widget_render::MetalPrimitive::WidgetInstance {
+                widget_type,
+                mut instance,
+                is_background,
+            } => {
+                let local_right_ndc = -1.0 + (layout_width * cell_w / vp_w) * 2.0;
+                if (instance.ndc_max[0] - local_right_ndc).abs() <= 0.002 {
+                    let old_width = instance.ndc_max[0] - instance.ndc_min[0];
+                    instance.ndc_max[0] += (extra_cols * cell_w / vp_w) * 2.0;
+                    let new_width = instance.ndc_max[0] - instance.ndc_min[0];
+                    if old_width > 0.0 {
+                        instance.pixel_aspect *= new_width / old_width;
+                    }
+                }
+                widget_render::MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    is_background,
+                }
+            }
+            widget_render::MetalPrimitive::PushClipRect(mut r) => {
+                if reaches_right(r.col + r.width) {
+                    r.width += extra_cols;
+                }
+                widget_render::MetalPrimitive::PushClipRect(r)
+            }
+            other => other,
+        }
     }
 
     /// Offset a MetalPrimitive by (col_off, row_off) cells.

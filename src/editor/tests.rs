@@ -2125,10 +2125,21 @@ fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
     editor.open_scratch_buffer("*test*", "abcdef\nsecond");
     editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
     editor.set_layout_viewport(20, 8);
+    struct TestTextMeasurer;
+    impl crate::layout::TextMeasurer for TestTextMeasurer {
+        fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+            text.chars().count() as f32 * 10.0
+        }
+
+        fn line_height_px(&self, _font_size: f32) -> f32 {
+            20.0
+        }
+    }
+    editor.set_text_measurer(Box::new(TestTextMeasurer), 10.0, 20.0);
 
     let tile_id = editor.active_tile;
     if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
-        leaf.border_width_px = 0.2;
+        leaf.border_width_px = 2.0;
     }
     editor.cached_tile_rects = vec![(
         tile_id,

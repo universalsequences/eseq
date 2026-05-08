@@ -4,6 +4,7 @@ use crate::backend::{
 };
 use crate::buffer::{Buffer, BufferTextStyle};
 use crate::editor::{Editor, ViewMode};
+use crate::layout::Rect;
 use crate::mode::{TokenClass, TokenSpan, highlight_lines};
 use crate::text::matching_paren;
 use crate::theme;
@@ -257,6 +258,7 @@ pub fn build_render_frame(
     viewport_height: usize,
 ) -> RenderFrame {
     editor.set_layout_viewport(viewport_width as u16, viewport_height as u16);
+    editor.clamp_widget_scroll_offsets();
     if let Some(layout) = editor.widget_layout() {
         let aspect = editor.layout_aspect();
         let max_h =
@@ -502,9 +504,38 @@ fn metal_content_cells(logical_extent: f32) -> usize {
     logical_extent.max(0.0).floor() as usize
 }
 
+fn metal_tile_inner_cells(
+    rect: Rect,
+    show_status: bool,
+    show_border: bool,
+    border_width_px: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> (usize, usize) {
+    let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
+    let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
+    let border_inset_px = if show_border {
+        border_width_px
+            .max(0.0)
+            .min(tile_width_px * 0.5)
+            .min(tile_height_px * 0.5)
+    } else {
+        0.0
+    };
+    let content_width = rect.width - (border_inset_px * 2.0 / cell_w.max(1.0));
+    let content_height = rect.height
+        - (border_inset_px * 2.0 / cell_h.max(1.0))
+        - if show_status { 1.0 } else { 0.0 };
+    (
+        metal_content_cells(content_width),
+        metal_content_cells(content_height),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::metal_content_cells;
+    use super::{metal_content_cells, metal_tile_inner_cells};
+    use crate::layout::Rect;
 
     #[test]
     fn metal_content_cells_never_round_fractional_tiles_up() {
@@ -516,6 +547,46 @@ mod tests {
     #[test]
     fn metal_content_cells_clamps_negative_extents() {
         assert_eq!(metal_content_cells(-0.25), 0);
+    }
+
+    #[test]
+    fn metal_tile_inner_cells_subtracts_pixel_border_from_fill_width() {
+        let (cols, rows) = metal_tile_inner_cells(
+            Rect {
+                col: 0.0,
+                row: 0.0,
+                width: 100.0,
+                height: 10.0,
+            },
+            false,
+            true,
+            2.0,
+            10.0,
+            20.0,
+        );
+
+        assert_eq!(cols, 99);
+        assert_eq!(rows, 9);
+    }
+
+    #[test]
+    fn metal_tile_inner_cells_reserves_status_after_border_inset() {
+        let (cols, rows) = metal_tile_inner_cells(
+            Rect {
+                col: 0.0,
+                row: 0.0,
+                width: 100.0,
+                height: 10.0,
+            },
+            true,
+            true,
+            2.0,
+            10.0,
+            20.0,
+        );
+
+        assert_eq!(cols, 99);
+        assert_eq!(rows, 8);
     }
 }
 
@@ -529,6 +600,7 @@ fn build_tiled_render_frame_impl(
     editor.update_tile_rects(total_width as u16, total_height as u16);
     let tile_rects: Vec<_> = editor.tile_rects().to_vec();
     let active_tile = editor.active_tile;
+    let (cell_w, cell_h) = editor.layout_cell_dims();
 
     let buf = editor.active_buffer();
     let (cursor_row, cursor_col) = buf.cursor;
@@ -624,15 +696,19 @@ fn build_tiled_render_frame_impl(
             };
         } else {
             // Metal tile rects can be fractional because margins/splits are
-            // stored in logical cell units. Rounding can give :width :fill
-            // widgets one more column than the tile actually has, so use only
-            // the guaranteed fully available content cells.
-            inner_width = metal_content_cells(rect.width);
-            inner_height = if show_status {
-                metal_content_cells(rect.height).saturating_sub(1) // status bar only
-            } else {
-                metal_content_cells(rect.height)
-            };
+            // stored in logical cell units, and the Metal backend clips content
+            // inside pixel borders. Lay widgets out to the same inset content
+            // rect so :width :fill children do not clip their right edge.
+            let (cols, rows) = metal_tile_inner_cells(
+                rect,
+                show_status,
+                show_border,
+                border_width_px,
+                cell_w,
+                cell_h,
+            );
+            inner_width = cols;
+            inner_height = rows;
         }
 
         let frame_key = (
