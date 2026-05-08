@@ -194,6 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending_drag: Option<(Event, (f32, f32))> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
+    let mut soft_step_param_edit = SoftStepParamEdit::default();
 
     // Inline editor session state (instrument/effect creation/editing)
     let mut editor_buffer_name: Option<String> = None;
@@ -303,6 +304,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if should_toggle_play_on_space(&editor, &key) {
                         let _ = editor.runtime_mut().eval_str("(seq-toggle-play)");
                         editor.refresh_runtime_side_effects();
+                        ui_loop_stats.note_event(event_started.elapsed());
+                        continue;
+                    }
+                    if handle_metal_soft_step_param_key(
+                        &mut editor,
+                        &key,
+                        &state,
+                        &current_track,
+                        &mut soft_step_param_edit,
+                    ) {
                         ui_loop_stats.note_event(event_started.elapsed());
                         continue;
                     }
@@ -2241,6 +2252,382 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: clamped,
                                     },
                                 );
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    "set-track-plock-entry" => {
+                        if let Value::Map(ref map) = payload {
+                            let target = map.get("target").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            let step = map.get("step-idx").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
+                            if let (Some(target), Some(step), Some(value)) = (target, step, value) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                match target.as_str() {
+                                    "timebase" => {
+                                        let idx = (value.round() as usize)
+                                            .min(sequencer::sequencer::Timebase::ALL.len() - 1);
+                                        state.pattern.timebase_plocks[track]
+                                            .set(step, sequencer::sequencer::Timebase::ALL[idx]);
+                                        state.publish_scheduler_snapshot();
+                                    }
+                                    "swing" => {
+                                        state.pattern.swing_plocks[track].set(step, value);
+                                        state.publish_scheduler_snapshot();
+                                    }
+                                    "swing-resolution" => {
+                                        let idx = (value.round() as usize).min(
+                                            sequencer::sequencer::SwingResolution::ALL.len() - 1,
+                                        );
+                                        state.pattern.swing_resolution_plocks[track].set(
+                                            step,
+                                            sequencer::sequencer::SwingResolution::ALL[idx],
+                                        );
+                                        state.publish_scheduler_snapshot();
+                                    }
+                                    "instrument" => {
+                                        if let Some(param_idx) = param_idx {
+                                            if let Some(desc) = app
+                                                .graph
+                                                .instrument_descriptors
+                                                .get(track)
+                                                .and_then(|d| d.params.get(param_idx))
+                                                .cloned()
+                                            {
+                                                let stored =
+                                                    desc.clamp(desc.user_input_to_stored(value));
+                                                state.pattern.instrument_slots[track]
+                                                    .plocks
+                                                    .set(step, param_idx, stored);
+                                                state.publish_scheduler_snapshot();
+                                            }
+                                        }
+                                    }
+                                    "effect" => {
+                                        if let (Some(slot_idx), Some(param_idx)) =
+                                            (slot_idx, param_idx)
+                                        {
+                                            if let Some(slot) = state
+                                                .pattern
+                                                .effect_chains
+                                                .get(track)
+                                                .and_then(|chain| chain.get(slot_idx))
+                                            {
+                                                let clamped = app
+                                                    .graph
+                                                    .effect_descriptors
+                                                    .get(track)
+                                                    .and_then(|d| d.get(slot_idx))
+                                                    .and_then(|d| d.params.get(param_idx))
+                                                    .map(|p| value.clamp(p.min, p.max))
+                                                    .unwrap_or(value);
+                                                slot.plocks.set(step, param_idx, clamped);
+                                                state.publish_scheduler_snapshot();
+                                            }
+                                        }
+                                    }
+                                    "midi-fx" => {
+                                        if let (Some(slot_idx), Some(param_idx)) =
+                                            (slot_idx, param_idx)
+                                        {
+                                            if let Some(slot) = state
+                                                .pattern
+                                                .midi_fx_slots
+                                                .get(track)
+                                                .and_then(|slots| slots.get(slot_idx))
+                                            {
+                                                let chain = state.pattern.track_params[track]
+                                                    .midi_fx_chain();
+                                                let clamped = chain
+                                                    .get(slot_idx)
+                                                    .and_then(|name| {
+                                                        sequencer::lisp_effect::load_midi_fx_descriptor(name)
+                                                    })
+                                                    .and_then(|desc| {
+                                                        desc.params.get(param_idx).cloned()
+                                                    })
+                                                    .map(|p| value.clamp(p.min, p.max))
+                                                    .unwrap_or(value);
+                                                slot.plocks.set(step, param_idx, clamped);
+                                                state.publish_scheduler_snapshot();
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    "set-track-plock-entry-option" => {
+                        if let Value::Map(ref map) = payload {
+                            let target = map.get("target").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            let step = map.get("step-idx").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let label = map.get("label").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            if let (Some(target), Some(step), Some(label)) = (target, step, label) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                match target.as_str() {
+                                    "timebase" => {
+                                        if let Some(idx) = sequencer::sequencer::Timebase::LABELS
+                                            .iter()
+                                            .position(|item| *item == label)
+                                        {
+                                            state.pattern.timebase_plocks[track].set(
+                                                step,
+                                                sequencer::sequencer::Timebase::ALL[idx],
+                                            );
+                                            state.publish_scheduler_snapshot();
+                                        }
+                                    }
+                                    "swing-resolution" => {
+                                        if let Some(idx) =
+                                            sequencer::sequencer::SwingResolution::LABELS
+                                                .iter()
+                                                .position(|item| *item == label)
+                                        {
+                                            state.pattern.swing_resolution_plocks[track].set(
+                                                step,
+                                                sequencer::sequencer::SwingResolution::ALL[idx],
+                                            );
+                                            state.publish_scheduler_snapshot();
+                                        }
+                                    }
+                                    "instrument" => {
+                                        if let Some(param_idx) = param_idx {
+                                            if let Some(selected_idx) = app
+                                                .graph
+                                                .instrument_descriptors
+                                                .get(track)
+                                                .and_then(|d| d.params.get(param_idx))
+                                                .and_then(|p| match &p.kind {
+                                                    sequencer::effects::ParamKind::Enum {
+                                                        labels,
+                                                    } => labels
+                                                        .iter()
+                                                        .position(|item| item == &label),
+                                                    sequencer::effects::ParamKind::Boolean => {
+                                                        match label.as_str() {
+                                                            "on" | "ON" => Some(1),
+                                                            "off" | "OFF" => Some(0),
+                                                            _ => None,
+                                                        }
+                                                    }
+                                                    _ => None,
+                                                })
+                                            {
+                                                state.pattern.instrument_slots[track].plocks.set(
+                                                    step,
+                                                    param_idx,
+                                                    selected_idx as f32,
+                                                );
+                                                state.publish_scheduler_snapshot();
+                                            }
+                                        }
+                                    }
+                                    "effect" => {
+                                        if let (Some(slot_idx), Some(param_idx)) =
+                                            (slot_idx, param_idx)
+                                        {
+                                            if let Some(selected_idx) = app
+                                                .graph
+                                                .effect_descriptors
+                                                .get(track)
+                                                .and_then(|d| d.get(slot_idx))
+                                                .and_then(|d| d.params.get(param_idx))
+                                                .and_then(|p| match &p.kind {
+                                                    sequencer::effects::ParamKind::Enum {
+                                                        labels,
+                                                    } => labels
+                                                        .iter()
+                                                        .position(|item| item == &label),
+                                                    sequencer::effects::ParamKind::Boolean => {
+                                                        match label.as_str() {
+                                                            "on" | "ON" => Some(1),
+                                                            "off" | "OFF" => Some(0),
+                                                            _ => None,
+                                                        }
+                                                    }
+                                                    _ => None,
+                                                })
+                                            {
+                                                if let Some(slot) = state
+                                                    .pattern
+                                                    .effect_chains
+                                                    .get(track)
+                                                    .and_then(|chain| chain.get(slot_idx))
+                                                {
+                                                    slot.plocks.set(
+                                                        step,
+                                                        param_idx,
+                                                        selected_idx as f32,
+                                                    );
+                                                    state.publish_scheduler_snapshot();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    "midi-fx" => {
+                                        if let (Some(slot_idx), Some(param_idx)) =
+                                            (slot_idx, param_idx)
+                                        {
+                                            let chain =
+                                                state.pattern.track_params[track].midi_fx_chain();
+                                            if let Some(selected_idx) = chain
+                                                .get(slot_idx)
+                                                .and_then(|name| {
+                                                    sequencer::lisp_effect::load_midi_fx_descriptor(
+                                                        name,
+                                                    )
+                                                })
+                                                .and_then(|desc| {
+                                                    desc.params.get(param_idx).and_then(|p| {
+                                                        match &p.kind {
+                                                            sequencer::effects::ParamKind::Enum {
+                                                                labels,
+                                                            } => labels
+                                                                .iter()
+                                                                .position(|item| item == &label),
+                                                            sequencer::effects::ParamKind::Boolean => {
+                                                                match label.as_str() {
+                                                                    "on" | "ON" => Some(1),
+                                                                    "off" | "OFF" => Some(0),
+                                                                    _ => None,
+                                                                }
+                                                            }
+                                                            _ => None,
+                                                        }
+                                                    })
+                                                })
+                                            {
+                                                if let Some(slot) = state
+                                                    .pattern
+                                                    .midi_fx_slots
+                                                    .get(track)
+                                                    .and_then(|slots| slots.get(slot_idx))
+                                                {
+                                                    slot.plocks.set(
+                                                        step,
+                                                        param_idx,
+                                                        selected_idx as f32,
+                                                    );
+                                                    state.publish_scheduler_snapshot();
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    "clear-track-plock-entry" => {
+                        if let Value::Map(ref map) = payload {
+                            let target = map.get("target").and_then(|cell| match &*cell.borrow() {
+                                Value::String(s) => Some(s.clone()),
+                                _ => None,
+                            });
+                            let step = map.get("step-idx").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            if let (Some(target), Some(step)) = (target, step) {
+                                let track = current_track.load(Ordering::Relaxed);
+                                match target.as_str() {
+                                    "timebase" => state.pattern.timebase_plocks[track].clear(step),
+                                    "swing" => state.pattern.swing_plocks[track].clear(step),
+                                    "swing-resolution" => {
+                                        state.pattern.swing_resolution_plocks[track].clear(step)
+                                    }
+                                    "instrument" => {
+                                        if let Some(param_idx) = param_idx {
+                                            state.pattern.instrument_slots[track]
+                                                .plocks
+                                                .clear_param(step, param_idx);
+                                        }
+                                    }
+                                    "effect" => {
+                                        if let (Some(slot_idx), Some(param_idx)) =
+                                            (slot_idx, param_idx)
+                                        {
+                                            if let Some(slot) = state
+                                                .pattern
+                                                .effect_chains
+                                                .get(track)
+                                                .and_then(|chain| chain.get(slot_idx))
+                                            {
+                                                slot.plocks.clear_param(step, param_idx);
+                                            }
+                                        }
+                                    }
+                                    "midi-fx" => {
+                                        if let (Some(slot_idx), Some(param_idx)) =
+                                            (slot_idx, param_idx)
+                                        {
+                                            if let Some(slot) = state
+                                                .pattern
+                                                .midi_fx_slots
+                                                .get(track)
+                                                .and_then(|slots| slots.get(slot_idx))
+                                            {
+                                                slot.plocks.clear_param(step, param_idx);
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                state.publish_scheduler_snapshot();
                                 fx_epoch.fetch_add(1, Ordering::Relaxed);
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                             }

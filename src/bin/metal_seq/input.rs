@@ -1,4 +1,8 @@
 use super::*;
+use eseqlisp::widget_render::number_picker::{
+    clear_number_picker_edit_state, handle_number_picker_edit_key_for_widget,
+    number_picker_edit_state, NumberPickerEditOutcome,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct HeldKeyboardNote {
@@ -18,6 +22,24 @@ pub(crate) fn layout_node_by_id(
     }
     for child in &node.children {
         if let Some(found) = layout_node_by_id(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+pub(crate) fn layout_node_by_stable_key<'a>(
+    node: &'a eseqlisp::layout::LayoutNode,
+    stable_key: &str,
+    widget_type: Option<&str>,
+) -> Option<&'a eseqlisp::layout::LayoutNode> {
+    if node.stable_key.as_deref() == Some(stable_key)
+        && widget_type.is_none_or(|expected| node.widget_type == expected)
+    {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = layout_node_by_stable_key(child, stable_key, widget_type) {
             return Some(found);
         }
     }
@@ -145,6 +167,213 @@ pub(crate) fn current_metal_cursor_step(editor: &mut Editor) -> Option<usize> {
     match editor.runtime_mut().eval_str("(current-step)") {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
+    }
+}
+
+pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
+    match editor.runtime_mut().eval_str("param-mode") {
+        Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
+        _ => None,
+    }
+}
+
+pub(crate) fn metal_has_selected_bus(editor: &mut Editor) -> bool {
+    matches!(
+        editor.runtime_mut().eval_str("(seq-has-selected-bus?)"),
+        Ok(Some(Value::Bool(true)))
+    )
+}
+
+fn metal_step_param_for_mode(mode: usize) -> Option<StepParam> {
+    match mode {
+        0 => Some(StepParam::Velocity),
+        1 => Some(StepParam::Duration),
+        2 => Some(StepParam::AuxA),
+        3 => Some(StepParam::Transpose),
+        4 => Some(StepParam::Pan),
+        // Sync is rendered as a label in the step footer, not a numeric picker.
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SoftStepParamEditTarget {
+    track: usize,
+    step: usize,
+    param: StepParam,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SoftStepParamEdit {
+    target: Option<SoftStepParamEditTarget>,
+    widget_id: Option<u64>,
+    editing: bool,
+}
+
+impl SoftStepParamEdit {
+    fn is_active(&self) -> bool {
+        self.target.is_some() && self.widget_id.is_some() && self.editing
+    }
+
+    fn clear(&mut self) {
+        if let Some(widget_id) = self.widget_id {
+            clear_number_picker_edit_state(widget_id);
+        }
+        self.target = None;
+        self.widget_id = None;
+        self.editing = false;
+    }
+}
+
+fn current_soft_step_param_target(
+    editor: &mut Editor,
+    current_track: &Arc<AtomicUsize>,
+) -> Option<SoftStepParamEditTarget> {
+    if editor.active_buffer().name != "*metal*" || metal_has_selected_bus(editor) {
+        return None;
+    }
+    let step = current_metal_cursor_step(editor)?;
+    let mode = current_metal_param_mode(editor)?;
+    let param = metal_step_param_for_mode(mode)?;
+    Some(SoftStepParamEditTarget {
+        track: current_track.load(Ordering::Relaxed),
+        step,
+        param,
+    })
+}
+
+fn current_metal_step_param_number_picker_id(editor: &Editor) -> Option<u64> {
+    let layout = editor.widget_layout()?;
+    layout_node_by_stable_key(
+        &layout,
+        "metal-step-param-number-picker",
+        Some("number-picker"),
+    )
+    .map(|node| node.widget_id)
+}
+
+fn numeric_edit_char(key: &crossterm::event::KeyEvent) -> Option<char> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    if !(c.is_ascii_digit() || c == '.' || c == '-') {
+        return None;
+    }
+    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+        Some(c)
+    } else {
+        None
+    }
+}
+
+fn number_picker_soft_edit_key(key: &crossterm::event::KeyEvent, edit_active: bool) -> bool {
+    use crossterm::event::KeyCode;
+
+    numeric_edit_char(key).is_some()
+        || (edit_active && matches!(key.code, KeyCode::Backspace | KeyCode::Enter | KeyCode::Esc))
+}
+
+fn starts_unarmed_number_picker_edit(key: &crossterm::event::KeyEvent) -> bool {
+    numeric_edit_char(key).is_some()
+}
+
+/// Route only numeric text-editing keys to the current Metal step parameter.
+///
+/// This deliberately avoids real widget focus so arrow keys can keep their
+/// sequencer meaning. The edit buffer mirrors number-picker semantics: first
+/// numeric key starts a fresh value, Enter commits, Esc cancels.
+pub(crate) fn handle_metal_soft_step_param_key(
+    editor: &mut Editor,
+    key: &crossterm::event::KeyEvent,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    edit: &mut SoftStepParamEdit,
+) -> bool {
+    use crossterm::event::KeyEventKind;
+
+    if !matches!(key.kind, KeyEventKind::Press) {
+        return false;
+    }
+
+    if focused_widget_captures_text_input(editor) {
+        return false;
+    }
+
+    if !number_picker_soft_edit_key(key, edit.is_active()) {
+        if edit.is_active() {
+            edit.clear();
+            editor.mark_needs_redraw();
+        }
+        return false;
+    }
+
+    if numeric_edit_char(key).is_some() {
+        if !edit.is_active() && !starts_unarmed_number_picker_edit(key) {
+            return false;
+        }
+        let Some(target) = current_soft_step_param_target(editor, current_track) else {
+            return false;
+        };
+        let Some(widget_id) = current_metal_step_param_number_picker_id(editor) else {
+            return false;
+        };
+        if edit.target != Some(target) || edit.widget_id != Some(widget_id) {
+            edit.clear();
+            edit.target = Some(target);
+            edit.widget_id = Some(widget_id);
+            edit.editing = false;
+        }
+    }
+
+    let Some(target) = edit.target else {
+        return false;
+    };
+    let Some(widget_id) = edit.widget_id else {
+        return false;
+    };
+    let current_value = state.pattern.step_data[target.track].get(target.step, target.param);
+    let decimals = if target.param == StepParam::Transpose {
+        0
+    } else {
+        2
+    };
+    let outcome = handle_number_picker_edit_key_for_widget(
+        widget_id,
+        eseqlisp::widget_render::WidgetKeyEvent {
+            code: key.code,
+            modifiers: key.modifiers,
+        },
+        current_value as f64,
+        target.param.min() as f64,
+        target.param.max() as f64,
+        decimals,
+    );
+
+    match outcome {
+        Some(NumberPickerEditOutcome::StateChanged) => {
+            edit.editing = number_picker_edit_state(widget_id).editing;
+            if !edit.editing {
+                edit.clear();
+            }
+            editor.mark_needs_redraw();
+            true
+        }
+        Some(NumberPickerEditOutcome::Commit(value)) => {
+            state.pattern.step_data[target.track].set(target.step, target.param, value as f32);
+            state.publish_scheduler_snapshot();
+            sync_step_param_lists(editor.runtime_mut(), state, target.track);
+            edit.clear();
+            editor.mark_needs_redraw();
+            true
+        }
+        None if edit.is_active() => {
+            edit.clear();
+            editor.mark_needs_redraw();
+            true
+        }
+        None => false,
     }
 }
 

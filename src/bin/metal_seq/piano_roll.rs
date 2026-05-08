@@ -31,8 +31,16 @@ struct PianoRollMoveItem {
     duration: f32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PianoRollDragKind {
+    Move,
+    Resize,
+}
+
 pub(crate) struct PianoRollMoveState {
+    kind: PianoRollDragKind,
     ids: Vec<u64>,
+    anchor_id: u64,
     anchor_step: usize,
     anchor_lane: isize,
     originals: Vec<PianoRollMoveItem>,
@@ -434,13 +442,11 @@ pub(crate) fn apply_piano_roll_action(
         }
         "finish-create-item" => {
             *move_state.lock().unwrap() = None;
-            let step = value_as_number(action.get("start"))
-                .unwrap_or(0.0)
-                .round()
-                .clamp(0.0, (num_steps - 1) as f64) as usize;
+            let start = value_as_number(action.get("start")).unwrap_or(0.0);
+            let step = start.floor().clamp(0.0, (num_steps - 1) as f64) as usize;
             let lane = value_as_usize(action.get("lane")).unwrap_or(0);
-            let duration = (value_as_number(action.get("end")).unwrap_or(step as f64 + 1.0)
-                - step as f64) as f32;
+            let duration =
+                (value_as_number(action.get("end")).unwrap_or(start + 1.0) - start) as f32;
             let duration = piano_roll_sanitize_duration(duration);
             let transpose = piano_roll_lane_to_transpose(lane);
             let mut notes = piano_roll_step_note_entries(state, track, step);
@@ -492,7 +498,6 @@ pub(crate) fn apply_piano_roll_action(
             Ok(format!("moved {} note(s)", ids.len()))
         }
         "resize-item-absolute" => {
-            *move_state.lock().unwrap() = None;
             let id = value_as_u64(action.get("id"))
                 .ok_or_else(|| "resize-item-absolute missing id".to_string())?;
             if value_as_keyword_or_string(action.get("edge")).as_deref() == Some("start") {
@@ -503,36 +508,16 @@ pub(crate) fn apply_piano_roll_action(
             let duration_delta = value_as_number(action.get("duration-delta")).map(|n| n as f32);
             if let Some((step, _voice_idx)) = piano_roll_item_parts(id) {
                 let resize_ids = if ids.is_empty() { vec![id] } else { ids };
-                let mut resized = 0;
-                for resize_id in resize_ids {
-                    let Some((resize_step, resize_voice_idx)) = piano_roll_item_parts(resize_id)
-                    else {
-                        continue;
-                    };
-                    let mut notes = piano_roll_step_note_entries(state, track, resize_step);
-                    let duration = if resize_id == id {
-                        piano_roll_sanitize_duration(time - step as f32)
-                    } else if let Some(delta) = duration_delta {
-                        let Some(note) = notes.get(resize_voice_idx) else {
-                            continue;
-                        };
-                        piano_roll_sanitize_duration(note.duration + delta)
-                    } else {
-                        continue;
-                    };
-                    if let Some(note) = notes.get_mut(resize_voice_idx) {
-                        note.duration = duration;
-                        set_piano_roll_step_note_entries(state, track, resize_step, &notes);
-                        resized += 1;
-                    } else if resize_id == id {
-                        state.pattern.step_data[track].set(
-                            resize_step,
-                            StepParam::Duration,
-                            duration,
-                        );
-                        resized += 1;
-                    }
-                }
+                let resized = resize_piano_roll_items_absolute(
+                    state,
+                    track,
+                    &resize_ids,
+                    id,
+                    step,
+                    time,
+                    duration_delta,
+                    move_state,
+                );
                 Ok(format!("resized {} note(s)", resized))
             } else {
                 Ok("resize ignored".to_string())
@@ -588,6 +573,121 @@ fn move_piano_roll_items_by_delta(
     next_ids
 }
 
+fn resize_piano_roll_items_absolute(
+    state: &Arc<SequencerState>,
+    track: usize,
+    ids: &[u64],
+    anchor_id: u64,
+    anchor_step: usize,
+    time: f32,
+    duration_delta: Option<f32>,
+    move_state: &Arc<Mutex<Option<PianoRollMoveState>>>,
+) -> usize {
+    let mut sorted_ids = ids.to_vec();
+    sorted_ids.sort_unstable();
+
+    let mut guard = move_state.lock().unwrap();
+    let needs_new_state = guard
+        .as_ref()
+        .map(|state| {
+            state.kind != PianoRollDragKind::Resize
+                || state.ids != sorted_ids
+                || state.anchor_id != anchor_id
+        })
+        .unwrap_or(true);
+
+    if needs_new_state {
+        let originals = ids
+            .iter()
+            .filter_map(|&id| {
+                let (step, voice_idx) = piano_roll_item_parts(id)?;
+                let notes = piano_roll_step_note_entries(state, track, step);
+                let note = notes.get(voice_idx)?;
+                Some(PianoRollMoveItem {
+                    id,
+                    step,
+                    transpose: note.transpose,
+                    duration: note.duration,
+                })
+            })
+            .collect::<Vec<_>>();
+        if originals.is_empty() {
+            return 0;
+        }
+        *guard = Some(PianoRollMoveState {
+            kind: PianoRollDragKind::Resize,
+            ids: sorted_ids,
+            anchor_id,
+            anchor_step,
+            anchor_lane: 0,
+            last_positions: originals.clone(),
+            originals,
+        });
+    }
+
+    let Some(resize_state) = guard.as_ref() else {
+        return 0;
+    };
+    let Some(anchor) = resize_state
+        .originals
+        .iter()
+        .find(|item| item.id == anchor_id)
+    else {
+        return 0;
+    };
+    let anchor_duration = piano_roll_sanitize_duration(time - resize_state.anchor_step as f32);
+    let delta = anchor_duration - anchor.duration;
+
+    let mut next_by_step: HashMap<usize, Vec<PianoRollNote>> = HashMap::new();
+    for item in &resize_state.originals {
+        next_by_step.entry(item.step).or_insert_with(|| {
+            piano_roll_step_note_entries(state, track, item.step)
+                .into_iter()
+                .map(|note| {
+                    resize_state
+                        .originals
+                        .iter()
+                        .find(|original| {
+                            original.step == item.step
+                                && (original.transpose - note.transpose).abs() < f32::EPSILON
+                        })
+                        .map(|original| PianoRollNote {
+                            transpose: original.transpose,
+                            duration: original.duration,
+                        })
+                        .unwrap_or(note)
+                })
+                .collect()
+        });
+    }
+
+    let mut resized = 0;
+    for item in &resize_state.originals {
+        let duration = if item.id == anchor_id {
+            anchor_duration
+        } else if duration_delta.is_some() {
+            piano_roll_sanitize_duration(item.duration + delta)
+        } else {
+            continue;
+        };
+        let Some(notes) = next_by_step.get_mut(&item.step) else {
+            continue;
+        };
+        if let Some(note) = notes
+            .iter_mut()
+            .find(|note| (note.transpose - item.transpose).abs() < f32::EPSILON)
+        {
+            note.duration = duration;
+            resized += 1;
+        }
+    }
+
+    for (step, notes) in next_by_step {
+        set_piano_roll_step_note_entries(state, track, step, &notes);
+    }
+    resized
+}
+
 fn move_piano_roll_items_absolute(
     state: &Arc<SequencerState>,
     track: usize,
@@ -604,7 +704,7 @@ fn move_piano_roll_items_absolute(
     let mut guard = move_state.lock().unwrap();
     let needs_new_state = guard
         .as_ref()
-        .map(|state| state.ids != sorted_ids)
+        .map(|state| state.kind != PianoRollDragKind::Move || state.ids != sorted_ids)
         .unwrap_or(true);
 
     if needs_new_state {
@@ -634,7 +734,9 @@ fn move_piano_roll_items_absolute(
             return Vec::new();
         }
         *guard = Some(PianoRollMoveState {
+            kind: PianoRollDragKind::Move,
             ids: sorted_ids,
+            anchor_id,
             anchor_step,
             anchor_lane,
             last_positions: originals.clone(),

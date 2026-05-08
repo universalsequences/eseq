@@ -358,6 +358,14 @@ pub(crate) fn init_runtime(
                         build_step_has_plocks(&state, 0, &effect_descriptors)
                     },
                 ),
+                (
+                    "track-plocks",
+                    if track_count == 0 {
+                        Value::List(vec![])
+                    } else {
+                        build_track_plocks_value(&app, &state, 0, &selected_steps)
+                    },
+                ),
                 ("compiling", Value::Bool(false)),
                 ("recording", Value::Bool(false)),
                 ("cpu-load-pct", Value::Number(0.0)),
