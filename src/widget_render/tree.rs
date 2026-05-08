@@ -401,7 +401,11 @@ pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f
         state.synced_items_hash.unwrap_or(0),
         state.selected_row
     );
-    Some((view_key, state.selected_row, ROW_HEIGHT))
+    Some((
+        view_key,
+        state.selected_row,
+        row_height_from_props(&node.props),
+    ))
 }
 
 pub(crate) fn current_content_height(node: &LayoutNode) -> Option<f32> {
@@ -416,7 +420,7 @@ pub(crate) fn current_content_height(node: &LayoutNode) -> Option<f32> {
     sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
     let mut rows = Vec::new();
     flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
-    Some(rows.len() as f32 * ROW_HEIGHT)
+    Some(rows.len() as f32 * row_height_from_props(&node.props))
 }
 
 /// Build an action map for event dispatch.
@@ -460,6 +464,7 @@ impl WidgetDefinition for TreeWidget {
             "width",
             "height",
             "font-size",
+            "row-height",
             "selected-path",
             "selected-label",
         ]
@@ -488,7 +493,7 @@ impl WidgetDefinition for TreeWidget {
         }
         flatten_items(&items, 0, &[], &expanded, expand_all, &mut rows);
 
-        let rh = ROW_HEIGHT;
+        let rh = row_height_from_value(node);
 
         let width = get_prop_num(node, "width")
             .map(f64_to_f32)
@@ -581,7 +586,7 @@ impl WidgetDefinition for TreeWidget {
         let mut rows = Vec::new();
         flatten_items(&items, 0, &[], &state.expanded, expand_all, &mut rows);
 
-        let rh = ROW_HEIGHT;
+        let rh = row_height_from_props(&node.props);
 
         let scroll_offset = find_parent_scroll_offset(node);
         let row_relative = local_row - node.rect.row + scroll_offset;
@@ -762,7 +767,7 @@ impl WidgetDefinition for TreeWidget {
             })
             .unwrap_or(DEFAULT_FONT_SIZE);
 
-        let rh = ROW_HEIGHT;
+        let rh = row_height_from_props(&node.props);
 
         let bg_alt = resolve_named_color(&node.props, "row-bg-alt", theme::TREE_ROW_ALT_BG());
         let selected_bg = resolve_named_color(&node.props, "selected-bg", theme::WIDGET_FOCUS_BG());
@@ -1005,5 +1010,19 @@ fn find_parent_scroll_offset(_node: &LayoutNode) -> f32 {
     super::scroll::current_event_scroll_offset()
 }
 
-/// Fixed row height in cells. Matches what measure() uses.
-const ROW_HEIGHT: f32 = 1.25;
+fn row_height_from_value(node: &Value) -> f32 {
+    get_prop_num(node, "row-height")
+        .map(f64_to_f32)
+        .unwrap_or(DEFAULT_ROW_HEIGHT)
+        .max(MIN_ROW_HEIGHT)
+}
+
+fn row_height_from_props(props: &HashMap<String, Value>) -> f32 {
+    match props.get("row-height") {
+        Some(Value::Number(n)) => (*n as f32).max(MIN_ROW_HEIGHT),
+        _ => DEFAULT_ROW_HEIGHT,
+    }
+}
+
+const DEFAULT_ROW_HEIGHT: f32 = 1.25;
+const MIN_ROW_HEIGHT: f32 = 1.0;

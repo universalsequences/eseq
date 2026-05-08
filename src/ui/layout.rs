@@ -1047,6 +1047,21 @@ mod tests {
         Value::String(text.to_string())
     }
 
+    fn assert_num_approx(actual: Option<f64>, expected: f64) {
+        let actual = actual.expect("expected numeric value");
+        assert!(
+            (actual - expected).abs() < 0.000_01,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn assert_f32_approx(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.000_01,
+            "expected {expected}, got {actual}"
+        );
+    }
+
     /// Build a label widget: (label "text" :width w)
     fn label(text: &str, width: Option<f64>) -> Value {
         let mut args = vec![s(text)];
@@ -1293,9 +1308,9 @@ mod tests {
         let engine = LayoutEngine::new(80, 24, 1.0);
         let expanded_tree = scroll_with_stable_tree(200.0);
         let initial_layout = engine.layout(&expanded_tree).unwrap();
-        assert_eq!(
+        assert_num_approx(
             get_prop_num_from_layout(&initial_layout, "_content_height"),
-            Some(2.5)
+            2.5,
         );
 
         let tree_node = initial_layout.children.first().expect("tree child");
@@ -1308,16 +1323,16 @@ mod tests {
         );
 
         let expanded_layout = engine.layout(&expanded_tree).unwrap();
-        assert_eq!(
+        assert_num_approx(
             get_prop_num_from_layout(&expanded_layout, "_content_height"),
-            Some(7.5)
+            7.5,
         );
 
         let collapsed_sibling_tree = scroll_with_stable_tree(100.0);
         let sibling_layout = engine.layout(&collapsed_sibling_tree).unwrap();
-        assert_eq!(
+        assert_num_approx(
             get_prop_num_from_layout(&sibling_layout, "_content_height"),
-            Some(2.5)
+            2.5,
         );
     }
 
@@ -1336,9 +1351,9 @@ mod tests {
         );
 
         let expanded_layout = engine.layout(&tree).unwrap();
-        assert_eq!(
+        assert_num_approx(
             get_prop_num_from_layout(&expanded_layout, "_content_height"),
-            Some(7.5)
+            7.5,
         );
 
         let expanded_tree_node = expanded_layout.children.first().expect("tree child");
@@ -1351,7 +1366,7 @@ mod tests {
         );
 
         let state = crate::widget_render::scroll::sync_node_state(&expanded_layout);
-        assert_eq!(state.content_height, 2.5);
+        assert_f32_approx(state.content_height, 2.5);
         assert_eq!(state.viewport_height, 3.0);
         assert_eq!(state.offset_y, 0.0);
     }
@@ -1399,7 +1414,7 @@ mod tests {
             },
         );
         let state = crate::widget_render::scroll::sync_node_state(&layout);
-        assert_eq!(state.offset_y, 0.75);
+        assert_f32_approx(state.offset_y, 0.75);
     }
 
     #[test]

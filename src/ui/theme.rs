@@ -60,6 +60,7 @@ pub struct Theme {
     pub comp_doc_title_fg: Color,
     pub tree_row_alt_bg: Color,
     pub fx_panel_bg: Color,
+    pub fx_inner_panel_bg: Color,
     pub fx_panel_selected_bg: Color,
     pub fx_panel_header_bg: Color,
     pub fx_panel_header_selected_bg: Color,
@@ -308,6 +309,11 @@ theme_slots!(
     ),
     (fx_panel_bg, FX_PANEL_BG, Color::from_hex(0x22, 0x22, 0x23)),
     (
+        fx_inner_panel_bg,
+        FX_INNER_PANEL_BG,
+        Color::from_hex(0x1b, 0x1b, 0x1c)
+    ),
+    (
         fx_panel_selected_bg,
         FX_PANEL_SELECTED_BG,
         Color::from_hex(0x2a, 0x2a, 0x2d)
@@ -427,7 +433,7 @@ theme_slots!(
         BUTTON_DANGER_FG,
         Color::from_hex(0xf4, 0xf4, 0xf5)
     ),
-    (dropdown_bg, DROPDOWN_BG, Color::from_hex(0x36, 0x38, 0x3d)),
+    (dropdown_bg, DROPDOWN_BG, Color::from_hex(0x41, 0x43, 0x49)),
     (dropdown_fg, DROPDOWN_FG, Color::from_hex(0xf0, 0xf0, 0xf2)),
     (
         dropdown_ring,

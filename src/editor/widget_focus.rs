@@ -113,7 +113,7 @@ impl Editor {
                     self.active_leaf_mut().focused_widget_id = Some(*id);
                 }
                 self.clear_focus_on_other_tiles();
-                self.adjust_widget_scroll(*row);
+                self.adjust_widget_scroll(*row, *height);
                 self.mark_needs_redraw();
                 return self.activate_focused();
             }
@@ -275,7 +275,7 @@ impl Editor {
         // 2D spatial navigation: find the nearest focusable widget in the
         // requested direction.  The primary-axis distance is weighted 1×,
         // the secondary axis 3× so we strongly prefer staying on-axis.
-        let mut best: Option<(u64, f32, f32)> = None; // (id, row, score)
+        let mut best: Option<(u64, f32, f32, f32)> = None; // (id, row, height, score)
 
         for &(id, row, col, w, h) in &focusable_nodes {
             if id == current_id {
@@ -298,19 +298,19 @@ impl Editor {
 
             let score = primary + secondary * 3.0;
 
-            if best.is_none() || score < best.unwrap().2 {
-                best = Some((id, row, score));
+            if best.is_none() || score < best.unwrap().3 {
+                best = Some((id, row, h, score));
             }
         }
 
-        if let Some((next_id, next_row, _)) = best {
+        if let Some((next_id, next_row, next_height, _)) = best {
             if let Some(node) = find_node_by_id(&layout, next_id) {
                 self.set_focused_widget(node);
             } else {
                 self.active_leaf_mut().focused_widget_id = Some(next_id);
             }
             self.clear_focus_on_other_tiles();
-            self.adjust_widget_scroll(next_row);
+            self.adjust_widget_scroll(next_row, next_height);
             self.mark_needs_redraw();
             return;
         }
@@ -332,18 +332,20 @@ impl Editor {
         }
     }
 
-    pub(super) fn adjust_widget_scroll(&mut self, focused_row: f32) {
+    pub(super) fn adjust_widget_scroll(&mut self, focused_row: f32, focused_height: f32) {
         let viewport_height = self.runtime.layout_rows();
         if viewport_height == 0 {
             return;
         }
-        let focused_terminal_row = focused_row.round();
+        let viewport_height = viewport_height as f32;
+        let focused_top = focused_row.floor();
+        let focused_bottom = (focused_row + focused_height).ceil();
         let leaf = self.active_leaf_mut();
-        if focused_terminal_row < leaf.widget_scroll_top {
-            leaf.widget_scroll_top = focused_terminal_row;
+        if focused_top < leaf.widget_scroll_top {
+            leaf.widget_scroll_top = focused_top.max(0.0);
         }
-        if focused_terminal_row >= leaf.widget_scroll_top + viewport_height as f32 {
-            leaf.widget_scroll_top = focused_terminal_row - viewport_height as f32 + 1.0;
+        if focused_bottom > leaf.widget_scroll_top + viewport_height {
+            leaf.widget_scroll_top = (focused_bottom - viewport_height).max(0.0);
         }
     }
 

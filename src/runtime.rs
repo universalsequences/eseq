@@ -1350,6 +1350,7 @@ impl Runtime {
             "box",
             "grid",
             "tabs",
+            "response-curve-editor",
             "timeline",
             "waveform",
             "scroll",

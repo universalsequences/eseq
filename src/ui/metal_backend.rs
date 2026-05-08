@@ -1651,9 +1651,9 @@ fragment float4 waveform_frag(
                 // then offset the resulting primitives to screen position.
                 if let Some(ref layout) = tile.frame.widget_layout {
                     let time_seconds = self.elapsed_time_seconds();
-                    let inner_rows = ((content_bottom_px - content_top_px) / cell_h)
-                        .max(0.0)
-                        .floor() as u16;
+                    let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h)
+                        .max(0.0);
+                    let inner_rows = inner_rows_exact.floor() as u16;
 
                     let viewport = WidgetViewport {
                         cell_w,
@@ -1663,7 +1663,7 @@ fragment float4 waveform_frag(
                         time_seconds,
                         focused_widget_id: tile.frame.focused_widget_id,
                         focused_branch: false,
-                        tile_content_rows: inner_rows as f32,
+                        tile_content_rows: inner_rows_exact,
                         scroll_top: tile.frame.widget_scroll_top,
                         scroll_left: tile.frame.widget_scroll_left,
                         inherited_hover: false,
@@ -2826,7 +2826,8 @@ fragment float4 waveform_frag(
             let vp_h = texture.height() as f32;
             // ── Build/cached text vertex data ───────────────────────────────
             let mut text_upload_bytes = 0;
-            let max_rows = (vp_h / cell_h).floor() as u16 - 1;
+            let max_rows_exact = (vp_h / cell_h - 1.0).max(0.0);
+            let max_rows = max_rows_exact.floor() as u16;
             let primitive_scene = frame
                 .widget_layout
                 .as_ref()
@@ -2845,7 +2846,7 @@ fragment float4 waveform_frag(
                             time_seconds,
                             focused_widget_id: frame.focused_widget_id,
                             focused_branch: false,
-                            tile_content_rows: max_rows as f32,
+                            tile_content_rows: max_rows_exact,
                             scroll_top: frame.widget_scroll_top,
                             scroll_left: frame.widget_scroll_left,
                             inherited_hover: false,

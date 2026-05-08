@@ -406,7 +406,9 @@ impl WidgetDefinition for KnobNumberWidget {
             knob_size
         };
         let label_row = node.rect.row;
-        let value_row = node.rect.row + node.rect.height * 0.62;
+        let large_knob_value_offset = ((knob_size - 1.45).max(0.0) * 1.1).min(0.32);
+        let value_row = (node.rect.row + node.rect.height * 0.62 + large_knob_value_offset)
+            .min(node.rect.row + node.rect.height - 0.55);
         let knob_top = node.rect.row + node.rect.height * 0.45;
         let knob_rect = Rect {
             row: knob_top.max(node.rect.row + 0.72),

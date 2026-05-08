@@ -11,6 +11,7 @@ pub mod knob_number;
 pub mod label;
 pub mod mixer_meter;
 pub mod number_picker;
+pub mod response_curve_editor;
 pub mod scroll;
 pub mod sdf_widget;
 pub mod tabs;
@@ -636,6 +637,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &image::IMAGE_WIDGET,
     &dropdown::DROPDOWN_WIDGET,
     &number_picker::NUMBER_PICKER_WIDGET,
+    &response_curve_editor::RESPONSE_CURVE_EDITOR_WIDGET,
     &scroll::SCROLL_WIDGET,
     &text_input::TEXT_INPUT_WIDGET,
     &tree::TREE_WIDGET,
