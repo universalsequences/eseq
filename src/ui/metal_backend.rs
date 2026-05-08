@@ -1672,8 +1672,8 @@ fragment float4 waveform_frag(
                     // so widgets move with the text.
                     let text_scroll = tile.frame.text_scroll_top as f32;
                     let widget_scroll = tile.frame.widget_scroll_top;
-                    let widget_col_off = col_off as f32 - tile.frame.widget_scroll_left;
-                    let widget_row_off = row_off as f32 - text_scroll - widget_scroll;
+                    let widget_col_off = tile.rect.col - tile.frame.widget_scroll_left;
+                    let widget_row_off = tile.rect.row - text_scroll - widget_scroll;
                     let offset_prims: Vec<_> = primitives
                         .into_iter()
                         .map(|p| {
@@ -1814,8 +1814,8 @@ fragment float4 waveform_frag(
                         // Overlay primitives are already in post-scroll tile-local
                         // coordinates; only the tile origin offset still needs to
                         // be applied before drawing.
-                        let overlay_col_off = col_off as f32;
-                        let overlay_row_off = row_off as f32;
+                        let overlay_col_off = tile.rect.col;
+                        let overlay_row_off = tile.rect.row;
                         let offset_overlay: Vec<_> = overlay_prims
                             .into_iter()
                             .map(|p| {

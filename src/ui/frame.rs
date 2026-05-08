@@ -494,6 +494,27 @@ pub fn build_tiled_render_frame_borderless(
     build_tiled_render_frame_impl(editor, total_width, total_height, false)
 }
 
+fn metal_content_cells(logical_extent: f32) -> usize {
+    logical_extent.max(0.0).floor() as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metal_content_cells;
+
+    #[test]
+    fn metal_content_cells_never_round_fractional_tiles_up() {
+        assert_eq!(metal_content_cells(120.0), 120);
+        assert_eq!(metal_content_cells(120.49), 120);
+        assert_eq!(metal_content_cells(120.99), 120);
+    }
+
+    #[test]
+    fn metal_content_cells_clamps_negative_extents() {
+        assert_eq!(metal_content_cells(-0.25), 0);
+    }
+}
+
 fn build_tiled_render_frame_impl(
     editor: &mut Editor,
     total_width: usize,
@@ -595,12 +616,15 @@ fn build_tiled_render_frame_impl(
                 (rect.height.round() as usize).saturating_sub(2) // border top/bottom
             };
         } else {
-            // Metal: content fills full tile, status bar takes 1 row
-            inner_width = rect.width.round() as usize;
+            // Metal tile rects can be fractional because margins/splits are
+            // stored in logical cell units. Rounding can give :width :fill
+            // widgets one more column than the tile actually has, so use only
+            // the guaranteed fully available content cells.
+            inner_width = metal_content_cells(rect.width);
             inner_height = if show_status {
-                (rect.height.round() as usize).saturating_sub(1) // status bar only
+                metal_content_cells(rect.height).saturating_sub(1) // status bar only
             } else {
-                rect.height.round() as usize
+                metal_content_cells(rect.height)
             };
         }
 
