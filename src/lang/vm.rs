@@ -1779,6 +1779,33 @@ impl VM {
             .retain(|pending| pending.source_buffer_id() != owner_buffer_id);
     }
 
+    pub fn clear_subtree_effects_for_named_target(&mut self, target_name: &str) {
+        let target = EffectTarget::BufferName(target_name.to_string());
+        let ids = self
+            .dag
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| match node {
+                ReactiveNode::Effect {
+                    target: current_target,
+                    subtree_root_id: Some(_),
+                    ..
+                } if *current_target == target => Some(*id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.dag.remove_node(id);
+        }
+        self.pending_widget_trees.retain(|pending| match pending {
+            PendingUiUpdate::ReplaceSubtree {
+                target: pending_target,
+                ..
+            } => *pending_target != target,
+            PendingUiUpdate::FullTree(_) => true,
+        });
+    }
+
     fn clear_subtree_effects_for_current_context(&mut self) {
         let owner_buffer_id = self.current_effect_source_buffer_id;
         let target = self.current_effect_target.clone();

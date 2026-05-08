@@ -1763,6 +1763,19 @@ impl Runtime {
         std::mem::take(&mut self.shared.borrow_mut().pending_buffer_widget_trees)
     }
 
+    pub fn clear_subtree_effects_for_named_target(&mut self, target_name: &str) {
+        self.vm.clear_subtree_effects_for_named_target(target_name);
+        self.shared
+            .borrow_mut()
+            .pending_buffer_widget_trees
+            .retain(|pending| match pending {
+                PendingUiUpdate::ReplaceSubtree { target, .. } => {
+                    target != &EffectTarget::BufferName(target_name.to_string())
+                }
+                PendingUiUpdate::FullTree(_) => true,
+            });
+    }
+
     pub(crate) fn take_pending_open_file(&mut self) -> Option<String> {
         self.shared.borrow_mut().pending_open_file.take()
     }
