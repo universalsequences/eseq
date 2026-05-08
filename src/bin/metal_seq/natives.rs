@@ -54,6 +54,7 @@ pub(crate) fn init_runtime(
                 ("playhead", Value::Number(0.0)),
                 ("transport-playhead", Value::Number(0.0)),
                 ("sampler-playhead", Value::Number(0.0)),
+                ("track-ids", build_track_ids(&app)),
                 ("track-names", build_track_names(&track_names)),
                 (
                     "steps",

@@ -232,8 +232,8 @@
           :plocked (if visible (if plocked? 1 0) 0)
           :selected (if visible (if selected? 1 0) 0))))))
 
-(def seqv-playhead-row (track row)
-  (subtree :key (str "seqv-playhead-row-" track "-" row)
+(def seqv-playhead-row (track track-id row)
+  (subtree :key (str "seqv-playhead-row-" track-id "-" row)
     (seqv-playhead-row-bar
       :col (if SEQ.playing
              (reactive-get "SEQ" (str "track-playhead-row-" track "-" row))
@@ -260,12 +260,12 @@
                     (< step (len SEQ.selected-steps))
                     (nth SEQ.selected-steps step))
                   (and (< step (len plocks)) (nth plocks step))))))
-          (seqv-playhead-row track-idx row))))))
+          (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row))))))
 
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.3 :gap 0.0
     (each (range 0 (len SEQ.track-names)) |i|
-      (subtree :key (str "sequencer-track-" i)
+      (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
         (let ((selected (and (< selected-bus 0) (= SEQ.current-track i)))
             (muted (seqv-muted? i)))
           (box :width :fill

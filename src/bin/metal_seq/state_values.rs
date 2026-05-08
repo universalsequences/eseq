@@ -334,11 +334,22 @@ pub(crate) fn build_track_names(names: &[String]) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn build_track_ids(app: &ui::App) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = app
+        .graph
+        .track_node_ids
+        .iter()
+        .map(|ids| Rc::new(RefCell::new(Value::Number(ids.pan_id as f64))))
+        .collect();
+    Value::List(items)
+}
+
 pub(crate) fn sync_track_name_state(
     rt: &mut Runtime,
     track_names: &mut Vec<String>,
     app: &ui::App,
 ) {
+    rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
     if *track_names == app.tracks {
         return;
     }
@@ -896,6 +907,7 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
         return;
     }
 

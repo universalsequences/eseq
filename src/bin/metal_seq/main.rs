@@ -547,6 +547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "num-tracks",
                                         Value::Number(track_names.len() as f64),
                                     );
+                                    rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
                                     rt.set_reactive(
                                         "SEQ",
                                         "current-track",
@@ -704,8 +705,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &cached_track_peak_levels,
                                 );
                                 sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                                rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
+                                editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                                prev_track_playheads = track_playheads_snapshot(&state, &app);
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 editor.handle_host_event(HostEvent::Status(format!(
                                     "Deleted track {}",
@@ -3326,6 +3330,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             );
                                             rt.set_reactive(
                                                 "SEQ",
+                                                "track-ids",
+                                                build_track_ids(&app),
+                                            );
+                                            rt.set_reactive(
+                                                "SEQ",
                                                 "current-track",
                                                 Value::Number(idx as f64),
                                             );
@@ -4030,6 +4039,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Value::Number(track_names.len() as f64),
                         );
                         rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
+                        rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
                         rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
                         rt.set_reactive(
                             "SEQ",

@@ -9,9 +9,9 @@ use sequencer::ui;
 
 use super::state_values::{
     build_accumulator_names, build_effects_value, build_instrument_panel_value,
-    build_midi_effects_value, build_step_has_plocks, build_steps_value, build_track_names,
-    push_solo_mutes, sync_all_track_sequencer_state, sync_step_param_lists, sync_track_mixer_state,
-    sync_track_params, sync_track_peak_fields,
+    build_midi_effects_value, build_step_has_plocks, build_steps_value, build_track_ids,
+    build_track_names, push_solo_mutes, sync_all_track_sequencer_state, sync_step_param_lists,
+    sync_track_mixer_state, sync_track_params, sync_track_peak_fields,
 };
 
 pub(crate) struct AddTrackInstrumentCtx<'a> {
@@ -64,6 +64,7 @@ pub(crate) fn handle_add_track_instrument_command(payload: &Value, ctx: AddTrack
 
             let rt = editor.runtime_mut();
             rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
+            rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
             rt.set_reactive("SEQ", "current-track", Value::Number(idx as f64));
             rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
             sync_all_track_sequencer_state(rt, state, app);
