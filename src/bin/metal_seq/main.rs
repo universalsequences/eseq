@@ -216,6 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_track_peak_levels: Vec<f64> = Vec::new();
     let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
     let mut prev_bus_playheads: Vec<usize> = Vec::new();
+    let mut prev_track_playheads: Vec<u32> = Vec::new();
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
     let mut prev_auto_follow = true;
@@ -531,6 +532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "track-names",
                                         build_track_names(&track_names),
                                     );
+                                    sync_all_track_sequencer_state(rt, &state, &app);
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
                                     sync_step_param_lists(rt, &state, idx);
                                     sync_track_mixer_state(rt, &app, &state);
@@ -4028,7 +4030,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
                             rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
                         } else {
+                            sync_all_track_sequencer_state(rt, &state, &app);
                             sync_playhead_fields(
                                 rt,
                                 playhead as usize,
@@ -4089,6 +4096,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_peak_r_level = cached_peak_r_level;
                         prev_track_peak_levels = cached_track_peak_levels.clone();
                         prev_bus_playheads = bus_playhead_snapshot(&app);
+                        prev_track_playheads = track_playheads_snapshot(&state, &app);
                         prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
 
                         if let Some((status, _)) = app.editor.status_message.take() {
@@ -4153,6 +4161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mut needs_reactive_cycle = false;
+            let mut sequencer_playheads_changed = false;
 
             // Track switch — rebuild everything
             if ct != prev_current_track && !app.tracks.is_empty() {
@@ -4174,6 +4183,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Value::Number(transport_playhead as f64),
                 );
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                sync_all_track_sequencer_state(rt, &state, &app);
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
                 sync_track_mixer_state(rt, &app, &state);
@@ -4279,6 +4289,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_bus_playheads = bus_playheads;
                 needs_reactive_cycle = true;
             }
+            let track_playheads_now = track_playheads_snapshot(&state, &app);
+            if track_playheads_now != prev_track_playheads {
+                editor.runtime_mut().set_reactive(
+                    "SEQ",
+                    "track-playheads",
+                    build_all_track_playheads_value(&state, &app),
+                );
+                prev_track_playheads = track_playheads_now;
+                needs_reactive_cycle = true;
+                sequencer_playheads_changed = true;
+            }
             if playhead != prev_playhead && !app.tracks.is_empty() {
                 sync_playhead_field_delta(
                     editor.runtime_mut(),
@@ -4301,6 +4322,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     state.pattern.track_params[ct].get_num_steps(),
                 );
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                sync_all_track_sequencer_state(rt, &state, &app);
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
                 sync_track_mixer_state(rt, &app, &state);
@@ -4340,6 +4362,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     sync_track_name_state(rt, &mut track_names, &app);
                     sync_track_mixer_state(rt, &app, &state);
+                    sync_all_track_sequencer_state(rt, &state, &app);
                     sync_bus_mixer_state(rt, &app);
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
@@ -4460,6 +4483,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if needs_reactive_cycle {
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
+                if sequencer_playheads_changed {
+                    editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                }
                 editor.mark_needs_redraw();
             }
         }

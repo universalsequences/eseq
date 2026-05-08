@@ -30,24 +30,58 @@
 
 (defstate lower-panel-buffer "*fx*")
 
+(def lower-fx-layout-height 11)
+
+(def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
+  (list :rows :gap 1
+    0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
+    0.95 (list :cols :gap 1
+      0.2 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 32)
+      0.8 (list :rows :gap 1
+        0.55 (list :cols :gap 1
+          0.78 (list :buf "*metal*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
+          0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))
+        0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 12 :max-height 12)))
+    lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
+
+(def seq-apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
+  (set-layout (seq-lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height)))
+
+(def seq-apply-fx-layout ()
+  (seq-apply-lower-panel-layout "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height))
+
+(def seq-apply-piano-roll-layout ()
+  (seq-apply-lower-panel-layout "*piano-roll*" 1.0 13 50))
+
 (def seq-toggle-fx-piano-roll ()
   (if (= (current-buffer-name) "*fx*")
     (do
       (set-window-buffer "*piano-roll*")
-      (set! lower-panel-buffer "*piano-roll*"))
+      (set! lower-panel-buffer "*piano-roll*")
+      (seq-apply-piano-roll-layout))
     (if (= (current-buffer-name) "*piano-roll*")
       (do
         (set-window-buffer "*fx*")
-        (set! lower-panel-buffer "*fx*"))
+        (set! lower-panel-buffer "*fx*")
+        (seq-apply-fx-layout))
       (if (= lower-panel-buffer "*fx*")
         (do
           (set-window-buffer-for "*fx*" "*piano-roll*")
-          (set! lower-panel-buffer "*piano-roll*"))
+          (set! lower-panel-buffer "*piano-roll*")
+          (seq-apply-piano-roll-layout))
         (do
           (set-window-buffer-for "*piano-roll*" "*fx*")
-          (set! lower-panel-buffer "*fx*"))))))
+          (set! lower-panel-buffer "*fx*")
+          (seq-apply-fx-layout))))))
 
-(bind-key "Tab" "seq-toggle-fx-piano-roll")
+(def seq-toggle-main-or-piano-roll ()
+  (if (= (current-buffer-name) "*metal*")
+    (set-window-buffer "*sequencer*")
+    (if (= (current-buffer-name) "*sequencer*")
+      (set-window-buffer "*metal*")
+      (seq-toggle-fx-piano-roll))))
+
+(bind-key "Tab" "seq-toggle-main-or-piano-roll")
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync
 (defstate param-mode 0)
@@ -490,15 +524,7 @@
     (dict :bus selected-bus :param param :label label)))
 
 (load "metal-seq-metal.lisp")
+(load "metal-seq-sequencer.lisp")
 
 ; Layout: samples on the left; metal + mixer on the right; fx spans the bottom.
-(set-layout '(:rows :gap 1
-  0.05 (:buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
-  0.95 (:cols :gap 1
-    0.2 (:buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 32)
-    0.8 (:rows :gap 1
-      0.55 (:cols :gap 1
-        0.78 (:buf "*metal*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
-        0.22 (:buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))
-      0.45 (:buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 12 :max-height 12)))
-  0.33 (:buf "*fx*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 50)))
+(seq-apply-fx-layout)

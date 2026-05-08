@@ -12,6 +12,91 @@ pub(crate) fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Va
     Value::List(items)
 }
 
+/// Build a list-of-lists of bools: one step list per track for the *sequencer* buffer.
+pub(crate) fn build_all_track_steps_value(state: &Arc<SequencerState>, app: &ui::App) -> Value {
+    let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
+        .map(|t| {
+            let steps: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
+                .map(|s| {
+                    Rc::new(RefCell::new(Value::Bool(
+                        state.pattern.patterns[t].is_active(s),
+                    )))
+                })
+                .collect();
+            Rc::new(RefCell::new(Value::List(steps)))
+        })
+        .collect();
+    Value::List(tracks)
+}
+
+pub(crate) fn build_all_track_num_steps_value(state: &Arc<SequencerState>, app: &ui::App) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
+        .map(|t| {
+            Rc::new(RefCell::new(Value::Number(
+                state.pattern.track_params[t].get_num_steps() as f64,
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
+pub(crate) fn build_all_track_playheads_value(state: &Arc<SequencerState>, app: &ui::App) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
+        .map(|t| {
+            Rc::new(RefCell::new(Value::Number(
+                state.transport.track_playheads[t].load(Ordering::Relaxed) as f64,
+            )))
+        })
+        .collect();
+    Value::List(items)
+}
+
+pub(crate) fn build_all_track_step_has_plocks(state: &Arc<SequencerState>, app: &ui::App) -> Value {
+    let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
+        .map(|track| {
+            Rc::new(RefCell::new(build_step_has_plocks(
+                state,
+                track,
+                &app.graph.effect_descriptors,
+            )))
+        })
+        .collect();
+    Value::List(tracks)
+}
+
+pub(crate) fn track_playheads_snapshot(state: &Arc<SequencerState>, app: &ui::App) -> Vec<u32> {
+    (0..app.tracks.len())
+        .map(|t| state.transport.track_playheads[t].load(Ordering::Relaxed))
+        .collect()
+}
+
+pub(crate) fn sync_all_track_sequencer_state(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+) {
+    rt.set_reactive(
+        "SEQ",
+        "track-steps",
+        build_all_track_steps_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-num-steps",
+        build_all_track_num_steps_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-playheads",
+        build_all_track_playheads_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-step-has-plocks",
+        build_all_track_step_has_plocks(state, app),
+    );
+}
+
 /// Build a Lisp Value::List of floats for a given step param on a given track.
 pub(crate) fn build_param_list(
     state: &Arc<SequencerState>,
@@ -697,8 +782,14 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
         rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
         return;
     }
+
+    sync_all_track_sequencer_state(rt, state, app);
 
     sync_playhead_fields(
         rt,
@@ -2680,6 +2771,28 @@ mod tests {
         ASTParser::new(tokens)
             .parse()
             .expect("parse metal-seq-metal.lisp");
+    }
+
+    #[test]
+    fn metal_seq_sequencer_lisp_parses() {
+        let src = std::fs::read_to_string("metal-seq-sequencer.lisp").expect("read sequencer lisp");
+        let tokens = Parser::new(src)
+            .parse()
+            .expect("tokenize metal-seq-sequencer.lisp");
+        let mut pos = 0;
+        while pos < tokens.len() {
+            if let Err(err) = parse_expression_at(&tokens, &mut pos) {
+                let start = pos.saturating_sub(8);
+                let end = (pos + 8).min(tokens.len());
+                panic!(
+                    "parse metal-seq-sequencer.lisp at token {pos}: {err:?}\ncontext: {:?}",
+                    &tokens[start..end]
+                );
+            }
+        }
+        ASTParser::new(tokens)
+            .parse()
+            .expect("parse metal-seq-sequencer.lisp");
     }
 
     fn test_list(values: Vec<Value>) -> Value {
