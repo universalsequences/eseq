@@ -263,7 +263,7 @@
           (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row))))))
 
 (effect-buffer "*sequencer*"
-  (v-stack :padding 0.3 :gap 0.0
+  (v-stack :padding 0.00 :gap 0.0
     (each (range 0 (len SEQ.track-names)) |i|
       (subtree :key (str "sequencer-track-" (nth SEQ.track-ids i))
         (let ((selected (and (< selected-bus 0) (= SEQ.current-track i)))

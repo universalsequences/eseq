@@ -30,7 +30,7 @@
 
 (defstate lower-panel-buffer "*fx*")
 
-(def lower-fx-layout-height 11)
+(def lower-fx-layout-height 10)
 
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (list :rows :gap 1

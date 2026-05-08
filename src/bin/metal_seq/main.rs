@@ -4117,8 +4117,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             sync_sidebar_browser(rt, &app, ct);
                         }
 
+                        rt.clear_subtree_effects_for_named_target("*sequencer*");
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
+                        editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
 
                         prev_current_track = ct;
                         prev_playhead = playhead;

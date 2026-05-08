@@ -15,7 +15,7 @@
 (def midi-fx-ui-current-name "")
 
 ;; Matches a standard built-in FX panel with four parameter rows.
-(def fx-fixed-panel-height 9.75)
+(def fx-fixed-panel-height 9.95)
 (def fx-panel-body-padding 0.35)
 
 (def fx-panel-body (debug-name children)
@@ -168,12 +168,6 @@
               :material (aqua-slider-material)
               :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :num-steps v))))))
         (v-stack :align :center :gap 0.24
-          (label "gate" :font-size 8 :color :dim :bg :transparent)
-          (box :width 3.2 :height 1.3
-            :bg (if SEQ.tp-gate :blue :dark-gray)
-            :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1)))
-            (label (if SEQ.tp-gate "ON" "OFF") :font-size 9 :color :white :bg :transparent)))
-        (v-stack :align :center :gap 0.24
           (label "poly" :font-size 8 :color :dim :bg :transparent)
           (box :width 3.2 :height 1.3
             :bg (if SEQ.tp-poly :blue :dark-gray)
@@ -248,7 +242,7 @@
   :width 1 :height 1
   :state (selected header-r header-g header-b selected-header-r selected-header-g selected-header-b)
   :shader
-  (let ((panel-radius (min (* 8 (fwidth y)) (* 0.5 (min width height))))
+  (let ((panel-radius (min (* 3 (fwidth y)) (* 0.5 (min width height))))
       (panel (sdf/rounded-rect (* 1 width) (* 1 height) (* 2 panel-radius)))
       ;; Use derivatives to convert a real pixel height into the shader's
       ;; normalized/SDF y-space. This keeps the header bar visually constant
@@ -700,8 +694,18 @@
       :width 4.0 :height 2.05
       :on-change (lambda (v) (fx-set-instrument-value p v)))))
 
+(def sampler-gate-button ()
+  (v-stack :align :center :gap 0.2
+    (label "gate" :font-size 10 :color :dim :bg :transparent)
+    (button (if SEQ.tp-gate "ON" "OFF")
+      :width 3.2 :height 1.0 :padding 0 :font-size 10
+      :background-color (if SEQ.tp-gate (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+      :color (if SEQ.tp-gate :black :dim)
+      :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1))))))
+
 (def sampler-param-knobs (params)
-  (h-stack :gap 0.65 :padding 0 :align :center
+  (h-stack :gap 0.65 :padding 0.05 :align :center
+    (sampler-gate-button)
     (each (visible-params params) |p pi|
       (sampler-param-knob p (str "sampler-param-knob-" (get p :idx))))))
 
@@ -715,31 +719,34 @@
           (fx-enabled-toggle (enabled-param (get inst :params)) false "sampler-enabled")
           (label "Sampler" :font-size 11 :color :white :bg :transparent)))
       (fx-panel-body "sampler-panel-content"
-        (v-stack :gap 0.8
-          (if (get inst :buffer)
-            (subtree :key (str "sampler-waveform-" (get inst :buffer))
-              (box :width 70 :height 5.05
-                (waveform
-                  :height 5.0
-                  :header-height 0.3
-                  :ruler-font-size 8
-                  :ruler-color :dim
-                  :ruler-bg :black
-                  :grid-major-color :black
-                  :grid-minor-color :black
-                  :bg :instrument-control-bg
-                  :focusable true
-                  :buffer (get inst :buffer)
-                  :view-start sampler-view-start
-                  :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
-                  :cursor-time sampler-cursor-time
-                  :playhead-time SEQ.sampler-playhead
-                  :selection-start (get inst :start-time)
-                  :selection-end (get inst :end-time)
-                  :time-ruler (dict :mode :seconds)
-                  :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
-            (label "No sample" :font-size 12 :color :dim :bg :transparent))
-          (sampler-param-knobs (get inst :params)))))))
+        (v-stack 
+          (box :background-color :instrument-control-bg :corner-radius 10
+            (v-stack :gap 0.01 :padding 0.15
+              (box :height 0.1)
+              (if (get inst :buffer)
+                (subtree :key (str "sampler-waveform-" (get inst :buffer))
+                  (box :width 70 :height 4.85
+                    (waveform
+                      :height 4.85
+                      :header-height 0.3
+                      :ruler-font-size 8
+                      :ruler-color :dim
+                      :ruler-bg :black
+                      :grid-major-color :black
+                      :grid-minor-color :black
+                      :bg :instrument-control-bg
+                      :focusable true
+                      :buffer (get inst :buffer)
+                      :view-start sampler-view-start
+                      :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
+                      :cursor-time sampler-cursor-time
+                      :playhead-time SEQ.sampler-playhead
+                      :selection-start (get inst :start-time)
+                      :selection-end (get inst :end-time)
+                      :time-ruler (dict :mode :seconds)
+                      :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
+                (label "No sample" :font-size 12 :color :dim :bg :transparent))
+              (sampler-param-knobs (get inst :params)))))))))
 
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
@@ -902,7 +909,7 @@
     (fx-bus-selection-panel)
     (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
-    (v-stack :padding 0.5 :gap 1 
+    (v-stack :padding 0.05 :gap 1 
       (h-stack :gap 1
         (each SEQ.instrument-panel |inst inst-idx|
           (instrument-panel inst))
