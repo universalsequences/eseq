@@ -226,7 +226,7 @@ void initialize_engine(int block_Size, int sample_rate) {
 
 // ===================== Parameter Application =====================
 
-#define DGEN_HEADER_SLOTS 4
+#define DGEN_HEADER_SLOTS 5
 #define DGEN_CANARY_INDEX 2
 #define DGEN_HEADER_CANARY_BITS 0x4cd35a1dU
 #define DGEN_STATE_REDZONE_SLOTS 256

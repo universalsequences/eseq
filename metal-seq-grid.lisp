@@ -251,11 +251,7 @@
           (do (delete-selected-steps) true)
           (if (= key "RET")
             (do (cursor-toggle) true)
-            (if (= key "+")
-              (do (double-track-pattern) true)
-              (if (or (= key "_") (= key "-"))
-                (do (halve-track-pattern) true)
-                false))))))))
+            false))))))
 
 (def goto-page (page)
   (do
@@ -282,9 +278,6 @@
 (mode-bind-key "seq-grid-mode" "BS" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "Delete" "delete-selected-steps")
 (mode-bind-key "seq-grid-mode" "RET" "cursor-toggle")
-(mode-bind-key "seq-grid-mode" "+" "double-track-pattern")
-(mode-bind-key "seq-grid-mode" "_" "halve-track-pattern")
-(mode-bind-key "seq-grid-mode" "-" "halve-track-pattern")
 
 (def set-vel-mode () (set! param-mode 0))
 (mode-bind-key "seq-grid-mode" "v" "set-vel-mode")

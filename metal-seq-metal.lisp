@@ -285,7 +285,8 @@
         (box :width 8 :height 1.3
           (label (sync-current-label)
             :font-size 11 :color :white :bg :transparent))
-        (number-picker :value (nth (param-values) (current-step))
+        (number-picker :key "metal-step-param-number-picker"
+          :value (nth (param-values) (current-step))
           :min (param-min) :max (param-max) :decimals (param-decimals)
           :on-change (lambda (v)
             (do

@@ -439,6 +439,29 @@ pub(crate) fn init_runtime(
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
     });
 
+    // seq-toggle-track-step — toggle a step on a specific track (no track switch)
+    let st = state.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-toggle-track-step", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(step))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-toggle-track-step: expected (track step)".into());
+        };
+        let track = *track as usize;
+        let step = *step as usize;
+        if track >= st.active_track_count() {
+            return Err(format!("seq-toggle-track-step: track {track} out of range").into());
+        }
+        if step >= MAX_STEPS {
+            return Err(format!("seq-toggle-track-step: step {step} out of range").into());
+        }
+        st.toggle_step_and_clear_plocks(track, step);
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
+    });
+
     // seq-set-step-param — set param on current track
     let st = state.clone();
     let ct = current_track.clone();
@@ -1276,7 +1299,7 @@ pub(crate) fn init_runtime(
             _ => {
                 return Err(
                     "seq-use-accumulator: expected string label or track/string label".into(),
-                )
+                );
             }
         };
         if track >= st.active_track_count() {
@@ -1408,13 +1431,13 @@ pub(crate) fn init_runtime(
             {
                 return Err(
                     "seq-set-midi-fx-position: pre-accumulator is not implemented yet".into(),
-                )
+                );
             }
             _ => {
                 return Err(
                     "seq-set-midi-fx-position: expected :pre-accumulator or :post-accumulator"
                         .into(),
-                )
+                );
             }
         };
         st.pattern.track_params[track].set_midi_fx_position(position);
@@ -1777,6 +1800,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-toggle-step",
             "(seq-toggle-step step)",
             "Toggle the current track's step on/off and clear that step's p-locks.",
+        ),
+        (
+            "seq-toggle-track-step",
+            "(seq-toggle-track-step track step)",
+            "Toggle a step on a specific track without changing the current track.",
         ),
         (
             "seq-set-step-param",

@@ -14,6 +14,104 @@ use crate::sequencer::{BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_
 
 use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
 
+fn project_slot_into_synced_snapshot(
+    slot: project::ProjectEffectSlot,
+    desc: &crate::effects::EffectDescriptor,
+    node_id: u32,
+) -> crate::effects::EffectSlotSnapshot {
+    let mut snapshot = slot.into_snapshot_with_node_id(node_id);
+    snapshot.sync_to_descriptor(desc, node_id);
+    snapshot
+}
+
+fn project_custom_instrument_slot_into_synced_snapshot(
+    slot: project::ProjectEffectSlot,
+    desc: &crate::effects::EffectDescriptor,
+    node_id: u32,
+) -> crate::effects::EffectSlotSnapshot {
+    let new_np = desc.params.len();
+    let inserted_enabled = desc
+        .params
+        .iter()
+        .position(|param| param.name.eq_ignore_ascii_case("enabled"))
+        .filter(|_| slot.num_params as usize + 1 == new_np);
+
+    let find_old_idx_by_node = |target: u32| {
+        slot.param_node_indices
+            .iter()
+            .position(|&saved| saved == target)
+    };
+
+    let old_idx_for = |new_idx: usize, target_node_idx: u32| -> Option<usize> {
+        if inserted_enabled == Some(new_idx) {
+            return None;
+        }
+
+        if let Some(enabled_idx) = inserted_enabled {
+            if target_node_idx >= crate::lisp_effect::HEADER_SLOTS as u32
+                && target_node_idx < crate::voice_modulator::MOD_PARAM_BASE
+            {
+                if let Some(old_idx) = find_old_idx_by_node(target_node_idx - 1) {
+                    return Some(old_idx);
+                }
+            } else if let Some(old_idx) = find_old_idx_by_node(target_node_idx) {
+                return Some(old_idx);
+            }
+
+            return Some(if new_idx > enabled_idx {
+                new_idx - 1
+            } else {
+                new_idx
+            })
+            .filter(|&old_idx| old_idx < slot.defaults.len());
+        }
+
+        find_old_idx_by_node(target_node_idx)
+            .or_else(|| (new_idx < slot.defaults.len()).then_some(new_idx))
+    };
+
+    let mut defaults = desc
+        .params
+        .iter()
+        .map(|param| param.default)
+        .collect::<Vec<_>>();
+    for (new_idx, param) in desc.params.iter().enumerate() {
+        if let Some(old_idx) = old_idx_for(new_idx, param.node_param_idx) {
+            if let Some(value) = slot.defaults.get(old_idx).copied() {
+                defaults[new_idx] = value;
+            }
+        }
+    }
+
+    let mut plocks = (0..MAX_STEPS)
+        .map(|_| vec![None; new_np])
+        .collect::<Vec<_>>();
+    for step in 0..MAX_STEPS {
+        for (new_idx, param) in desc.params.iter().enumerate() {
+            let Some(old_idx) = old_idx_for(new_idx, param.node_param_idx) else {
+                continue;
+            };
+            if let Some(value) = slot
+                .plocks
+                .get(step)
+                .and_then(|row| row.get(old_idx))
+                .copied()
+                .flatten()
+            {
+                plocks[step][new_idx] = Some(value);
+            }
+        }
+    }
+
+    crate::effects::EffectSlotSnapshot {
+        node_id,
+        num_params: new_np as u32,
+        defaults,
+        plocks,
+        param_node_indices: desc.params.iter().map(|p| p.node_param_idx).collect(),
+    }
+}
+
 fn project_bus_gate_sequence_from_ui(
     sequence: &super::BusGateSequence,
 ) -> project::ProjectBusGateSequence {
@@ -1112,7 +1210,16 @@ impl App {
                             let node_id = self.state.pattern.effect_chains[track_idx][slot_idx]
                                 .node_id
                                 .load(Ordering::Relaxed);
-                            slot.into_snapshot_with_node_id(node_id)
+                            if let Some(desc) = self
+                                .graph
+                                .effect_descriptors
+                                .get(track_idx)
+                                .and_then(|descs| descs.get(slot_idx))
+                            {
+                                project_slot_into_synced_snapshot(slot, desc, node_id)
+                            } else {
+                                slot.into_snapshot_with_node_id(node_id)
+                            }
                         })
                         .collect()
                 })
@@ -1144,8 +1251,10 @@ impl App {
                                 }
                             });
                         if saved_slot.num_params >= 4 {
-                            // New project format: sampler params already saved
-                            saved_slot.into_snapshot_with_node_id(0)
+                            // Sampler params already saved; sync to pick up params added after
+                            // the project was written, such as enabled.
+                            let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
+                            project_slot_into_synced_snapshot(saved_slot, &sampler_desc, 0)
                         } else {
                             // Old project: migrate attack/release from TrackParams
                             let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
@@ -1185,13 +1294,12 @@ impl App {
                                 &self.state.pattern.instrument_slots[track_idx],
                             )
                         } else {
-                            let mut snapshot = slot.into_snapshot_with_node_id(node_id);
-                            // Regenerate instrument param routing from the current descriptor.
-                            // Older projects may have serialized stale absolute node ids here,
-                            // which makes restored synth edits no-op after load.
-                            snapshot.param_node_indices =
-                                desc.params.iter().map(|p| p.node_param_idx).collect();
-                            snapshot
+                            // Sync against the current descriptor so old projects inherit params
+                            // added after save, while remapping custom-instrument params across
+                            // the inserted enabled slot.
+                            project_custom_instrument_slot_into_synced_snapshot(
+                                slot, &desc, node_id,
+                            )
                         }
                     }
                 })
@@ -1319,5 +1427,83 @@ impl App {
         }
         self.push_track_solo_mutes();
         self.push_all_restored_instrument_defaults();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_param(
+        name: &str,
+        default: f32,
+        node_param_idx: u32,
+    ) -> crate::effects::ParamDescriptor {
+        crate::effects::ParamDescriptor {
+            name: name.to_string(),
+            min: 0.0,
+            max: 1.0,
+            default,
+            kind: crate::effects::ParamKind::Continuous { unit: None },
+            scaling: crate::effects::ParamScaling::Linear,
+            node_param_idx,
+            host_control: None,
+        }
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_remaps_params_across_inserted_enabled() {
+        let mut plocks = vec![vec![None; 4]; MAX_STEPS];
+        plocks[7][2] = Some(0.33);
+
+        let old_slot = project::ProjectEffectSlot {
+            num_params: 4,
+            defaults: vec![0.12, 0.34, 0.56, 0.78],
+            plocks,
+            param_node_indices: vec![
+                (crate::lisp_effect::HEADER_SLOTS - 1) as u32,
+                crate::lisp_effect::HEADER_SLOTS as u32,
+                crate::voice_modulator::MOD_PARAM_BASE,
+                crate::voice_modulator::MOD_PARAM_BASE + 1,
+            ],
+        };
+
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            params: vec![
+                test_param("attack", 0.01, crate::lisp_effect::HEADER_SLOTS as u32),
+                test_param("tone", 0.02, crate::lisp_effect::HEADER_SLOTS as u32 + 1),
+                crate::effects::EffectDescriptor::enabled_param(
+                    crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                    1.0,
+                ),
+                test_param("lfo rate", 0.03, crate::voice_modulator::MOD_PARAM_BASE),
+                test_param(
+                    "lfo depth",
+                    0.04,
+                    crate::voice_modulator::MOD_PARAM_BASE + 1,
+                ),
+            ],
+        };
+
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+
+        assert_eq!(restored.node_id, 42);
+        assert_eq!(restored.num_params, 5);
+        assert_eq!(restored.defaults, vec![0.12, 0.34, 1.0, 0.56, 0.78]);
+        assert_eq!(restored.plocks[7][3], Some(0.33));
+        assert_eq!(restored.plocks[7][2], None);
+        assert_eq!(
+            restored.param_node_indices,
+            vec![
+                crate::lisp_effect::HEADER_SLOTS as u32,
+                crate::lisp_effect::HEADER_SLOTS as u32 + 1,
+                crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                crate::voice_modulator::MOD_PARAM_BASE,
+                crate::voice_modulator::MOD_PARAM_BASE + 1,
+            ]
+        );
     }
 }

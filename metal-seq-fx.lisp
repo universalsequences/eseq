@@ -16,6 +16,19 @@
 
 ;; Matches a standard built-in FX panel with four parameter rows.
 (def fx-fixed-panel-height 9.75)
+(def fx-panel-body-padding 0.35)
+
+(def fx-panel-body (debug-name children)
+  (box :debug-name debug-name
+       :padding fx-panel-body-padding
+       :v-align :start
+       :h-align :start
+    (v-stack :gap 0
+      (box :width 1 :height 0.16)
+      children)))
+
+(def fx-panel-header-leading-spacer ()
+  (box :width 0.4 :height 0))
 
 (def fx-clear-selected-effect ()
   (do
@@ -366,7 +379,7 @@
                        (fx-set-instrument-value p v)))))))))
 
 (def fx-param-grid (params fx)
-  (h-stack :gap 1.5 :padding 0.5
+  (h-stack :gap 1.5 :padding 0
     (each (chunks (visible-params params) 4) |chunk ci|
       (v-stack :gap 0.25
         (each chunk |p pi|
@@ -418,7 +431,7 @@
 
 (def instrument-mod-grid (params)
   (let ((amounts (instrument-mod-amount-params params)))
-    (h-stack :gap 0.45 :padding 0.35
+    (h-stack :gap 0.45 :padding 0
       (each (chunks amounts 3) |chunk ci|
         (v-stack :gap 0.18
           (each chunk |p pi|
@@ -530,7 +543,7 @@
                  (fx-select-effect (get fx :slot-idx))
                  (fx-clear-selected-effect))))
         (h-stack :gap 0.5 :align :center
-          (box :width 0.75 :height 0)
+          (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param params) fx
             (if (get fx :midi-fx)
               (str "midi-fx-enabled-" (get fx :slot-idx))
@@ -550,9 +563,7 @@
                     (dict :name title :slot (get fx :slot-idx)))))
               (label "edit" :font-size 8 :color :dim :bg :transparent))
             (box))))
-      (box :padding 1
-           :debug-name (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
-           :on-click |x y r| (fx-clear-selected-effect)
+      (fx-panel-body (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
         (if (get fx :midi-fx)
           (midi-fx-panel-body fx)
           (fx-param-grid params fx)))))))
@@ -572,13 +583,11 @@
            :debug-name "midi-fx-panel-header"
            :on-click |x y r| (fx-select-midi-effect (get fx :slot-idx))
         (h-stack :gap 0.5 :align :center
-          (box :width 0.75 :height 0)
+          (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param params) fx
             (str "midi-fx-enabled-" (get fx :slot-idx)))
           (label title :font-size 11 :color :white :bg :transparent)))
-      (box :padding 1
-           :debug-name "midi-fx-panel-content"
-           :on-click |x y r| (fx-clear-selected-effect)
+      (fx-panel-body "midi-fx-panel-content"
         (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
           (midi-fx-panel-body fx)))))))
 
@@ -624,14 +633,14 @@
 (def instrument-synth-panel-body (inst)
   (let ((custom (custom-instrument-synth-ui inst)))
     (if custom
-      (box :debug-name "custom-synth-wrapper" :padding 0.5 :h-align :start :v-align :start custom)
+      (box :debug-name "custom-synth-wrapper" :padding 0 :h-align :start :v-align :start custom)
       (box :debug-name "fallback-synth-wrapper"
         (fx-param-grid (get inst :synth) false)))))
 
 (def midi-fx-panel-body (fx)
   (let ((custom (custom-midi-fx-ui fx)))
     (if custom
-      (box :debug-name "custom-midi-fx-wrapper" :padding 0.5 :h-align :start :v-align :start
+      (box :debug-name "custom-midi-fx-wrapper" :padding 0 :h-align :start :v-align :start
         (v-stack :gap 0.25 custom))
       (box :debug-name "fallback-midi-fx-wrapper"
         (fx-param-grid (get fx :params) fx)))))
@@ -692,26 +701,26 @@
       :on-change (lambda (v) (fx-set-instrument-value p v)))))
 
 (def sampler-param-knobs (params)
-  (h-stack :gap 0.65 :padding 0.35 :align :center
+  (h-stack :gap 0.65 :padding 0 :align :center
     (each (visible-params params) |p pi|
       (sampler-param-knob p (str "sampler-param-knob-" (get p :idx))))))
 
 (def sampler-panel (inst)
   (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
-       :height fx-fixed-panel-height
+    :height fx-fixed-panel-height
     (v-stack :gap 0
       (box :height 1 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0.5 :align :center
-          (box :width 0.75 :height 0)
+          (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param (get inst :params)) false "sampler-enabled")
           (label "Sampler" :font-size 11 :color :white :bg :transparent)))
-      (box :padding 1.5
+      (fx-panel-body "sampler-panel-content"
         (v-stack :gap 0.8
           (if (get inst :buffer)
             (subtree :key (str "sampler-waveform-" (get inst :buffer))
-              (box :width 50 :height 3.75
+              (box :width 70 :height 5.05
                 (waveform
-                  :height 3.75
+                  :height 5.0
                   :header-height 0.3
                   :ruler-font-size 8
                   :ruler-color :dim
@@ -741,7 +750,7 @@
       (v-stack :debug-name "instrument-panel-vstack" :gap 0
         (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :center :h-align :start
           (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center
-            (box :width 0.75 :height 0)
+            (fx-panel-header-leading-spacer)
             (fx-enabled-toggle (enabled-param (get inst :synth)) false "instrument-enabled")
             (box :debug-name "instrument-name-box" :height 2 :v-align :center :h-align :start :padding .1
               (h-stack :v-align :center :height 2 :gap 2 :padding 0.1
@@ -764,14 +773,12 @@
                 (fx-mini-save-icon
                   :on-click |x y r| (sbrowser-enter-preset-save)
                   :active 0)))))
-        (box :debug-name "instrument-content-box" :padding 0.5
-          (v-stack :debug-name "instrument-content-vstack" :gap 0.0
-            
-            (if (= instrument-panel-tab 0)
-              (instrument-synth-panel-body inst)
-              (if (= instrument-panel-tab 1)
-                (box :debug-name "mods-wrapper"  (instrument-mod-grid (get inst :mod)))
-                (box :debug-name "sources-wrapper"  (instrument-source-tabs inst))))))))))
+        (fx-panel-body "instrument-content-box"
+          (if (= instrument-panel-tab 0)
+            (instrument-synth-panel-body inst)
+            (if (= instrument-panel-tab 1)
+              (box :debug-name "mods-wrapper"  (instrument-mod-grid (get inst :mod)))
+              (box :debug-name "sources-wrapper"  (instrument-source-tabs inst)))))))))
 
 (defwidget black
   :width 2 :height 2
@@ -807,9 +814,9 @@
        :background-color :fx-panel-bg
        :corner-radius 8
        :height fx-fixed-panel-height
-       :padding 1.1
+       :padding 0
        :on-click |x y r| (fx-clear-selected-effect)
-    children))
+    (fx-panel-body "fx-add-panel-content" children)))
 
 (def fx-add-bus-panel ()
   (fx-add-panel-shell

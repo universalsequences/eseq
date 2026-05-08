@@ -70,6 +70,115 @@ pub(crate) fn track_playheads_snapshot(state: &Arc<SequencerState>, app: &ui::Ap
         .collect()
 }
 
+fn track_playhead_row_field(track: usize, row: usize) -> String {
+    format!("track-playhead-row-{track}-{row}")
+}
+
+fn track_active_playhead_step(state: &Arc<SequencerState>, track: usize) -> usize {
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .max(1)
+        .min(MAX_STEPS);
+    let playhead = state.transport.track_playheads[track].load(Ordering::Relaxed) as usize;
+    playhead.min(num_steps.saturating_sub(1))
+}
+
+fn track_playhead_row_count(state: &Arc<SequencerState>, track: usize) -> usize {
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .max(1)
+        .min(MAX_STEPS);
+    (num_steps + PAGE_SIZE - 1) / PAGE_SIZE
+}
+
+pub(crate) fn sync_all_track_playhead_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+) {
+    for track in 0..app.tracks.len() {
+        let active_step = track_active_playhead_step(state, track);
+        let active_row = active_step / PAGE_SIZE;
+        let active_col = active_step % PAGE_SIZE;
+        let row_count = track_playhead_row_count(state, track);
+        let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
+        for row in 0..max_rows {
+            rt.set_reactive(
+                "SEQ",
+                &track_playhead_row_field(track, row),
+                Value::Number(if row == active_row && row < row_count {
+                    active_col as f64
+                } else {
+                    -1.0
+                }),
+            );
+        }
+    }
+}
+
+pub(crate) fn sync_track_playhead_field_delta(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    previous: &mut Vec<u32>,
+) -> bool {
+    let track_count = app.tracks.len();
+    let mut current = Vec::with_capacity(track_count);
+    let mut ui_changed = previous.len() != track_count;
+    let mut snapshot_changed = previous.len() != track_count;
+
+    for t in 0..track_count {
+        let playhead = state.transport.track_playheads[t].load(Ordering::Relaxed);
+        let active_step = track_active_playhead_step(state, t);
+        let active_row = active_step / PAGE_SIZE;
+        let active_col = active_step % PAGE_SIZE;
+        if let Some(prev_playhead) = previous.get(t).copied() {
+            if prev_playhead != playhead {
+                snapshot_changed = true;
+                let num_steps = state.pattern.track_params[t]
+                    .get_num_steps()
+                    .max(1)
+                    .min(MAX_STEPS);
+                let prev_active_step = (prev_playhead as usize).min(num_steps.saturating_sub(1));
+                let prev_active_row = prev_active_step / PAGE_SIZE;
+                if prev_active_row != active_row {
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_playhead_row_field(t, prev_active_row),
+                        Value::Number(-1.0),
+                    );
+                }
+                if prev_active_step != active_step {
+                    rt.set_reactive(
+                        "SEQ",
+                        &track_playhead_row_field(t, active_row),
+                        Value::Number(active_col as f64),
+                    );
+                    ui_changed = true;
+                }
+            }
+        } else {
+            rt.set_reactive(
+                "SEQ",
+                &track_playhead_row_field(t, active_row),
+                Value::Number(active_col as f64),
+            );
+            ui_changed = true;
+        }
+        current.push(playhead);
+    }
+
+    if snapshot_changed {
+        *previous = current;
+    }
+
+    if !ui_changed {
+        return false;
+    }
+
+    true
+}
+
 pub(crate) fn sync_all_track_sequencer_state(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -95,6 +204,7 @@ pub(crate) fn sync_all_track_sequencer_state(
         "track-step-has-plocks",
         build_all_track_step_has_plocks(state, app),
     );
+    sync_all_track_playhead_fields(rt, state, app);
 }
 
 /// Build a Lisp Value::List of floats for a given step param on a given track.
@@ -3775,6 +3885,17 @@ mod tests {
                 .any(|buffer| buffer.name == "*piano-roll*"),
             "piano roll lisp should create the *piano-roll* buffer"
         );
+        let piano_buffer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*piano-roll*")
+            .expect("piano roll buffer")
+            .id;
+        editor.set_active_buffer(piano_buffer_id);
+        let layout = editor
+            .widget_layout()
+            .expect("piano roll should have a widget layout");
+        assert_eq!(layout.widget_type, "timeline");
         editor
             .runtime_mut()
             .eval_str("(set! piano-roll-view-duration 8)")

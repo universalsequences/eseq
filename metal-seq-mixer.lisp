@@ -148,10 +148,10 @@
               (name (nth SEQ.track-names row)))
           (subtree :key (str "mixer-track-row-" i)
             (box :background "track-container"
-              :padding 0.5 
+              :padding 0.5
               :even (mod i 2)
               :selected (if (and (< selected-bus 0) (= SEQ.current-track i)) 1 0)
-              
+
               (h-stack :gap 0.5 :align :center
                 (box :width 2 :height 1.5
                   :background "rec-arm-dot"

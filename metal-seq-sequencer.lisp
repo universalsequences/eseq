@@ -47,20 +47,47 @@
               1.0)
             (rgba 0.99 0.15 0.15 1.0)))))))
 
-(defwidget seqv-playhead-lane
-  :width 1.5 :height 1.5
-  :state (active)
+(defwidget seqv-playhead-row-bar
+  :width 42.3 :height 0.24
+  :paint-margin 0.18
+  :state (col)
   :shader
-  (sdf/layer
-    (sdf/fill (sdf/rounded-rect width height 0.32)
-      (material
-        :color (if (= active 1)
-                 (rgba 0.55 0.65 1.0 0.58)
-                 (rgba 0 0 0 0))
-        :shadow (shadow
-          :color (if (= active 1) (rgba 0.50 0.58 1.0 0.7) (rgba 0 0 0 0))
-          :blur 0.22
-          :offset (vec2 0 0))))))
+  (if (< col 0)
+    (rgba 0 0 0 0)
+    (let ((step-w (/ 1.0 16.0))
+          (center (/ (+ col 0.5) 16.0))
+          (trail-start (max 0.0 (- center (* step-w 1.55))))
+          (start (- center (* step-w 0.46)))
+          (end (+ center (* step-w 0.46)))
+          (trail-half-w (* 0.5 aspect (- end trail-start)))
+          (__half_w (* 0.5 aspect (- end start)))
+          (__half_h 0.12)
+          (__radius 0.07))
+      (sdf/layer
+        (sdf/fill
+          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ trail-start end)))))
+                (y (* 0.5 y)))
+            (sdf/rounded-rect trail-half-w 0.09 0.06))
+          (material
+            :color
+            (rgba 0.32 0.48 1.0
+              (* 0.42
+                (smoothstep trail-start center (/ (+ x aspect) (* 2.0 aspect)))
+                (smoothstep 0.82 0.0 (abs y))))))
+        (sdf/fill
+          (let ((x (+ (* 0.5 x) (* 0.5 aspect (- 1.0 (+ start end)))))
+                (y (* 0.5 y)))
+            (sdf/rounded-rect __half_w __half_h __radius))
+          (material
+            :color
+            (mix
+              (rgba 0.20 0.42 1.0 0.38)
+              (rgba 0.82 0.92 1.0 1.0)
+              (smoothstep 0.85 0.0 (abs y)))
+            :shadow (shadow
+              :color (rgba 0.25 0.45 1.0 0.72)
+              :blur 0.12
+              :offset (vec2 0 0))))))))
 
 (defwidget seqv-step-shell
   :width 1.5 :height 1.5
@@ -180,10 +207,8 @@
     (set! seqv-drag-track nil)))
 
 ;; Single tight step button (no slider, no number).
-(def seqv-step-cell (track step active visible playhead? selected? plocked?)
+(def seqv-step-cell (track step active visible selected? plocked?)
   (box :width 2.55 :height 1.45 :align :center :padding 0.03
-    :background "seqv-playhead-lane"
-    :active (if playhead? 1 0)
     :on-mouse-down (lambda (evt)
       (if visible
         (seqv-step-pointer-down track step evt)
@@ -207,28 +232,35 @@
           :plocked (if visible (if plocked? 1 0) 0)
           :selected (if visible (if selected? 1 0) 0))))))
 
+(def seqv-playhead-row (track row)
+  (subtree :key (str "seqv-playhead-row-" track "-" row)
+    (seqv-playhead-row-bar
+      :col (if SEQ.playing
+             (reactive-get "SEQ" (str "track-playhead-row-" track "-" row))
+             -1))))
+
 (def seqv-track-grid (track-idx)
   (let ((steps (nth SEQ.track-steps track-idx))
         (plocks (nth SEQ.track-step-has-plocks track-idx))
         (num-steps (nth SEQ.track-num-steps track-idx))
-        (playhead (nth SEQ.track-playheads track-idx))
         (rows (max 1 (floor (/ (+ num-steps (- sequencer-row-width 1)) sequencer-row-width)))))
-    (v-stack :gap 0.1
+    (v-stack :gap 0.04
       (box :width 0.1 :height 0.12 :bg :transparent)
       (each (range 0 rows) |row|
-        (h-stack :gap 0.1
-          (each (range 0 sequencer-row-width) |col|
-            (let ((step (+ (* row sequencer-row-width) col)))
-              (seqv-step-cell
-                track-idx
-                step
-                (if (< step (len steps)) (nth steps step) 0)
-                (< step num-steps)
-                (and SEQ.playing (= step playhead))
-                (and (= track-idx SEQ.current-track)
-                  (< step (len SEQ.selected-steps))
-                  (nth SEQ.selected-steps step))
-                (and (< step (len plocks)) (nth plocks step))))))))))
+        (v-stack :gap -0.03
+          (h-stack :gap 0.1
+            (each (range 0 sequencer-row-width) |col|
+              (let ((step (+ (* row sequencer-row-width) col)))
+                (seqv-step-cell
+                  track-idx
+                  step
+                  (if (< step (len steps)) (nth steps step) 0)
+                  (< step num-steps)
+                  (and (= track-idx SEQ.current-track)
+                    (< step (len SEQ.selected-steps))
+                    (nth SEQ.selected-steps step))
+                  (and (< step (len plocks)) (nth plocks step))))))
+          (seqv-playhead-row track-idx row))))))
 
 (effect-buffer "*sequencer*"
   (v-stack :padding 0.3 :gap 0.0

@@ -498,8 +498,24 @@ pub(crate) fn note_from_key(c: char) -> Option<i32> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecordingKeyOutcome {
+    Ignored,
+    Consumed,
+    Recorded,
+}
+
+impl RecordingKeyOutcome {
+    pub(crate) fn consumed(self) -> bool {
+        !matches!(self, Self::Ignored)
+    }
+
+    pub(crate) fn recorded(self) -> bool {
+        matches!(self, Self::Recorded)
+    }
+}
+
 /// Intercept keyboard events for live recording.
-/// Returns true if the key was consumed (music note key while armed).
 pub(crate) fn handle_recording_key(
     key: &crossterm::event::KeyEvent,
     state: &Arc<SequencerState>,
@@ -509,12 +525,13 @@ pub(crate) fn handle_recording_key(
     keyboard_octave: &Arc<std::sync::atomic::AtomicI32>,
     current_track: &Arc<AtomicUsize>,
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
-) -> bool {
+    ui_epoch: &Arc<AtomicUsize>,
+) -> RecordingKeyOutcome {
     use crossterm::event::{KeyCode, KeyEventKind};
 
     let c = match key.code {
         KeyCode::Char(c) => c.to_ascii_lowercase(),
-        _ => return false,
+        _ => return RecordingKeyOutcome::Ignored,
     };
 
     // Octave shift keys (only on press)
@@ -523,12 +540,12 @@ pub(crate) fn handle_recording_key(
             let delta = if c == 'z' { -12 } else { 12 };
             keyboard_octave.fetch_add(delta, Ordering::Relaxed);
         }
-        return true;
+        return RecordingKeyOutcome::Consumed;
     }
 
     let note = match note_from_key(c) {
         Some(n) => n,
-        None => return false,
+        None => return RecordingKeyOutcome::Ignored,
     };
 
     match key.kind {
@@ -536,7 +553,7 @@ pub(crate) fn handle_recording_key(
             // Suppress key repeat — only trigger on first press
             let mut held = held_notes.lock().unwrap();
             if held.iter().any(|note| note.key == c) {
-                return true;
+                return RecordingKeyOutcome::Consumed;
             }
 
             let armed = record_armed.lock().unwrap();
@@ -567,7 +584,7 @@ pub(crate) fn handle_recording_key(
                 press_time: Instant::now(),
                 tracks: pressed_tracks,
             });
-            true
+            RecordingKeyOutcome::Consumed
         }
         KeyEventKind::Release => {
             // Find and remove the held note
@@ -594,6 +611,7 @@ pub(crate) fn handle_recording_key(
                     let secs_per_step = 60.0 / bpm / 4.0;
                     let hold_secs = note.press_time.elapsed().as_secs_f64();
                     let duration_steps = (hold_secs / secs_per_step).max(0.15).min(64.0) as f32;
+                    let mut recorded = false;
 
                     for (track, a) in armed.iter().enumerate() {
                         if !*a {
@@ -617,13 +635,18 @@ pub(crate) fn handle_recording_key(
                             StepParam::Duration,
                             duration_steps,
                         );
+                        recorded = true;
                     }
-                    state.publish_scheduler_snapshot();
+                    if recorded {
+                        state.publish_scheduler_snapshot();
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                        return RecordingKeyOutcome::Recorded;
+                    }
                 }
             }
-            true
+            RecordingKeyOutcome::Consumed
         }
-        _ => true, // consume Repeat events too
+        _ => RecordingKeyOutcome::Consumed, // consume Repeat events too
     }
 }
 

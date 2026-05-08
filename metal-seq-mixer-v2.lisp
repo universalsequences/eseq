@@ -40,6 +40,16 @@
 (def mixer-v2-event-volume (event)
   (mixer-v2-pointer-volume (get event :sy)))
 
+(def mixer-v2-select-track (i)
+  (do
+    (set! selected-bus -1)
+    (seq-set-track i)))
+
+(def mixer-v2-select-bus (i)
+  (do
+    (seq-clear-selection)
+    (set! selected-bus i)))
+
 (defwidget mixer-v2-volume-triangle
   :width 1.35 :height 4.24
   :paint-margin 0.15
@@ -84,24 +94,40 @@
 
 (def mixer-v2-track-meter-control (i)
   (box :width 3.65 :height 4.24
-    :on-click (lambda (event) (seq-set-track-volume i (mixer-v2-event-volume event)))
-    :on-drag (lambda (event) (seq-set-track-volume i (mixer-v2-event-volume event)))
+    :on-click (lambda (event)
+      (seq-set-track-volume i (mixer-v2-event-volume event)))
+    :on-drag (lambda (event)
+      (seq-set-track-volume i (mixer-v2-event-volume event)))
     (h-stack :gap 0.06 :align :center
       (mixer-v2-volume-triangle
         :value (nth SEQ.track-volumes i)
-        :on-click (lambda (sx sy region) (seq-set-track-volume i (mixer-v2-pointer-volume sy)))
-        :on-drag (lambda (sx sy region) (seq-set-track-volume i (mixer-v2-pointer-volume sy))))
+        :on-click (lambda (sx sy region)
+          (seq-set-track-volume i (mixer-v2-pointer-volume sy)))
+        :on-drag (lambda (sx sy region)
+          (seq-set-track-volume i (mixer-v2-pointer-volume sy))))
       (mixer-v2-track-meter i))))
 
 (def mixer-v2-bus-meter-control (i)
   (box :width 3.65 :height 4.24
-    :on-click (lambda (event) (seq-set-bus-volume i (mixer-v2-event-volume event)))
-    :on-drag (lambda (event) (seq-set-bus-volume i (mixer-v2-event-volume event)))
+    :on-click (lambda (event)
+      (do
+        (mixer-v2-select-bus i)
+        (seq-set-bus-volume i (mixer-v2-event-volume event))))
+    :on-drag (lambda (event)
+      (do
+        (mixer-v2-select-bus i)
+        (seq-set-bus-volume i (mixer-v2-event-volume event))))
     (h-stack :gap 0.06 :align :center
       (mixer-v2-volume-triangle
         :value (nth SEQ.bus-volumes i)
-        :on-click (lambda (sx sy region) (seq-set-bus-volume i (mixer-v2-pointer-volume sy)))
-        :on-drag (lambda (sx sy region) (seq-set-bus-volume i (mixer-v2-pointer-volume sy))))
+        :on-click (lambda (sx sy region)
+          (do
+            (mixer-v2-select-bus i)
+            (seq-set-bus-volume i (mixer-v2-pointer-volume sy))))
+        :on-drag (lambda (sx sy region)
+          (do
+            (mixer-v2-select-bus i)
+            (seq-set-bus-volume i (mixer-v2-pointer-volume sy)))))
       (mixer-v2-bus-meter i))))
 
 (def mixer-v2-send-label (name)
@@ -125,14 +151,15 @@
 
 (def mixer-v2-track-strip (i)
   (let ((selected (and (< selected-bus 0) (= SEQ.current-track i)))
-        (muted (mixer-v2-muted? i))
-        (sends (nth SEQ.track-bus-sends i)))
+      (muted (mixer-v2-muted? i))
+      (sends (nth SEQ.track-bus-sends i)))
     (box :width 10.9 :height 11.0
       :background-color (mixer-v2-strip-bg selected muted)
       :border-width 2
+      :corner-radius 10
       :border-color (mixer-v2-strip-border selected)
       :padding 0.45
-      :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i))
+      :on-click |x y r| (mixer-v2-select-track i)
       (v-stack :gap 0.25
         (dropdown :value (nth SEQ.track-outputs i)
           :key (str "mixer-v2-track-output-" i)
@@ -143,7 +170,7 @@
         (h-stack :gap 0.05
           (each sends |send send-idx|
             (mixer-v2-send-knob i send)))
-        (h-stack :gap 0.45 :align :center
+        (h-stack :gap 1.6 :align :center
           (knob-number :label "pan"
             :key (str "mixer-v2-track-pan-" i)
             :value (nth SEQ.track-pans i)
@@ -151,29 +178,30 @@
             :font-size 9 :label-font-size 8
             :text-color :dim :label-color :dim
             :width 3.9 :height 2.35 :knob-size 1.48
-            :on-change (lambda (v) (seq-set-track-pan i v)))
+            :on-change (lambda (v)
+              (seq-set-track-pan i v)))
           (mixer-v2-track-meter-control i))
         (h-stack :gap 0.35
           (button (str (+ i 1))
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
             :color (if muted :dim :black)
-            :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-track-mute i)))
+            :on-click |x y r| (seq-toggle-track-mute i))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.track-solos i))
             :color (if (nth SEQ.track-solos i) :black :dim)
-            :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-track-solo i)))
+            :on-click |x y r| (seq-toggle-track-solo i))
           (button "R"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
             :color (if (nth SEQ.record-armed i) :black :dim)
-            :on-click |x y r| (do (set! selected-bus -1) (seq-toggle-record-arm i))))
+            :on-click |x y r| (seq-toggle-record-arm i)))
         (button (substring (nth SEQ.track-names i) 0 10)
           :width 9.8 :height 1.0 :padding 0 :font-size 10
           :background-color (if muted :mixer-label-muted-bg :mixer-label-bg)
           :color (if muted :dark-gray :dim)
-          :on-click |x y r| (do (set! selected-bus -1) (seq-set-track i)))))))
+          :on-click |x y r| (mixer-v2-select-track i))))))
 
 (def mixer-v2-bus-label (i)
   (if (= i 0) "Main" (nth SEQ.bus-names i)))
@@ -247,9 +275,10 @@
     (box :width 9.3 :height 11.0
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
+      :corner-radius 10
       :border-color (mixer-v2-strip-border selected)
       :padding 0.45
-      :on-click |x y r| (do (seq-clear-selection) (set! selected-bus i))
+      :on-click |x y r| (mixer-v2-select-bus i)
       (v-stack :gap 0.4
         (box :height 3.0)
         (h-stack :gap 0.45 :align :center
@@ -260,21 +289,21 @@
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if (nth SEQ.bus-mutes i) :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
             :color (if (nth SEQ.bus-mutes i) :dim :black)
-            :on-click |x y r| (seq-toggle-bus-mute i))
+            :on-click |x y r| (do (mixer-v2-select-bus i) (seq-toggle-bus-mute i)))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.bus-solos i))
             :color (if (nth SEQ.bus-solos i) :black :dim)
-            :on-click |x y r| (seq-toggle-bus-solo i))
+            :on-click |x y r| (do (mixer-v2-select-bus i) (seq-toggle-bus-solo i)))
           (box :width 2.1 :height 1.0))
         (button (mixer-v2-bus-label i)
           :width 8.2 :height 1.0 :padding 0 :font-size 10
           :background-color :mixer-label-bg
           :color :white
-          :on-click |x y r| (do (seq-clear-selection) (set! selected-bus i)))))))
+          :on-click |x y r| (mixer-v2-select-bus i))))))
 
 (effect-buffer "*mixer*"
-  (h-stack :padding 0.005 :gap 0.0
+  (h-stack :padding 0.2 :gap 0.0
     (each (range 0 SEQ.num-tracks) |i|
       (subtree :key (str "mixer-v2-track-" i)
         (mixer-v2-track-strip i)))

@@ -85,6 +85,16 @@ fn pull_shared_bus_state(
     }
 }
 
+fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
+    editor.tile_root.leaf_ids().into_iter().any(|tile_id| {
+        editor
+            .tile_root
+            .find_leaf(tile_id)
+            .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
+            .is_some_and(|buffer| buffer.name == name && buffer.view_mode != ViewMode::TextOnly)
+    })
+}
+
 fn map_number(
     map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
     key: &str,
@@ -217,6 +227,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
     let mut prev_bus_playheads: Vec<usize> = Vec::new();
     let mut prev_track_playheads: Vec<u32> = Vec::new();
+    let mut prev_current_track_playhead_visible = false;
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
     let mut prev_auto_follow = true;
@@ -320,21 +331,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     // Intercept keyboard for live recording when any track is armed
                     let any_armed = record_armed.lock().unwrap().iter().any(|a| *a);
-                    let intercepted =
-                        if any_armed && should_route_to_live_keyboard(&editor, &key, &held_notes) {
-                            handle_recording_key(
-                                &key,
-                                &state,
-                                &record_armed,
-                                &recording,
-                                &keyboard_tx,
-                                &keyboard_octave,
-                                &current_track,
-                                &held_notes,
-                            )
-                        } else {
-                            false
-                        };
+                    let recording_key_outcome = if (any_armed
+                        || held_note_for_key(&held_notes, &key))
+                        && should_route_to_live_keyboard(&editor, &key, &held_notes)
+                    {
+                        handle_recording_key(
+                            &key,
+                            &state,
+                            &record_armed,
+                            &recording,
+                            &keyboard_tx,
+                            &keyboard_octave,
+                            &current_track,
+                            &held_notes,
+                            &ui_epoch,
+                        )
+                    } else {
+                        RecordingKeyOutcome::Ignored
+                    };
+                    let intercepted = recording_key_outcome.consumed();
+                    if recording_key_outcome.recorded() {
+                        let ct = current_track.load(Ordering::Relaxed);
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                        sync_all_track_sequencer_state(rt, &state, &app);
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                        editor.mark_needs_redraw();
+                    }
                     // Only pass Press events to the editor (Release is only for note-off)
                     if !intercepted && key.kind == crossterm::event::KeyEventKind::Press {
                         let should_reload_custom_ui = should_reload_custom_ui_after_key(&key);
@@ -3014,6 +3039,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_track_name_state(rt, &mut track_names, &app);
                                     sync_pattern_state(rt, &state);
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
+                                    sync_all_track_sequencer_state(rt, &state, &app);
                                     sync_step_param_lists(rt, &state, ct);
                                     sync_track_mixer_state(rt, &app, &state);
                                     sync_bus_mixer_state(rt, &app);
@@ -4146,6 +4172,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let bus_playheads = bus_playhead_snapshot(&app);
             let epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
             let snap_ver = state.scheduler_snapshot_version();
+            let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
+            let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
+            let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
+            let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
+            let master_meter_visible = transport_visible || mixer_visible;
+            let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
+                || editor_has_visible_buffer(&editor, "*piano-roll*");
             if last_meter_poll_at.elapsed() >= METER_POLL_INTERVAL {
                 cached_peak_l_level = meter_display_level(f32::from_bits(
                     state.transport.peak_l.load(Ordering::Relaxed),
@@ -4161,8 +4194,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let mut needs_reactive_cycle = false;
-            let mut sequencer_playheads_changed = false;
-
             // Track switch — rebuild everything
             if ct != prev_current_track && !app.tracks.is_empty() {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
@@ -4172,18 +4203,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
                 rt.set_reactive("SEQ", "current-track", Value::Number(ct as f64));
-                sync_playhead_fields(
-                    rt,
-                    playhead as usize,
-                    state.pattern.track_params[ct].get_num_steps(),
-                );
-                rt.set_reactive(
-                    "SEQ",
-                    "transport-playhead",
-                    Value::Number(transport_playhead as f64),
-                );
+                if current_track_playhead_visible {
+                    sync_playhead_fields(
+                        rt,
+                        playhead as usize,
+                        state.pattern.track_params[ct].get_num_steps(),
+                    );
+                }
+                if transport_visible {
+                    rt.set_reactive(
+                        "SEQ",
+                        "transport-playhead",
+                        Value::Number(transport_playhead as f64),
+                    );
+                }
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                sync_all_track_sequencer_state(rt, &state, &app);
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
                 sync_track_mixer_state(rt, &app, &state);
@@ -4235,7 +4269,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_bpm = bpm;
                 needs_reactive_cycle = true;
             }
-            if cpu_load_bits != prev_cpu_load_bits {
+            if transport_visible && cpu_load_bits != prev_cpu_load_bits {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "cpu-load-pct",
@@ -4244,7 +4278,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_cpu_load_bits = cpu_load_bits;
                 needs_reactive_cycle = true;
             }
-            if cached_peak_l_level != prev_peak_l_level {
+            if !transport_visible && cpu_load_bits != prev_cpu_load_bits {
+                prev_cpu_load_bits = cpu_load_bits;
+            }
+            if master_meter_visible && cached_peak_l_level != prev_peak_l_level {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "master-peak-l",
@@ -4253,7 +4290,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_peak_l_level = cached_peak_l_level;
                 needs_reactive_cycle = true;
             }
-            if cached_peak_r_level != prev_peak_r_level {
+            if !master_meter_visible && cached_peak_l_level != prev_peak_l_level {
+                prev_peak_l_level = cached_peak_l_level;
+            }
+            if master_meter_visible && cached_peak_r_level != prev_peak_r_level {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "master-peak-r",
@@ -4262,73 +4302,102 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_peak_r_level = cached_peak_r_level;
                 needs_reactive_cycle = true;
             }
+            if !master_meter_visible && cached_peak_r_level != prev_peak_r_level {
+                prev_peak_r_level = cached_peak_r_level;
+            }
             if cached_track_peak_levels != prev_track_peak_levels {
-                sync_track_peak_field_delta(
-                    editor.runtime_mut(),
-                    &prev_track_peak_levels,
-                    &cached_track_peak_levels,
-                );
+                if mixer_visible {
+                    sync_track_peak_field_delta(
+                        editor.runtime_mut(),
+                        &prev_track_peak_levels,
+                        &cached_track_peak_levels,
+                    );
+                    needs_reactive_cycle = true;
+                }
                 prev_track_peak_levels = cached_track_peak_levels.clone();
-                needs_reactive_cycle = true;
             }
             if cached_bus_peak_levels != prev_bus_peak_levels {
-                sync_bus_peak_field_delta(
-                    editor.runtime_mut(),
-                    &prev_bus_peak_levels,
-                    &cached_bus_peak_levels,
-                );
+                if mixer_visible {
+                    sync_bus_peak_field_delta(
+                        editor.runtime_mut(),
+                        &prev_bus_peak_levels,
+                        &cached_bus_peak_levels,
+                    );
+                    needs_reactive_cycle = true;
+                }
                 prev_bus_peak_levels = cached_bus_peak_levels.clone();
-                needs_reactive_cycle = true;
             }
             if bus_playheads != prev_bus_playheads {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "bus-playheads",
-                    build_bus_playheads_value(&app),
-                );
+                if metal_visible {
+                    editor.runtime_mut().set_reactive(
+                        "SEQ",
+                        "bus-playheads",
+                        build_bus_playheads_value(&app),
+                    );
+                    needs_reactive_cycle = true;
+                }
                 prev_bus_playheads = bus_playheads;
-                needs_reactive_cycle = true;
             }
-            let track_playheads_now = track_playheads_snapshot(&state, &app);
-            if track_playheads_now != prev_track_playheads {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "track-playheads",
-                    build_all_track_playheads_value(&state, &app),
-                );
-                prev_track_playheads = track_playheads_now;
-                needs_reactive_cycle = true;
-                sequencer_playheads_changed = true;
-            }
-            if playhead != prev_playhead && !app.tracks.is_empty() {
-                sync_playhead_field_delta(
+            if sequencer_visible {
+                if sync_track_playhead_field_delta(
                     editor.runtime_mut(),
-                    prev_playhead as usize,
-                    playhead as usize,
-                    state.pattern.track_params[ct].get_num_steps(),
-                );
+                    &state,
+                    &app,
+                    &mut prev_track_playheads,
+                ) {
+                    needs_reactive_cycle = true;
+                }
+            } else {
+                prev_track_playheads = track_playheads_snapshot(&state, &app);
+            }
+            if current_track_playhead_visible
+                && (!prev_current_track_playhead_visible || playhead != prev_playhead)
+                && !app.tracks.is_empty()
+            {
+                if prev_current_track_playhead_visible {
+                    sync_playhead_field_delta(
+                        editor.runtime_mut(),
+                        prev_playhead as usize,
+                        playhead as usize,
+                        state.pattern.track_params[ct].get_num_steps(),
+                    );
+                } else {
+                    sync_playhead_fields(
+                        editor.runtime_mut(),
+                        playhead as usize,
+                        state.pattern.track_params[ct].get_num_steps(),
+                    );
+                }
                 prev_playhead = playhead;
                 needs_reactive_cycle = true;
             }
+            if !current_track_playhead_visible && prev_playhead != playhead {
+                prev_playhead = playhead;
+            }
+            prev_current_track_playhead_visible = current_track_playhead_visible;
             if (epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version)
                 && !app.tracks.is_empty()
             {
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
-                sync_playhead_fields(
-                    rt,
-                    playhead as usize,
-                    state.pattern.track_params[ct].get_num_steps(),
-                );
+                if current_track_playhead_visible {
+                    sync_playhead_fields(
+                        rt,
+                        playhead as usize,
+                        state.pattern.track_params[ct].get_num_steps(),
+                    );
+                }
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
                 sync_all_track_sequencer_state(rt, &state, &app);
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                 sync_step_param_lists(rt, &state, ct);
                 sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
-                sync_track_peak_fields(rt, &cached_track_peak_levels);
-                sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                if mixer_visible {
+                    sync_track_peak_fields(rt, &cached_track_peak_levels);
+                    sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                }
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
@@ -4341,6 +4410,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_snapshot_version = snap_ver;
                 needs_reactive_cycle = true;
             }
+            let mut refresh_visible_sequencer_after_cycle = false;
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
                 pull_shared_bus_state(&mut app, &bus_state);
@@ -4362,7 +4432,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     sync_track_name_state(rt, &mut track_names, &app);
                     sync_track_mixer_state(rt, &app, &state);
-                    sync_all_track_sequencer_state(rt, &state, &app);
                     sync_bus_mixer_state(rt, &app);
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
@@ -4374,6 +4443,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         build_selection_value(&selected_steps),
                     );
                     sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
+                    if sequencer_visible {
+                        sync_all_track_sequencer_state(rt, &state, &app);
+                    }
                     rt.set_reactive(
                         "SEQ",
                         "step-has-plocks",
@@ -4392,6 +4464,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.graph.record_armed[i] = *a;
                     }
                 }
+                refresh_visible_sequencer_after_cycle = sequencer_visible;
                 prev_ui_epoch = ui_ep;
                 needs_reactive_cycle = true;
             }
@@ -4447,7 +4520,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_fx_epoch = fx_ep;
                 needs_reactive_cycle = true;
             }
-            if transport_playhead != prev_transport_playhead {
+            if transport_visible && transport_playhead != prev_transport_playhead {
                 editor.runtime_mut().set_reactive(
                     "SEQ",
                     "transport-playhead",
@@ -4455,6 +4528,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 prev_transport_playhead = transport_playhead;
                 needs_reactive_cycle = true;
+            }
+            if !transport_visible && transport_playhead != prev_transport_playhead {
+                prev_transport_playhead = transport_playhead;
             }
             // Update sampler playhead for waveform display
             {
@@ -4483,7 +4559,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if needs_reactive_cycle {
                 editor.runtime_mut().run_reactive_cycle();
                 editor.refresh_runtime_side_effects();
-                if sequencer_playheads_changed {
+                if refresh_visible_sequencer_after_cycle {
                     editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
                 }
                 editor.mark_needs_redraw();

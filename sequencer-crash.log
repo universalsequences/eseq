@@ -613,3 +613,35 @@ backtrace:
              at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
   19: _main
 
+
+sequencer caught fatal signal 6 (SIGABRT)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 6 (SIGABRT)
+crash log: sequencer-crash.log
+stack trace:
+0   metal_seq                           0x0000000104a15d30 _ZN9sequencer5crash3imp14signal_handler17hc025fa6587438084E + 344
+1   libsystem_platform.dylib            0x000000018445f744 _sigtramp + 56
+2   libsystem_pthread.dylib             0x0000000184455888 pthread_kill + 296
+3   libsystem_c.dylib                   0x000000018435a850 abort + 124
+4   libsystem_malloc.dylib              0x0000000184259224 malloc_vreport + 892
+5   libsystem_malloc.dylib              0x000000018425cf78 malloc_report + 64
+6   libsystem_malloc.dylib              0x0000000184261e04 ___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED + 76
+7   metal_seq                           0x0000000104aa4750 apply_delete_node_internal + 1712
+8   metal_seq                           0x0000000104aa36a8 apply_graph_edits + 612
+9   metal_seq                           0x0000000104aa6f48 process_next_block + 216
+10  metal_seq                           0x0000000104a459a8 _ZN9sequencer5audio14audio_callback17h539fe3d74c126a6cE + 20240
+11  metal_seq                           0x0000000104a407ac _ZN9coreaudio10audio_unit15render_callback50_$LT$impl$u20$coreaudio..audio_unit..AudioUnit$GT$19set_render_callback28_$u7b$$u7b$closure$u7d$$u7d$17he8f40af9de706ffaE + 200
+12  metal_seq                           0x0000000104ad3f8c _ZN9coreaudio10audio_unit15render_callback10input_proc17hff69b0aaaec361e5E + 24
+13  CoreAudio                           0x000000010bea3024 CoreAudio + 12324
+14  CoreAudio                           0x000000010bea2c60 CoreAudio + 11360
+15  CoreAudio                           0x000000010bfaf8bc AUNotQuiteSoSimpleTimeFactory + 33488
+16  CoreAudio                           0x000000010beadda4 AUGenericOutputFactory + 39644
+17  CoreAudio                           0x000000018776cc90 _ZN19HALC_ProxyIOContext10IOWorkLoopEv + 10588
+18  CoreAudio                           0x0000000187769c8c ___ZN19HALC_ProxyIOContextC2Ejj_block_invoke + 172
+19  CoreAudio                           0x0000000187937710 _ZN13HALC_IOThread5EntryEPv + 88
+20  libsystem_pthread.dylib             0x0000000184455c08 _pthread_start + 136
+21  libsystem_pthread.dylib             0x0000000184450ba8 thread_start + 8
+
+
