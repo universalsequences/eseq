@@ -190,6 +190,7 @@ impl Editor {
             }
             _ => Value::Bool(false),
         };
+        self.sync_runtime_source_context();
         let result = self.runtime.invoke(callback, vec![key_arg, text_arg]);
         if let Some(status) = self.runtime.take_status_message() {
             self.minibuffer = Some(status);
@@ -358,6 +359,7 @@ impl Editor {
         };
         // Look for :on-enter callback in props
         if let Some(callback) = node.props.get("on-enter").cloned() {
+            self.sync_runtime_source_context();
             let result = self.runtime.invoke(callback, vec![]);
             if let Some(status) = self.runtime.take_status_message() {
                 self.minibuffer = Some(status);

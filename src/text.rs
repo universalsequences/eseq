@@ -246,73 +246,135 @@ fn sexp_range_at_cursor_with_selector(
 ) -> Option<((usize, usize), (usize, usize))> {
     let line = lines.get(cursor.0)?;
     let cursor_col = cursor.1.min(line.len());
+    let cursor = (cursor.0, cursor_col);
 
-    let mut flat = String::new();
-    let mut line_starts = Vec::with_capacity(lines.len());
-    for (idx, line) in lines.iter().enumerate() {
-        line_starts.push(flat.len());
-        flat.push_str(line);
-        if idx + 1 < lines.len() {
-            flat.push('\n');
-        }
+    if line.as_bytes().get(cursor_col) == Some(&b'(') {
+        return matching_forward_from(lines, cursor).map(|end| (cursor, end));
     }
 
-    if flat.is_empty() {
-        return None;
+    if cursor_col > 0 && line.as_bytes().get(cursor_col - 1) == Some(&b')') {
+        let close = (cursor.0, cursor_col - 1);
+        return matching_backward_from(lines, close).map(|start| (start, close));
     }
 
-    let bytes = flat.as_bytes();
-    let cursor_idx = (line_starts[cursor.0] + cursor_col).min(flat.len());
-
-    let mut stack: Vec<usize> = Vec::new();
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
-    for (idx, byte) in bytes.iter().enumerate() {
-        match *byte {
-            b'(' => stack.push(idx),
-            b')' => {
-                if let Some(open) = stack.pop() {
-                    pairs.push((open, idx));
+    let mut depth = 0usize;
+    let mut selected_open = None;
+    let mut row = cursor.0;
+    loop {
+        let bytes = lines[row].as_bytes();
+        let end_col = if row == cursor.0 {
+            cursor_col.min(bytes.len())
+        } else {
+            bytes.len()
+        };
+        for col in (0..end_col).rev() {
+            match bytes[col] {
+                b')' => depth += 1,
+                b'(' => {
+                    if depth == 0 {
+                        let open = (row, col);
+                        if matching_forward_from(lines, open).is_some_and(|close| {
+                            close.0 > cursor.0 || (close.0 == cursor.0 && close.1 >= cursor.1)
+                        }) {
+                            selected_open = Some(open);
+                            if matches!(selector, RangeSelector::Innermost) {
+                                break;
+                            }
+                        }
+                    } else {
+                        depth -= 1;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
+        if selected_open.is_some() && matches!(selector, RangeSelector::Innermost) {
+            break;
+        }
+        if row == 0 {
+            break;
+        }
+        row -= 1;
     }
 
-    let pair = if cursor_idx < bytes.len() && bytes[cursor_idx] == b'(' {
-        pairs.iter().find(|(open, _)| *open == cursor_idx).copied()
-    } else if cursor_idx > 0 && bytes[cursor_idx - 1] == b')' {
-        pairs
-            .iter()
-            .find(|(_, close)| *close == cursor_idx - 1)
-            .copied()
-    } else {
-        let enclosing = pairs
-            .iter()
-            .filter(|(open, close)| *open < cursor_idx && cursor_idx <= *close);
-        match selector {
-            RangeSelector::Outermost => enclosing.min_by_key(|(open, _)| *open).copied(),
-            RangeSelector::Innermost => enclosing.max_by_key(|(open, _)| *open).copied(),
-        }
-        .or_else(|| {
-            pairs
-                .iter()
-                .filter(|(_, close)| *close < cursor_idx)
-                .max_by_key(|(_, close)| *close)
-                .copied()
-        })
-    }?;
+    if let Some(open) = selected_open {
+        return matching_forward_from(lines, open).map(|close| (open, close));
+    }
 
-    Some((
-        flat_index_to_cursor(&line_starts, pair.0),
-        flat_index_to_cursor(&line_starts, pair.1),
-    ))
+    previous_complete_sexp_before(lines, cursor)
+        .and_then(|close| matching_backward_from(lines, close).map(|open| (open, close)))
 }
 
-fn flat_index_to_cursor(line_starts: &[usize], idx: usize) -> (usize, usize) {
-    let row = line_starts
-        .partition_point(|start| *start <= idx)
-        .saturating_sub(1);
-    (row, idx.saturating_sub(line_starts[row]))
+fn matching_forward_from(lines: &[String], open: (usize, usize)) -> Option<(usize, usize)> {
+    let mut depth = 0usize;
+    for row in open.0..lines.len() {
+        let bytes = lines[row].as_bytes();
+        let start_col = if row == open.0 { open.1 } else { 0 };
+        for (col, byte) in bytes.iter().enumerate().skip(start_col) {
+            match *byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some((row, col));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn matching_backward_from(lines: &[String], close: (usize, usize)) -> Option<(usize, usize)> {
+    let mut depth = 0usize;
+    for row in (0..=close.0).rev() {
+        let bytes = lines[row].as_bytes();
+        if bytes.is_empty() {
+            continue;
+        }
+        let end_col = if row == close.0 {
+            close.1.min(bytes.len().saturating_sub(1))
+        } else {
+            bytes.len().saturating_sub(1)
+        };
+        for col in (0..=end_col).rev() {
+            match bytes[col] {
+                b')' => depth += 1,
+                b'(' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some((row, col));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn previous_complete_sexp_before(
+    lines: &[String],
+    cursor: (usize, usize),
+) -> Option<(usize, usize)> {
+    for row in (0..=cursor.0).rev() {
+        let bytes = lines[row].as_bytes();
+        if bytes.is_empty() {
+            continue;
+        }
+        let end_exclusive = if row == cursor.0 {
+            cursor.1.min(bytes.len())
+        } else {
+            bytes.len()
+        };
+        for col in (0..end_exclusive).rev() {
+            if bytes[col] == b')' {
+                return Some((row, col));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

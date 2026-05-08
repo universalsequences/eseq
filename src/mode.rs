@@ -354,17 +354,49 @@ pub fn completion_match(
     })
 }
 
+pub fn has_completion_prefix(buffer: &Buffer) -> bool {
+    buffer
+        .lines
+        .get(buffer.cursor.0)
+        .and_then(|line| symbol_prefix(line, buffer.cursor.1.min(line.len())))
+        .is_some()
+}
+
 pub fn highlight_line(
     mode: &BufferMode,
     line: &str,
     runtime_symbols: &[String],
     buffer: &Buffer,
 ) -> Vec<TokenSpan> {
-    let mut spans = Vec::new();
     let known = completion_candidates(mode, runtime_symbols, buffer)
         .into_iter()
         .map(|item| item.label)
         .collect::<HashSet<_>>();
+    highlight_line_with_known(mode, line, &known)
+}
+
+pub fn highlight_lines<'a>(
+    mode: &BufferMode,
+    lines: impl IntoIterator<Item = &'a String>,
+    runtime_symbols: &[String],
+    buffer: &Buffer,
+) -> Vec<Vec<TokenSpan>> {
+    let known = completion_candidates(mode, runtime_symbols, buffer)
+        .into_iter()
+        .map(|item| item.label)
+        .collect::<HashSet<_>>();
+    lines
+        .into_iter()
+        .map(|line| highlight_line_with_known(mode, line, &known))
+        .collect()
+}
+
+fn highlight_line_with_known(
+    mode: &BufferMode,
+    line: &str,
+    known: &HashSet<String>,
+) -> Vec<TokenSpan> {
+    let mut spans = Vec::new();
     let bytes = line.as_bytes();
     let mut idx = 0usize;
 
@@ -545,7 +577,7 @@ fn is_symbol_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{BufferMode, completion_match, highlight_line};
+    use super::{BufferMode, completion_match, highlight_line, highlight_lines};
     use crate::buffer::Buffer;
     use crate::runtime::SymbolMetadata;
     use std::collections::HashMap;
@@ -579,6 +611,24 @@ mod tests {
                 .iter()
                 .any(|span| span.class == super::TokenClass::Special)
         );
+    }
+
+    #[test]
+    fn batch_highlight_matches_single_line_highlight() {
+        let buffer = Buffer::from_text(0, "*test*", "(def local 1)\n(local seq-step)");
+        let symbols = vec![String::from("seq-step")];
+        let batched = highlight_lines(
+            &BufferMode::ESeqLisp,
+            buffer.lines.iter(),
+            &symbols,
+            &buffer,
+        );
+        let single = buffer
+            .lines
+            .iter()
+            .map(|line| highlight_line(&BufferMode::ESeqLisp, line, &symbols, &buffer))
+            .collect::<Vec<_>>();
+        assert_eq!(batched, single);
     }
 
     #[test]

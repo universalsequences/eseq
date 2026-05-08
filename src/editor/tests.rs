@@ -1144,6 +1144,54 @@ fn vim_undo_and_redo_restore_text_edits() {
 }
 
 #[test]
+fn plain_typing_coalesces_into_one_undo_snapshot() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*test*", "");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    for ch in ['a', 'b', 'c'] {
+        editor.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert_eq!(editor.active_buffer().text(), "abc");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "");
+}
+
+#[test]
+fn cursor_movement_starts_a_new_typing_undo_group() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(
+        runtime,
+        EditorConfig {
+            vim_mode: true,
+            ..EditorConfig::default()
+        },
+    );
+    editor.open_scratch_buffer("*test*", "");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "ba");
+
+    editor.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "a");
+    editor.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+    assert_eq!(editor.active_buffer().text(), "");
+}
+
+#[test]
 fn ctrl_k_deletes_rest_of_line() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -1933,6 +1981,182 @@ fn widget_mouse_hit_testing_does_not_trigger_from_aspect_shifted_row() {
 }
 
 #[test]
+fn tree_mouse_hit_testing_keeps_lower_row_edge_on_same_item() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(24, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def picked (state ""))
+                (effect
+                  (tree
+                    :items '(
+                      (:label "one")
+                      (:label "two")
+                      (:label "three"))
+                    :on-select (lambda (item) (set! picked (get item :label)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(24, 10);
+
+    let layout = editor.widget_layout().expect("tree layout");
+    assert_eq!(layout.widget_type, "tree");
+    let row_height = layout.rect.height / 3.0;
+    let click_row = layout.rect.row + row_height * 0.92;
+
+    editor.handle_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            layout.rect.col as u16,
+            click_row as u16,
+        ),
+        0,
+        0,
+        24,
+        10,
+        layout.rect.col + 1.0,
+        click_row,
+    );
+
+    let value = editor.runtime.eval_str("picked").unwrap().unwrap();
+    assert_eq!(value, Value::String("one".to_string()));
+}
+
+#[test]
+fn tree_row_height_prop_controls_hit_testing() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(24, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def picked (state ""))
+                (effect
+                  (tree
+                    :row-height 2.0
+                    :items '(
+                      (:label "one")
+                      (:label "two"))
+                    :on-select (lambda (item) (set! picked (get item :label)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(24, 10);
+
+    let layout = editor.widget_layout().expect("tree layout");
+    assert_eq!(layout.rect.height, 4.0);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1),
+        0,
+        0,
+        24,
+        10,
+        layout.rect.col + 1.0,
+        layout.rect.row + 1.7,
+    );
+
+    let value = editor.runtime.eval_str("picked").unwrap().unwrap();
+    assert_eq!(value, Value::String("one".to_string()));
+}
+
+#[test]
+fn tiled_mouse_hit_testing_uses_fractional_tile_origin() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(24, 9);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def picked (state ""))
+                (effect
+                  (tree
+                    :items '(
+                      (:label "one")
+                      (:label "two"))
+                    :on-select (lambda (item) (set! picked (get item :label)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(24, 9);
+
+    let tile_id = editor.active_tile;
+    if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.show_border = false;
+    }
+    editor.cached_tile_rects = vec![(
+        tile_id,
+        crate::layout::Rect {
+            col: 3.25,
+            row: 10.5,
+            width: 24.0,
+            height: 10.0,
+        },
+    )];
+    let layout = editor.widget_layout().expect("tree layout");
+    let row_height = layout.rect.height / 2.0;
+    let precise_col = 3.25 + layout.rect.col + 1.0;
+    let precise_row = 10.5 + layout.rect.row + row_height * 0.9;
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+
+    let value = editor.runtime.eval_str("picked").unwrap().unwrap();
+    assert_eq!(value, Value::String("one".to_string()));
+}
+
+#[test]
+fn tiled_text_click_uses_precise_content_origin_and_border_inset() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "abcdef\nsecond");
+    editor.active_buffer_mut().view_mode = super::ViewMode::TextOnly;
+    editor.set_layout_viewport(20, 8);
+
+    let tile_id = editor.active_tile;
+    if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+        leaf.border_width_px = 0.2;
+    }
+    editor.cached_tile_rects = vec![(
+        tile_id,
+        crate::layout::Rect {
+            col: 3.25,
+            row: 10.5,
+            width: 20.0,
+            height: 8.0,
+        },
+    )];
+
+    let precise_col: f32 = 3.25 + 0.2 + 2.9;
+    let precise_row: f32 = 10.5 + 0.2 + 0.9;
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            precise_col.floor() as u16,
+            precise_row.floor() as u16,
+        ),
+        precise_col,
+        precise_row,
+        0,
+    );
+
+    assert_eq!(editor.active_buffer().cursor, (0, 2));
+}
+
+#[test]
 fn mouse_down_updates_knob_via_bind_shorthand() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
@@ -2657,6 +2881,52 @@ fn cycle_view_mode_stays_in_text_when_no_ui_exists() {
 
     assert_eq!(editor.active_buffer().view_mode, super::ViewMode::TextOnly);
     assert_eq!(editor.minibuffer.as_deref(), Some("No UI in this buffer"));
+}
+
+#[test]
+fn text_visible_buffer_forces_status_bar_even_when_tile_hides_status() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.open_scratch_buffer("*test*", "abc");
+    let tile_id = editor.active_tile;
+    editor.active_leaf_mut().show_status = false;
+    editor.cached_tile_rects = vec![(
+        tile_id,
+        crate::layout::Rect {
+            col: 0.0,
+            row: 0.0,
+            width: 20.0,
+            height: 8.0,
+        },
+    )];
+
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 20, 9);
+
+    assert!(frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 7);
+}
+
+#[test]
+fn ui_only_buffer_can_still_hide_status_bar() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    let tile_id = editor.active_tile;
+    editor.active_leaf_mut().show_status = false;
+    editor.cached_tile_rects = vec![(
+        tile_id,
+        crate::layout::Rect {
+            col: 0.0,
+            row: 0.0,
+            width: 20.0,
+            height: 8.0,
+        },
+    )];
+
+    let frame = crate::ui::frame::build_tiled_render_frame_borderless(&mut editor, 20, 9);
+
+    assert!(!frame.tiles[0].show_status);
+    assert_eq!(editor.tile_content_area(tile_id, 0).unwrap().3, 8);
 }
 
 #[test]

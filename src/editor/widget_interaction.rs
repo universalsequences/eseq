@@ -526,6 +526,8 @@ impl Editor {
         content_row: u16,
         content_width: u16,
         content_height: u16,
+        precise_col: f32,
+        precise_row: f32,
     ) {
         let Some(cursor) = self.text_cursor_from_mouse(
             mouse,
@@ -533,6 +535,8 @@ impl Editor {
             content_row,
             content_width,
             content_height,
+            precise_col,
+            precise_row,
         ) else {
             return;
         };
@@ -565,6 +569,8 @@ impl Editor {
         content_row: u16,
         content_width: u16,
         content_height: u16,
+        precise_col: f32,
+        precise_row: f32,
     ) {
         let Some(anchor) = self.active_text_drag_anchor else {
             return;
@@ -579,6 +585,8 @@ impl Editor {
             content_row,
             content_width,
             content_height,
+            precise_col,
+            precise_row,
         ) else {
             return;
         };
@@ -612,17 +620,21 @@ impl Editor {
 
     fn text_cursor_from_mouse(
         &self,
-        mouse: MouseEvent,
+        _mouse: MouseEvent,
         content_col: u16,
         content_row: u16,
         content_width: u16,
         content_height: u16,
+        precise_col: f32,
+        precise_row: f32,
     ) -> Option<(usize, usize)> {
-        if mouse.column < content_col || mouse.row < content_row {
+        let local_col_f = precise_col - content_col as f32;
+        let local_row_f = precise_row - content_row as f32;
+        if local_col_f < 0.0 || local_row_f < 0.0 {
             return None;
         }
-        let local_col = mouse.column - content_col;
-        let local_row = mouse.row - content_row;
+        let local_col = local_col_f.floor() as u16;
+        let local_row = local_row_f.floor() as u16;
         if local_col >= content_width || local_row >= content_height {
             return None;
         }

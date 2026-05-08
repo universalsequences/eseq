@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,11 +20,12 @@ use crate::buffer::{Buffer, debug_widget_tree_summary};
 use crate::host::{BufferId, CompileKind, HostCommand, HostEvent};
 use crate::layout::Rect;
 use crate::mode::{
-    BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match, highlight_line,
+    BufferMode, CompletionItem, CompletionMatch, TokenSpan, completion_match,
+    has_completion_prefix, highlight_lines,
 };
 use crate::runtime::Runtime;
 use crate::text::{innermost_sexp_range_at_cursor, sexp_at_cursor};
-use crate::tile::{HighlightCache, SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
+use crate::tile::{SplitDir, TileId, TileLeaf, TileNode, split_ratio_for_point};
 use crate::vm::{EffectTarget, PendingUiUpdate, Value, format_lisp_value};
 use crate::widget_render::WidgetCursor;
 use commands::key_str;
@@ -262,6 +262,7 @@ pub struct Editor {
     vim_linewise_yank: Option<Vec<String>>,
     undo_stack: Vec<TextUndoSnapshot>,
     redo_stack: Vec<TextUndoSnapshot>,
+    typing_undo_buffer_id: Option<BufferId>,
     /// Cached tile rects, recomputed when tiles change or viewport resizes.
     cached_tile_rects: Vec<(TileId, Rect)>,
     /// Outer margin around the tiled layout, in cell units.
@@ -339,6 +340,7 @@ impl Editor {
             vim_linewise_yank: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            typing_undo_buffer_id: None,
             cached_tile_rects: vec![],
             tile_outer_gap: 0.0,
             widget_cursor: WidgetCursor::Default,
@@ -815,14 +817,24 @@ impl Editor {
                 return;
             };
             self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+                let (event_col, event_row) = editor
+                    .tile_content_precise_event_position(
+                        tile_id,
+                        border_inset,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                    .unwrap_or((precise_col, precise_row));
                 editor.handle_mouse_precise(
                     mouse,
                     content_col,
                     content_row,
                     content_width,
                     content_height,
-                    precise_col,
-                    precise_row,
+                    event_col,
+                    event_row,
                 );
             });
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -906,6 +918,16 @@ impl Editor {
                 else {
                     return;
                 };
+                let (event_col, event_row) = editor
+                    .tile_content_precise_event_position(
+                        tile_id,
+                        border_inset,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                    .unwrap_or((precise_col, precise_row));
 
                 editor.handle_mouse_precise(
                     mouse,
@@ -913,8 +935,8 @@ impl Editor {
                     content_row,
                     content_width,
                     content_height,
-                    precise_col,
-                    precise_row,
+                    event_col,
+                    event_row,
                 );
             });
         }
@@ -981,16 +1003,75 @@ impl Editor {
     ) -> Option<(u16, u16, u16, u16)> {
         let rect = self.tile_rect(tile_id)?;
         let border = border_inset as f32;
-        let content_col = (rect.col + border).round() as u16;
-        let content_row = (rect.row + border).round() as u16;
-        let content_width = (rect.width - border * 2.0).max(0.0).round() as u16;
-        let show_status = self.tile_root.find_leaf(tile_id)?.show_status;
-        let content_height = if show_status {
-            (rect.height - border * 2.0 - 1.0).max(0.0).round() as u16
+        let show_status = self.tile_effective_show_status(tile_id)?;
+
+        let content_col_f = rect.col + border;
+        let content_row_f = rect.row + border;
+        let content_width_f = (rect.width - border * 2.0).max(0.0);
+        let content_height_f = if show_status {
+            (rect.height - border * 2.0 - 1.0).max(0.0)
         } else {
-            (rect.height - border * 2.0).max(0.0).round() as u16
+            (rect.height - border * 2.0).max(0.0)
         };
-        Some((content_col, content_row, content_width, content_height))
+
+        if border_inset == 0 {
+            Some((
+                content_col_f.floor() as u16,
+                content_row_f.floor() as u16,
+                content_width_f.floor() as u16,
+                content_height_f.floor() as u16,
+            ))
+        } else {
+            Some((
+                content_col_f.round() as u16,
+                content_row_f.round() as u16,
+                content_width_f.round() as u16,
+                content_height_f.round() as u16,
+            ))
+        }
+    }
+
+    fn tile_content_precise_event_position(
+        &self,
+        tile_id: TileId,
+        border_inset: u16,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<(f32, f32)> {
+        let rect = self.tile_rect(tile_id)?;
+        let (border_col, border_row) = self.tile_content_border_insets(tile_id, border_inset);
+        let content_col_f = rect.col + border_col;
+        let content_row_f = rect.row + border_row;
+        Some((
+            precise_col - content_col_f + content_col as f32,
+            precise_row - content_row_f + content_row as f32,
+        ))
+    }
+
+    fn tile_content_border_insets(&self, tile_id: TileId, border_inset: u16) -> (f32, f32) {
+        if border_inset != 0 {
+            let border = border_inset as f32;
+            return (border, border);
+        }
+        let Some(leaf) = self.tile_root.find_leaf(tile_id) else {
+            return (0.0, 0.0);
+        };
+        if !leaf.show_border {
+            return (0.0, 0.0);
+        }
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        (
+            leaf.border_width_px.max(0.0) / cell_w.max(1.0),
+            leaf.border_width_px.max(0.0) / cell_h.max(1.0),
+        )
+    }
+
+    pub(crate) fn tile_effective_show_status(&self, tile_id: TileId) -> Option<bool> {
+        let leaf = self.tile_root.find_leaf(tile_id)?;
+        let buffer = self.buffers.get(leaf.buffer_idx)?;
+        Some(leaf.show_status || buffer.view_mode != ViewMode::UiOnly)
     }
 
     fn status_toggle_tile_at_screen(&self, precise_col: f32, precise_row: f32) -> Option<TileId> {
@@ -1009,7 +1090,7 @@ impl Editor {
         let Some(leaf) = self.tile_root.find_leaf(tile_id) else {
             return false;
         };
-        if !leaf.show_status {
+        if !self.tile_effective_show_status(tile_id).unwrap_or(false) {
             return false;
         }
         let ui_available = if tile_id == self.active_tile {
@@ -1353,47 +1434,17 @@ impl Editor {
         }
     }
 
-    pub fn active_highlight_spans(&mut self) -> Rc<Vec<Vec<TokenSpan>>> {
+    pub fn active_highlight_spans_for_visible(
+        &mut self,
+        scroll_top: usize,
+        viewport_height: usize,
+    ) -> Vec<Vec<TokenSpan>> {
         let buf_idx = self.active_buffer_idx();
+        let symbols = self.runtime.completion_symbols();
         let buffer = &self.buffers[buf_idx];
-        let buffer_id = buffer.id;
-        let buffer_revision = buffer.revision;
-        let buffer_mode = buffer.mode.clone();
-        let runtime_symbol_revision = self.runtime.symbol_revision();
-
-        let leaf = self.active_leaf();
-        let is_fresh = leaf.highlight_cache.as_ref().is_some_and(|cache| {
-            cache.buffer_id == buffer_id
-                && cache.buffer_revision == buffer_revision
-                && cache.buffer_mode == buffer_mode
-                && cache.runtime_symbol_revision == runtime_symbol_revision
-        });
-
-        if !is_fresh {
-            let symbols = self.runtime.completion_symbols();
-            let buffer = &self.buffers[buf_idx];
-            let spans = buffer
-                .lines
-                .iter()
-                .map(|line| highlight_line(&buffer.mode, line, &symbols, buffer))
-                .collect();
-            self.active_leaf_mut().highlight_cache = Some(HighlightCache {
-                buffer_id,
-                buffer_revision,
-                buffer_mode,
-                runtime_symbol_revision,
-                spans: Rc::new(spans),
-            });
-        }
-
-        Rc::clone(
-            &self
-                .active_leaf()
-                .highlight_cache
-                .as_ref()
-                .expect("highlight cache")
-                .spans,
-        )
+        let visible = scroll_top.min(buffer.lines.len())
+            ..(scroll_top + viewport_height).min(buffer.lines.len());
+        highlight_lines(&buffer.mode, buffer.lines[visible].iter(), &symbols, buffer)
     }
 
     pub fn active_sexp_range(&self) -> Option<((usize, usize), (usize, usize))> {
@@ -2177,6 +2228,7 @@ impl Editor {
     }
 
     pub fn runtime_mut(&mut self) -> &mut Runtime {
+        self.sync_runtime_source_context();
         &mut self.runtime
     }
 
@@ -2215,6 +2267,9 @@ impl Editor {
         }
 
         self.mark_needs_redraw();
+        if !self.key_starts_text_insert(key) {
+            self.finish_typing_undo_group();
+        }
 
         if self.handle_save_prompt_key(key) {
             return;
@@ -2255,12 +2310,10 @@ impl Editor {
         // Focused widget keys take priority over global bindings
         // (so Enter/arrows work in number-pickers, dropdowns, etc.)
         if self.handle_focused_widget_key(key) {
-            println!("handle widget key early returned");
             return;
         }
 
         if self.handle_focus_key(key) {
-            println!("handle focus key early returned");
             return;
         }
 
@@ -2295,12 +2348,6 @@ impl Editor {
         {
             let ks = key_str(key);
             let mode = &self.active_buffer().mode;
-            eprintln!(
-                "mode-keybinding check: key='{}' buffer='{}' mode={:?}",
-                ks,
-                self.active_buffer().name,
-                mode
-            );
             if let BufferMode::Named(mode_name) = mode {
                 if let Some(handler) = self
                     .mode_registry
@@ -2308,7 +2355,6 @@ impl Editor {
                     .and_then(|mode| mode.keybindings.get(&ks))
                     .cloned()
                 {
-                    eprintln!("  → matched handler: {}", handler);
                     self.call_lisp_handler(&handler);
                     return;
                 }
@@ -2334,7 +2380,7 @@ impl Editor {
                 }
                 self.minibuffer = None;
                 self.clear_mark();
-                self.record_undo_snapshot();
+                self.record_typing_undo_snapshot();
                 self.active_buffer_mut().insert_char(c);
                 self.sync_text_horizontal_scroll_to_viewport();
                 self.sync_runtime_context();
@@ -2363,6 +2409,23 @@ impl Editor {
                 self.active_buffer().mode,
                 BufferMode::ESeqLisp | BufferMode::DGenLisp
             )
+    }
+
+    fn key_starts_text_insert(&self, key: KeyEvent) -> bool {
+        if !matches!(
+            key.code,
+            KeyCode::Char(_)
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT
+        ) {
+            return false;
+        }
+        if self.save_prompt.is_some() || self.minibuffer_input.is_some() {
+            return false;
+        }
+        if self.active_buffer().read_only || self.active_buffer().view_mode == ViewMode::UiOnly {
+            return false;
+        }
+        !self.vim_applies_to_active_buffer() || self.vim_input_mode == VimInputMode::Insert
     }
 
     fn handle_selection_escape(&mut self, key: KeyEvent) -> bool {
@@ -2838,6 +2901,19 @@ impl Editor {
         self.redo_stack.clear();
     }
 
+    fn record_typing_undo_snapshot(&mut self) {
+        let buffer_id = self.active_buffer().id;
+        if self.typing_undo_buffer_id == Some(buffer_id) {
+            return;
+        }
+        self.record_undo_snapshot();
+        self.typing_undo_buffer_id = Some(buffer_id);
+    }
+
+    fn finish_typing_undo_group(&mut self) {
+        self.typing_undo_buffer_id = None;
+    }
+
     fn restore_text_snapshot(&mut self, snapshot: TextUndoSnapshot) {
         let Some(buffer_idx) = self
             .buffers
@@ -2857,6 +2933,7 @@ impl Editor {
         buffer.dirty = snapshot.dirty;
         buffer.revision = buffer.revision.wrapping_add(1);
         buffer.text_styles.clear();
+        self.finish_typing_undo_group();
         if self.active_buffer_idx() == buffer_idx {
             self.sync_text_horizontal_scroll_to_viewport();
         }
@@ -3013,6 +3090,8 @@ impl Editor {
                         content_row,
                         content_width,
                         content_height,
+                        precise_col,
+                        precise_row,
                     );
                 }
                 self.active_leaf_mut().last_widget_click = None;
@@ -3065,6 +3144,8 @@ impl Editor {
                         content_row,
                         content_width,
                         content_height,
+                        precise_col,
+                        precise_row,
                     );
                 }
                 self.last_mouse_precise = Some((precise_col, precise_row));
@@ -3412,7 +3493,7 @@ impl Editor {
             self.run_command("find-file");
             return;
         }
-        self.sync_runtime_context();
+        self.sync_runtime_source_context();
         self.clear_minibuffer_message();
         let rendered_args = args
             .iter()
@@ -3457,7 +3538,7 @@ impl Editor {
             _ => Value::Bool(false),
         };
         let args = vec![Value::String(key_str(key)), text];
-        self.sync_runtime_context();
+        self.sync_runtime_source_context();
         self.clear_minibuffer_message();
         let code = format!(
             "({} {} {})",
@@ -3486,7 +3567,7 @@ impl Editor {
         if fn_name == "eval-sexp" {
             self.start_eval_flash();
         }
-        self.sync_runtime_context();
+        self.sync_runtime_source_context();
         self.clear_minibuffer_message();
 
         let source = match fn_name {
@@ -3546,8 +3627,6 @@ impl Editor {
         shared.current_buffer_id = Some(active.id);
         shared.current_buffer_name = active.name.clone();
         shared.current_buffer_path = active.path.clone();
-        shared.current_buffer_text = active.text();
-        shared.current_sexp = sexp_at_cursor(&active.lines, active.cursor);
         shared.current_buffer_read_only = active.read_only;
         shared.current_buffer_mode = active.mode.name().to_string();
         shared.current_line_number = active.cursor.0 + 1;
@@ -3558,6 +3637,16 @@ impl Editor {
             .unwrap_or_default();
         shared.buffer_names = buffer_names;
         shared.current_view_mode = active.view_mode.label().to_string();
+    }
+
+    fn sync_runtime_source_context(&mut self) {
+        self.sync_runtime_context();
+        let active = self.active_buffer();
+        let text = active.text();
+        let sexp = sexp_at_cursor(&active.lines, active.cursor);
+        let mut shared = self.runtime.shared.borrow_mut();
+        shared.current_buffer_text = text;
+        shared.current_sexp = sexp;
     }
 
     fn apply_widget_tree_to_buffer(
@@ -3607,8 +3696,11 @@ impl Editor {
                     .iter()
                     .find(|(tid, _)| *tid == id)
                     .map(|(_, r)| r);
+                let show_status = self
+                    .tile_effective_show_status(id)
+                    .unwrap_or(leaf.show_status);
                 let (cols, rows) = match rect {
-                    Some(r) => metal_tile_content_viewport(r, leaf.show_status),
+                    Some(r) => metal_tile_content_viewport(r, show_status),
                     None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
                 };
                 Some((id, cols, rows))
@@ -3690,8 +3782,11 @@ impl Editor {
                     .iter()
                     .find(|(tid, _)| *tid == id)
                     .map(|(_, r)| r);
+                let show_status = self
+                    .tile_effective_show_status(id)
+                    .unwrap_or(leaf.show_status);
                 let (cols, rows) = match rect {
-                    Some(r) => metal_tile_content_viewport(r, leaf.show_status),
+                    Some(r) => metal_tile_content_viewport(r, show_status),
                     None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
                 };
                 Some((id, cols, rows))
@@ -3869,6 +3964,11 @@ impl Editor {
         if self.save_prompt.is_some() {
             self.completion = None;
             self.trace_completion("refresh:save-prompt");
+            return;
+        }
+        if !has_completion_prefix(self.active_buffer()) {
+            self.completion = None;
+            self.trace_completion("refresh:no-prefix");
             return;
         }
         let symbols = self.runtime.completion_symbols();
@@ -4126,7 +4226,7 @@ impl Editor {
             }
             // Call on_enter hook
             if let Some(on_enter) = mode_def.as_ref().and_then(|m| m.on_enter.clone()) {
-                self.sync_runtime_context();
+                self.sync_runtime_source_context();
                 let code = format!("({on_enter})");
                 let _ = self.runtime.eval_str(&code);
                 if let Some(status) = self.runtime.take_status_message() {
@@ -4574,6 +4674,7 @@ impl Editor {
         let Some(output) = output else {
             return false;
         };
+        self.sync_runtime_source_context();
         let result = self.runtime.invoke(output.callback, output.args);
         if let Some(status) = self.runtime.take_status_message() {
             self.minibuffer = Some(status);

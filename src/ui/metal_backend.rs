@@ -637,8 +637,8 @@ fragment float4 waveform_frag(
     /// Signed to support negative offsets from horizontal scrolling.
     #[derive(Clone, Copy, Default)]
     struct TileOffset {
-        col: i32,
-        row: i32,
+        col: f32,
+        row: f32,
     }
 
     #[derive(Clone)]
@@ -1556,34 +1556,54 @@ fragment float4 waveform_frag(
 
             // ── Per-tile rendering with scissor rect ─────────────────────────
             for tile in &tiled.tiles {
-                let col_off = tile.rect.col.round() as usize;
-                let row_off = tile.rect.row.round() as usize;
-                let tile_w = tile.rect.width.round() as usize;
-                let tile_h = tile.rect.height.round() as usize;
                 let tile_left_px = tile.rect.col * cell_w;
                 let tile_top_px = tile.rect.row * cell_h;
                 let tile_width_px = tile.rect.width * cell_w;
                 let tile_height_px = tile.rect.height * cell_h;
-
-                // Set scissor rect to clip to tile content area (exclude status row)
-                let scissor_rows = if tile.show_status {
-                    (tile.rect.height - 1.0).max(0.0)
+                let border_inset_px = if tile.show_border {
+                    tile.border_width_px
+                        .max(0.0)
+                        .min(tile_width_px * 0.5)
+                        .min(tile_height_px * 0.5)
                 } else {
-                    tile.rect.height.max(0.0)
+                    0.0
                 };
-                let scissor_left = tile_left_px.floor().max(0.0);
-                let scissor_top = tile_top_px.floor().max(0.0);
-                let scissor_right = (tile_left_px + tile_width_px).ceil().max(scissor_left);
-                let scissor_bottom = (tile_top_px + scissor_rows * cell_h)
-                    .ceil()
-                    .max(scissor_top);
-                let scissor = MTLScissorRect {
+                let content_left_px = tile_left_px + border_inset_px;
+                let content_top_px = tile_top_px + border_inset_px;
+                let content_right_px =
+                    (tile_left_px + tile_width_px - border_inset_px).max(content_left_px);
+                let content_bottom_px = if tile.show_status {
+                    (tile_top_px + tile_height_px - border_inset_px - cell_h).max(content_top_px)
+                } else {
+                    (tile_top_px + tile_height_px - border_inset_px).max(content_top_px)
+                };
+                let content_col = content_left_px / cell_w;
+                let content_row = content_top_px / cell_h;
+
+                let tile_scissor_left = tile_left_px.floor().max(0.0);
+                let tile_scissor_top = tile_top_px.floor().max(0.0);
+                let tile_scissor_right =
+                    (tile_left_px + tile_width_px).ceil().max(tile_scissor_left);
+                let tile_scissor_bottom =
+                    (tile_top_px + tile_height_px).ceil().max(tile_scissor_top);
+                let tile_scissor = MTLScissorRect {
+                    x: tile_scissor_left as usize,
+                    y: tile_scissor_top as usize,
+                    width: (tile_scissor_right - tile_scissor_left) as usize,
+                    height: (tile_scissor_bottom - tile_scissor_top) as usize,
+                };
+
+                // Set scissor rect to clip to tile content area (exclude border and status row)
+                let scissor_left = content_left_px.floor().max(0.0);
+                let scissor_top = content_top_px.floor().max(0.0);
+                let scissor_right = content_right_px.ceil().max(scissor_left);
+                let scissor_bottom = content_bottom_px.ceil().max(scissor_top);
+                let content_scissor = MTLScissorRect {
                     x: scissor_left as usize,
                     y: scissor_top as usize,
                     width: (scissor_right - scissor_left) as usize,
                     height: (scissor_bottom - scissor_top) as usize,
                 };
-                enc.setScissorRect(scissor);
 
                 let tile_bg = tile
                     .background_color_name
@@ -1592,12 +1612,13 @@ fragment float4 waveform_frag(
                     .or(tile.background_color)
                     .unwrap_or(theme::BG());
                 let mut tile_bg_verts = Vec::new();
+                enc.setScissorRect(tile_scissor);
                 push_rounded_rect_fill_px(
                     &mut tile_bg_verts,
                     tile_left_px,
                     tile_top_px,
                     tile_width_px,
-                    scissor_rows as f32 * cell_h,
+                    tile_height_px,
                     tile.border_radius_px,
                     tile_bg,
                     vp_w,
@@ -1611,11 +1632,13 @@ fragment float4 waveform_frag(
                     &tile_bg_verts,
                 );
 
+                enc.setScissorRect(content_scissor);
+
                 // ── Text content (shifted by horizontal scroll) ──────────────
-                let hscroll = tile.frame.widget_scroll_left.round() as i32;
+                let hscroll = tile.frame.widget_scroll_left;
                 let offset = TileOffset {
-                    col: col_off as i32 - hscroll,
-                    row: row_off as i32,
+                    col: content_col - hscroll,
+                    row: content_row,
                 };
                 let text_verts = {
                     let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
@@ -1628,9 +1651,9 @@ fragment float4 waveform_frag(
                 // then offset the resulting primitives to screen position.
                 if let Some(ref layout) = tile.frame.widget_layout {
                     let time_seconds = self.elapsed_time_seconds();
-                    let inner_rows = (tile.rect.height - if tile.show_status { 1.0 } else { 0.0 })
+                    let inner_rows = ((content_bottom_px - content_top_px) / cell_h)
                         .max(0.0)
-                        .round() as u16;
+                        .floor() as u16;
 
                     let viewport = WidgetViewport {
                         cell_w,
@@ -1672,8 +1695,8 @@ fragment float4 waveform_frag(
                     // so widgets move with the text.
                     let text_scroll = tile.frame.text_scroll_top as f32;
                     let widget_scroll = tile.frame.widget_scroll_top;
-                    let widget_col_off = tile.rect.col - tile.frame.widget_scroll_left;
-                    let widget_row_off = tile.rect.row - text_scroll - widget_scroll;
+                    let widget_col_off = content_col - tile.frame.widget_scroll_left;
+                    let widget_row_off = content_row - text_scroll - widget_scroll;
                     let offset_prims: Vec<_> = primitives
                         .into_iter()
                         .map(|p| {
@@ -1690,7 +1713,8 @@ fragment float4 waveform_frag(
                         .collect();
                     // Split primitives into segments at clip rect boundaries.
                     // Each segment gets its own scissor rect for proper scroll clipping.
-                    let segments = split_prim_segments(&offset_prims, scissor, cell_w, cell_h);
+                    let segments =
+                        split_prim_segments(&offset_prims, content_scissor, cell_w, cell_h);
 
                     self.compile_pending_sdf_pipelines();
                     for (seg_scissor, seg_prims) in &segments {
@@ -1805,7 +1829,7 @@ fragment float4 waveform_frag(
                         }
                     }
                     // Restore tile scissor after segments
-                    enc.setScissorRect(scissor);
+                    enc.setScissorRect(content_scissor);
 
                     // ── Overlay pass (dropdown menus, etc.) ──
                     // Rendered after all segments with full tile scissor so it
@@ -1814,8 +1838,8 @@ fragment float4 waveform_frag(
                         // Overlay primitives are already in post-scroll tile-local
                         // coordinates; only the tile origin offset still needs to
                         // be applied before drawing.
-                        let overlay_col_off = tile.rect.col;
-                        let overlay_row_off = tile.rect.row;
+                        let overlay_col_off = content_col;
+                        let overlay_row_off = content_row;
                         let offset_overlay: Vec<_> = overlay_prims
                             .into_iter()
                             .map(|p| {
@@ -1867,7 +1891,7 @@ fragment float4 waveform_frag(
                                 &enc,
                                 &image_pipeline,
                                 &images,
-                                Some(scissor),
+                                Some(content_scissor),
                                 &mut image_load_budget,
                                 cell_w,
                                 cell_h,
@@ -1931,19 +1955,27 @@ fragment float4 waveform_frag(
 
                 // ── Per-tile status bar (drawn ON TOP of widgets with full-tile scissor)
                 if tile.show_status {
+                    let status_left_px = content_left_px;
+                    let status_right_px = content_right_px;
+                    let status_top_px = (tile_top_px + tile_height_px - border_inset_px - cell_h)
+                        .max(content_top_px);
+                    let status_bottom_px =
+                        (tile_top_px + tile_height_px - border_inset_px).max(status_top_px);
                     enc.setScissorRect(MTLScissorRect {
-                        x: (col_off as f32 * cell_w) as usize,
-                        y: (row_off as f32 * cell_h) as usize,
-                        width: (tile_w as f32 * cell_w) as usize,
-                        height: (tile_h as f32 * cell_h) as usize,
+                        x: status_left_px.floor().max(0.0) as usize,
+                        y: status_top_px.floor().max(0.0) as usize,
+                        width: (status_right_px.ceil() - status_left_px.floor()).max(0.0) as usize,
+                        height: (status_bottom_px.ceil() - status_top_px.floor()).max(0.0) as usize,
                     });
                     let mut status_verts = Vec::new();
-                    let status_row = row_off + tile_h.saturating_sub(1);
+                    let status_col = status_left_px / cell_w;
+                    let status_row = status_top_px / cell_h;
+                    let status_width_px = (status_right_px - status_left_px).max(0.0);
                     let status_bg = to_rgba(theme::STATUS_BG());
-                    let sx0 = ndc_x(col_off as f32 * cell_w);
-                    let sx1 = ndc_x((col_off + tile_w) as f32 * cell_w);
-                    let sy0 = ndc_y(status_row as f32 * cell_h);
-                    let sy1 = ndc_y((status_row + 1) as f32 * cell_h);
+                    let sx0 = ndc_x(status_left_px);
+                    let sx1 = ndc_x(status_right_px);
+                    let sy0 = ndc_y(status_top_px);
+                    let sy1 = ndc_y(status_bottom_px);
                     let sb = |px, py| Vertex {
                         position: [px, py],
                         uv: [0.0, 0.0],
@@ -1959,8 +1991,8 @@ fragment float4 waveform_frag(
                         sb(sx1, sy1),
                     ]);
                     for (i, cell) in tile.frame.status_cells.iter().enumerate() {
-                        let ch_col = col_off + i;
-                        if ch_col >= col_off + tile_w {
+                        let ch_col = status_col + i as f32;
+                        if (ch_col + 1.0) * cell_w > status_right_px {
                             continue;
                         }
                         let fg = to_rgba(cell.style.fg);
@@ -1974,7 +2006,7 @@ fragment float4 waveform_frag(
                             rasterize_char(
                                 atlas,
                                 ch,
-                                (ch_col as i32, status_row as f32),
+                                (ch_col, status_row),
                                 &CharCtx {
                                     cell_w,
                                     cell_h,
@@ -1990,9 +2022,9 @@ fragment float4 waveform_frag(
                     // Draw the edge lines AFTER cell backgrounds so they render on top
                     push_horizontal_rule(
                         &mut status_verts,
-                        col_off as f32 * cell_w,
-                        status_row as f32 * cell_h,
-                        tile_w as f32 * cell_w,
+                        status_left_px,
+                        status_top_px,
+                        status_width_px,
                         1.0,
                         theme::STATUS_EDGE(),
                         vp_w,
@@ -2000,9 +2032,9 @@ fragment float4 waveform_frag(
                     );
                     push_horizontal_rule(
                         &mut status_verts,
-                        col_off as f32 * cell_w,
-                        (status_row + 1) as f32 * cell_h - 1.0,
-                        tile_w as f32 * cell_w,
+                        status_left_px,
+                        status_bottom_px - 1.0,
+                        status_width_px,
                         1.0,
                         theme::STATUS_EDGE(),
                         vp_w,
@@ -2013,6 +2045,7 @@ fragment float4 waveform_frag(
 
                 // ── Thin pixel borders (drawn AFTER content, on top) ─────────
                 if has_multiple_tiles && tile.show_border {
+                    enc.setScissorRect(tile_scissor);
                     let border_color = if tile.is_active {
                         theme::BORDER_ACTIVE()
                     } else {
@@ -3131,7 +3164,7 @@ fragment float4 waveform_frag(
     fn rasterize_char(
         atlas: &mut GlyphAtlas,
         ch: char,
-        (col, row): (i32, f32),
+        (col, row): (f32, f32),
         ctx: &CharCtx,
         out: &mut Vec<Vertex>,
     ) {
@@ -3143,8 +3176,8 @@ fragment float4 waveform_frag(
 
         let ndc_x = |px: f32| px / ctx.vp_w * 2.0 - 1.0;
         let ndc_y = |px: f32| 1.0 - px / ctx.vp_h * 2.0;
-        let x0 = ndc_x(col as f32 * ctx.cell_w);
-        let x1 = ndc_x((col + 1) as f32 * ctx.cell_w);
+        let x0 = ndc_x(col * ctx.cell_w);
+        let x1 = ndc_x((col + 1.0) * ctx.cell_w);
         let y0 = ndc_y(row * ctx.cell_h);
         let y1 = ndc_y((row + 1.0) * ctx.cell_h);
 
@@ -3294,14 +3327,14 @@ fragment float4 waveform_frag(
 
         for (row, line) in frame.lines.iter().enumerate() {
             for (col, cell) in line.iter().enumerate() {
-                let abs_col = col as i32 + offset.col;
-                let abs_row = row as i32 + offset.row;
+                let abs_col = col as f32 + offset.col;
+                let abs_row = row as f32 + offset.row;
                 let is_cursor = frame.cursor == Some((row, col));
 
-                let x0 = ndc_x(abs_col as f32 * cell_w);
-                let x1 = ndc_x((abs_col + 1) as f32 * cell_w);
-                let y0 = ndc_y(abs_row as f32 * cell_h);
-                let y1 = ndc_y((abs_row + 1) as f32 * cell_h);
+                let x0 = ndc_x(abs_col * cell_w);
+                let x1 = ndc_x((abs_col + 1.0) * cell_w);
+                let y0 = ndc_y(abs_row * cell_h);
+                let y1 = ndc_y((abs_row + 1.0) * cell_h);
 
                 // Use a dedicated cursor fill so it stays legible over selection and syntax colors.
                 let (fg, bg) = if is_cursor {
@@ -3343,7 +3376,7 @@ fragment float4 waveform_frag(
                 rasterize_char(
                     atlas,
                     cell.ch,
-                    (abs_col, abs_row as f32),
+                    (abs_col, abs_row),
                     &CharCtx {
                         cell_w,
                         cell_h,
@@ -3359,7 +3392,7 @@ fragment float4 waveform_frag(
 
         // ── Status bar (placed at bottom of tile region) ─────────────────────
         let total_rows = (vp_h / cell_h).floor() as usize;
-        let status_row = if offset.col == 0 && offset.row == 0 {
+        let status_row = if offset.col == 0.0 && offset.row == 0.0 {
             total_rows.saturating_sub(1) // legacy single-tile: bottom of screen
         } else {
             // Skip status bar for offset tiles — handled by tiled renderer
@@ -3416,7 +3449,7 @@ fragment float4 waveform_frag(
                     rasterize_char(
                         atlas,
                         ch,
-                        (ch_col as i32, ch_row as f32),
+                        (ch_col as f32, ch_row as f32),
                         &CharCtx {
                             cell_w,
                             cell_h,
@@ -3469,7 +3502,7 @@ fragment float4 waveform_frag(
                         rasterize_char(
                             atlas,
                             ch,
-                            ((doc_col + j) as i32, title_row as f32),
+                            ((doc_col + j) as f32, title_row as f32),
                             &CharCtx {
                                 cell_w,
                                 cell_h,
@@ -3496,7 +3529,7 @@ fragment float4 waveform_frag(
                         rasterize_char(
                             atlas,
                             ch,
-                            ((doc_col + j) as i32, doc_row as f32),
+                            ((doc_col + j) as f32, doc_row as f32),
                             &CharCtx {
                                 cell_w,
                                 cell_h,
@@ -3558,7 +3591,7 @@ fragment float4 waveform_frag(
             rasterize_char(
                 atlas,
                 ch,
-                (col as i32, status_row as f32),
+                (col as f32, status_row as f32),
                 &CharCtx {
                     cell_w,
                     cell_h,
@@ -3601,7 +3634,7 @@ fragment float4 waveform_frag(
                         rasterize_char(
                             atlas,
                             ch,
-                            (run.col + idx as i32, run.row),
+                            ((run.col + idx as i32) as f32, run.row),
                             &CharCtx {
                                 cell_w,
                                 cell_h: atlas.cell_h as f32,
@@ -4097,7 +4130,7 @@ fragment float4 waveform_frag(
             rasterize_char(
                 atlas,
                 ch,
-                ((col + j) as i32, row as f32),
+                ((col + j) as f32, row as f32),
                 &CharCtx {
                     cell_w,
                     cell_h,

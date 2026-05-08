@@ -4,7 +4,7 @@ use crate::backend::{
 };
 use crate::buffer::{Buffer, BufferTextStyle};
 use crate::editor::{Editor, ViewMode};
-use crate::mode::{TokenClass, TokenSpan, highlight_line};
+use crate::mode::{TokenClass, TokenSpan, highlight_lines};
 use crate::text::matching_paren;
 use crate::theme;
 use std::collections::hash_map::DefaultHasher;
@@ -276,13 +276,17 @@ pub fn build_render_frame(
     let region_range = editor.active_region_range();
     let sexp_range = editor.active_sexp_range();
     let eval_flash_range = editor.active_eval_flash_range();
-    let highlight_spans = editor.active_highlight_spans();
-
+    let (scroll_top, match_pos, cursor_row, cursor_col) = {
+        let buf = editor.active_buffer();
+        (
+            buf.scroll_top.min(buf.lines.len()),
+            matching_paren(&buf.lines, buf.cursor),
+            buf.cursor.0,
+            buf.cursor.1,
+        )
+    };
+    let highlight_spans = editor.active_highlight_spans_for_visible(scroll_top, viewport_height);
     let buf = editor.active_buffer();
-    let scroll_top = buf.scroll_top.min(buf.lines.len());
-    let match_pos = matching_paren(&buf.lines, buf.cursor);
-    let (cursor_row, cursor_col) = buf.cursor;
-
     let visible = scroll_top..(scroll_top + viewport_height).min(buf.lines.len());
 
     let lines: Vec<Vec<Cell>> = buf.lines[visible]
@@ -291,7 +295,7 @@ pub fn build_render_frame(
         .map(|(i, content)| {
             let row = scroll_top + i;
             let match_col = match_pos.and_then(|(mr, mc)| if mr == row { Some(mc) } else { None });
-            let row_spans = highlight_spans.get(row);
+            let row_spans = highlight_spans.get(i);
             let row_styles = buf
                 .text_styles
                 .iter()
@@ -548,11 +552,14 @@ fn build_tiled_render_frame_impl(
         .map(|(tile_id, rect)| {
             let leaf = editor.tile_root.find_leaf(*tile_id).unwrap();
             let buf = &editor.buffers[leaf.buffer_idx];
+            let show_status = editor
+                .tile_effective_show_status(*tile_id)
+                .unwrap_or(leaf.show_status);
             (
                 *tile_id,
                 *rect,
                 leaf.buffer_idx,
-                leaf.show_status,
+                show_status,
                 leaf.show_border,
                 leaf.border_width_px,
                 leaf.border_radius_px,
@@ -736,10 +743,7 @@ fn build_inactive_tile_frame_from_parts(
 
     // Only highlight visible lines — not the entire buffer.
     let visible_lines = &buffer.lines[visible];
-    let highlight_spans: Vec<Vec<TokenSpan>> = visible_lines
-        .iter()
-        .map(|line| highlight_line(&buffer.mode, line, symbols, buffer))
-        .collect();
+    let highlight_spans = highlight_lines(&buffer.mode, visible_lines.iter(), symbols, buffer);
 
     let lines: Vec<Vec<Cell>> = visible_lines
         .iter()
