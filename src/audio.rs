@@ -11,6 +11,7 @@ use std::time::Instant;
 use crate::audiograph::*;
 use crate::delay;
 use crate::effects::EffectSlotSnapshot;
+use crate::filter;
 use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
@@ -1465,7 +1466,8 @@ fn fire_resolved(
                     data.gate_off_state[track_idx].schedule(lid, note_total_gate as f64);
                 }
             } else {
-                let voice = data.voice_pools[track_idx].allocate_voice(transpose);
+                let voice =
+                    data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
                 let voice_lid = voice.logical_id;
                 let lid = if voice_lid != 0 {
                     voice_lid
@@ -1573,7 +1575,8 @@ fn fire_resolved(
                 data.gate_off_state[track_idx].schedule(lid, total_gate as f64);
             }
         } else {
-            let voice = data.voice_pools[track_idx].allocate_voice(transpose);
+            let voice =
+                data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
             let voice_lid = voice.logical_id;
             let lid = if voice_lid != 0 {
                 voice_lid
@@ -1805,7 +1808,8 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     voice_lid,
                 );
             } else {
-                let voice = data.voice_pools[kt.track].allocate_voice(resolved_transpose);
+                let voice = data.voice_pools[kt.track]
+                    .allocate_voice_retriggering_same_note(resolved_transpose);
                 let voice_lid = voice.logical_id;
                 if voice_lid == 0 {
                     continue;
@@ -1871,6 +1875,21 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         data.last_bpm = bpm;
         let bpm_f = bpm as f32;
         for i in 0..num_tracks {
+            let filter_lid = data.state.pattern.effect_chains[i][0]
+                .node_id
+                .load(Ordering::Acquire) as u64;
+            if filter_lid != 0 {
+                unsafe {
+                    params_push_wrapper(
+                        data.lg.0,
+                        ParamMsg {
+                            idx: filter::FILTER_PARAM_BPM,
+                            logical_id: filter_lid,
+                            fvalue: bpm_f,
+                        },
+                    );
+                }
+            }
             let delay_lid = data.state.runtime.delay_lids[i].load(Ordering::Acquire);
             if delay_lid != 0 {
                 unsafe {
@@ -1962,7 +1981,8 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
             while cs.counter <= 0.0 && cs.remaining > 0 {
                 // Allocate a voice for the chop re-trigger
                 let transpose = sd.get(cs.step, StepParam::Transpose);
-                let voice = data.voice_pools[track_idx].allocate_voice(transpose);
+                let voice =
+                    data.voice_pools[track_idx].allocate_voice_retriggering_same_note(transpose);
                 let voice_lid = voice.logical_id;
                 let sampler_lid =
                     data.state.runtime.sampler_lids[track_idx].load(Ordering::Acquire);

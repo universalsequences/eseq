@@ -8,7 +8,7 @@ use crate::sequencer::MAX_STEPS;
 /// instrument sizes so defaults/plocks/node indices stay aligned.
 pub const MAX_SLOT_PARAMS: usize = 128;
 
-/// Number of built-in effect slots (Filter, Delay). Slots at this index or higher are custom/lisp.
+/// Number of fixed built-in effect slots (Filter, Delay). Slots at this index or higher are insert/custom.
 pub const BUILTIN_SLOT_COUNT: usize = 2;
 
 /// NaN sentinel stored as bits — means "no p-lock override".
@@ -328,6 +328,91 @@ mod tests {
             (crate::lisp_effect::HEADER_SLOTS + 12) as u32
         );
     }
+
+    #[test]
+    fn builtin_dynamics_exposes_macro_params() {
+        let desc = EffectDescriptor::builtin_444_compressor();
+        let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "mode", "amount", "attack", "release", "low cut", "drive", "output", "mix",
+                "enabled"
+            ]
+        );
+        assert_eq!(desc.params[0].default, 1.0);
+        assert_eq!(desc.params[1].default, 0.62);
+        assert_eq!(
+            desc.params[1].node_param_idx,
+            crate::dynamics::DYNAMICS_PARAM_AMOUNT as u32
+        );
+        match &desc.params[0].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels,
+                    &vec!["Glue".to_string(), "404".to_string(), "Hybrid".to_string()]
+                );
+            }
+            other => panic!("mode should be enum, got {other:?}"),
+        }
+        match &desc.params[3].kind {
+            ParamKind::Enum { labels } => {
+                assert_eq!(
+                    labels,
+                    &vec![
+                        "fast".to_string(),
+                        "bounce".to_string(),
+                        "auto".to_string(),
+                        "smooth".to_string()
+                    ]
+                );
+            }
+            other => panic!("release should be enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_compressor_names_are_canonical_and_legacy_dynamics_loads() {
+        assert_eq!(
+            EffectDescriptor::builtin_insert_names(),
+            &[
+                "Filter",
+                "Delay",
+                "Reverb",
+                "444 Compressor",
+                "Glue Compressor",
+                "Compressor",
+                "Limiter"
+            ]
+        );
+        assert_eq!(
+            EffectDescriptor::canonical_builtin_insert_name("404 Compressor"),
+            Some("444 Compressor")
+        );
+        assert_eq!(
+            EffectDescriptor::canonical_builtin_insert_name("Dynamics"),
+            Some("444 Compressor")
+        );
+        assert_eq!(
+            EffectDescriptor::builtin_insert("Glue Compressor")
+                .unwrap()
+                .params[0]
+                .default,
+            0.0
+        );
+        assert_eq!(
+            EffectDescriptor::canonical_builtin_insert_name("Utility Compressor"),
+            Some("Compressor")
+        );
+        assert_eq!(
+            EffectDescriptor::canonical_builtin_insert_name("Utility Limiter"),
+            Some("Limiter")
+        );
+        assert_eq!(
+            EffectDescriptor::builtin_insert("Limiter").unwrap().params[1].default,
+            -0.3
+        );
+    }
 }
 
 // ── EffectDescriptor ──
@@ -357,7 +442,15 @@ impl EffectDescriptor {
     }
 
     pub fn builtin_insert_names() -> &'static [&'static str] {
-        &["Filter", "Delay", "Reverb"]
+        &[
+            "Filter",
+            "Delay",
+            "Reverb",
+            "444 Compressor",
+            "Glue Compressor",
+            "Compressor",
+            "Limiter",
+        ]
     }
 
     pub fn builtin_insert_project_name(name: &str) -> Option<String> {
@@ -371,10 +464,23 @@ impl EffectDescriptor {
     }
 
     pub fn canonical_builtin_insert_name(name: &str) -> Option<&'static str> {
+        let trimmed = name.trim();
+        if trimmed.eq_ignore_ascii_case("Dynamics") {
+            return Some("444 Compressor");
+        }
+        if trimmed.eq_ignore_ascii_case("404 Compressor") {
+            return Some("444 Compressor");
+        }
+        if trimmed.eq_ignore_ascii_case("Utility Compressor") {
+            return Some("Compressor");
+        }
+        if trimmed.eq_ignore_ascii_case("Utility Limiter") {
+            return Some("Limiter");
+        }
         Self::builtin_insert_names()
             .iter()
             .copied()
-            .find(|builtin| builtin.eq_ignore_ascii_case(name.trim()))
+            .find(|builtin| builtin.eq_ignore_ascii_case(trimmed))
     }
 
     pub fn builtin_insert(name: &str) -> Option<Self> {
@@ -382,6 +488,10 @@ impl EffectDescriptor {
             "Filter" => Some(Self::builtin_filter()),
             "Delay" => Some(Self::builtin_delay()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
+            "444 Compressor" => Some(Self::builtin_444_compressor()),
+            "Glue Compressor" => Some(Self::builtin_glue_compressor()),
+            "Compressor" => Some(Self::builtin_compressor()),
+            "Limiter" => Some(Self::builtin_limiter()),
             _ => None,
         }
     }
@@ -397,17 +507,18 @@ impl EffectDescriptor {
                 ParamDescriptor {
                     name: "mode".to_string(),
                     min: 0.0,
-                    max: 2.0,
+                    max: 3.0,
                     default: 0.0,
                     kind: ParamKind::Enum {
                         labels: vec![
                             "lowpass".to_string(),
                             "highpass".to_string(),
                             "bandpass".to_string(),
+                            "notch".to_string(),
                         ],
                     },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: 1,
+                    node_param_idx: crate::filter::FILTER_PARAM_MODE as u32,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -419,7 +530,7 @@ impl EffectDescriptor {
                         unit: Some("Hz".to_string()),
                     },
                     scaling: ParamScaling::Exponential,
-                    node_param_idx: 2,
+                    node_param_idx: crate::filter::FILTER_PARAM_CUTOFF as u32,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -429,7 +540,168 @@ impl EffectDescriptor {
                     default: 1.0,
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: 3,
+                    node_param_idx: crate::filter::FILTER_PARAM_RESONANCE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "drive".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_DRIVE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "wet".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_WET as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "lfo amt".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_LFO_AMOUNT as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "lfo rate".to_string(),
+                    min: 0.01,
+                    max: 40.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::filter::FILTER_PARAM_LFO_RATE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "lfo sync".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_LFO_SYNCED as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "lfo div".to_string(),
+                    min: 0.0,
+                    max: 10.0,
+                    default: 6.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "1/32".to_string(),
+                            "1/16".to_string(),
+                            "1/16t".to_string(),
+                            "1/8".to_string(),
+                            "1/8t".to_string(),
+                            "1/8.".to_string(),
+                            "1/4".to_string(),
+                            "1/4t".to_string(),
+                            "1/4.".to_string(),
+                            "1/2".to_string(),
+                            "1".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_LFO_DIVISION as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "lfo wave".to_string(),
+                    min: 0.0,
+                    max: 5.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "sine".to_string(),
+                            "tri".to_string(),
+                            "saw".to_string(),
+                            "ramp".to_string(),
+                            "square".to_string(),
+                            "s&h".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_LFO_WAVE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "lfo phase".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_LFO_PHASE_OFFSET as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "env amt".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_ENV_AMOUNT as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "env attack".to_string(),
+                    min: 0.1,
+                    max: 5000.0,
+                    default: 5.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::filter::FILTER_PARAM_ENV_ATTACK_MS as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "env release".to_string(),
+                    min: 1.0,
+                    max: 5000.0,
+                    default: 120.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::filter::FILTER_PARAM_ENV_RELEASE_MS as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "slope".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["12".to_string(), "24".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::filter::FILTER_PARAM_SLOPE as u32,
                     host_control: None,
                 },
             ],
@@ -565,6 +837,290 @@ impl EffectDescriptor {
                 Self::enabled_param(crate::reverb::REVERB_PARAM_ENABLED as u32, 1.0),
             ],
         }
+    }
+
+    fn builtin_dynamics_variant(
+        name: &str,
+        mode: f32,
+        amount: f32,
+        attack: f32,
+        release: f32,
+        low_cut_hz: f32,
+        drive: f32,
+        output_db: f32,
+        mix: f32,
+    ) -> Self {
+        Self {
+            name: name.to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 2.0,
+                    default: mode,
+                    kind: ParamKind::Enum {
+                        labels: vec!["Glue".to_string(), "404".to_string(), "Hybrid".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_MODE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "amount".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: amount,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_AMOUNT as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "attack".to_string(),
+                    min: 0.0,
+                    max: 3.0,
+                    default: attack,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "fast".to_string(),
+                            "punch".to_string(),
+                            "glue".to_string(),
+                            "slow".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_ATTACK as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "release".to_string(),
+                    min: 0.0,
+                    max: 3.0,
+                    default: release,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "fast".to_string(),
+                            "bounce".to_string(),
+                            "auto".to_string(),
+                            "smooth".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_RELEASE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "low cut".to_string(),
+                    min: 20.0,
+                    max: 250.0,
+                    default: low_cut_hz,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "drive".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: drive,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_DRIVE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "output".to_string(),
+                    min: -12.0,
+                    max: 12.0,
+                    default: output_db,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_OUTPUT_DB as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mix".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: mix,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_MIX as u32,
+                    host_control: None,
+                },
+                Self::enabled_param(crate::dynamics::DYNAMICS_PARAM_ENABLED as u32, 1.0),
+            ],
+        }
+    }
+
+    /// SP-404-inspired compressor: sustain, level, and post-compression color.
+    pub fn builtin_444_compressor() -> Self {
+        Self::builtin_dynamics_variant("444 Compressor", 1.0, 0.62, 1.0, 2.0, 55.0, 0.32, -1.0, 1.0)
+    }
+
+    /// SSL-style bus glue: linked stereo detection, low-cut sidechain, and auto release.
+    pub fn builtin_glue_compressor() -> Self {
+        Self::builtin_dynamics_variant("Glue Compressor", 0.0, 0.42, 2.0, 2.0, 90.0, 0.12, 0.0, 1.0)
+    }
+
+    /// General-purpose compressor with conservative hybrid behavior.
+    pub fn builtin_compressor() -> Self {
+        Self {
+            name: "Compressor".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "threshold".to_string(),
+                    min: -60.0,
+                    max: 0.0,
+                    default: -18.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::compressor::COMPRESSOR_PARAM_THRESHOLD_DB as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "ratio".to_string(),
+                    min: 1.0,
+                    max: 20.0,
+                    default: 4.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::compressor::COMPRESSOR_PARAM_RATIO as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "attack".to_string(),
+                    min: 0.1,
+                    max: 200.0,
+                    default: 10.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::compressor::COMPRESSOR_PARAM_ATTACK_MS as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "release".to_string(),
+                    min: 5.0,
+                    max: 2000.0,
+                    default: 120.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::compressor::COMPRESSOR_PARAM_RELEASE_MS as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "makeup".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::compressor::COMPRESSOR_PARAM_MAKEUP_DB as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mix".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::compressor::COMPRESSOR_PARAM_MIX as u32,
+                    host_control: None,
+                },
+                Self::enabled_param(crate::compressor::COMPRESSOR_PARAM_ENABLED as u32, 1.0),
+            ],
+        }
+    }
+
+    /// General-purpose lookahead limiter.
+    pub fn builtin_limiter() -> Self {
+        Self {
+            name: "Limiter".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "input".to_string(),
+                    min: -24.0,
+                    max: 24.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::limiter::LIMITER_PARAM_INPUT_GAIN_DB as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "ceiling".to_string(),
+                    min: -24.0,
+                    max: 0.0,
+                    default: -0.3,
+                    kind: ParamKind::Continuous {
+                        unit: Some("dB".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::limiter::LIMITER_PARAM_CEILING_DB as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "release".to_string(),
+                    min: 1.0,
+                    max: 2000.0,
+                    default: 100.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::limiter::LIMITER_PARAM_RELEASE_MS as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "lookahead".to_string(),
+                    min: 0.0,
+                    max: 20.0,
+                    default: 3.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::limiter::LIMITER_PARAM_LOOKAHEAD_MS as u32,
+                    host_control: None,
+                },
+                Self::enabled_param(crate::limiter::LIMITER_PARAM_ENABLED as u32, 1.0),
+            ],
+        }
+    }
+
+    /// Back-compat alias for projects created while the generic prototype existed.
+    pub fn builtin_dynamics() -> Self {
+        Self::builtin_444_compressor()
     }
 
     /// Built-in sampler instrument descriptor.

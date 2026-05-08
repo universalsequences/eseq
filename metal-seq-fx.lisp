@@ -247,7 +247,7 @@
       ;; Use derivatives to convert a real pixel height into the shader's
       ;; normalized/SDF y-space. This keeps the header bar visually constant
       ;; as panels get taller/shorter.
-      (header-h (* 45 (fwidth y)))
+      (header-h (* 35 (fwidth y)))
       (header-bottom (+ (- height) header-h))
       (header-shape (max panel (- y header-bottom))))
     (sdf/layer
@@ -463,6 +463,8 @@
 (def visible-params (params)
   (filter |p| (not (= (get p :name) "enabled")) params))
 
+(load "metal-seq-builtin-fx-ui.lisp")
+
 (defwidget fx-enabled-dot
   :width 1.55 :height 1.0
   :paint-margin 0.1
@@ -526,7 +528,7 @@
        :selected (if selected 1 0)
        :padding 0
     (v-stack :gap 0
-      (box :height 1.0 :padding 0 :v-align :center :h-align :start
+      (box :height 0.7 :padding 0 :v-align :center :h-align :start
            :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
            :on-click |x y r|
              (if (get fx :midi-fx)
@@ -560,7 +562,10 @@
       (fx-panel-body (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
         (if (get fx :midi-fx)
           (midi-fx-panel-body fx)
-          (fx-param-grid params fx)))))))
+          (let ((builtin-ui (builtin-audio-fx-ui fx)))
+            (if builtin-ui
+              builtin-ui
+              (fx-param-grid params fx)))))))))
 
 (def midi-fx-panel (title params fx)
   (let ((selected (= selected-midi-fx-slot (get fx :slot-idx))))
@@ -573,7 +578,7 @@
        :selected (if selected 1 0)
        :padding 0
     (v-stack :gap 0
-      (box :height 1.0 :padding 0 :v-align :center :h-align :start
+      (box :height 0.7 :padding 0 :v-align :center :h-align :start
            :debug-name "midi-fx-panel-header"
            :on-click |x y r| (fx-select-midi-effect (get fx :slot-idx))
         (h-stack :gap 0.5 :align :center
@@ -713,7 +718,7 @@
   (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     :height fx-fixed-panel-height
     (v-stack :gap 0
-      (box :height 1 :padding 0 :v-align :center :h-align :start
+      (box :height 0.75 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0.5 :align :center
           (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param (get inst :params)) false "sampler-enabled")
@@ -755,19 +760,16 @@
          :height fx-fixed-panel-height
          :selected 0
       (v-stack :debug-name "instrument-panel-vstack" :gap 0
-        (box :debug-name "instrument-header-box" :height 1 :padding 0 :v-align :center :h-align :start
+        (box :debug-name "instrument-header-box" :height 0.75 :padding 0 :v-align :center :h-align :start
           (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center
             (fx-panel-header-leading-spacer)
             (fx-enabled-toggle (enabled-param (get inst :synth)) false "instrument-enabled")
-            (box :debug-name "instrument-name-box" :height 2 :v-align :center :h-align :start :padding .1
-              (h-stack :v-align :center :height 2 :gap 2 :padding 0.1
+              (h-stack :v-align :center :height 0.75 :gap 2 :padding 0.1
                 (label (substring (get inst :display-name) 0 12)
                   :font-size 11  :color :white :bg :transparent)
-                (h-stack :debug-name "instrument-tabs-row" :gap 0.85 :align :center :v-align :center
                   (instrument-tab-button "synth" 0 4.5)
                   (instrument-tab-button "mods" 1 4.0)
                   (instrument-tab-button "sources" 2 5.8))
-                ))
             
             (box :debug-name "instrument-edit-button" :bg :dark-gray :width 1.2 :height 0.9 :align :center
               :on-click |x y r|

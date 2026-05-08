@@ -67,6 +67,7 @@
 
       ;; Sequencer panels
       :fx-panel-bg       '(0.21 0.21 0.21)
+      :fx-inner-panel-bg '(0.17 0.17 0.175)
       :fx-panel-selected-bg '(0.21 0.21 0.21)
       :fx-panel-header-bg '(0.27 0.27 0.27)
       :fx-panel-header-selected-bg '(0.22 0.22 0.23)

@@ -6977,7 +6977,15 @@ mod tests {
                         other => panic!("expected string, got {other:?}"),
                     })
                     .collect();
-                assert_eq!(names, vec!["enabled", "mode", "cutoff", "resonance"]);
+                assert!(names.starts_with(&[
+                    "enabled".to_string(),
+                    "mode".to_string(),
+                    "cutoff".to_string(),
+                    "resonance".to_string(),
+                ]));
+                assert!(names.contains(&"drive".to_string()));
+                assert!(names.contains(&"lfo amt".to_string()));
+                assert!(names.contains(&"env amt".to_string()));
             }
             other => panic!("expected list, got {other:?}"),
         }

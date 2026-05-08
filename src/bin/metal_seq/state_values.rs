@@ -2939,6 +2939,35 @@ mod tests {
         }
     }
 
+    fn value_contains_keyword(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::Keyword(text) => text == needle,
+            Value::List(items) => items
+                .iter()
+                .any(|item| value_contains_keyword(&item.borrow(), needle)),
+            Value::Map(map) => map
+                .values()
+                .any(|item| value_contains_keyword(&item.borrow(), needle)),
+            _ => false,
+        }
+    }
+
+    fn layout_contains_widget_type(node: &eseqlisp::layout::LayoutNode, widget_type: &str) -> bool {
+        node.widget_type == widget_type
+            || node
+                .children
+                .iter()
+                .any(|child| layout_contains_widget_type(child, widget_type))
+    }
+
+    fn layout_contains_debug_name(node: &eseqlisp::layout::LayoutNode, needle: &str) -> bool {
+        matches!(node.props.get("debug-name"), Some(Value::String(name)) if name.contains(needle))
+            || node
+                .children
+                .iter()
+                .any(|child| layout_contains_debug_name(child, needle))
+    }
+
     fn test_param_map(
         name: &str,
         idx: usize,
@@ -2962,6 +2991,72 @@ mod tests {
         param.insert("min".to_string(), Rc::new(RefCell::new(Value::Number(min))));
         param.insert("max".to_string(), Rc::new(RefCell::new(Value::Number(max))));
         param
+    }
+
+    fn test_enum_param_map(
+        name: &str,
+        idx: usize,
+        value: f64,
+        labels: Vec<&str>,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut param = test_param_map(name, idx, value, 0.0, (labels.len() - 1) as f64);
+        let selected = labels
+            .get(value.round() as usize)
+            .copied()
+            .unwrap_or_default();
+        param.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String(selected.to_string()))),
+        );
+        param.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(test_list(
+                labels
+                    .into_iter()
+                    .map(|label| Value::String(label.to_string()))
+                    .collect(),
+            ))),
+        );
+        param
+    }
+
+    fn test_filter_params() -> Vec<Value> {
+        vec![
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "mode",
+                1,
+                0.0,
+                vec!["lowpass", "highpass", "bandpass", "notch"],
+            )),
+            Value::Map(test_param_map("cutoff", 2, 1000.0, 20.0, 20000.0)),
+            Value::Map(test_param_map("resonance", 3, 1.0, 0.5, 10.0)),
+            Value::Map(test_param_map("drive", 4, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("wet", 5, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("lfo amt", 6, 0.0, -1.0, 1.0)),
+            Value::Map(test_param_map("lfo rate", 7, 1.0, 0.01, 40.0)),
+            Value::Map(test_param_map("lfo sync", 8, 0.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map(
+                "lfo div",
+                9,
+                6.0,
+                vec![
+                    "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2",
+                    "1",
+                ],
+            )),
+            Value::Map(test_enum_param_map(
+                "lfo wave",
+                10,
+                0.0,
+                vec!["sine", "tri", "saw", "ramp", "square", "s&h"],
+            )),
+            Value::Map(test_param_map("lfo phase", 11, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("env amt", 12, 0.0, -1.0, 1.0)),
+            Value::Map(test_param_map("env attack", 13, 5.0, 0.1, 5000.0)),
+            Value::Map(test_param_map("env release", 14, 120.0, 1.0, 5000.0)),
+            Value::Map(test_enum_param_map("slope", 15, 0.0, vec!["12", "24"])),
+        ]
     }
 
     fn test_fx_map(
@@ -3276,11 +3371,14 @@ mod tests {
                 ),
                 (
                     "effects",
-                    test_list(vec![Value::Map(test_fx_map(
-                        "track-fx",
-                        2,
-                        vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
-                    ))]),
+                    test_list(vec![
+                        Value::Map(test_fx_map("Filter", 0, test_filter_params())),
+                        Value::Map(test_fx_map(
+                            "track-fx",
+                            2,
+                            vec![Value::Map(test_param_map("gain", 0, 0.5, 0.0, 1.0))],
+                        )),
+                    ]),
                 ),
                 ("midi-effects", test_list(vec![])),
                 (
@@ -3327,6 +3425,15 @@ mod tests {
             )
             .expect("install fx test helpers");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let filter_ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe filter ui")
+            .expect("filter ui probe value");
+        assert!(
+            value_contains_keyword(&filter_ui_probe, "response-curve-editor"),
+            "filter custom UI probe did not contain response editor: {filter_ui_probe:?}"
+        );
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("track fx lisp status after refresh: {status}");
@@ -3337,10 +3444,13 @@ mod tests {
             .find(|buffer| buffer.name == "*fx*")
             .expect("fx lisp should create the *fx* buffer");
         let tree = fx.widget_tree.as_ref().expect("track fx tree");
+        assert!(value_contains_string(tree, "Filter"));
+        assert!(value_contains_string(tree, "LFO"));
+        assert!(value_contains_string(tree, "drive"));
+        assert!(value_contains_keyword(tree, "response-curve-editor"));
         assert!(value_contains_string(tree, "track-fx"));
         assert!(value_contains_string(tree, "test-instru"));
         assert!(value_contains_string(tree, "Add Effect"));
-
         editor
             .runtime_mut()
             .eval_str("(set! selected-bus 1)")
@@ -3357,6 +3467,89 @@ mod tests {
         let tree = fx.widget_tree.as_ref().expect("bus fx tree");
         assert!(value_contains_string(tree, "bus-fx"));
         assert!(value_contains_string(tree, "Add Bus FX"));
+    }
+
+    #[test]
+    fn metal_seq_fx_filter_layout_contains_response_curve_editor() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Filter".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Filter",
+                        0,
+                        test_filter_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let filter_ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe filter ui")
+            .expect("filter ui probe value");
+        assert!(
+            value_contains_keyword(&filter_ui_probe, "response-curve-editor"),
+            "filter custom UI probe did not contain response editor: {filter_ui_probe:?}"
+        );
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("filter fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor.widget_layout().expect("filter fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Filter"),
+            "filter layout should contain the built-in Filter panel"
+        );
+        assert!(
+            layout_contains_widget_type(&layout, "response-curve-editor"),
+            "filter layout should contain the response curve editor"
+        );
     }
 
     #[test]

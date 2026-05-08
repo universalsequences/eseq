@@ -103,6 +103,26 @@ impl VoicePool {
         slot
     }
 
+    /// Allocate a voice for samplers.
+    /// In poly mode, a repeated note should retrigger the existing voice instead
+    /// of layering another copy of the same sample.
+    pub fn allocate_voice_retriggering_same_note(&mut self, note: f32) -> &mut VoiceSlot {
+        if self.polyphonic && self.num_voices > 1 {
+            for i in 0..self.num_voices {
+                if self.voices[i].active && (self.voices[i].note - note).abs() < 0.01 {
+                    self.age_counter += 1;
+                    let slot = &mut self.voices[i];
+                    slot.age = self.age_counter;
+                    slot.active = true;
+                    slot.note = note;
+                    return slot;
+                }
+            }
+        }
+
+        self.allocate_voice(note)
+    }
+
     pub fn release_voice_by_note(&mut self, note: f32) {
         for i in 0..self.num_voices {
             if self.voices[i].active && (self.voices[i].note - note).abs() < 0.01 {
@@ -146,5 +166,22 @@ mod tests {
 
         assert_eq!(pool.allocate_voice(7.0).logical_id, 3);
         assert_eq!(pool.allocate_voice(11.0).logical_id, 4);
+    }
+
+    #[test]
+    fn sampler_allocation_retriggers_active_same_note_in_poly_mode() {
+        let mut pool = VoicePool::new();
+        pool.polyphonic = true;
+        for lid in 1..=4 {
+            pool.add_voice(lid, lid as i32);
+        }
+
+        let first = pool.allocate_voice_retriggering_same_note(0.0).logical_id;
+        let second = pool.allocate_voice_retriggering_same_note(7.0).logical_id;
+        let repeated = pool.allocate_voice_retriggering_same_note(0.0).logical_id;
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(repeated, first);
     }
 }

@@ -46,15 +46,21 @@ mod accumulator;
 mod agent;
 pub mod audio;
 pub mod audiograph;
+#[allow(dead_code)]
+mod compressor;
 pub mod crash;
 #[allow(dead_code)]
 mod delay;
+#[allow(dead_code)]
+mod dynamics;
 #[allow(dead_code)]
 pub mod effects;
 #[allow(dead_code)]
 mod filter;
 #[allow(dead_code)]
 mod gatepitch;
+#[allow(dead_code)]
+mod limiter;
 #[allow(dead_code)]
 pub mod lisp_effect;
 pub mod mixer_volume;

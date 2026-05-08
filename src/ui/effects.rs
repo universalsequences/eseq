@@ -511,6 +511,18 @@ impl App {
                 crate::reverb::reverb_vtable(),
                 crate::reverb::REVERB_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "444 Compressor" | "Glue Compressor" => (
+                crate::dynamics::dynamics_vtable(),
+                crate::dynamics::DYNAMICS_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
+            "Compressor" => (
+                crate::compressor::compressor_vtable(),
+                crate::compressor::COMPRESSOR_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
+            "Limiter" => (
+                crate::limiter::limiter_vtable(),
+                crate::limiter::LIMITER_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             other => return Err(format!("Unknown built-in effect '{other}'")),
         };
         let name = CString::new(format!(
@@ -559,9 +571,6 @@ impl App {
         let bpm = self.state.transport.bpm.load(Ordering::Relaxed) as f32;
         for (track_idx, descs) in self.graph.effect_descriptors.iter().enumerate() {
             for (slot_idx, desc) in descs.iter().enumerate() {
-                if desc.name != "Delay" {
-                    continue;
-                }
                 let Some(slot) = self
                     .state
                     .pattern
@@ -573,12 +582,17 @@ impl App {
                 };
                 let node_id = slot.node_id.load(Ordering::Relaxed);
                 if node_id != 0 {
+                    let idx = match desc.name.as_str() {
+                        "Delay" => crate::delay::DELAY_PARAM_BPM,
+                        "Filter" => crate::filter::FILTER_PARAM_BPM,
+                        _ => continue,
+                    };
                     unsafe {
                         crate::audiograph::params_push_wrapper(
                             self.graph.lg.0,
                             crate::audiograph::ParamMsg {
                                 logical_id: node_id as u64,
-                                idx: crate::delay::DELAY_PARAM_BPM,
+                                idx,
                                 fvalue: bpm,
                             },
                         );
@@ -588,19 +602,21 @@ impl App {
         }
         for bus in &self.buses {
             for (slot_idx, desc) in bus.effect_descriptors.iter().enumerate() {
-                if desc.name != "Delay" {
-                    continue;
-                }
                 let Some(slot) = bus.effect_slots.get(slot_idx) else {
                     continue;
                 };
                 if slot.node_id != 0 {
+                    let idx = match desc.name.as_str() {
+                        "Delay" => crate::delay::DELAY_PARAM_BPM,
+                        "Filter" => crate::filter::FILTER_PARAM_BPM,
+                        _ => continue,
+                    };
                     unsafe {
                         crate::audiograph::params_push_wrapper(
                             self.graph.lg.0,
                             crate::audiograph::ParamMsg {
                                 logical_id: slot.node_id as u64,
-                                idx: crate::delay::DELAY_PARAM_BPM,
+                                idx,
                                 fvalue: bpm,
                             },
                         );

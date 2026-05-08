@@ -95,6 +95,15 @@ fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
     })
 }
 
+fn track_button_state_snapshot(state: &Arc<SequencerState>) -> Vec<(bool, bool)> {
+    (0..state.active_track_count())
+        .map(|track| {
+            let params = &state.pattern.track_params[track];
+            (params.is_muted(), params.is_solo())
+        })
+        .collect()
+}
+
 fn map_number(
     map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
     key: &str,
@@ -227,6 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
     let mut prev_bus_playheads: Vec<usize> = Vec::new();
     let mut prev_track_playheads: Vec<u32> = Vec::new();
+    let mut prev_track_button_states = track_button_state_snapshot(&state);
     let mut prev_current_track_playhead_visible = false;
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
@@ -710,6 +720,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 editor.refresh_runtime_side_effects();
                                 editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
                                 prev_track_playheads = track_playheads_snapshot(&state, &app);
+                                prev_track_button_states = track_button_state_snapshot(&state);
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 editor.handle_host_event(HostEvent::Status(format!(
                                     "Deleted track {}",
@@ -4135,6 +4146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_track_peak_levels = cached_track_peak_levels.clone();
                         prev_bus_playheads = bus_playhead_snapshot(&app);
                         prev_track_playheads = track_playheads_snapshot(&state, &app);
+                        prev_track_button_states = track_button_state_snapshot(&state);
                         prev_ui_epoch = ui_epoch.load(Ordering::Relaxed);
 
                         if let Some((status, _)) = app.editor.status_message.take() {
@@ -4420,12 +4432,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_sidebar_browser(rt, &app, ct);
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
+                prev_track_button_states = track_button_state_snapshot(&state);
                 needs_reactive_cycle = true;
             }
             let mut refresh_visible_sequencer_after_cycle = false;
+            let mut refresh_visible_mixer_after_cycle = false;
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
                 pull_shared_bus_state(&mut app, &bus_state);
+                let track_button_states = track_button_state_snapshot(&state);
+                let track_buttons_changed = track_button_states != prev_track_button_states;
                 let rt = editor.runtime_mut();
                 if app.tracks.is_empty() {
                     sync_track_topology_state(
@@ -4468,6 +4484,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let rec_on = recording.load(Ordering::Relaxed);
                 rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
                 let armed = record_armed.lock().unwrap();
+                let record_armed_changed = armed.len() != app.graph.record_armed.len()
+                    || armed
+                        .iter()
+                        .enumerate()
+                        .any(|(i, armed)| app.graph.record_armed.get(i) != Some(armed));
                 rt.set_reactive("SEQ", "record-armed", build_record_armed_value(&armed));
                 // Sync to app for TUI recording logic
                 app.ui.recording = rec_on;
@@ -4477,6 +4498,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 refresh_visible_sequencer_after_cycle = sequencer_visible;
+                refresh_visible_mixer_after_cycle =
+                    mixer_visible && (record_armed_changed || track_buttons_changed);
+                prev_track_button_states = track_button_states;
                 prev_ui_epoch = ui_ep;
                 needs_reactive_cycle = true;
             }
@@ -4573,6 +4597,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 editor.refresh_runtime_side_effects();
                 if refresh_visible_sequencer_after_cycle {
                     editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                }
+                if refresh_visible_mixer_after_cycle {
+                    editor.refresh_visible_layouts_for_buffer_named("*mixer*");
                 }
                 editor.mark_needs_redraw();
             }

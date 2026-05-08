@@ -802,6 +802,176 @@ pub(crate) fn init_runtime(
         Ok(Value::Number(clamped as f64))
     });
 
+    // seq-set-effect-param-pair — (seq-set-effect-param-pair slot-idx param-a value-a param-b value-b)
+    let st = state.clone();
+    let ct = current_track.clone();
+    let descs = effect_descriptors.clone();
+    let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    runtime.register_native("seq-set-effect-param-pair", move |args, _ctx| {
+        let (
+            Some(Value::Number(slot)),
+            Some(Value::Number(param_a)),
+            Some(Value::Number(val_a)),
+            Some(Value::Number(param_b)),
+            Some(Value::Number(val_b)),
+        ) = (
+            args.first(),
+            args.get(1),
+            args.get(2),
+            args.get(3),
+            args.get(4),
+        )
+        else {
+            return Err(
+                "seq-set-effect-param-pair: expected (slot param-a value-a param-b value-b)".into(),
+            );
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let slot_idx = *slot as usize;
+        let updates = [
+            (*param_a as usize, *val_a as f32),
+            (*param_b as usize, *val_b as f32),
+        ];
+
+        let chain = &st.pattern.effect_chains[track];
+        let Some(slot_state) = chain.get(slot_idx) else {
+            return Err(format!("seq-set-effect-param-pair: slot {slot_idx} out of range").into());
+        };
+
+        let mut clamped_values = Vec::with_capacity(updates.len());
+        for (param_idx, val) in updates {
+            let clamped = descs
+                .get(track)
+                .and_then(|d| d.get(slot_idx))
+                .and_then(|d| d.params.get(param_idx))
+                .map(|p| val.clamp(p.min, p.max))
+                .unwrap_or(val);
+
+            slot_state.defaults.set(param_idx, clamped);
+
+            let node_id = slot_state.node_id.load(Ordering::Relaxed);
+            if node_id != 0 {
+                let idx = slot_state.resolve_node_idx(param_idx);
+                let skip = descs
+                    .get(track)
+                    .and_then(|d| d.get(slot_idx))
+                    .and_then(|d| d.params.get(param_idx))
+                    .and_then(|p| p.host_control.as_ref())
+                    .is_some();
+                if !skip {
+                    unsafe {
+                        sequencer::audiograph::params_push_wrapper(
+                            lg_raw,
+                            sequencer::audiograph::ParamMsg {
+                                idx,
+                                logical_id: node_id as u64,
+                                fvalue: clamped,
+                            },
+                        );
+                    }
+                }
+            }
+            clamped_values.push(Value::Number(clamped as f64));
+        }
+
+        st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::List(
+            clamped_values
+                .into_iter()
+                .map(|value| Rc::new(RefCell::new(value)))
+                .collect(),
+        ))
+    });
+
+    // seq-set-effect-param-pair-live — push two effect params during a drag without
+    // forcing the expensive FX reactive rebuild. The final commit should use
+    // seq-set-effect-param-pair so the scheduler/UI snapshot catches up.
+    let st = state.clone();
+    let ct = current_track.clone();
+    let descs = effect_descriptors.clone();
+    runtime.register_native("seq-set-effect-param-pair-live", move |args, _ctx| {
+        let (
+            Some(Value::Number(slot)),
+            Some(Value::Number(param_a)),
+            Some(Value::Number(val_a)),
+            Some(Value::Number(param_b)),
+            Some(Value::Number(val_b)),
+        ) = (
+            args.first(),
+            args.get(1),
+            args.get(2),
+            args.get(3),
+            args.get(4),
+        )
+        else {
+            return Err(
+                "seq-set-effect-param-pair-live: expected (slot param-a value-a param-b value-b)"
+                    .into(),
+            );
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let slot_idx = *slot as usize;
+        let updates = [
+            (*param_a as usize, *val_a as f32),
+            (*param_b as usize, *val_b as f32),
+        ];
+
+        let chain = &st.pattern.effect_chains[track];
+        let Some(slot_state) = chain.get(slot_idx) else {
+            return Err(
+                format!("seq-set-effect-param-pair-live: slot {slot_idx} out of range").into(),
+            );
+        };
+
+        let mut clamped_values = Vec::with_capacity(updates.len());
+        for (param_idx, val) in updates {
+            let clamped = descs
+                .get(track)
+                .and_then(|d| d.get(slot_idx))
+                .and_then(|d| d.params.get(param_idx))
+                .map(|p| val.clamp(p.min, p.max))
+                .unwrap_or(val);
+
+            slot_state.defaults.set(param_idx, clamped);
+
+            let node_id = slot_state.node_id.load(Ordering::Relaxed);
+            if node_id != 0 {
+                let idx = slot_state.resolve_node_idx(param_idx);
+                let skip = descs
+                    .get(track)
+                    .and_then(|d| d.get(slot_idx))
+                    .and_then(|d| d.params.get(param_idx))
+                    .and_then(|p| p.host_control.as_ref())
+                    .is_some();
+                if !skip {
+                    unsafe {
+                        sequencer::audiograph::params_push_wrapper(
+                            lg_raw,
+                            sequencer::audiograph::ParamMsg {
+                                idx,
+                                logical_id: node_id as u64,
+                                fvalue: clamped,
+                            },
+                        );
+                    }
+                }
+            }
+            clamped_values.push(Value::Number(clamped as f64));
+        }
+
+        Ok(Value::List(
+            clamped_values
+                .into_iter()
+                .map(|value| Rc::new(RefCell::new(value)))
+                .collect(),
+        ))
+    });
+
     // ── Selection natives ──
 
     // seq-select-step — toggle step in/out of selection
@@ -1077,6 +1247,55 @@ pub(crate) fn init_runtime(
         ui_ep.fetch_add(1, Ordering::Relaxed);
         fx_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Number(val as f64))
+    });
+
+    // seq-set-effect-plock-pair — apply two effect p-locks to ALL selected steps
+    let st = state.clone();
+    let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
+    let auto_follow_override = auto_follow_override_until.clone();
+    runtime.register_native("seq-set-effect-plock-pair", move |args, _ctx| {
+        let (
+            Some(Value::Number(slot)),
+            Some(Value::Number(param_a)),
+            Some(Value::Number(val_a)),
+            Some(Value::Number(param_b)),
+            Some(Value::Number(val_b)),
+        ) = (
+            args.first(),
+            args.get(1),
+            args.get(2),
+            args.get(3),
+            args.get(4),
+        )
+        else {
+            return Err(
+                "seq-set-effect-plock-pair: expected (slot param-a value-a param-b value-b)".into(),
+            );
+        };
+        let track = ct.load(Ordering::Relaxed);
+        let slot_idx = *slot as usize;
+        let chain = &st.pattern.effect_chains[track];
+        let Some(slot_state) = chain.get(slot_idx) else {
+            return Err(format!("slot {slot_idx} out of range").into());
+        };
+        let updates = [
+            (*param_a as usize, *val_a as f32),
+            (*param_b as usize, *val_b as f32),
+        ];
+        let steps = sel.lock().unwrap();
+        for &step in steps.iter() {
+            for (param_idx, val) in updates {
+                slot_state.plocks.set(step, param_idx, val);
+            }
+        }
+        st.publish_scheduler_snapshot();
+        *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
+        ui_ep.fetch_add(1, Ordering::Relaxed);
+        fx_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(true))
     });
 
     // seq-set-step-param-plock — apply step param p-lock to selected steps
@@ -1858,6 +2077,16 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Set an effect parameter default on the current track.",
         ),
         (
+            "seq-set-effect-param-pair",
+            "(seq-set-effect-param-pair slot param-a value-a param-b value-b)",
+            "Set two effect parameter defaults on the current track with one UI/FX invalidation.",
+        ),
+        (
+            "seq-set-effect-param-pair-live",
+            "(seq-set-effect-param-pair-live slot param-a value-a param-b value-b)",
+            "Push two effect parameter defaults during a drag without rebuilding reactive FX state.",
+        ),
+        (
             "seq-select-step",
             "(seq-select-step step)",
             "Toggle a step in the current selection.",
@@ -1901,6 +2130,11 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-effect-plock",
             "(seq-set-effect-plock slot param value)",
             "Set an effect parameter p-lock on each selected step.",
+        ),
+        (
+            "seq-set-effect-plock-pair",
+            "(seq-set-effect-plock-pair slot param-a value-a param-b value-b)",
+            "Set two effect parameter p-locks on each selected step with one UI/FX invalidation.",
         ),
         (
             "seq-set-step-param-plock",
