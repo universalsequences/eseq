@@ -1331,7 +1331,7 @@ impl TimelineView {
     fn begin_gesture(&self, local_col: f32, local_row: f32) -> Option<Value> {
         let hit = self.hit_test(local_col, local_row)?;
         let current_time = self.snap_time(self.time_at_col(local_col));
-        let current_edit_time = self.snap_edit_time(self.time_at_col(local_col));
+        let current_marquee_time = self.time_at_col(local_col);
         let current_lane = self.lane_at_row(local_row);
         match self.tool {
             TimelineTool::Pointer => match hit {
@@ -1369,7 +1369,7 @@ impl TimelineView {
                 }
                 HitRegion::Background { .. } => Some(map_value(vec![
                     ("kind", keyword(":marquee")),
-                    ("time", Value::Number(current_edit_time)),
+                    ("time", Value::Number(current_marquee_time)),
                     ("lane", Value::Number(current_lane as f64)),
                 ])),
                 HitRegion::Header => Some(map_value(vec![("kind", keyword(":scrub"))])),
@@ -1385,7 +1385,7 @@ impl TimelineView {
             ])),
             TimelineTool::Marquee => Some(map_value(vec![
                 ("kind", keyword(":marquee")),
-                ("time", Value::Number(current_edit_time)),
+                ("time", Value::Number(current_marquee_time)),
                 ("lane", Value::Number(current_lane as f64)),
             ])),
             TimelineTool::Pan => Some(map_value(vec![
@@ -1475,7 +1475,7 @@ impl TimelineView {
         let raw_time = self.time_at_col(local_col);
         let current_time = self.snap_time(raw_time);
         let current_resize_time = self.snap_resize_time(raw_time);
-        let current_edit_time = self.snap_edit_time(raw_time);
+        let current_marquee_time = raw_time;
         let current_lane = self.lane_at_row(local_row);
         let gesture = get_map(gesture?)?;
         match gesture.get("kind") {
@@ -1540,7 +1540,7 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "marquee" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)? as usize;
-                if (start_time - current_edit_time).abs() < f64::EPSILON
+                if (start_time - current_marquee_time).abs() < f64::EPSILON
                     && start_lane == current_lane
                 {
                     return Some(action_map(vec![("type", keyword(":clear-selection"))]));
@@ -1549,8 +1549,14 @@ impl TimelineView {
                 let lane_b = start_lane.max(current_lane);
                 Some(action_map(vec![
                     ("type", keyword(":marquee-select")),
-                    ("time-a", Value::Number(start_time.min(current_edit_time))),
-                    ("time-b", Value::Number(start_time.max(current_edit_time))),
+                    (
+                        "time-a",
+                        Value::Number(start_time.min(current_marquee_time)),
+                    ),
+                    (
+                        "time-b",
+                        Value::Number(start_time.max(current_marquee_time)),
+                    ),
                     ("lane-a", Value::Number(lane_a as f64)),
                     ("lane-b", Value::Number(lane_b as f64)),
                     ("mode", keyword(":replace")),
@@ -1775,7 +1781,7 @@ impl TimelineView {
     ) -> Option<Value> {
         let raw_time = self.time_at_col(local_col);
         let current_resize_time = self.snap_resize_time(raw_time);
-        let current_edit_time = self.snap_edit_time(raw_time);
+        let current_marquee_time = raw_time;
         let current_lane = self.lane_at_row(local_row);
         let gesture = get_map(gesture?)?;
         match gesture.get("kind") {
@@ -1793,7 +1799,7 @@ impl TimelineView {
             Some(Value::Keyword(kind)) if kind == "marquee" => {
                 let start_time = as_number(gesture.get("time")?)?;
                 let start_lane = as_number(gesture.get("lane")?)? as usize;
-                if (start_time - current_edit_time).abs() < f64::EPSILON
+                if (start_time - current_marquee_time).abs() < f64::EPSILON
                     && start_lane == current_lane
                 {
                     return Some(action_map(vec![("type", keyword(":clear-selection"))]));
@@ -1802,8 +1808,14 @@ impl TimelineView {
                 let lane_b = start_lane.max(current_lane);
                 Some(action_map(vec![
                     ("type", keyword(":finish-marquee-select")),
-                    ("time-a", Value::Number(start_time.min(current_edit_time))),
-                    ("time-b", Value::Number(start_time.max(current_edit_time))),
+                    (
+                        "time-a",
+                        Value::Number(start_time.min(current_marquee_time)),
+                    ),
+                    (
+                        "time-b",
+                        Value::Number(start_time.max(current_marquee_time)),
+                    ),
                     ("lane-a", Value::Number(lane_a as f64)),
                     ("lane-b", Value::Number(lane_b as f64)),
                     ("mode", keyword(":replace")),
@@ -2695,7 +2707,7 @@ mod tests {
     }
 
     #[test]
-    fn marquee_selection_floors_to_zoomed_grid_snap() {
+    fn marquee_selection_uses_raw_pointer_times() {
         let props = HashMap::from([
             ("tool".to_string(), keyword_value("pointer")),
             (
@@ -2735,14 +2747,16 @@ mod tests {
         let Value::Map(map) = action else {
             panic!("expected action map");
         };
-        assert_eq!(
-            map.get("time-a").map(|value| value.borrow().clone()),
-            Some(Value::Number(2.0))
-        );
-        assert_eq!(
-            map.get("time-b").map(|value| value.borrow().clone()),
-            Some(Value::Number(3.0))
-        );
+        let time_a = map
+            .get("time-a")
+            .and_then(|value| as_number(&value.borrow()))
+            .expect("time-a");
+        let time_b = map
+            .get("time-b")
+            .and_then(|value| as_number(&value.borrow()))
+            .expect("time-b");
+        assert!((time_a - 2.4).abs() < 0.0001);
+        assert!((time_b - 3.4).abs() < 0.0001);
     }
 
     #[test]

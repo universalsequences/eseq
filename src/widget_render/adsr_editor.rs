@@ -264,7 +264,8 @@ impl WidgetDefinition for AdsrEditorWidget {
         let release = prop_ms(&node.props, "release", 300.0);
         let hold = super::get_f32_prop(&node.props, "hold", 0.35).clamp(0.05, 2.0);
 
-        let curve_color = resolve_named_color(&node.props, "curve-color", theme::WIDGET_KNOB_FILLED());
+        let curve_color =
+            resolve_named_color(&node.props, "curve-color", theme::WIDGET_KNOB_FILLED());
         let bg_color = resolve_named_color(
             &node.props,
             "background-color",

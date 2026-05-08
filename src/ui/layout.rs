@@ -544,6 +544,15 @@ pub fn reuse_layout_node_for_subtree_path(
     child_path: &[usize],
     dirty_widget_ids: &mut Vec<u64>,
 ) -> Option<LayoutNode> {
+    reuse_layout_node_for_subtree_path_result(existing, tree, child_path, dirty_widget_ids).ok()
+}
+
+pub fn reuse_layout_node_for_subtree_path_result(
+    existing: &LayoutNode,
+    tree: &Value,
+    child_path: &[usize],
+    dirty_widget_ids: &mut Vec<u64>,
+) -> Result<LayoutNode, String> {
     let mut trace_path = Vec::new();
     reuse_layout_node_at_path(
         existing,
@@ -552,7 +561,6 @@ pub fn reuse_layout_node_for_subtree_path(
         dirty_widget_ids,
         &mut trace_path,
     )
-    .ok()
 }
 
 fn find_subtree_path(node: &LayoutNode, subtree_root_id: u64, path: &mut Vec<usize>) -> Option<()> {
@@ -592,15 +600,22 @@ fn reuse_layout_node_at_path(
     let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
     let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
     let new_stable_key = get_prop_str(tree, "__stable-key");
-    if existing.stable_widget_id != new_stable_widget_id
-        || existing.subtree_root_id != new_subtree_root_id
-        || existing.parent_subtree_root_id != new_parent_subtree_root_id
-        || existing.stable_key != new_stable_key
-    {
+    let is_explicit_subtree_root =
+        existing.subtree_root_id.is_some() && existing.subtree_root_id == new_subtree_root_id;
+    let identity_mismatch = if is_explicit_subtree_root {
+        existing.subtree_root_id != new_subtree_root_id || existing.stable_key != new_stable_key
+    } else {
+        existing.stable_widget_id != new_stable_widget_id
+            || existing.subtree_root_id != new_subtree_root_id
+            || existing.parent_subtree_root_id != new_parent_subtree_root_id
+            || existing.stable_key != new_stable_key
+    };
+    if identity_mismatch {
         return Err(format!("stable-identity:{widget_type}"));
     }
 
-    let new_props = collect_props(tree);
+    let mut new_props = collect_props(tree);
+    preserve_layout_internal_props(&existing.props, &mut new_props);
     if !size_affecting_props_equal(&widget_type, &existing.props, &new_props) {
         return Err(format!("size-props:{widget_type}"));
     }
@@ -1344,11 +1359,8 @@ mod tests {
     #[test]
     fn tree_selection_resyncs_when_items_change_but_selected_label_does_not() {
         let engine = LayoutEngine::new(80, 24, 1.0);
-        let first = scroll_with_flat_selected_tree(
-            400.0,
-            &["a", "b", "c", "d", "shared", "e"],
-            "shared",
-        );
+        let first =
+            scroll_with_flat_selected_tree(400.0, &["a", "b", "c", "d", "shared", "e"], "shared");
         let first_layout = engine.layout(&first).unwrap();
         let first_state = crate::widget_render::scroll::sync_node_state(&first_layout);
         assert!(

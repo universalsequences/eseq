@@ -51,11 +51,7 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
             buf.set(row_u16, col, styled_cell('\u{2588}', fg, None));
         } else {
             let ch = if col_offset % 2 == 0 { '\u{2022}' } else { ' ' };
-            buf.set(
-                row_u16,
-                col,
-                styled_cell(ch, dot_color(props), None),
-            );
+            buf.set(row_u16, col, styled_cell(ch, dot_color(props), None));
         }
     }
 }

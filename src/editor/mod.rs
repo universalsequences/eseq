@@ -33,14 +33,32 @@ use natives::register_editor_natives;
 
 const TILE_GAP_PX_PER_UNIT: f32 = 15.0;
 
-fn layout_matches_viewport_width(layout: &crate::layout::LayoutNode, cols: u16) -> bool {
-    (layout.rect.width - cols as f32).abs() < 0.5
+fn metal_tile_content_viewport(rect: &Rect, show_status: bool) -> (u16, u16) {
+    let cols = rect.width.max(0.0).floor() as u16;
+    let rows = if show_status {
+        (rect.height.max(0.0).floor() as u16).saturating_sub(1)
+    } else {
+        rect.height.max(0.0).floor() as u16
+    };
+    (cols.max(1), rows.max(1))
+}
+
+fn widget_only_scratch_buffer_should_show_ui(buffer: &Buffer) -> bool {
+    buffer.widget_tree.is_some()
+        && buffer.path.is_none()
+        && buffer.name.starts_with('*')
+        && buffer.name.ends_with('*')
+        && buffer.text().trim().is_empty()
 }
 
 fn debug_ui_updates_enabled() -> bool {
     std::env::var("ESEQLISP_DEBUG_UI_UPDATES")
         .ok()
         .is_some_and(|value| value == "1" || value == "true")
+}
+
+fn trace_ui_invalidation_enabled() -> bool {
+    std::env::var_os("ESEQLISP_TRACE_UI").is_some()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2034,6 +2052,9 @@ impl Editor {
         if let (Some(cur), Some(new)) = (current_idx, new_idx) {
             if let Some(leaf) = self.tile_root.find_leaf_by_buffer_idx_mut(cur) {
                 leaf.buffer_idx = new;
+                if widget_only_scratch_buffer_should_show_ui(&self.buffers[new]) {
+                    self.buffers[new].view_mode = ViewMode::UiOnly;
+                }
                 // Invalidate all cached rendering state so the new buffer
                 // renders immediately instead of showing the old widget tree.
                 leaf.cached_layout = None;
@@ -3587,7 +3608,7 @@ impl Editor {
                     .find(|(tid, _)| *tid == id)
                     .map(|(_, r)| r);
                 let (cols, rows) = match rect {
-                    Some(r) => (r.width as u16, r.height.max(1.0) as u16),
+                    Some(r) => metal_tile_content_viewport(r, leaf.show_status),
                     None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
                 };
                 Some((id, cols, rows))
@@ -3601,9 +3622,6 @@ impl Editor {
                 .and_then(|leaf| leaf.cached_layout.clone());
             let reused_layout_and_dirty = tree.as_ref().and_then(|tree| {
                 let existing = existing_layout.as_ref()?;
-                if !layout_matches_viewport_width(existing, cols) {
-                    return None;
-                }
                 let mut dirty_widget_ids = Vec::new();
                 crate::layout::reuse_layout_node(existing, tree, &mut dirty_widget_ids)
                     .map(|layout| (std::sync::Arc::new(layout), dirty_widget_ids))
@@ -3673,7 +3691,7 @@ impl Editor {
                     .find(|(tid, _)| *tid == id)
                     .map(|(_, r)| r);
                 let (cols, rows) = match rect {
-                    Some(r) => (r.width as u16, r.height.max(1.0) as u16),
+                    Some(r) => metal_tile_content_viewport(r, leaf.show_status),
                     None => (self.runtime.layout_cols(), self.runtime.layout_rows()),
                 };
                 Some((id, cols, rows))
@@ -3681,13 +3699,16 @@ impl Editor {
             .collect();
 
         for (tile_id, cols, rows) in tiles_to_update {
+            let buffer_name = self.buffers[buffer_idx].name.clone();
             let existing_layout = self
                 .tile_root
                 .find_leaf(tile_id)
                 .and_then(|leaf| leaf.cached_layout.clone());
             let mut dirty_widget_ids = Vec::new();
-            let mut layout =
-                existing_layout.filter(|layout| layout_matches_viewport_width(layout, cols));
+            let mut reuse_mode = "targeted";
+            let mut miss_reason = None::<String>;
+            let reusable_existing_layout = existing_layout;
+            let mut layout = reusable_existing_layout.clone();
             let mut targeted = layout.is_some();
             let subtree_paths = layout
                 .as_ref()
@@ -3695,6 +3716,7 @@ impl Editor {
             for subtree_root_id in subtree_roots {
                 let Some(existing) = layout.as_ref() else {
                     targeted = false;
+                    miss_reason.get_or_insert_with(|| "missing-layout".to_string());
                     break;
                 };
                 let Some(child_path) = subtree_paths
@@ -3702,31 +3724,72 @@ impl Editor {
                     .and_then(|paths| paths.get(subtree_root_id))
                 else {
                     targeted = false;
+                    miss_reason = Some(format!("missing-subtree-path:{subtree_root_id}"));
                     break;
                 };
-                let Some(updated) = crate::layout::reuse_layout_node_for_subtree_path(
+                let updated = match crate::layout::reuse_layout_node_for_subtree_path_result(
                     existing.as_ref(),
                     tree,
                     child_path,
                     &mut dirty_widget_ids,
-                ) else {
-                    targeted = false;
-                    break;
+                ) {
+                    Ok(updated) => updated,
+                    Err(reason) => {
+                        targeted = false;
+                        miss_reason = Some(format!("subtree:{subtree_root_id}:{reason}"));
+                        break;
+                    }
                 };
                 layout = Some(std::sync::Arc::new(updated));
             }
             let (layout, dirty_widget_ids) = if targeted {
                 (layout, dirty_widget_ids)
             } else {
-                let layout = self
-                    .runtime
-                    .layout_snapshot_for_tree_with_viewport_and_offset(
+                let mut dirty_widget_ids = Vec::new();
+                let reused_layout = reusable_existing_layout.as_ref().and_then(|existing| {
+                    match crate::layout::reuse_layout_node(
+                        existing.as_ref(),
                         tree,
-                        Some((cols, rows)),
-                        buffer_id * 100_000,
-                    );
-                (layout, Vec::new())
+                        &mut dirty_widget_ids,
+                    ) {
+                        Some(layout) => {
+                            reuse_mode = "whole-tree";
+                            Some(std::sync::Arc::new(layout))
+                        }
+                        None => {
+                            if miss_reason.is_none() {
+                                miss_reason = crate::layout::reuse_layout_failure_reason(
+                                    existing.as_ref(),
+                                    tree,
+                                );
+                            }
+                            None
+                        }
+                    }
+                });
+                if let Some(layout) = reused_layout {
+                    (Some(layout), dirty_widget_ids)
+                } else {
+                    reuse_mode = "full";
+                    let layout = self
+                        .runtime
+                        .layout_snapshot_for_tree_with_viewport_and_offset(
+                            tree,
+                            Some((cols, rows)),
+                            buffer_id * 100_000,
+                        );
+                    (layout, Vec::new())
+                }
             };
+            if trace_ui_invalidation_enabled() && reuse_mode != "targeted" {
+                eprintln!(
+                    "[ui-trace][inactive-layout] buffer={buffer_name} tile={tile_id} mode={reuse_mode} roots={} viewport={}x{} reason={}",
+                    subtree_roots.len(),
+                    cols,
+                    rows,
+                    miss_reason.as_deref().unwrap_or("-"),
+                );
+            }
             if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
                 leaf.cached_layout = layout;
                 leaf.dirty_widget_ids = dirty_widget_ids;

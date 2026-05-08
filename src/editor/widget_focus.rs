@@ -394,6 +394,9 @@ impl Editor {
 
     pub(super) fn restore_buffer_widget_tree(&mut self) {
         crate::widget_render::clear_overlay();
+        if super::widget_only_scratch_buffer_should_show_ui(self.active_buffer()) {
+            self.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+        }
         let buf = self.active_buffer();
         let tree = buf.widget_tree.clone();
         let buffer_id = buf.id as u64;
@@ -415,6 +418,9 @@ impl Editor {
         layout_revision: u64,
     ) {
         crate::widget_render::clear_overlay();
+        if super::widget_only_scratch_buffer_should_show_ui(self.active_buffer()) {
+            self.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+        }
         let buf = self.active_buffer();
         let tree = buf.widget_tree.clone();
         let snapshot = buf.committed_ui_snapshot.clone();

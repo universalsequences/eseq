@@ -31,33 +31,137 @@ const TRIANGLE_WIDTH: f32 = 1.4;
 // ── Internal state ──────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
-struct NumberPickerState {
+pub struct NumberPickerEditState {
     /// When true, the user is typing a value. The display shows edit_text
     /// instead of the formatted prop value.
-    editing: bool,
-    edit_text: String,
-    cursor_pos: usize,
+    pub editing: bool,
+    pub edit_text: String,
+    pub cursor_pos: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NumberPickerEditOutcome {
+    StateChanged,
+    Commit(f64),
 }
 
 thread_local! {
-    static STATES: RefCell<HashMap<u64, NumberPickerState>> = RefCell::new(HashMap::new());
+    static STATES: RefCell<HashMap<u64, NumberPickerEditState>> = RefCell::new(HashMap::new());
     /// Per-character cell widths for digits, '.', '-' at a given font size.
     /// Key: font_size_bits → HashMap<char, cell_width>.
     static CHAR_WIDTHS: RefCell<HashMap<u32, HashMap<char, f32>>> =
         RefCell::new(HashMap::new());
 }
 
-fn get_state(widget_id: u64) -> NumberPickerState {
+fn get_state(widget_id: u64) -> NumberPickerEditState {
     STATES.with(|s| s.borrow().get(&widget_id).cloned().unwrap_or_default())
 }
 
-fn set_state(widget_id: u64, state: NumberPickerState) {
+pub fn number_picker_edit_state(widget_id: u64) -> NumberPickerEditState {
+    get_state(widget_id)
+}
+
+fn set_state(widget_id: u64, state: NumberPickerEditState) {
     STATES.with(|s| s.borrow_mut().insert(widget_id, state));
     super::bump_widget_state_generation();
 }
 
+pub fn clear_number_picker_edit_state(widget_id: u64) {
+    set_state(widget_id, NumberPickerEditState::default());
+}
+
 fn format_value(value: f64, decimals: u32) -> String {
     format!("{:.*}", decimals as usize, value)
+}
+
+pub fn number_picker_display_text(state: &NumberPickerEditState) -> String {
+    match state.edit_text.as_str() {
+        "." => "0.".to_string(),
+        "-." => "-0.".to_string(),
+        text => text.to_string(),
+    }
+}
+
+pub fn handle_number_picker_edit_key(
+    state: &mut NumberPickerEditState,
+    key: WidgetKeyEvent,
+    value: f64,
+    min: f64,
+    max: f64,
+    decimals: u32,
+) -> Option<NumberPickerEditOutcome> {
+    match key.code {
+        KeyCode::Char(c)
+            if (c.is_ascii_digit() || c == '.' || c == '-')
+                && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
+        {
+            if !state.editing {
+                state.editing = true;
+                state.edit_text.clear();
+                state.cursor_pos = 0;
+            }
+            state.edit_text.insert(state.cursor_pos, c);
+            state.cursor_pos += 1;
+            Some(NumberPickerEditOutcome::StateChanged)
+        }
+        KeyCode::Backspace if state.editing => {
+            if state.cursor_pos > 0 {
+                state.cursor_pos -= 1;
+                state.edit_text.remove(state.cursor_pos);
+            }
+            if state.edit_text.is_empty() {
+                state.editing = false;
+            }
+            Some(NumberPickerEditOutcome::StateChanged)
+        }
+        KeyCode::Left if state.editing => {
+            state.cursor_pos = state.cursor_pos.saturating_sub(1);
+            Some(NumberPickerEditOutcome::StateChanged)
+        }
+        KeyCode::Right if state.editing => {
+            state.cursor_pos = (state.cursor_pos + 1).min(state.edit_text.len());
+            Some(NumberPickerEditOutcome::StateChanged)
+        }
+        KeyCode::Enter => {
+            if state.editing {
+                let parsed = state
+                    .edit_text
+                    .parse::<f64>()
+                    .unwrap_or(value)
+                    .clamp(min, max);
+                state.editing = false;
+                state.edit_text.clear();
+                state.cursor_pos = 0;
+                Some(NumberPickerEditOutcome::Commit(parsed))
+            } else {
+                state.editing = true;
+                state.edit_text = format_value(value, decimals);
+                state.cursor_pos = state.edit_text.len();
+                Some(NumberPickerEditOutcome::StateChanged)
+            }
+        }
+        KeyCode::Esc => {
+            state.editing = false;
+            state.edit_text.clear();
+            state.cursor_pos = 0;
+            Some(NumberPickerEditOutcome::StateChanged)
+        }
+        _ => None,
+    }
+}
+
+pub fn handle_number_picker_edit_key_for_widget(
+    widget_id: u64,
+    key: WidgetKeyEvent,
+    value: f64,
+    min: f64,
+    max: f64,
+    decimals: u32,
+) -> Option<NumberPickerEditOutcome> {
+    let mut state = get_state(widget_id);
+    let outcome = handle_number_picker_edit_key(&mut state, key, value, min, max, decimals)?;
+    set_state(widget_id, state);
+    Some(outcome)
 }
 
 /// Compute text X offset in cells by summing cached per-character widths.
@@ -211,78 +315,20 @@ impl WidgetDefinition for NumberPickerWidget {
 
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
         let mut state = get_state(node.widget_id);
-        let value = get_f32_prop(&node.props, "value", 0.0);
+        let value = get_f32_prop(&node.props, "value", 0.0) as f64;
         let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
+        let min = get_f32_prop(&node.props, "min", 0.0) as f64;
+        let max = get_f32_prop(&node.props, "max", 1.0) as f64;
 
-        match key.code {
-            KeyCode::Char(c)
-                if (c.is_ascii_digit() || c == '.' || c == '-')
-                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
-            {
-                if !state.editing {
-                    // First keypress: clear and start fresh
-                    state.editing = true;
-                    state.edit_text = String::new();
-                    state.cursor_pos = 0;
-                }
-                state.edit_text.insert(state.cursor_pos, c);
-                state.cursor_pos += 1;
+        match handle_number_picker_edit_key(&mut state, key, value, min, max, decimals)? {
+            NumberPickerEditOutcome::StateChanged => {
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
-            KeyCode::Backspace if state.editing => {
-                if state.cursor_pos > 0 {
-                    state.cursor_pos -= 1;
-                    state.edit_text.remove(state.cursor_pos);
-                }
-                if state.edit_text.is_empty() {
-                    state.editing = false;
-                }
+            NumberPickerEditOutcome::Commit(value) => {
                 set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::Nil))
+                Some(WidgetEvent::Custom(Value::Number(value)))
             }
-            KeyCode::Left if state.editing => {
-                state.cursor_pos = state.cursor_pos.saturating_sub(1);
-                set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::Nil))
-            }
-            KeyCode::Right if state.editing => {
-                state.cursor_pos = (state.cursor_pos + 1).min(state.edit_text.len());
-                set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::Nil))
-            }
-            KeyCode::Enter => {
-                if state.editing {
-                    // Parse and commit
-                    let min = get_f32_prop(&node.props, "min", 0.0);
-                    let max = get_f32_prop(&node.props, "max", 1.0);
-                    let parsed = state
-                        .edit_text
-                        .parse::<f64>()
-                        .unwrap_or(value as f64)
-                        .clamp(min as f64, max as f64);
-                    state.editing = false;
-                    state.edit_text.clear();
-                    state.cursor_pos = 0;
-                    set_state(node.widget_id, state);
-                    Some(WidgetEvent::Custom(Value::Number(parsed)))
-                } else {
-                    // Enter edit mode with current value
-                    state.editing = true;
-                    state.edit_text = format_value(value as f64, decimals);
-                    state.cursor_pos = state.edit_text.len();
-                    set_state(node.widget_id, state);
-                    Some(WidgetEvent::Custom(Value::Nil))
-                }
-            }
-            KeyCode::Esc => {
-                state.editing = false;
-                state.edit_text.clear();
-                state.cursor_pos = 0;
-                set_state(node.widget_id, state);
-                Some(WidgetEvent::Custom(Value::Nil))
-            }
-            _ => None,
         }
     }
 
@@ -365,6 +411,7 @@ impl WidgetDefinition for NumberPickerWidget {
         let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
         let state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
+        let effective_focused = is_focused || state.editing;
         let noui = get_bool_prop(&node.props, "noui", false);
         let unit = match node.props.get("unit") {
             Some(Value::String(unit)) => unit.as_str(),
@@ -404,13 +451,12 @@ impl WidgetDefinition for NumberPickerWidget {
 
         if !noui {
             let bg_color = resolve_named_color(&node.props, "bg-color", theme::DROPDOWN_BG());
-            let ring_color =
-                resolve_named_color(&node.props, "ring-color", theme::DROPDOWN_RING());
+            let ring_color = resolve_named_color(&node.props, "ring-color", theme::DROPDOWN_RING());
             let tri_color =
                 resolve_named_color(&node.props, "tri-color", theme::BUTTON_SECONDARY_FG());
 
             // ── Focus ring ──
-            if is_focused {
+            if effective_focused {
                 let ring_v = RING_WIDTH;
                 let ring_h = RING_WIDTH * viewport.cell_h / viewport.cell_w;
                 let ring_rect = Rect {
@@ -526,7 +572,7 @@ impl WidgetDefinition for NumberPickerWidget {
         };
         let (display_text, fg) = if state.editing {
             (state.edit_text.clone(), edit_color)
-        } else if is_focused {
+        } else if effective_focused {
             (display_value, edit_color)
         } else {
             (display_value, text_color)
@@ -559,9 +605,10 @@ impl WidgetDefinition for NumberPickerWidget {
         }
 
         // ── Cursor (when editing) ──
-        if is_focused && state.editing {
+        if effective_focused && state.editing {
+            let cursor_pos = state.cursor_pos;
             let cursor_x =
-                cursor_x_from_cache(&display_text, state.cursor_pos, font_size, viewport.cell_w);
+                cursor_x_from_cache(&display_text, cursor_pos, font_size, viewport.cell_w);
             let cursor_col = text_col + cursor_x;
             let cursor_rect = Rect {
                 row: node.rect.row + 0.15,
