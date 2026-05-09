@@ -1412,6 +1412,8 @@ pub(crate) fn build_sampler_panel_value(
 ) -> Value {
     use std::collections::HashMap;
 
+    app.publish_sampler_analysis_runtime(track);
+
     let sel = selected.lock().unwrap();
     let plock_step = sel.iter().copied().min();
     let slot = &app.state.pattern.instrument_slots[track];
@@ -1542,6 +1544,63 @@ pub(crate) fn build_sampler_panel_value(
     if let Some(buf_val) = buffer_value {
         panel_map.insert("buffer".to_string(), Rc::new(RefCell::new(buf_val)));
     }
+    let buffer_id = app.graph.track_buffer_ids.get(track).copied().unwrap_or(-1);
+    let analysis_entry = app.sample_analysis.cache().get(buffer_id);
+    let mut analysis_status = "none".to_string();
+    let mut analysis_message = String::new();
+    let mut onset_values: Vec<Rc<RefCell<Value>>> = Vec::new();
+    if let Some(entry) = analysis_entry {
+        match entry.as_ref() {
+            sequencer::analysis::AnalysisEntry::Pending => {
+                analysis_status = "pending".to_string();
+                analysis_message = "Analyzing...".to_string();
+            }
+            sequencer::analysis::AnalysisEntry::Ready(result) => {
+                analysis_status = "ready".to_string();
+                analysis_message = format!("{:.1} BPM", result.bpm);
+                panel_map.insert(
+                    "analysis-bpm".to_string(),
+                    Rc::new(RefCell::new(Value::Number(result.bpm as f64))),
+                );
+                panel_map.insert(
+                    "analysis-confidence".to_string(),
+                    Rc::new(RefCell::new(Value::Number(result.bpm_confidence as f64))),
+                );
+                if let Some(frame) = result.downbeat_frame {
+                    let seconds = frame as f64 / app.graph.sample_rate.max(1) as f64;
+                    panel_map.insert(
+                        "downbeat-time".to_string(),
+                        Rc::new(RefCell::new(Value::Number(seconds))),
+                    );
+                }
+                onset_values = result
+                    .onsets_frames
+                    .iter()
+                    .map(|frame| {
+                        Rc::new(RefCell::new(Value::Number(
+                            *frame as f64 / app.graph.sample_rate.max(1) as f64,
+                        )))
+                    })
+                    .collect();
+            }
+            sequencer::analysis::AnalysisEntry::Failed(error) => {
+                analysis_status = "failed".to_string();
+                analysis_message = error.clone();
+            }
+        }
+    }
+    panel_map.insert(
+        "analysis-status".to_string(),
+        Rc::new(RefCell::new(Value::String(analysis_status))),
+    );
+    panel_map.insert(
+        "analysis-message".to_string(),
+        Rc::new(RefCell::new(Value::String(analysis_message))),
+    );
+    panel_map.insert(
+        "onsets".to_string(),
+        Rc::new(RefCell::new(Value::List(onset_values))),
+    );
     panel_map.insert(
         "params".to_string(),
         Rc::new(RefCell::new(Value::List(params))),
@@ -2953,7 +3012,7 @@ mod tests {
         editor
             .runtime_mut()
             .register_native("seq-filter-sample-tree", |_args, _ctx| {
-                Ok(test_list(vec![]))
+                Ok(test_sample_tree())
             });
         editor
             .runtime_mut()
@@ -2978,6 +3037,14 @@ mod tests {
             });
         editor
             .runtime_mut()
+            .eval_str("(defstate selected-bus -1)")
+            .expect("define browser test selected bus state");
+        editor
+            .runtime_mut()
+            .eval_str("(def seq-has-selected-bus? () (>= selected-bus 0))")
+            .expect("define browser test selected bus predicate");
+        editor
+            .runtime_mut()
             .eval_str(&src)
             .expect("load browser lisp");
         editor
@@ -2998,6 +3065,25 @@ mod tests {
             .find(|buffer| buffer.name == "*samples*")
             .expect("browser lisp should create the *samples* buffer")
             .id
+    }
+
+    fn test_sample_tree() -> Value {
+        test_list(vec![map_value([
+            ("label", Value::String("drums".to_string())),
+            (
+                "children",
+                test_list(vec![
+                    map_value([
+                        ("label", Value::String("kick.wav".to_string())),
+                        ("path", Value::String("samples/drums/kick.wav".to_string())),
+                    ]),
+                    map_value([
+                        ("label", Value::String("snare.wav".to_string())),
+                        ("path", Value::String("samples/drums/snare.wav".to_string())),
+                    ]),
+                ]),
+            ),
+        ])])
     }
 
     fn find_layout_node_by_stable_key<'a>(
@@ -3060,6 +3146,81 @@ mod tests {
                 "instrument tab should visibly render top-level instrument rows at {cols}x{rows}; rendered:\n{rendered}"
             );
         }
+    }
+
+    #[test]
+    fn metal_seq_browser_samples_gap_is_stable_between_track_kinds() {
+        fn sample_content_gap(
+            editor: &mut eseqlisp::Editor,
+            sidebar_kind: &str,
+            track: f64,
+        ) -> f32 {
+            editor.runtime_mut().set_reactive(
+                "SEQ",
+                "sidebar-kind",
+                Value::String(sidebar_kind.to_string()),
+            );
+            editor
+                .runtime_mut()
+                .set_reactive("SEQ", "sidebar-track-index", Value::Number(track));
+            editor
+                .runtime_mut()
+                .eval_str("(set! sbrowser-tab \"samples\")")
+                .expect("select samples tab");
+            editor.refresh_runtime_side_effects();
+            editor.set_active_buffer(browser_id(editor));
+            editor.set_layout_viewport(72, 60);
+            let layout = editor.widget_layout().expect("browser layout");
+            let header = find_layout_node_by_stable_key(&layout, "browser-header")
+                .expect("browser header node");
+            let content = find_layout_node_by_stable_key(&layout, "browser-tabbed-content")
+                .expect("browser tabbed content node");
+            content.rect.row - (header.rect.row + header.rect.height)
+        }
+
+        let mut editor = browser_editor_on_instrument_tab();
+        let sampler_gap = sample_content_gap(&mut editor, "sampler", 0.0);
+        let instrument_gap = sample_content_gap(&mut editor, "instrument", 1.0);
+
+        assert!(
+            (sampler_gap - instrument_gap).abs() < 0.01,
+            "samples header/content gap should not depend on selected track kind; sampler={sampler_gap}, instrument={instrument_gap}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_render_does_not_mutate_sample_search_on_track_change() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-filter \"kick\")")
+            .expect("set sample search");
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-kind",
+            Value::String("sampler".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sidebar-track-index", Value::Number(2.0));
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(72, 60);
+        let _ = editor.widget_layout().expect("browser layout");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("build browser widgets");
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("sbrowser-filter"),
+            Ok(Some(Value::String("kick".to_string()))),
+            "rendering the browser should not clear the search filter as a side effect"
+        );
     }
 
     #[test]
@@ -3160,6 +3321,74 @@ mod tests {
                 .expect("read browser tab"),
             Some(Value::String("presets".to_string()))
         );
+    }
+
+    #[test]
+    fn metal_seq_browser_audio_effect_add_uses_selected_bus() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! selected-bus 1)")
+            .expect("select bus");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-audio-effect
+                    (dict :kind "builtin-audio-effect" :name "Filter" :label "Filter"))"#,
+            )
+            .expect("select built-in audio effect for bus");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-builtin-bus-effect");
+                let Value::Map(payload) = payload else {
+                    panic!("bus effect payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("bus").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Filter".to_string()))
+                );
+            }
+            other => panic!("expected add-builtin-bus-effect host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_audio_effect_add_uses_track_when_no_bus_selected() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! selected-bus -1)")
+            .expect("clear selected bus");
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-audio-effect
+                    (dict :kind "custom-audio-effect" :name "my-effect" :label "my-effect"))"#,
+            )
+            .expect("select custom audio effect for track");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-effect");
+                let Value::Map(payload) = payload else {
+                    panic!("track effect payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("my-effect".to_string()))
+                );
+            }
+            other => panic!("expected add-effect host command, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3421,12 +3650,34 @@ mod tests {
                 .any(|child| layout_contains_widget_type(child, widget_type))
     }
 
+    fn count_widget_type(node: &eseqlisp::layout::LayoutNode, widget_type: &str) -> usize {
+        usize::from(node.widget_type == widget_type)
+            + node
+                .children
+                .iter()
+                .map(|child| count_widget_type(child, widget_type))
+                .sum::<usize>()
+    }
+
     fn layout_contains_debug_name(node: &eseqlisp::layout::LayoutNode, needle: &str) -> bool {
         matches!(node.props.get("debug-name"), Some(Value::String(name)) if name.contains(needle))
             || node
                 .children
                 .iter()
                 .any(|child| layout_contains_debug_name(child, needle))
+    }
+
+    fn find_layout_node_by_debug_name<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        needle: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if matches!(node.props.get("debug-name"), Some(Value::String(name)) if name.contains(needle))
+        {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_debug_name(child, needle))
     }
 
     fn test_param_map(
@@ -3627,7 +3878,9 @@ mod tests {
     fn register_full_grid_test_natives(editor: &mut eseqlisp::Editor) {
         editor
             .runtime_mut()
-            .register_native("seq-filter-sample-tree", |_args, _ctx| Ok(test_list(vec![])));
+            .register_native("seq-filter-sample-tree", |_args, _ctx| {
+                Ok(test_list(vec![]))
+            });
         editor
             .runtime_mut()
             .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));
@@ -3929,6 +4182,40 @@ mod tests {
                 .find_leaf(fx_tile_id)
                 .expect("fx tile leaf should still exist")
                 .widget_viewport_height
+        );
+    }
+
+    #[test]
+    fn metal_seq_duration_mode_renders_all_steps_above_two() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "durations", test_number_list(&[8.0; 16]));
+        editor
+            .runtime_mut()
+            .eval_str("(set! param-mode 1)")
+            .expect("switch to duration mode");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("duration mode should render without status error: {status}");
+        }
+
+        let metal_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*metal*")
+            .expect("metal buffer should exist")
+            .id;
+        editor.set_active_buffer(metal_id);
+        editor.set_layout_viewport(120, 40);
+        let layout = editor
+            .widget_layout()
+            .expect("duration mode metal layout should build");
+
+        assert_eq!(
+            count_widget_type(&layout, "vslider"),
+            16,
+            "duration mode should keep rendering one slider per visible step"
         );
     }
 
@@ -4329,13 +4616,17 @@ mod tests {
             .find(|buffer| buffer.name == "*fx*")
             .expect("fx lisp should create the *fx* buffer");
         let tree = fx.widget_tree.as_ref().expect("track fx tree");
-        assert!(value_contains_string(tree, "Filter"));
-        assert!(value_contains_string(tree, "LFO"));
-        assert!(value_contains_string(tree, "drive"));
         assert!(value_contains_keyword(tree, "response-curve-editor"));
         assert!(value_contains_string(tree, "track-fx"));
         assert!(value_contains_string(tree, "test-instru"));
-        assert!(value_contains_string(tree, "Add Effect"));
+        assert!(
+            !value_contains_string(tree, "Add Effect"),
+            "fx buffer should not render the old add-effect dropdown panel"
+        );
+        assert!(value_contains_string(
+            tree,
+            "Drop Audio or Midi Effect Here"
+        ));
         editor
             .runtime_mut()
             .eval_str("(set! selected-bus 1)")
@@ -4351,7 +4642,24 @@ mod tests {
             .expect("fx buffer exists");
         let tree = fx.widget_tree.as_ref().expect("bus fx tree");
         assert!(value_contains_string(tree, "bus-fx"));
-        assert!(value_contains_string(tree, "Add Bus FX"));
+        assert!(
+            !value_contains_string(tree, "Add Bus FX"),
+            "fx buffer should not render the old bus add-effect dropdown panel"
+        );
+        assert!(value_contains_string(
+            tree,
+            "Drop Audio or Midi Effect Here"
+        ));
+        editor.set_active_buffer(fx.id);
+        editor.set_layout_viewport(92, 42);
+        let layout = editor.widget_layout().expect("bus fx layout");
+        let placeholder = find_layout_node_by_debug_name(&layout, "fx-drop-placeholder-panel")
+            .expect("bus fx drop placeholder panel");
+        assert!(
+            placeholder.rect.width >= 30.0,
+            "bus fx drop placeholder should be wide enough for its label, got {:?}",
+            placeholder.rect
+        );
     }
 
     #[test]

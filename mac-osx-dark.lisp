@@ -4,7 +4,7 @@
 (def mac-osx-theme () 
   (apply-theme (dict
       ;; Main editor
-      :bg             '(0.14 0.14 0.14)     ; #1c1c1e — System dark bg
+      :bg             '(0.10 0.10 0.12)     ; #1c1c1e — System dark bg
       :fg             '(0.88 0.88 0.89)     ; #e0e0e3
       :fg-muted       '(0.56 0.56 0.58)     ; #8e8e93 — System gray
       :dim            '(0.66 0.66 0.68)     ; Secondary sequencer text
@@ -42,8 +42,8 @@
       :fg-match-paren '(1.00 1.00 1.00)     ;
       
       ;; Buffer/panel surfaces
-      :buffer-bg        '(0.18 0.18 0.180)  ; Main rounded buffer surface
-
+      :buffer-bg        '(0.12 0.13 0.14)  ; Main rounded buffer surface
+      
       ;; Status bar — Xcode-style dark gray bar with black borders
       :status-fg         '(0.58 0.58 0.60)   ; Muted text
       :status-bg         '(0.14 0.14 0.15)   ; Dark gray bar
@@ -63,20 +63,20 @@
       ;; Tile borders
       :border-active   '(0.42 0.42 0.44)     ; Lighter gray for active tile
       :border-inactive '(0.07 0.07 0.075)    ; Match buffer background
-      :tree-row-alt-bg '(0.225 0.225 0.22)   ; Subtle tree zebra stripe
-
+      :tree-row-alt-bg '(0.17 0.18 0.19)   ; Subtle tree zebra stripe
+      
       ;; Sequencer panels
-      :fx-panel-bg       '(0.21 0.21 0.21)
-      :fx-inner-panel-bg '(0.17 0.17 0.175)
+      :fx-panel-bg       '(0.17 0.17 0.18)
+      :fx-inner-panel-bg '(0.15 0.15 0.155)
       :fx-panel-selected-bg '(0.21 0.21 0.21)
-      :fx-panel-header-bg '(0.27 0.27 0.27)
+      :fx-panel-header-bg '(0.21 0.21 0.22)
       :fx-panel-header-selected-bg '(0.32 0.32 0.63)
       :fx-panel-border   '(0.26 0.26 0.27)
-      :instrument-panel-bg '(0.22 0.22 0.23)
+      :instrument-panel-bg '(0.17 0.17 0.18)
       :instrument-control-bg '(0.04 0.04 0.045)
-      :instrument-group-bg '(0.23 0.23 0.235)
-      :instrument-group-selected-bg '(0.28 0.285 0.28)
-      :mixer-strip-bg    '(0.20 0.20 0.20)
+      :instrument-group-bg '(0.15 0.15 0.155)
+      :instrument-group-selected-bg '(0.19 0.195 0.19)
+      :mixer-strip-bg    '(0.17 0.17 0.18)
       :mixer-strip-selected-bg '(0.23 0.23 0.26)
       :mixer-strip-muted-bg '(0.095 0.095 0.10)
       :mixer-strip-border '(0.14 0.15 0.16)
@@ -112,3 +112,5 @@
       :widget-knob-filled   '(0.00 0.48 0.95)   ;
       :widget-knob-track    '(0.04 0.04 0.04)   ;
       )))
+
+(mac-osx-theme)

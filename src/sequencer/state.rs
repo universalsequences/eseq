@@ -717,6 +717,11 @@ pub struct RuntimeBindingState {
     pub engine_voice_counts: Vec<AtomicU32>,
     pub engine_route_lids: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_route_lids_r: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
+    pub sampler_analysis_buffer_ids: Vec<AtomicU32>,
+    pub sampler_analysis_bpm: Vec<AtomicU32>,
+    pub sampler_onset_ptr_lo: Vec<AtomicU32>,
+    pub sampler_onset_ptr_hi: Vec<AtomicU32>,
+    pub sampler_analysis_status: Vec<AtomicU32>,
 }
 
 pub struct SequencerState {
@@ -847,6 +852,15 @@ impl SequencerState {
                 engine_route_lids_r: (0..MAX_TRACKS)
                     .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
                     .collect(),
+                sampler_analysis_buffer_ids: (0..MAX_TRACKS)
+                    .map(|_| AtomicU32::new(u32::MAX))
+                    .collect(),
+                sampler_analysis_bpm: (0..MAX_TRACKS)
+                    .map(|_| AtomicU32::new(0.0_f32.to_bits()))
+                    .collect(),
+                sampler_onset_ptr_lo: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_onset_ptr_hi: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
+                sampler_analysis_status: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
             },
             scheduler_snapshot: Mutex::new(Arc::new(SequencerSnapshot::empty())),
             scheduler_snapshot_version: AtomicU64::new(0),
@@ -989,6 +1003,11 @@ impl SequencerState {
         self.runtime.voice_counts[track].store(0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[track].store(0, Ordering::Relaxed);
         self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Relaxed);
+        self.runtime.sampler_analysis_buffer_ids[track].store(u32::MAX, Ordering::Relaxed);
+        self.runtime.sampler_analysis_bpm[track].store(0.0_f32.to_bits(), Ordering::Relaxed);
+        self.runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Relaxed);
+        self.runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Relaxed);
+        self.runtime.sampler_analysis_status[track].store(0, Ordering::Relaxed);
         for voice in 0..MAX_VOICES {
             self.runtime.voice_lids[track][voice].store(0, Ordering::Relaxed);
             self.runtime.synth_node_ids[track][voice].store(0, Ordering::Relaxed);
@@ -1042,6 +1061,26 @@ impl SequencerState {
                 self.runtime.track_engine_ids[next].load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
+            self.runtime.sampler_analysis_buffer_ids[idx].store(
+                self.runtime.sampler_analysis_buffer_ids[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.sampler_analysis_bpm[idx].store(
+                self.runtime.sampler_analysis_bpm[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.sampler_onset_ptr_lo[idx].store(
+                self.runtime.sampler_onset_ptr_lo[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.sampler_onset_ptr_hi[idx].store(
+                self.runtime.sampler_onset_ptr_hi[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.sampler_analysis_status[idx].store(
+                self.runtime.sampler_analysis_status[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
             for voice in 0..MAX_VOICES {
                 self.runtime.voice_lids[idx][voice].store(
                     self.runtime.voice_lids[next][voice].load(Ordering::Relaxed),
@@ -1085,6 +1124,11 @@ impl SequencerState {
         self.runtime.voice_counts[last].store(0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[last].store(0, Ordering::Relaxed);
         self.runtime.track_engine_ids[last].store(u32::MAX, Ordering::Relaxed);
+        self.runtime.sampler_analysis_buffer_ids[last].store(u32::MAX, Ordering::Relaxed);
+        self.runtime.sampler_analysis_bpm[last].store(0.0_f32.to_bits(), Ordering::Relaxed);
+        self.runtime.sampler_onset_ptr_lo[last].store(0, Ordering::Relaxed);
+        self.runtime.sampler_onset_ptr_hi[last].store(0, Ordering::Relaxed);
+        self.runtime.sampler_analysis_status[last].store(0, Ordering::Relaxed);
         for voice in 0..MAX_VOICES {
             self.runtime.voice_lids[last][voice].store(0, Ordering::Relaxed);
             self.runtime.synth_node_ids[last][voice].store(0, Ordering::Relaxed);

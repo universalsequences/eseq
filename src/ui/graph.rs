@@ -460,8 +460,10 @@ impl GraphController<'_> {
             return Err("Maximum number of tracks reached".to_string());
         }
 
-        let (buffer_id, track_name) =
-            crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
+        self.app.submit_sample_analysis(&loaded);
+        let buffer_id = loaded.buffer_id;
+        let track_name = loaded.name;
         let shell = self.create_track_shell(idx, &track_name);
         let voices = self.build_sampler_voices(
             &track_name,
@@ -483,6 +485,8 @@ impl GraphController<'_> {
         let sample_name = self.app.tracks[idx].clone();
         self.app.sampler_paths.push(Some(sample_path.clone()));
         self.app.register_sample_path(&sample_name, sample_path);
+        self.app.reset_sampler_bpm_for_analysis(idx);
+        self.app.publish_sampler_analysis_runtime(idx);
         Ok(idx)
     }
 
@@ -597,6 +601,7 @@ impl GraphController<'_> {
             self.app.graph.track_buffer_ids[track] = *buffer_id;
             self.app.tracks[track] = name.clone();
             self.app.sync_sampler_path_from_name(track, name);
+            self.app.publish_sampler_analysis_runtime(track);
         }
     }
 

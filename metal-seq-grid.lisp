@@ -232,10 +232,27 @@
       (bus-delete-selected-steps)
       (seq-delete-selected-steps))))
 
+(def duration-slider-position (duration)
+  (let ((d (max 0 (min duration 32))))
+    (if (<= d 2)
+      (/ d 4)
+      (+ 0.5 (* 0.5 (pow (/ (- d 2) 30) 0.25))))))
+
+(def duration-slider-value (position)
+  (let ((p (max 0 (min position 1))))
+    (if (<= p 0.5)
+      (* p 4)
+      (+ 2 (* 30 (pow (* 2 (- p 0.5)) 4))))))
+
 (def step-param-value (v)
   (if (= param-mode 3)
     (round v)
     v))
+
+(def step-slider-param-value (v)
+  (if (= param-mode 1)
+    (duration-slider-value v)
+    (step-param-value v)))
 
 (def param-decimals ()
   (if (= param-mode 3) 0 2))
@@ -303,7 +320,7 @@
 
 (def param-min ()
   (if (= param-mode 0) 0
-    (if (= param-mode 1) 0.1
+    (if (= param-mode 1) 0
       (if (= param-mode 2) 0
         (if (= param-mode 3) -12
           (if (= param-mode 4) -1
@@ -311,11 +328,31 @@
 
 (def param-max ()
   (if (= param-mode 0) 1
-    (if (= param-mode 1) 2
+    (if (= param-mode 1) 32
       (if (= param-mode 2) 16
         (if (= param-mode 3) 12
           (if (= param-mode 4) 1
             (- (len SEQ.sync-labels) 1)))))))
+
+(def param-slider-min ()
+  (if (= param-mode 1) 0 (param-min)))
+
+(def param-slider-max ()
+  (if (= param-mode 1) 1 (param-max)))
+
+(def param-slider-value (step)
+  (if (= param-mode 1)
+    (duration-slider-position (nth (param-values) step))
+    (nth (param-values) step)))
+
+(def param-haptic-pivot-position ()
+  (if (= param-mode 1) 0.5 1))
+
+(def param-haptic-pivot-value ()
+  (if (= param-mode 1) 2 (param-max)))
+
+(def param-haptic-exponent ()
+  (if (= param-mode 1) 4 1))
 
 (def param-keyword ()
   (if (= param-mode 0) :velocity

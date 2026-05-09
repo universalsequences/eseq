@@ -4314,7 +4314,13 @@ fn fallback_effect_descriptors(track_count: usize) -> Vec<Vec<EffectDescriptor>>
 
 fn fallback_instrument_descriptors(track_count: usize) -> Vec<EffectDescriptor> {
     (0..track_count)
-        .map(|_| EffectDescriptor::builtin_delay())
+        .map(|_| {
+            let mut desc = EffectDescriptor::builtin_delay();
+            for (idx, param) in desc.params.iter_mut().enumerate() {
+                param.node_param_idx = idx as u32;
+            }
+            desc
+        })
         .collect()
 }
 

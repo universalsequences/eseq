@@ -30,6 +30,16 @@
        :light (vec3 -0.1 -0.61 3.5) :shininess 81.0)
      :color (aqua-color (rgba 0.35 0.35 0.8 1.0) (rgba 0.20 0.20 0.92 1.0))))
 
+(defmacro aqua-slider-muted-material ()
+  `(material
+     :lighting (lighting :edge-min -0.215 :edge-max 0.8413
+       :light (vec3 -0.1 -0.61 2.4) :shininess 38.0)
+     :color
+       (* 0.38
+          (aqua-color
+            (rgba 0.10 0.10 0.22 0.85)
+            (rgba 0.08 0.08 0.30 0.85)))))
+
      
 
 ;; ── Aqua widgets ──

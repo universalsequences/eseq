@@ -240,6 +240,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_current_track_playhead_visible = false;
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
+    let mut prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)> = None;
     let mut prev_auto_follow = true;
     let mut watched_sampler_voice_track: Option<usize> = None;
     let mut watched_sampler_voice_ids: Vec<i32> = Vec::new();
@@ -495,7 +496,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let path = Path::new(&path_str);
                             let track = current_track.load(Ordering::Relaxed);
                             match sequencer::sampler::load_wav_buffer(lg_raw, path) {
-                                Ok((new_buffer_id, new_name)) => {
+                                Ok(loaded) => {
+                                    app.submit_sample_analysis(&loaded);
+                                    let new_buffer_id = loaded.buffer_id;
+                                    let new_name = loaded.name;
                                     register_waveform_sample(path);
                                     app.graph_controller()
                                         .send_buffer_to_all_voices(track, new_buffer_id);
@@ -505,6 +509,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if track < app.sampler_paths.len() {
                                         app.sampler_paths[track] = Some(path.to_path_buf());
                                     }
+                                    app.reset_sampler_bpm_for_analysis(track);
+                                    app.publish_sampler_analysis_runtime(track);
                                     track_names[track] = new_name.clone();
                                     // Update reactive state
                                     let rt = editor.runtime_mut();
@@ -600,6 +606,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                         }
                     },
+                    "reanalyze-sample" => {
+                        let track = current_track.load(Ordering::Relaxed);
+                        let Some(path) = app
+                            .sampler_paths
+                            .get(track)
+                            .and_then(|path| path.as_ref())
+                            .cloned()
+                        else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "No sample loaded on this track".to_string(),
+                            ));
+                            continue;
+                        };
+                        match sequencer::sampler::load_wav_buffer(lg_raw, &path) {
+                            Ok(loaded) => {
+                                app.submit_sample_analysis(&loaded);
+                                let new_buffer_id = loaded.buffer_id;
+                                app.graph_controller()
+                                    .send_buffer_to_all_voices(track, new_buffer_id);
+                                app.graph.track_buffer_ids[track] = new_buffer_id;
+                                app.publish_sampler_analysis_runtime(track);
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "instrument-panel",
+                                    build_instrument_panel_value(&app, track, &selected_steps),
+                                );
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Re-analyzing sample".to_string(),
+                                ));
+                            }
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error re-analyzing sample: {error}"
+                                )));
+                            }
+                        }
+                    }
                     "add-track-sample" => {
                         let path_str = extract_path_from_payload(&payload);
                         if let Some(path_str) = path_str {
@@ -4651,6 +4697,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             if !transport_visible && transport_playhead != prev_transport_playhead {
                 prev_transport_playhead = transport_playhead;
+            }
+            {
+                let ct = current_track.load(Ordering::Relaxed);
+                let analysis_key = if app.is_sampler_track(ct) {
+                    let buffer_id = app.graph.track_buffer_ids.get(ct).copied().unwrap_or(-1);
+                    let entry = app.sample_analysis.cache().get(buffer_id);
+                    let (status, bpm_bits, onset_count) = match entry.as_deref() {
+                        Some(sequencer::analysis::AnalysisEntry::Pending) => (1, 0, 0),
+                        Some(sequencer::analysis::AnalysisEntry::Ready(result)) => {
+                            (2, result.bpm.to_bits(), result.onsets_frames.len())
+                        }
+                        Some(sequencer::analysis::AnalysisEntry::Failed(_)) => (3, 0, 0),
+                        None => (0, 0, 0),
+                    };
+                    Some((ct, buffer_id, status, bpm_bits, onset_count))
+                } else {
+                    None
+                };
+                if analysis_key != prev_sampler_analysis_key {
+                    if let Some((ct, _, _, _, _)) = analysis_key {
+                        app.publish_sampler_analysis_runtime(ct);
+                        editor.runtime_mut().set_reactive(
+                            "SEQ",
+                            "instrument-panel",
+                            build_instrument_panel_value(&app, ct, &selected_steps),
+                        );
+                        needs_reactive_cycle = true;
+                    }
+                    prev_sampler_analysis_key = analysis_key;
+                }
             }
             // Update sampler playhead for waveform display
             {

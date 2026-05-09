@@ -1258,6 +1258,38 @@ impl EffectDescriptor {
                     node_param_idx: crate::sampler::PARAM_SR_HZ as u32,
                     host_control: None,
                 },
+                ParamDescriptor {
+                    name: "warp".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::sampler::PARAM_WARP_ENABLED as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 0.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["transient".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::sampler::PARAM_WARP_MODE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "bpm".to_string(),
+                    min: 20.0,
+                    max: 400.0,
+                    default: 120.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: u32::MAX,
+                    host_control: None,
+                },
             ],
         }
     }

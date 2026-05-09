@@ -830,7 +830,10 @@ impl App {
                     return;
                 }
                 match crate::sampler::load_wav_buffer(self.graph.lg.0, path) {
-                    Ok((new_buffer_id, new_name)) => {
+                    Ok(loaded) => {
+                        self.submit_sample_analysis(&loaded);
+                        let new_buffer_id = loaded.buffer_id;
+                        let new_name = loaded.name;
                         let track = self.ui.cursor_track;
                         self.graph_controller()
                             .send_buffer_to_all_voices(track, new_buffer_id);
@@ -840,6 +843,8 @@ impl App {
                         if track < self.sampler_paths.len() {
                             self.sampler_paths[track] = Some(path.to_path_buf());
                         }
+                        self.reset_sampler_bpm_for_analysis(track);
+                        self.publish_sampler_analysis_runtime(track);
                         self.editor.status_message =
                             Some((format!("Swapped: {}", new_name), Instant::now()));
                     }

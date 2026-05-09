@@ -1276,17 +1276,19 @@ impl App {
                         track_idx + 1
                     ));
                 };
-                let (buffer_id, sample_name) =
-                    crate::sampler::load_wav_buffer(self.graph.lg.0, &path_buf).map_err(
-                        |error| {
-                            format!(
-                                "Failed to load sample '{}' for track {}: {}",
-                                path_buf.display(),
-                                track_idx + 1,
-                                error
-                            )
-                        },
-                    )?;
+                let loaded = crate::sampler::load_wav_buffer(self.graph.lg.0, &path_buf).map_err(
+                    |error| {
+                        format!(
+                            "Failed to load sample '{}' for track {}: {}",
+                            path_buf.display(),
+                            track_idx + 1,
+                            error
+                        )
+                    },
+                )?;
+                self.submit_sample_analysis(&loaded);
+                let buffer_id = loaded.buffer_id;
+                let sample_name = loaded.name;
                 if saved_path.as_ref() != Some(&path_buf) {
                     fallback_count += 1;
                 }

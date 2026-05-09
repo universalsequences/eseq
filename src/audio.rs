@@ -16,7 +16,8 @@ use crate::sampler::{
     PARAM_ATTACK_SAMPLES, PARAM_ENABLED, PARAM_END_POINT, PARAM_GATE_MODE, PARAM_GATE_SAMPLES,
     PARAM_LOOP_MODE, PARAM_LOOP_XFADE_SAMPLES, PARAM_PLAYHEAD, PARAM_RELEASE_SAMPLES,
     PARAM_REVERSE, PARAM_SPEED, PARAM_SR_HZ, PARAM_START_POINT, PARAM_TRANSPOSE, PARAM_TRIGGER,
-    PARAM_VELOCITY,
+    PARAM_VELOCITY, PARAM_WARP_ENABLED, PARAM_WARP_MODE, PARAM_WARP_ONSET_TABLE_PTR_HI,
+    PARAM_WARP_ONSET_TABLE_PTR_LO, PARAM_WARP_PROJECT_BPM, PARAM_WARP_RATIO, PARAM_WARP_SAMPLE_BPM,
 };
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
@@ -499,6 +500,13 @@ unsafe fn send_trigger(
     loop_mode: f32,
     loop_xfade_samples: f32,
     sr_hz: f32,
+    warp_enabled: f32,
+    warp_mode: f32,
+    warp_ratio: f32,
+    warp_sample_bpm: f32,
+    warp_project_bpm: f32,
+    warp_ptr_lo: f32,
+    warp_ptr_hi: f32,
 ) {
     params_push_wrapper(
         lg,
@@ -615,6 +623,62 @@ unsafe fn send_trigger(
     params_push_wrapper(
         lg,
         ParamMsg {
+            idx: PARAM_WARP_ENABLED,
+            logical_id: lid,
+            fvalue: warp_enabled,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_MODE,
+            logical_id: lid,
+            fvalue: warp_mode,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_RATIO,
+            logical_id: lid,
+            fvalue: warp_ratio,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_SAMPLE_BPM,
+            logical_id: lid,
+            fvalue: warp_sample_bpm,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_PROJECT_BPM,
+            logical_id: lid,
+            fvalue: warp_project_bpm,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_ONSET_TABLE_PTR_LO,
+            logical_id: lid,
+            fvalue: warp_ptr_lo,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_ONSET_TABLE_PTR_HI,
+            logical_id: lid,
+            fvalue: warp_ptr_hi,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
             idx: PARAM_PLAYHEAD,
             logical_id: lid,
             fvalue: 0.0,
@@ -646,6 +710,13 @@ unsafe fn send_keyboard_trigger(
     loop_mode: f32,
     loop_xfade_samples: f32,
     sr_hz: f32,
+    warp_enabled: f32,
+    warp_mode: f32,
+    warp_ratio: f32,
+    warp_sample_bpm: f32,
+    warp_project_bpm: f32,
+    warp_ptr_lo: f32,
+    warp_ptr_hi: f32,
 ) {
     params_push_wrapper(
         lg,
@@ -757,6 +828,62 @@ unsafe fn send_keyboard_trigger(
             idx: PARAM_SR_HZ,
             logical_id: lid,
             fvalue: sr_hz,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_ENABLED,
+            logical_id: lid,
+            fvalue: warp_enabled,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_MODE,
+            logical_id: lid,
+            fvalue: warp_mode,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_RATIO,
+            logical_id: lid,
+            fvalue: warp_ratio,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_SAMPLE_BPM,
+            logical_id: lid,
+            fvalue: warp_sample_bpm,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_PROJECT_BPM,
+            logical_id: lid,
+            fvalue: warp_project_bpm,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_ONSET_TABLE_PTR_LO,
+            logical_id: lid,
+            fvalue: warp_ptr_lo,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_WARP_ONSET_TABLE_PTR_HI,
+            logical_id: lid,
+            fvalue: warp_ptr_hi,
         },
     );
     params_push_wrapper(
@@ -926,6 +1053,38 @@ fn track_engine_id(state: &SequencerState, track_idx: usize) -> Option<usize> {
     } else {
         Some(engine_id as usize)
     }
+}
+
+fn sampler_warp_runtime(
+    state: &SequencerState,
+    track_idx: usize,
+    warp_enabled: f32,
+    warp_mode: f32,
+    sample_bpm: f32,
+) -> (f32, f32, f32, f32, f32, f32, f32) {
+    let project_bpm = state.transport.bpm.load(Ordering::Relaxed).max(1) as f32;
+    let sample_bpm = sample_bpm.clamp(20.0, 400.0);
+    if warp_enabled <= 0.5 || warp_mode.round() != 0.0 {
+        return (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0);
+    }
+    let status = state.runtime.sampler_analysis_status[track_idx].load(Ordering::Acquire);
+    if status != 2 {
+        return (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0);
+    }
+    let ptr_lo_bits = state.runtime.sampler_onset_ptr_lo[track_idx].load(Ordering::Acquire);
+    let ptr_hi_bits = state.runtime.sampler_onset_ptr_hi[track_idx].load(Ordering::Acquire);
+    if ptr_lo_bits == 0 && ptr_hi_bits == 0 {
+        return (0.0, warp_mode, 1.0, sample_bpm, project_bpm, 0.0, 0.0);
+    }
+    (
+        1.0,
+        warp_mode,
+        project_bpm / sample_bpm,
+        sample_bpm,
+        project_bpm,
+        f32::from_bits(ptr_lo_bits),
+        f32::from_bits(ptr_hi_bits),
+    )
 }
 
 fn instrument_sound_fingerprint(
@@ -1414,6 +1573,27 @@ fn fire_resolved(
         .plocks
         .get(step, 8)
         .unwrap_or_else(|| inst_slot.defaults.get(8));
+    let warp_enabled = inst_slot
+        .plocks
+        .get(step, 9)
+        .unwrap_or_else(|| inst_slot.defaults.get(9));
+    let warp_mode = inst_slot
+        .plocks
+        .get(step, 10)
+        .unwrap_or_else(|| inst_slot.defaults.get(10));
+    let sample_bpm = inst_slot
+        .plocks
+        .get(step, 11)
+        .unwrap_or_else(|| inst_slot.defaults.get(11));
+    let (
+        warp_enabled,
+        warp_mode,
+        warp_ratio,
+        warp_sample_bpm,
+        warp_project_bpm,
+        warp_ptr_lo,
+        warp_ptr_hi,
+    ) = sampler_warp_runtime(&data.state, track_idx, warp_enabled, warp_mode, sample_bpm);
     let velocity = resolved.velocity;
     let base_note_offset = f32::from_bits(
         data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
@@ -1581,6 +1761,13 @@ fn fire_resolved(
                         loop_mode,
                         loop_xfade_samples,
                         sr_hz,
+                        warp_enabled,
+                        warp_mode,
+                        warp_ratio,
+                        warp_sample_bpm,
+                        warp_project_bpm,
+                        warp_ptr_lo,
+                        warp_ptr_hi,
                     );
                 }
             }
@@ -1694,6 +1881,13 @@ fn fire_resolved(
                     loop_mode,
                     loop_xfade_samples,
                     sr_hz,
+                    warp_enabled,
+                    warp_mode,
+                    warp_ratio,
+                    warp_sample_bpm,
+                    warp_project_bpm,
+                    warp_ptr_lo,
+                    warp_ptr_hi,
                 );
             }
         }
@@ -1926,6 +2120,21 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let kb_loop_xfade_samples =
                     kb_inst_slot.defaults.get(7) * data.sample_rate as f32 / 1000.0;
                 let kb_sr_hz = kb_inst_slot.defaults.get(8);
+                let (
+                    kb_warp_enabled,
+                    kb_warp_mode,
+                    kb_warp_ratio,
+                    kb_warp_sample_bpm,
+                    kb_warp_project_bpm,
+                    kb_warp_ptr_lo,
+                    kb_warp_ptr_hi,
+                ) = sampler_warp_runtime(
+                    &data.state,
+                    kt.track,
+                    kb_inst_slot.defaults.get(9),
+                    kb_inst_slot.defaults.get(10),
+                    kb_inst_slot.defaults.get(11),
+                );
                 unsafe {
                     send_keyboard_trigger(
                         data.lg.0,
@@ -1942,6 +2151,13 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         kb_loop_mode,
                         kb_loop_xfade_samples,
                         kb_sr_hz,
+                        kb_warp_enabled,
+                        kb_warp_mode,
+                        kb_warp_ratio,
+                        kb_warp_sample_bpm,
+                        kb_warp_project_bpm,
+                        kb_warp_ptr_lo,
+                        kb_warp_ptr_hi,
                     );
                 }
                 store_active_keyboard_note(
@@ -1991,6 +2207,22 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                             ParamMsg {
                                 idx: crate::voice_modulator::PARAM_BPM as u64,
                                 logical_id: logical_id as u64,
+                                fvalue: bpm_f,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        for pool in &data.voice_pools {
+            for voice in pool.voices.iter().take(pool.num_voices) {
+                if voice.logical_id != 0 {
+                    unsafe {
+                        params_push_wrapper(
+                            data.lg.0,
+                            ParamMsg {
+                                idx: PARAM_WARP_PROJECT_BPM,
+                                logical_id: voice.logical_id,
                                 fvalue: bpm_f,
                             },
                         );
@@ -2072,6 +2304,33 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 .plocks
                 .get(cs.step, 8)
                 .unwrap_or_else(|| chop_inst_slot.defaults.get(8));
+            let chop_warp_enabled = chop_inst_slot
+                .plocks
+                .get(cs.step, 9)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(9));
+            let chop_warp_mode = chop_inst_slot
+                .plocks
+                .get(cs.step, 10)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(10));
+            let chop_sample_bpm = chop_inst_slot
+                .plocks
+                .get(cs.step, 11)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(11));
+            let (
+                chop_warp_enabled,
+                chop_warp_mode,
+                chop_warp_ratio,
+                chop_warp_sample_bpm,
+                chop_warp_project_bpm,
+                chop_warp_ptr_lo,
+                chop_warp_ptr_hi,
+            ) = sampler_warp_runtime(
+                &data.state,
+                track_idx,
+                chop_warp_enabled,
+                chop_warp_mode,
+                chop_sample_bpm,
+            );
             let chop_base_note_offset = f32::from_bits(
                 data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
             );
@@ -2110,6 +2369,13 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         chop_loop_mode,
                         chop_loop_xfade_samples,
                         chop_sr_hz,
+                        chop_warp_enabled,
+                        chop_warp_mode,
+                        chop_warp_ratio,
+                        chop_warp_sample_bpm,
+                        chop_warp_project_bpm,
+                        chop_warp_ptr_lo,
+                        chop_warp_ptr_hi,
                     );
                 }
                 data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
@@ -2495,10 +2761,33 @@ mod tests {
 
     use super::{
         bus_gate_target_at, instrument_sound_fingerprint, resolve_live_keyboard_transpose,
-        resolved_chord_transpose, swing_delay_samples, CustomEnginePool, GateOffTracker,
+        resolved_chord_transpose, sampler_warp_runtime, swing_delay_samples, CustomEnginePool,
+        GateOffTracker,
     };
     use crate::accumulator::AccumulatorRuntimeState;
+    use crate::analysis::{pack_ptr, OnsetTableShared};
     use crate::sequencer::{SequencerState, SwingResolution};
+
+    #[test]
+    fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
+        let state = SequencerState::new(1, Vec::new());
+        state.transport.bpm.store(160, Ordering::Relaxed);
+        state.runtime.sampler_analysis_status[0].store(2, Ordering::Relaxed);
+        let table = OnsetTableShared {
+            onsets_frames: vec![0, 22_050],
+            sample_len_frames: 44_100,
+        };
+        let (lo, hi) = pack_ptr(&table as *const OnsetTableShared);
+        state.runtime.sampler_onset_ptr_lo[0].store(lo.to_bits(), Ordering::Relaxed);
+        state.runtime.sampler_onset_ptr_hi[0].store(hi.to_bits(), Ordering::Relaxed);
+
+        let (_, _, ratio, sample_bpm, project_bpm, _, _) =
+            sampler_warp_runtime(&state, 0, 1.0, 0.0, 120.0);
+
+        assert!((ratio - (160.0 / 120.0)).abs() < 0.0001);
+        assert!((sample_bpm - 120.0).abs() < 0.0001);
+        assert!((project_bpm - 160.0).abs() < 0.0001);
+    }
 
     #[test]
     fn custom_engine_pool_prefers_inactive_voices_before_stealing() {

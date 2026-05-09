@@ -44,6 +44,7 @@
 mod accumulator;
 #[allow(dead_code)]
 mod agent;
+pub mod analysis;
 pub mod audio;
 pub mod audiograph;
 #[allow(dead_code)]

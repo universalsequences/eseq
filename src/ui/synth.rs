@@ -1163,16 +1163,19 @@ impl App {
                     value * sample_rate / 1000.0,
                 ),
                 8 => (crate::sampler::PARAM_SR_HZ, value),
+                9 => (crate::sampler::PARAM_WARP_ENABLED, value),
+                10 => (crate::sampler::PARAM_WARP_MODE, value),
+                11 => return,
                 _ => (idx, value),
             };
-            if let Some(nodes) = self.graph.track_node_ids.get(track) {
-                for &node_id in &nodes.sampler_ids {
+            if let Some(voice_lids) = self.graph.track_voice_lids.get(track) {
+                for &logical_id in voice_lids {
                     unsafe {
                         crate::audiograph::params_push_wrapper(
                             self.graph.lg.0,
                             crate::audiograph::ParamMsg {
                                 idx,
-                                logical_id: node_id as u64,
+                                logical_id,
                                 fvalue,
                             },
                         );

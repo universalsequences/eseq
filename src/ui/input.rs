@@ -1441,7 +1441,7 @@ impl App {
         row: u16,
     ) -> Option<f32> {
         let normalized = self.normalized_step_value_from_bar_row(row)?;
-        let value = param.slider_min() + normalized * (param.slider_max() - param.slider_min());
+        let value = param.denormalize_slider(normalized);
         Some(match param {
             StepParam::AuxA | StepParam::Chop | StepParam::Sync | StepParam::Transpose => {
                 value.round()

@@ -68,26 +68,48 @@
                 (bus-step-select-drag-over step evt)
                 nil))
             (v-stack :align :center :gap 0.5
-              (vslider :height 4
-                :width 2
-                :min (bus-seq-param-min) :max (bus-seq-param-max)
-                :origin (bus-seq-param-min)
-                :value (nth (bus-seq-param-values) step)
-                :items (if (= param-mode 2) SEQ.sync-labels '())
-                :font-size 11
-                :color (if visible
-                         (if (nth bus-steps step) :white :dim)
-                         :dim)
-                :material (aqua-slider-material)
-                :on-change (lambda (v)
-                  (if visible
-                    (do
-                      (cool-off-follow)
-                      (set! cursor-step step)
-                      (if (seq-has-selection?)
-                        (bus-set-selected-step-param v)
-                        (bus-set-step-param step v)))
-                    nil)))
+              (let ((step-on (and visible (nth bus-steps step))))
+                (if step-on
+                  (vslider :height 4
+                    :width 2
+                    :min (bus-seq-param-min) :max (bus-seq-param-max)
+                    :origin (bus-seq-param-min)
+                    :value (nth (bus-seq-param-values) step)
+                    :items (if (= param-mode 2) SEQ.sync-labels '())
+                    :font-size 11
+                    :color :white
+                    :fill (rgba 0.20 0.20 0.92 1.0)
+                    :dot-color :dark-gray
+                    :material (aqua-slider-material)
+                    :on-change (lambda (v)
+                      (if visible
+                        (do
+                          (cool-off-follow)
+                          (set! cursor-step step)
+                          (if (seq-has-selection?)
+                            (bus-set-selected-step-param v)
+                            (bus-set-step-param step v)))
+                        nil)))
+                  (vslider :height 4
+                    :width 2
+                    :min (bus-seq-param-min) :max (bus-seq-param-max)
+                    :origin (bus-seq-param-min)
+                    :value (nth (bus-seq-param-values) step)
+                    :items (if (= param-mode 2) SEQ.sync-labels '())
+                    :font-size 11
+                    :color :dim
+                    :fill (rgba 0.08 0.08 0.25 0.45)
+                    :dot-color (rgba 0.25 0.25 0.30 0.45)
+                    :material (aqua-slider-muted-material)
+                    :on-change (lambda (v)
+                      (if visible
+                        (do
+                          (cool-off-follow)
+                          (set! cursor-step step)
+                          (if (seq-has-selection?)
+                            (bus-set-selected-step-param v)
+                            (bus-set-step-param step v)))
+                        nil)))))
               (box
                 :active (if visible (if (nth bus-steps step) 1 0) 0)
                 :plocked 1
@@ -224,27 +246,62 @@
                 (step-select-drag-over step evt)
                 nil))
             (v-stack :align :center :gap 0.5
-              (vslider :height 4
-                :width (if (= param-mode 5) 2 1)
-                :min (param-min) :max (param-max)
-                :origin (param-origin)
-                :value (nth (param-values) step)
-                :items (if (= param-mode 5) SEQ.sync-labels '())
-                :font-size 11
-                :color (if visible
-                         (if (nth SEQ.steps step) :white :dim)
-                         :dim)
-                :material (aqua-slider-material)
-                :on-change (lambda (v)
-                  (if visible
-                    (do
-                      (cool-off-follow)
-                      (set! cursor-step step)
-                      (let ((value (step-param-value v)))
-                      (if (seq-has-selection?)
-                        (seq-set-step-param-plock (param-keyword) value)
-                        (seq-set-step-param step (param-keyword) value))))
-                    nil)))
+              (let ((step-on (and visible (nth SEQ.steps step))))
+                (if step-on
+                  (vslider :height 4
+                    :width (if (= param-mode 5) 2 1)
+                    :min (param-slider-min) :max (param-slider-max)
+                    :origin (param-origin)
+                    :value (param-slider-value step)
+                    :haptic-value (nth (param-values) step)
+                    :haptic-min (param-min)
+                    :haptic-max (param-max)
+                    :haptic-pivot-position (param-haptic-pivot-position)
+                    :haptic-pivot-value (param-haptic-pivot-value)
+                    :haptic-exponent (param-haptic-exponent)
+                    :items (if (= param-mode 5) SEQ.sync-labels '())
+                    :font-size 11
+                    :color :white
+                    :fill (rgba 0.20 0.20 0.92 1.0)
+                    :dot-color :dark-gray
+                    :material (aqua-slider-material)
+                    :on-change (lambda (v)
+                      (if visible
+                        (do
+                          (cool-off-follow)
+                          (set! cursor-step step)
+                          (let ((value (step-slider-param-value v)))
+                          (if (seq-has-selection?)
+                            (seq-set-step-param-plock (param-keyword) value)
+                            (seq-set-step-param step (param-keyword) value))))
+                        nil)))
+                  (vslider :height 4
+                    :width (if (= param-mode 5) 2 1)
+                    :min (param-slider-min) :max (param-slider-max)
+                    :origin (param-origin)
+                    :value (param-slider-value step)
+                    :haptic-value (nth (param-values) step)
+                    :haptic-min (param-min)
+                    :haptic-max (param-max)
+                    :haptic-pivot-position (param-haptic-pivot-position)
+                    :haptic-pivot-value (param-haptic-pivot-value)
+                    :haptic-exponent (param-haptic-exponent)
+                    :items (if (= param-mode 5) SEQ.sync-labels '())
+                    :font-size 11
+                    :color :dim
+                    :fill (rgba 0.08 0.08 0.25 0.45)
+                    :dot-color (rgba 0.25 0.25 0.30 0.45)
+                    :material (aqua-slider-muted-material)
+                    :on-change (lambda (v)
+                      (if visible
+                        (do
+                          (cool-off-follow)
+                          (set! cursor-step step)
+                          (let ((value (step-slider-param-value v)))
+                          (if (seq-has-selection?)
+                            (seq-set-step-param-plock (param-keyword) value)
+                            (seq-set-step-param step (param-keyword) value))))
+                        nil)))))
               (box
                 :active (if visible (if (nth SEQ.steps step) 1 0) 0)
                 :plocked 1

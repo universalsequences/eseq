@@ -182,11 +182,15 @@
   (let ((kind (get item :kind)) (name (get item :name)))
     (if (= kind "builtin-audio-effect")
       (do
-        (host-command "add-builtin-effect" (dict :name name))
+        (if (seq-has-selected-bus?)
+          (host-command "add-builtin-bus-effect" (dict :bus selected-bus :name name))
+          (host-command "add-builtin-effect" (dict :name name)))
         (status (str "Add built-in effect: " name)))
       (if (= kind "custom-audio-effect")
         (do
-          (host-command "add-effect" (dict :name name))
+          (if (seq-has-selected-bus?)
+            (host-command "add-bus-effect" (dict :bus selected-bus :name name))
+            (host-command "add-effect" (dict :name name)))
           (status (str "Add effect: " name)))
         (if (= kind "new-audio-effect")
           (do
@@ -225,7 +229,7 @@
 ;; ── Search bar widget ──
 
 (def sbrowser-header ()
-  (box :width :fill :height 2.0 :padding 0.25
+  (box :key "browser-header" :width :fill :height 2.0 :padding 0.25
     (h-stack :width :fill :gap 0.5 :align :center
       (text-input
         :width :fill
@@ -679,7 +683,6 @@
 ;; ── Build widgets ──
 
 (def sbrowser-build-widgets ()
-  (sbrowser-sync-track-search)
   (if (sbrowser-editor-mode?)
     (list
       (sbrowser-editor-header)

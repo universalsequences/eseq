@@ -342,6 +342,14 @@ impl StepParam {
     }
 
     pub fn normalize(self, val: f32) -> f32 {
+        if self == StepParam::Duration {
+            let val = val.clamp(self.slider_min(), self.slider_max());
+            return if val <= 2.0 {
+                val / 4.0
+            } else {
+                0.5 + 0.5 * ((val - 2.0) / 30.0).powf(0.25)
+            };
+        }
         let min = self.slider_min();
         let max = self.slider_max();
         if (max - min).abs() < f32::EPSILON {
@@ -350,13 +358,25 @@ impl StepParam {
         ((val - min) / (max - min)).clamp(0.0, 1.0)
     }
 
+    pub fn denormalize_slider(self, normalized: f32) -> f32 {
+        let normalized = normalized.clamp(0.0, 1.0);
+        if self == StepParam::Duration {
+            return if normalized <= 0.5 {
+                normalized * 4.0
+            } else {
+                2.0 + 30.0 * ((normalized - 0.5) * 2.0).powf(4.0)
+            };
+        }
+        self.slider_min() + normalized * (self.slider_max() - self.slider_min())
+    }
+
     pub fn slider_min(self) -> f32 {
         self.min()
     }
 
     pub fn slider_max(self) -> f32 {
         match self {
-            StepParam::Duration => 2.0,
+            StepParam::Duration => 32.0,
             _ => self.max(),
         }
     }
@@ -1131,5 +1151,34 @@ impl SwingResolutionPLockData {
         for (i, v) in snap.iter().enumerate() {
             self.overrides[i].store(v.unwrap_or(u32::MAX), Ordering::Relaxed);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StepParam;
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < 0.0001,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn duration_slider_uses_first_half_for_short_values() {
+        assert_close(StepParam::Duration.normalize(0.0), 0.0);
+        assert_close(StepParam::Duration.normalize(1.0), 0.25);
+        assert_close(StepParam::Duration.normalize(2.0), 0.5);
+        assert_close(StepParam::Duration.denormalize_slider(0.0), 0.0);
+        assert_close(StepParam::Duration.denormalize_slider(0.25), 1.0);
+        assert_close(StepParam::Duration.denormalize_slider(0.5), 2.0);
+    }
+
+    #[test]
+    fn duration_slider_extends_second_half_to_thirty_two_steps() {
+        assert_close(StepParam::Duration.normalize(32.0), 1.0);
+        assert_close(StepParam::Duration.denormalize_slider(1.0), 32.0);
+        assert_close(StepParam::Duration.denormalize_slider(0.75), 3.875);
     }
 }

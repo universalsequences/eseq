@@ -11,6 +11,7 @@ use crate::agent::actions::{
 use crate::agent::network::{AgentTurnError, AgentTurnResult};
 use crate::agent::protocol::{AgentToolRuntime, ToolCallOutcome};
 use crate::agent::providers::{AgentMessage, AgentMessageRole, AgentProviderState};
+use crate::analysis::{AnalysisJob, AnalysisService};
 use crate::audiograph::LiveGraphPtr;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScaling};
 use crate::lisp_effect::{DGenManifest, LoadedDGenLib, ScratchControlRuntime};
@@ -710,10 +711,69 @@ pub struct App {
     pub agent_panel: AgentPanelState,
     pub graph: GraphState,
     pub master_recorder: Arc<MasterRecorder>,
+    pub sample_analysis: AnalysisService,
     pub pending_recording_take: Option<RecordingTake>,
 }
 
 impl App {
+    pub fn submit_sample_analysis(&self, loaded: &crate::sampler::LoadedSample) {
+        self.sample_analysis.submit(AnalysisJob {
+            buffer_id: loaded.buffer_id,
+            samples: Arc::new(loaded.mono_samples.clone()),
+            sample_rate: loaded.sample_rate,
+        });
+    }
+
+    pub fn reset_sampler_bpm_for_analysis(&self, track: usize) {
+        if let Some(slot) = self.state.pattern.instrument_slots.get(track) {
+            slot.defaults.set(11, 120.0);
+        }
+    }
+
+    pub fn publish_sampler_analysis_runtime(&self, track: usize) {
+        use std::sync::atomic::Ordering;
+
+        let Some(&buffer_id) = self.graph.track_buffer_ids.get(track) else {
+            return;
+        };
+        let runtime = &self.state.runtime;
+        runtime.sampler_analysis_buffer_ids[track].store(buffer_id as u32, Ordering::Release);
+        match self.sample_analysis.cache().get(buffer_id) {
+            Some(entry) => match entry.as_ref() {
+                crate::analysis::AnalysisEntry::Pending => {
+                    runtime.sampler_analysis_status[track].store(1, Ordering::Release);
+                    runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
+                    runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+                }
+                crate::analysis::AnalysisEntry::Ready(result) => {
+                    runtime.sampler_analysis_bpm[track]
+                        .store(result.bpm.to_bits(), Ordering::Release);
+                    if let Some(slot) = self.state.pattern.instrument_slots.get(track) {
+                        if (slot.defaults.get(11) - 120.0).abs() < 0.001 && result.bpm > 0.0 {
+                            slot.defaults.set(11, result.bpm.clamp(20.0, 400.0));
+                        }
+                    }
+                    if let Some(table) = self.sample_analysis.cache().table(buffer_id) {
+                        let (lo, hi) = crate::analysis::pack_ptr(Arc::as_ptr(&table));
+                        runtime.sampler_onset_ptr_lo[track].store(lo.to_bits(), Ordering::Release);
+                        runtime.sampler_onset_ptr_hi[track].store(hi.to_bits(), Ordering::Release);
+                    }
+                    runtime.sampler_analysis_status[track].store(2, Ordering::Release);
+                }
+                crate::analysis::AnalysisEntry::Failed(_) => {
+                    runtime.sampler_analysis_status[track].store(3, Ordering::Release);
+                    runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
+                    runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+                }
+            },
+            None => {
+                runtime.sampler_analysis_status[track].store(0, Ordering::Release);
+                runtime.sampler_onset_ptr_lo[track].store(0, Ordering::Release);
+                runtime.sampler_onset_ptr_hi[track].store(0, Ordering::Release);
+            }
+        }
+    }
+
     pub fn capture_bus_pattern_snapshot(&self) -> Vec<BusPatternSnapshot> {
         self.buses
             .iter()
@@ -995,6 +1055,7 @@ impl App {
                 load_error,
             },
             master_recorder,
+            sample_analysis: AnalysisService::new(),
             pending_recording_take: None,
             graph: GraphState {
                 lg,

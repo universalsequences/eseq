@@ -735,11 +735,48 @@
         (sampler-param-dropdown p key)
         (sampler-param-knob p key)))))
 
-(def sampler-param-knobs (params)
-  (h-stack :gap 0.65 :padding 0.05 :align :center
+(def sampler-param-by-name (params name)
+  (nth (filter |p| (= (get p :name) name) params) 0))
+
+(def sampler-main-params (params)
+  (filter |p|
+    (let ((name (get p :name)))
+      (and (not (= name "enabled"))
+           (not (= name "warp"))
+           (not (= name "mode"))
+           (not (= name "bpm"))))
+    params))
+
+(def sampler-bpm-control (p)
+  (h-stack :gap 0.65 :align :end
+    (subtree :key "sampler-param-bpm"
+      (knob-number :label "bpm"
+        :value (get p :value)
+        :min (get p :min) :max (get p :max) :decimals 1
+        :font-size 10.5 :label-font-size 10
+        :text-color :dim :label-color :dim
+        :width 4.75 :height 2.05
+        :on-change (lambda (v) (fx-set-instrument-value p v))))
+    (v-stack :gap 0.12 :align :center
+      (box :height 0.82)
+      (h-stack :gap 0.2
+        (button "1/2"
+          :width 1.85 :height 0.82 :padding 0 :font-size 8
+          :background-color :mixer-control-bg :color :dim
+          :on-click |x y r| (fx-set-instrument-value p (max 20 (/ (get p :value) 2))))
+        (button "2x"
+          :width 1.85 :height 0.82 :padding 0 :font-size 8
+          :background-color :mixer-control-bg :color :dim
+          :on-click |x y r| (fx-set-instrument-value p (min 400 (* (get p :value) 2))))))))
+
+(def sampler-param-knobs (params inst)
+  (h-stack :gap 0.65 :padding 0.55 :align :center
     (sampler-gate-button)
-    (each (visible-params params) |p pi|
-      (sampler-param-control p))))
+    (each (sampler-main-params params) |p pi|
+      (sampler-param-control p))
+    (box :width 1.4 :height 1)
+    (sampler-param-control (sampler-param-by-name params "warp"))
+    (sampler-bpm-control (sampler-param-by-name params "bpm"))))
 
 (def sampler-panel (inst)
   (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
@@ -779,7 +816,7 @@
                       :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
                 (box :width 70 :height 4.85 :h-align :center :v-align :center
                   (label "No sample" :font-size 12 :color :dim :bg :transparent)))
-              (sampler-param-knobs (get inst :params)))))))))
+              (sampler-param-knobs (get inst :params) inst))))))))
 
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
