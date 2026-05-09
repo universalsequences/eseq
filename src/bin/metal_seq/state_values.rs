@@ -3383,6 +3383,10 @@ mod tests {
             Rc::new(RefCell::new(Value::String(name.to_string()))),
         );
         param.insert(
+            "group".to_string(),
+            Rc::new(RefCell::new(Value::String("main".to_string()))),
+        );
+        param.insert(
             "idx".to_string(),
             Rc::new(RefCell::new(Value::Number(idx as f64))),
         );
@@ -3542,6 +3546,426 @@ mod tests {
             Rc::new(RefCell::new(test_list(vec![]))),
         );
         inst
+    }
+
+    fn test_number_list(values: &[f64]) -> Value {
+        test_list(values.iter().copied().map(Value::Number).collect())
+    }
+
+    fn test_bool_list(values: &[bool]) -> Value {
+        test_list(values.iter().copied().map(Value::Bool).collect())
+    }
+
+    fn test_string_list(values: &[&str]) -> Value {
+        test_list(
+            values
+                .iter()
+                .map(|value| Value::String((*value).to_string()))
+                .collect(),
+        )
+    }
+
+    fn register_full_grid_test_natives(editor: &mut eseqlisp::Editor) {
+        editor
+            .runtime_mut()
+            .register_native("seq-filter-sample-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-preset-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-audio-effect-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-midi-effect-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-saved-instrument-tree", |args, _ctx| {
+                let query = match args.first() {
+                    Some(Value::String(s)) => s.as_str(),
+                    _ => "",
+                };
+                Ok(build_instrument_tree_value(query))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-piano-roll-action", |_args, _ctx| Ok(Value::Bool(true)));
+    }
+
+    fn full_grid_editor_for_scroll_tests() -> eseqlisp::Editor {
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        register_full_grid_test_natives(&mut editor);
+
+        let steps = test_bool_list(&[
+            true, false, true, false, true, false, true, false, true, false, true, false, true,
+            false, true, false,
+        ]);
+        let step_numbers = test_number_list(&[
+            1.0, 0.0, 0.8, 0.0, 0.7, 0.0, 0.9, 0.0, 0.6, 0.0, 0.8, 0.0, 1.0, 0.0, 0.7, 0.0,
+        ]);
+        let empty_plocks = test_bool_list(&[false; 16]);
+        let one_track_bus_sends = test_list(vec![
+            Value::Map({
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "name".to_string(),
+                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
+                );
+                map.insert(
+                    "value".to_string(),
+                    Rc::new(RefCell::new(Value::Number(0.0))),
+                );
+                map
+            }),
+            Value::Map({
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "name".to_string(),
+                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
+                );
+                map.insert(
+                    "value".to_string(),
+                    Rc::new(RefCell::new(Value::Number(0.0))),
+                );
+                map
+            }),
+        ]);
+
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("track-ids", test_number_list(&[0.0])),
+                ("track-names", test_string_list(&["bd02"])),
+                ("current-track", Value::Number(0.0)),
+                ("record-armed", test_bool_list(&[false])),
+                ("track-mutes", test_bool_list(&[false])),
+                ("track-solos", test_bool_list(&[false])),
+                ("track-muted-by-solo", test_bool_list(&[false])),
+                ("track-volumes", test_number_list(&[1.0])),
+                ("track-pans", test_number_list(&[0.0])),
+                ("track-outputs", test_string_list(&["main"])),
+                (
+                    "track-output-options",
+                    test_string_list(&["main", "sends only", "Bus A", "Bus B"]),
+                ),
+                ("track-bus-sends", test_list(vec![one_track_bus_sends])),
+                ("track-steps", test_list(vec![steps.clone()])),
+                ("track-num-steps", test_number_list(&[16.0])),
+                (
+                    "track-step-has-plocks",
+                    test_list(vec![empty_plocks.clone()]),
+                ),
+                ("track-plocks", test_list(vec![])),
+                ("steps", steps.clone()),
+                ("velocities", step_numbers.clone()),
+                ("durations", test_number_list(&[1.0; 16])),
+                ("auxas", test_number_list(&[0.0; 16])),
+                ("transposes", test_number_list(&[0.0; 16])),
+                ("pans", test_number_list(&[0.0; 16])),
+                ("syncs", test_number_list(&[0.0; 16])),
+                ("step-has-plocks", empty_plocks.clone()),
+                ("selected-steps", test_bool_list(&[false; 16])),
+                ("playhead", Value::Number(0.0)),
+                ("playhead-page", Value::Number(0.0)),
+                ("playing", Value::Bool(false)),
+                ("auto-follow", Value::Bool(false)),
+                ("tp-num-steps", Value::Number(16.0)),
+                ("tp-timebase", Value::Number(0.0)),
+                ("tp-swing", Value::Number(0.0)),
+                ("tp-swing-resolution", Value::Number(0.0)),
+                ("tp-gate", Value::Number(1.0)),
+                ("tp-poly", Value::Bool(false)),
+                ("tp-accumulator", Value::Number(0.0)),
+                ("tp-accum-mode", Value::Number(0.0)),
+                ("tp-accum-limit", Value::Number(0.0)),
+                ("tp-fts", Value::Number(0.0)),
+                (
+                    "sync-labels",
+                    test_string_list(&["off", "1/16", "1/8", "1/4"]),
+                ),
+                ("fts-options", test_string_list(&["off", "up", "down"])),
+                ("accum-mode-options", test_string_list(&["off", "wrap"])),
+                ("accumulator-options", test_string_list(&["off", "step"])),
+                ("bus-names", test_string_list(&["Mix", "Bus A", "Bus B"])),
+                ("bus-mutes", test_bool_list(&[false, false, false])),
+                ("bus-solos", test_bool_list(&[false, false, false])),
+                ("bus-volumes", test_number_list(&[1.0, 1.0, 1.0])),
+                (
+                    "bus-steps",
+                    test_list(vec![steps.clone(), steps.clone(), steps.clone()]),
+                ),
+                (
+                    "bus-velocities",
+                    test_list(vec![
+                        step_numbers.clone(),
+                        step_numbers.clone(),
+                        step_numbers.clone(),
+                    ]),
+                ),
+                (
+                    "bus-durations",
+                    test_list(vec![
+                        test_number_list(&[1.0; 16]),
+                        test_number_list(&[1.0; 16]),
+                        test_number_list(&[1.0; 16]),
+                    ]),
+                ),
+                (
+                    "bus-syncs",
+                    test_list(vec![
+                        test_number_list(&[0.0; 16]),
+                        test_number_list(&[0.0; 16]),
+                        test_number_list(&[0.0; 16]),
+                    ]),
+                ),
+                (
+                    "bus-step-has-plocks",
+                    test_list(vec![
+                        empty_plocks.clone(),
+                        empty_plocks.clone(),
+                        empty_plocks.clone(),
+                    ]),
+                ),
+                ("bus-playheads", test_number_list(&[0.0, 0.0, 0.0])),
+                ("bus-num-steps", test_number_list(&[16.0, 16.0, 16.0])),
+                ("bus-timebases", test_number_list(&[0.0, 0.0, 0.0])),
+                ("bus-swings", test_number_list(&[0.0, 0.0, 0.0])),
+                ("bus-swing-resolutions", test_number_list(&[0.0, 0.0, 0.0])),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "bus-effects",
+                    test_list(vec![
+                        test_list(vec![]),
+                        test_list(vec![]),
+                        test_list(vec![]),
+                    ]),
+                ),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("piano-roll-lanes", build_piano_roll_lanes_value()),
+                ("piano-roll-items", Value::List(vec![])),
+                ("piano-roll-selection", Value::List(vec![])),
+                ("sidebar-kind", Value::String("sampler".to_string())),
+                ("sidebar-track-index", Value::Number(0.0)),
+                ("sidebar-selected-sample", Value::String(String::new())),
+                ("sidebar-presets", test_list(vec![])),
+                ("sidebar-loaded-preset", Value::String(String::new())),
+                ("sidebar-instrument-name", Value::String(String::new())),
+                (
+                    "sidebar-instrument-display-name",
+                    Value::String(String::new()),
+                ),
+                ("current-project-name", Value::String("test".to_string())),
+                ("current-pattern", Value::Number(0.0)),
+                ("num-patterns", Value::Number(1.0)),
+                ("editor-mode", Value::String(String::new())),
+                ("editor-buffer-name", Value::String(String::new())),
+                ("editor-error", Value::String(String::new())),
+                ("recording", Value::Bool(false)),
+                ("transport-playhead", Value::Number(0.0)),
+                ("bpm", Value::Number(120.0)),
+                ("sampler-playhead", Value::Number(0.0)),
+                ("master-peak-l", Value::Number(0.0)),
+                ("master-peak-r", Value::Number(0.0)),
+                ("cpu-load-pct", Value::Number(0.0)),
+                ("track-peak-0", Value::Number(0.0)),
+                ("bus-peak-0", Value::Number(0.0)),
+                ("bus-peak-1", Value::Number(0.0)),
+                ("bus-peak-2", Value::Number(0.0)),
+            ],
+            true,
+        );
+
+        let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
+        editor.runtime_mut().eval_str(&src).expect("load grid lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("full grid lisp status after refresh: {status}");
+        }
+        editor
+    }
+
+    #[test]
+    fn metal_seq_full_grid_fx_panel_does_not_y_scroll_when_content_fits() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        fn layout_bottom(node: &eseqlisp::layout::LayoutNode) -> f32 {
+            node.children
+                .iter()
+                .map(layout_bottom)
+                .fold(node.rect.row + node.rect.height, f32::max)
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let fx_tile = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*fx*")
+            .expect("full grid layout should contain *fx* tile");
+        let fx_tile_id = fx_tile.tile_id;
+        let content_bottom = fx_tile
+            .frame
+            .widget_layout
+            .as_ref()
+            .map(|layout| layout_bottom(layout))
+            .expect("fx tile should have widget layout");
+        let fx_leaf = editor
+            .tile_root
+            .find_leaf(fx_tile_id)
+            .expect("fx tile leaf should exist");
+
+        let before = fx_leaf.widget_scroll_top;
+        let scroll_col = (fx_tile.rect.col + fx_tile.rect.width * 0.5).floor() as u16;
+        let scroll_row = (fx_tile.rect.row + fx_tile.rect.height * 0.5).floor() as u16;
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::ScrollDown, scroll_col, scroll_row),
+            scroll_col as f32 + 0.5,
+            scroll_row as f32 + 0.5,
+            0,
+        );
+        let after = editor
+            .tile_root
+            .find_leaf(fx_tile_id)
+            .expect("fx tile leaf should still exist")
+            .widget_scroll_top;
+
+        assert_eq!(
+            after, before,
+            "*fx* content fits but vertical scroll changed; tile_id={fx_tile_id}, content_bottom={content_bottom:.3}, viewport={:.3}",
+            editor
+                .tile_root
+                .find_leaf(fx_tile_id)
+                .expect("fx tile leaf should still exist")
+                .widget_viewport_height
+        );
+    }
+
+    #[test]
+    fn metal_seq_full_grid_fx_panel_does_not_smooth_y_scroll_when_content_fits() {
+        fn layout_bottom(node: &eseqlisp::layout::LayoutNode) -> f32 {
+            node.children
+                .iter()
+                .map(layout_bottom)
+                .fold(node.rect.row + node.rect.height, f32::max)
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let fx_tile = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*fx*")
+            .expect("full grid layout should contain *fx* tile");
+        let fx_tile_id = fx_tile.tile_id;
+        let content_bottom = fx_tile
+            .frame
+            .widget_layout
+            .as_ref()
+            .map(|layout| layout_bottom(layout))
+            .expect("fx tile should have widget layout");
+        let before = editor
+            .tile_root
+            .find_leaf(fx_tile_id)
+            .expect("fx tile leaf should exist")
+            .widget_scroll_top;
+        let precise_col = fx_tile.rect.col + fx_tile.rect.width * 0.5;
+        let precise_row = fx_tile.rect.row + fx_tile.rect.height * 0.5;
+
+        let widget_handled =
+            editor.handle_tiled_touchpad_scroll(precise_col, precise_row, 0, 0.0, -100.0);
+        if !widget_handled && editor.is_ui_scroll_mode() {
+            editor.apply_smooth_widget_scroll(0.0, -5.0);
+        }
+
+        let fx_leaf = editor
+            .tile_root
+            .find_leaf(fx_tile_id)
+            .expect("fx tile leaf should still exist");
+        assert_eq!(
+            fx_leaf.widget_scroll_top, before,
+            "*fx* content only has fractional border/padding overflow but smooth scroll changed; tile_id={fx_tile_id}, content_bottom={content_bottom:.3}, viewport={:.3}",
+            fx_leaf.widget_viewport_height
+        );
+    }
+
+    #[test]
+    fn metal_seq_full_grid_fx_panel_does_not_smooth_y_scroll_before_first_frame() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor.update_tile_rects(180, 90);
+        let fx_tile_id = editor
+            .tile_root
+            .leaf_ids()
+            .into_iter()
+            .find(|tile_id| {
+                editor
+                    .tile_root
+                    .find_leaf(*tile_id)
+                    .and_then(|leaf| editor.buffers.get(leaf.buffer_idx))
+                    .is_some_and(|buffer| buffer.name == "*fx*")
+            })
+            .expect("full grid layout should contain *fx* tile");
+        let fx_rect = editor
+            .tile_rects()
+            .iter()
+            .find(|(tile_id, _)| *tile_id == fx_tile_id)
+            .map(|(_, rect)| *rect)
+            .expect("fx tile should have a screen rect");
+        let before = editor
+            .tile_root
+            .find_leaf(fx_tile_id)
+            .expect("fx tile leaf should exist")
+            .widget_scroll_top;
+        let precise_col = fx_rect.col + fx_rect.width * 0.5;
+        let precise_row = fx_rect.row + fx_rect.height * 0.5;
+
+        let widget_handled =
+            editor.handle_tiled_touchpad_scroll(precise_col, precise_row, 0, 0.0, -100.0);
+        if !widget_handled && editor.is_ui_scroll_mode() {
+            editor.apply_smooth_widget_scroll(0.0, -5.0);
+        }
+
+        let fx_leaf = editor
+            .tile_root
+            .find_leaf(fx_tile_id)
+            .expect("fx tile leaf should still exist");
+        assert_eq!(
+            fx_leaf.widget_scroll_top, before,
+            "*fx* smooth scroll before the first rendered frame should use exact Metal tile height; viewport={:.3}",
+            fx_leaf.widget_viewport_height
+        );
     }
 
     #[test]
