@@ -1012,6 +1012,12 @@ pub(crate) fn build_effects_value(
                 "slot-idx".to_string(),
                 Rc::new(RefCell::new(Value::Number(slot_idx as f64))),
             );
+            slot_map.insert(
+                "builtin".to_string(),
+                Rc::new(RefCell::new(Value::Bool(
+                    sequencer::effects::EffectDescriptor::builtin_insert(&desc.name).is_some(),
+                ))),
+            );
 
             let params: Vec<Rc<RefCell<Value>>> = desc
                 .params
@@ -1094,10 +1100,10 @@ pub(crate) fn build_effects_value(
                                     .iter()
                                     .map(|d| d.label().to_string())
                                     .collect();
-                                let selected = labels
-                                    .get(current_val.round() as usize)
-                                    .cloned()
-                                    .unwrap_or_default();
+                                let selected_idx = (current_val.round() as usize)
+                                    .min(labels.len().saturating_sub(1));
+                                let selected =
+                                    labels.get(selected_idx).cloned().unwrap_or_default();
                                 let option_values = labels
                                     .into_iter()
                                     .map(|label| Rc::new(RefCell::new(Value::String(label))))
@@ -1178,6 +1184,13 @@ pub(crate) fn build_bus_effects_value_for_selection(
                     slot_map.insert(
                         "bus-fx".to_string(),
                         Rc::new(RefCell::new(Value::Bool(true))),
+                    );
+                    slot_map.insert(
+                        "builtin".to_string(),
+                        Rc::new(RefCell::new(Value::Bool(
+                            sequencer::effects::EffectDescriptor::builtin_insert(&desc.name)
+                                .is_some(),
+                        ))),
                     );
 
                     let params: Vec<Rc<RefCell<Value>>> = desc
@@ -2827,6 +2840,395 @@ mod tests {
         ASTParser::new(tokens)
             .parse()
             .expect("parse metal-seq-browser.lisp");
+    }
+
+    #[test]
+    fn metal_seq_core_lisp_files_parse() {
+        for path in [
+            "mac-osx-dark.lisp",
+            "metal-seq-materials.lisp",
+            "metal-seq-browser.lisp",
+            "metal-seq-builtin-fx-ui.lisp",
+            "metal-seq-fx.lisp",
+            "metal-seq-piano-roll.lisp",
+            "metal-seq-mixer-v2.lisp",
+            "metal-seq-transport.lisp",
+            "metal-seq-metal.lisp",
+            "metal-seq-sequencer.lisp",
+            "metal-seq-grid.lisp",
+        ] {
+            let src = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            let tokens = Parser::new(src)
+                .parse()
+                .unwrap_or_else(|e| panic!("tokenize {path}: {e:?}"));
+            ASTParser::new(tokens)
+                .parse()
+                .unwrap_or_else(|e| panic!("parse {path}: {e:?}"));
+        }
+    }
+
+    fn browser_editor_on_instrument_tab() -> eseqlisp::Editor {
+        let src = std::fs::read_to_string("metal-seq-browser.lisp").expect("read browser lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(0.0)),
+                ("sidebar-kind", Value::String("sampler".to_string())),
+                ("sidebar-track-index", Value::Number(0.0)),
+                ("sidebar-selected-sample", Value::String(String::new())),
+                ("sidebar-presets", test_list(vec![])),
+                ("sidebar-loaded-preset", Value::String(String::new())),
+                ("sidebar-instrument-name", Value::String(String::new())),
+                (
+                    "sidebar-instrument-display-name",
+                    Value::String(String::new()),
+                ),
+                ("current-project-name", Value::String(String::new())),
+                ("editor-mode", Value::String(String::new())),
+                ("editor-buffer-name", Value::String(String::new())),
+                ("editor-error", Value::String(String::new())),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .register_native("seq-filter-sample-tree", |_args, _ctx| {
+                Ok(test_list(vec![]))
+            });
+        editor
+            .runtime_mut()
+            .register_native("seq-project-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-preset-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-audio-effect-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-midi-effect-tree", |_args, _ctx| Ok(test_list(vec![])));
+        editor
+            .runtime_mut()
+            .register_native("seq-saved-instrument-tree", |args, _ctx| {
+                let query = match args.first() {
+                    Some(Value::String(s)) => s.as_str(),
+                    _ => "",
+                };
+                Ok(build_instrument_tree_value(query))
+            });
+        editor
+            .runtime_mut()
+            .eval_str(&src)
+            .expect("load browser lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"instruments\")")
+            .expect("select instrument tab");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("browser lisp status after refresh: {status}");
+        }
+        editor
+    }
+
+    fn browser_id(editor: &eseqlisp::Editor) -> eseqlisp::host::BufferId {
+        editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer")
+            .id
+    }
+
+    fn find_layout_node_by_stable_key<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        key: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.stable_key.as_deref() == Some(key) {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_stable_key(child, key))
+    }
+
+    fn render_layout_cells(layout: &eseqlisp::layout::LayoutNode, cols: u16, rows: u16) -> String {
+        let mut cell_buf = eseqlisp::widget_render::CellBuffer::new(cols, rows);
+        eseqlisp::widget_render::render_widget_tree(layout, &mut cell_buf);
+        cell_buf
+            .cells
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.as_ref().map(|cell| cell.ch).unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn metal_seq_browser_instrument_tab_builds_instrument_tree() {
+        let editor = browser_editor_on_instrument_tab();
+        let browser = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*samples*")
+            .expect("browser lisp should create the *samples* buffer");
+        let tree = browser.widget_tree.as_ref().expect("browser widget tree");
+        assert!(
+            value_contains_string(tree, "digitone") || value_contains_string(tree, "minimoog"),
+            "instrument tab should render saved instruments"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_instrument_tab_renders_visible_instrument_rows() {
+        fn render_instrument_browser(cols: u16, rows: u16) -> String {
+            let mut editor = browser_editor_on_instrument_tab();
+            editor.set_active_buffer(browser_id(&editor));
+            editor.set_layout_viewport(cols, rows);
+
+            let layout = editor.widget_layout().expect("browser layout");
+            render_layout_cells(&layout, cols, rows)
+        }
+
+        for (cols, rows) in [(32, 60), (220, 90)] {
+            let rendered = render_instrument_browser(cols, rows);
+            assert!(
+                rendered.contains("emulations") || rendered.contains("strings"),
+                "instrument tab should visibly render top-level instrument rows at {cols}x{rows}; rendered:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_sample_selection_adds_track_when_current_track_is_instrument() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-kind",
+            Value::String("instrument".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-item
+                    (dict :label "kick.wav" :path "samples/kick.wav"))"#,
+            )
+            .expect("select sample from instrument context");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-sample");
+                let Value::Map(payload) = payload else {
+                    panic!("sample add payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected add-track-sample host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_sampler_button_queues_blank_sampler_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-add-sampler-track)")
+            .expect("invoke sampler add action");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-sampler");
+                assert!(
+                    matches!(payload, Value::Map(map) if map.is_empty()),
+                    "blank sampler payload should be an empty dict: {payload:?}"
+                );
+                assert_eq!(
+                    editor
+                        .runtime_mut()
+                        .eval_str("sbrowser-tab")
+                        .expect("read browser tab"),
+                    Some(Value::String("samples".to_string()))
+                );
+            }
+            other => panic!("expected add-track-sampler host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_instrument_selection_queues_track_and_switches_to_presets() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-create-item
+                    (dict :kind "instrument" :name "emulations/digitone" :label "digitone"))"#,
+            )
+            .expect("select instrument");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-instrument");
+                let Value::Map(payload) = payload else {
+                    panic!("instrument add payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("emulations/digitone".to_string()))
+                );
+            }
+            other => panic!("expected add-track-instrument host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-tab")
+                .expect("read browser tab"),
+            Some(Value::String("presets".to_string()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_instrument_tab_diagnoses_side_by_side_scroll_collapse() {
+        fn apply_browser_body(editor: &mut eseqlisp::Editor, body: &str) {
+            editor
+                .runtime_mut()
+                .eval_str(&format!(
+                    r#"
+                    (effect-buffer "*samples*"
+                      (v-stack :width :fill :gap 0.4 :padding 1.2
+                        {body}))
+                    "#
+                ))
+                .expect("apply diagnostic browser body");
+            editor.refresh_runtime_side_effects();
+            if let Some(status) = editor.runtime_mut().take_status_message() {
+                panic!("diagnostic browser status after refresh: {status}");
+            }
+            editor.set_active_buffer(browser_id(editor));
+        }
+
+        fn snapshot(body: &str) -> (eseqlisp::layout::Rect, eseqlisp::layout::Rect, bool, String) {
+            let mut editor = browser_editor_on_instrument_tab();
+            apply_browser_body(&mut editor, body);
+            editor.set_layout_viewport(220, 90);
+            let layout = editor.widget_layout().expect("diagnostic browser layout");
+            let scroll = find_layout_node_by_stable_key(&layout, "instruments-tab-scroll")
+                .expect("instrument scroll layout node")
+                .rect;
+            let tree = find_layout_node_by_stable_key(&layout, "instruments-tab-tree")
+                .expect("instrument tree layout node")
+                .rect;
+            let rendered = render_layout_cells(&layout, 220, 90);
+            let has_instrument_rows =
+                rendered.contains("emulations") || rendered.contains("strings");
+            (scroll, tree, has_instrument_rows, rendered)
+        }
+
+        let good_body = r#"
+          (list
+            (sbrowser-header)
+            (sbrowser-tabs)
+            (sbrowser-active-tab-panel))
+        "#;
+        let side_by_side_body = r#"
+          (list
+            (sbrowser-header)
+            (h-stack :key "diagnostic-side-by-side" :width :fill :gap 0.5 :flex 1
+              (sbrowser-tabs)
+              (sbrowser-active-tab-panel)))
+        "#;
+        let stretched_side_by_side_body = r#"
+          (list
+            (sbrowser-header)
+            (h-stack :key "diagnostic-side-by-side-stretched" :width :fill :gap 0.5 :flex 1 :align :stretch
+              (sbrowser-tabs)
+              (sbrowser-active-tab-panel)))
+        "#;
+        let fixed_side_by_side_body = r#"
+          (list
+            (sbrowser-header)
+            (h-stack :key "diagnostic-side-by-side-fixed" :width :fill :gap 0.5 :flex 1 :align :stretch
+              (sbrowser-tabs)
+              (box :key "diagnostic-active-tab-panel" :width 0 :flex 1 :padding 0
+                (sbrowser-active-tab-panel))))
+        "#;
+
+        let (good_scroll, good_tree, good_rows, _) = snapshot(good_body);
+        let (side_scroll, side_tree, side_rows, side_rendered) = snapshot(side_by_side_body);
+        let (stretched_scroll, stretched_tree, stretched_rows, stretched_rendered) =
+            snapshot(stretched_side_by_side_body);
+        let (fixed_scroll, fixed_tree, fixed_rows, fixed_rendered) =
+            snapshot(fixed_side_by_side_body);
+
+        eprintln!(
+            "good scroll={:?} tree={:?} rows={}; side-by-side scroll={:?} tree={:?} rows={}; stretched side-by-side scroll={:?} tree={:?} rows={}; fixed side-by-side scroll={:?} tree={:?} rows={}",
+            good_scroll,
+            good_tree,
+            good_rows,
+            side_scroll,
+            side_tree,
+            side_rows,
+            stretched_scroll,
+            stretched_tree,
+            stretched_rows,
+            fixed_scroll,
+            fixed_tree,
+            fixed_rows
+        );
+
+        assert!(
+            good_scroll.height > 10.0,
+            "known-good layout should give instrument scroll visible height, got {good_scroll:?}"
+        );
+        assert!(
+            side_scroll.height < 0.01,
+            "side-by-side diagnostic should reproduce collapsed instrument scroll height; side scroll={side_scroll:?}, rendered:\n{side_rendered}"
+        );
+        assert!(good_rows, "known-good layout should render instrument rows");
+        assert!(
+            side_rows,
+            "the generic cell renderer still sees rows even though the scroll viewport is collapsed; rendered:\n{side_rendered}"
+        );
+        assert!(
+            stretched_scroll.height > 10.0,
+            "stretch-aligned side-by-side layout should give instrument scroll visible height; scroll={stretched_scroll:?}, rendered:\n{stretched_rendered}"
+        );
+        assert!(
+            stretched_rows,
+            "stretch-aligned side-by-side layout should render instrument rows; rendered:\n{stretched_rendered}"
+        );
+        assert!(
+            stretched_scroll.col + stretched_scroll.width > 220.0,
+            "unwrapped stretch side-by-side diagnostic should reproduce horizontal overflow; scroll={stretched_scroll:?}"
+        );
+        assert!(
+            fixed_scroll.height > 10.0,
+            "fixed side-by-side layout should give instrument scroll visible height; scroll={fixed_scroll:?}, rendered:\n{fixed_rendered}"
+        );
+        assert!(
+            fixed_scroll.col + fixed_scroll.width <= 220.0,
+            "fixed side-by-side layout should keep instrument scroll inside viewport; scroll={fixed_scroll:?}, rendered:\n{fixed_rendered}"
+        );
+        assert!(
+            fixed_rows,
+            "fixed side-by-side layout should render instrument rows; rendered:\n{fixed_rendered}"
+        );
     }
 
     #[test]

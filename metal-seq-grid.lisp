@@ -36,7 +36,7 @@
   (list :rows :gap 1
     0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
     0.95 (list :cols :gap 1
-      0.2 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25 :max-width 32)
+      0.2 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42)
       0.8 (list :rows :gap 1
         0.55 (list :cols :gap 1
           0.78 (list :buf "*metal*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)

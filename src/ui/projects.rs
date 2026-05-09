@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crossterm::event::KeyCode;
 
-use crate::effects::BUILTIN_SLOT_COUNT;
+use crate::effects::{EffectDescriptor, BUILTIN_SLOT_COUNT};
 use crate::project::{
     self, chord_snapshot_from_steps_and_durations, project_file_version, ProjectBusChannel,
     ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
@@ -16,12 +16,144 @@ use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
 
 fn project_slot_into_synced_snapshot(
     slot: project::ProjectEffectSlot,
-    desc: &crate::effects::EffectDescriptor,
+    desc: &EffectDescriptor,
     node_id: u32,
 ) -> crate::effects::EffectSlotSnapshot {
     let mut snapshot = slot.into_snapshot_with_node_id(node_id);
     snapshot.sync_to_descriptor(desc, node_id);
     snapshot
+}
+
+fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffectSlot {
+    let num_params = desc.params.len();
+    project::ProjectEffectSlot {
+        num_params: num_params as u32,
+        defaults: desc.params.iter().map(|param| param.default).collect(),
+        plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+        param_node_indices: desc
+            .params
+            .iter()
+            .map(|param| param.node_param_idx)
+            .collect(),
+    }
+}
+
+fn legacy_builtin_slot_has_edits(
+    slot: &project::ProjectEffectSlot,
+    desc: &EffectDescriptor,
+) -> bool {
+    if slot.num_params == 0 {
+        return false;
+    }
+    let num_params = (slot.num_params as usize).min(desc.params.len());
+    for param_idx in 0..num_params {
+        let saved = slot.defaults.get(param_idx).copied().unwrap_or(0.0);
+        if (saved - desc.params[param_idx].default).abs() > 0.0001 {
+            return true;
+        }
+    }
+    slot.plocks
+        .iter()
+        .any(|row| row.iter().take(num_params).any(Option::is_some))
+}
+
+fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
+    let mut filter_desc = EffectDescriptor::builtin_filter();
+    let mut delay_desc = EffectDescriptor::builtin_delay();
+    if let Some(enabled) = filter_desc
+        .params
+        .iter_mut()
+        .find(|param| param.name == "enabled")
+    {
+        enabled.default = 0.0;
+    }
+    if let Some(enabled) = delay_desc
+        .params
+        .iter_mut()
+        .find(|param| param.name == "enabled")
+    {
+        enabled.default = 0.0;
+    }
+    let legacy_descs = [&filter_desc, &delay_desc];
+    let legacy_names = ["Filter", "Delay"];
+    let max_slots = crate::lisp_effect::MAX_CUSTOM_FX;
+
+    for track_idx in 0..project.tracks.len() {
+        let old_custom_len = project
+            .custom_effects
+            .get(track_idx)
+            .map(Vec::len)
+            .unwrap_or_default();
+        let has_legacy_layout = project.patterns.iter().any(|pattern| {
+            pattern
+                .effect_slots
+                .get(track_idx)
+                .map(|slots| slots.len() >= 2 && slots.len() > old_custom_len)
+                .unwrap_or(false)
+        });
+        if !has_legacy_layout {
+            continue;
+        }
+
+        let mut preserve_legacy = [false; 2];
+        for pattern in &project.patterns {
+            let Some(slots) = pattern.effect_slots.get(track_idx) else {
+                continue;
+            };
+            for legacy_idx in 0..2 {
+                if let Some(slot) = slots.get(legacy_idx) {
+                    preserve_legacy[legacy_idx] |=
+                        legacy_builtin_slot_has_edits(slot, legacy_descs[legacy_idx]);
+                }
+            }
+        }
+
+        let old_names = project
+            .custom_effects
+            .get(track_idx)
+            .cloned()
+            .unwrap_or_default();
+        let mut migrated_names = Vec::new();
+        for legacy_idx in 0..2 {
+            if preserve_legacy[legacy_idx] {
+                migrated_names.push(EffectDescriptor::builtin_insert_project_name(
+                    legacy_names[legacy_idx],
+                ));
+            }
+        }
+        migrated_names.extend(old_names);
+        migrated_names.truncate(max_slots);
+        while project.custom_effects.len() <= track_idx {
+            project.custom_effects.push(Vec::new());
+        }
+        project.custom_effects[track_idx] = migrated_names;
+
+        for pattern in &mut project.patterns {
+            let old_slots = pattern
+                .effect_slots
+                .get(track_idx)
+                .cloned()
+                .unwrap_or_default();
+            let mut migrated_slots = Vec::new();
+            for legacy_idx in 0..2 {
+                if preserve_legacy[legacy_idx] {
+                    migrated_slots.push(
+                        old_slots.get(legacy_idx).cloned().unwrap_or_else(|| {
+                            default_project_effect_slot(legacy_descs[legacy_idx])
+                        }),
+                    );
+                }
+            }
+            if old_slots.len() > 2 {
+                migrated_slots.extend(old_slots.into_iter().skip(2));
+            }
+            migrated_slots.truncate(max_slots);
+            while pattern.effect_slots.len() <= track_idx {
+                pattern.effect_slots.push(Vec::new());
+            }
+            pattern.effect_slots[track_idx] = migrated_slots;
+        }
+    }
 }
 
 fn project_custom_instrument_slot_into_synced_snapshot(
@@ -361,7 +493,7 @@ impl App {
 
     pub fn queue_project_load_named(&mut self, name: &str) -> Result<(), String> {
         eprintln!("project-load: queue requested name={name}");
-        let project = project::load_project(name).map_err(|error| error.to_string())?;
+        let mut project = project::load_project(name).map_err(|error| error.to_string())?;
         eprintln!(
             "project-load: file loaded name={} version={} tracks={} patterns={} custom_effect_tracks={}",
             name,
@@ -373,6 +505,7 @@ impl App {
         if project.version != project::project_file_version() {
             return Err(format!("Unsupported project version {}", project.version));
         }
+        migrate_legacy_default_track_effects(&mut project);
 
         self.editor.pending_project_load = Some(super::PendingProjectLoad {
             name: name.to_string(),
@@ -1449,6 +1582,127 @@ mod tests {
             node_param_idx,
             host_control: None,
         }
+    }
+
+    fn minimal_project_with_effect_slots(
+        custom_effects: Vec<Option<String>>,
+        effect_slots: Vec<project::ProjectEffectSlot>,
+    ) -> ProjectFile {
+        ProjectFile {
+            version: project::project_file_version(),
+            name: "test".to_string(),
+            bpm: 120,
+            master_volume: 1.0,
+            current_pattern: 0,
+            reverb: ProjectReverbState {
+                size: 0.2,
+                brightness: 0.8,
+                replace: 0.3,
+            },
+            buses: Vec::new(),
+            tracks: vec![ProjectTrack::Sampler {
+                sample_path: "samples/kick.wav".to_string(),
+            }],
+            custom_effects: vec![custom_effects],
+            scratch: ProjectScratchState::default(),
+            patterns: vec![ProjectPattern {
+                track_bits: Vec::new(),
+                step_data: Vec::new(),
+                track_params: Vec::new(),
+                effect_slots: vec![effect_slots],
+                midi_fx_slots: Vec::new(),
+                instrument_slots: Vec::new(),
+                instrument_base_note_offsets: Vec::new(),
+                track_sound_states: Vec::new(),
+                chord_snapshots: Vec::new(),
+                chord_duration_snapshots: Vec::new(),
+                timebase_plock_snapshots: Vec::new(),
+                swing_plock_snapshots: Vec::new(),
+                swing_resolution_plock_snapshots: Vec::new(),
+                bus_patterns: Vec::new(),
+                instrument_types: Vec::new(),
+                sample_paths: Vec::new(),
+                sample_names: Vec::new(),
+            }],
+        }
+    }
+
+    fn legacy_default_project_effect_slot(
+        mut desc: EffectDescriptor,
+    ) -> project::ProjectEffectSlot {
+        if let Some(enabled) = desc.params.iter_mut().find(|param| param.name == "enabled") {
+            enabled.default = 0.0;
+        }
+        default_project_effect_slot(&desc)
+    }
+
+    #[test]
+    fn legacy_default_filter_delay_migration_drops_untouched_slots() {
+        let custom_slot = project::ProjectEffectSlot {
+            num_params: 1,
+            defaults: vec![0.42],
+            plocks: vec![vec![None]; MAX_STEPS],
+            param_node_indices: vec![9],
+        };
+        let mut project = minimal_project_with_effect_slots(
+            vec![Some("custom-fx".to_string())],
+            vec![
+                legacy_default_project_effect_slot(EffectDescriptor::builtin_filter()),
+                legacy_default_project_effect_slot(EffectDescriptor::builtin_delay()),
+                custom_slot.clone(),
+            ],
+        );
+
+        migrate_legacy_default_track_effects(&mut project);
+
+        assert_eq!(
+            project.custom_effects[0],
+            vec![Some("custom-fx".to_string())]
+        );
+        assert_eq!(project.patterns[0].effect_slots[0].len(), 1);
+        assert_eq!(
+            project.patterns[0].effect_slots[0][0].defaults,
+            custom_slot.defaults
+        );
+    }
+
+    #[test]
+    fn legacy_default_filter_delay_migration_preserves_edited_slots() {
+        let mut filter_slot =
+            legacy_default_project_effect_slot(EffectDescriptor::builtin_filter());
+        filter_slot.defaults[2] = 880.0;
+        let mut delay_slot = legacy_default_project_effect_slot(EffectDescriptor::builtin_delay());
+        delay_slot.plocks[3][0] = Some(0.0);
+        let custom_slot = project::ProjectEffectSlot {
+            num_params: 1,
+            defaults: vec![0.24],
+            plocks: vec![vec![None]; MAX_STEPS],
+            param_node_indices: vec![11],
+        };
+        let mut project = minimal_project_with_effect_slots(
+            vec![Some("custom-fx".to_string())],
+            vec![filter_slot, delay_slot, custom_slot.clone()],
+        );
+
+        migrate_legacy_default_track_effects(&mut project);
+
+        assert_eq!(
+            project.custom_effects[0],
+            vec![
+                EffectDescriptor::builtin_insert_project_name("Filter"),
+                EffectDescriptor::builtin_insert_project_name("Delay"),
+                Some("custom-fx".to_string()),
+            ]
+        );
+        assert_eq!(project.patterns[0].effect_slots[0][0].defaults[2], 880.0);
+        assert_eq!(
+            project.patterns[0].effect_slots[0][1].plocks[3][0],
+            Some(0.0)
+        );
+        assert_eq!(
+            project.patterns[0].effect_slots[0][2].defaults,
+            custom_slot.defaults
+        );
     }
 
     #[test]

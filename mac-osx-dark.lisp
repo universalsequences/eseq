@@ -70,7 +70,7 @@
       :fx-inner-panel-bg '(0.17 0.17 0.175)
       :fx-panel-selected-bg '(0.21 0.21 0.21)
       :fx-panel-header-bg '(0.27 0.27 0.27)
-      :fx-panel-header-selected-bg '(0.22 0.22 0.23)
+      :fx-panel-header-selected-bg '(0.32 0.32 0.63)
       :fx-panel-border   '(0.26 0.26 0.27)
       :instrument-panel-bg '(0.22 0.22 0.23)
       :instrument-control-bg '(0.04 0.04 0.045)

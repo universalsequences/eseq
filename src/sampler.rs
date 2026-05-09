@@ -448,6 +448,15 @@ pub fn load_wav_buffer(lg: *mut LiveGraph, wav_path: &Path) -> Result<(i32, Stri
     Ok((buffer_id, name))
 }
 
+pub fn create_silent_buffer(lg: *mut LiveGraph) -> Result<i32, String> {
+    let silent = [0.0_f32, 0.0_f32];
+    let buffer_id = unsafe { create_buffer(lg, 1, 2, silent.as_ptr()) };
+    if buffer_id < 0 {
+        return Err("Failed to create silent sampler buffer".to_string());
+    }
+    Ok(buffer_id)
+}
+
 /// Create a sampler node from an existing buffer ID.
 pub fn create_sampler_node(
     lg: *mut LiveGraph,

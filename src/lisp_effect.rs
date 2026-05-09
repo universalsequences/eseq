@@ -6692,6 +6692,20 @@ mod tests {
     use eseqlisp::{BufferMode, Editor, EditorConfig, Runtime};
     use std::sync::atomic::Ordering;
 
+    fn descriptors_with_filter(track_count: usize) -> Vec<Vec<EffectDescriptor>> {
+        (0..track_count)
+            .map(|_| {
+                let mut chain = EffectDescriptor::default_full_chain();
+                chain[0] = EffectDescriptor::builtin_filter();
+                chain
+            })
+            .collect()
+    }
+
+    fn bind_filter_slot(state: &SequencerState) {
+        state.pattern.effect_chains[0][0].apply_descriptor(&EffectDescriptor::builtin_filter(), 42);
+    }
+
     #[test]
     fn folder_instrument_dsp_path_maps_to_instrument_name() {
         let path = std::path::Path::new("instruments/emulations/monomachine-fmplus/dsp.lisp");
@@ -6887,8 +6901,9 @@ mod tests {
     #[test]
     fn seq_plock_effect_normalizes_slot_param_override() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        bind_filter_slot(&state);
         let mut runtime = Runtime::new();
-        let effect_descriptors = fallback_effect_descriptors(1);
+        let effect_descriptors = descriptors_with_filter(1);
         let expected = effect_descriptors[0][0].params[2].denormalize(0.5);
         register_sequencer_natives(
             &mut runtime,
@@ -6911,13 +6926,14 @@ mod tests {
     #[test]
     fn seq_plock_effect_raw_preserves_stored_value() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
+        bind_filter_slot(&state);
         let mut runtime = Runtime::new();
         register_sequencer_natives(
             &mut runtime,
             Arc::clone(&state),
             new_eval_context(0, 0),
             shared_native_metadata(
-                fallback_effect_descriptors(1),
+                descriptors_with_filter(1),
                 fallback_instrument_descriptors(1),
             ),
         );
@@ -6942,7 +6958,7 @@ mod tests {
             Arc::clone(&state),
             new_eval_context(0, 0),
             shared_native_metadata(
-                fallback_effect_descriptors(1),
+                descriptors_with_filter(1),
                 fallback_instrument_descriptors(1),
             ),
         );
@@ -6961,7 +6977,7 @@ mod tests {
             Arc::clone(&state),
             new_eval_context(0, 0),
             shared_native_metadata(
-                fallback_effect_descriptors(1),
+                descriptors_with_filter(1),
                 fallback_instrument_descriptors(1),
             ),
         );
@@ -7000,7 +7016,7 @@ mod tests {
             Arc::clone(&state),
             new_eval_context(0, 0),
             shared_native_metadata(
-                fallback_effect_descriptors(1),
+                descriptors_with_filter(1),
                 fallback_instrument_descriptors(1),
             ),
         );
@@ -7261,7 +7277,7 @@ mod tests {
         ));
         let mut runtime = ScratchControlRuntime::new(
             Arc::clone(&state),
-            fallback_effect_descriptors(1),
+            descriptors_with_filter(1),
             fallback_instrument_descriptors(1),
             0,
             0,
@@ -7280,7 +7296,7 @@ mod tests {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(
             Arc::clone(&state),
-            fallback_effect_descriptors(1),
+            descriptors_with_filter(1),
             fallback_instrument_descriptors(1),
             0,
             0,
@@ -7367,7 +7383,7 @@ mod tests {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
         let mut runtime = ScratchControlRuntime::new(
             Arc::clone(&state),
-            fallback_effect_descriptors(1),
+            descriptors_with_filter(1),
             fallback_instrument_descriptors(1),
             0,
             0,

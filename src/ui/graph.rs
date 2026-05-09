@@ -486,6 +486,35 @@ impl GraphController<'_> {
         Ok(idx)
     }
 
+    pub fn add_blank_sampler_track(&mut self) -> Result<usize, String> {
+        let idx = self.app.state.active_track_count();
+        if idx >= MAX_TRACKS {
+            return Err("Maximum number of tracks reached".to_string());
+        }
+
+        let buffer_id = crate::sampler::create_silent_buffer(self.app.graph.lg.0)?;
+        let track_name = format!("Sampler {}", idx + 1);
+        let shell = self.create_track_shell(idx, &track_name);
+        let voices = self.build_sampler_voices(
+            &track_name,
+            buffer_id,
+            shell.voice_sum_id,
+            shell.voice_sum_r_id,
+        )?;
+        self.finish_track_registration(TrackRegistration {
+            idx,
+            track_name,
+            shell,
+            voice_lids: voices.voice_lids,
+            instrument: InstrumentRegistration::Sampler {
+                buffer_id,
+                sampler_ids: voices.sampler_ids,
+            },
+        });
+        self.app.sampler_paths.push(None);
+        Ok(idx)
+    }
+
     pub fn add_custom_track(
         &mut self,
         name: &str,
@@ -652,7 +681,9 @@ impl GraphController<'_> {
             unsafe {
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.send_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
-                crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
+                if track.filter_id != 0 {
+                    crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
+                }
                 crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, track.pan_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.pan_id);
                 crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_r_id);
@@ -867,7 +898,7 @@ impl GraphController<'_> {
                 }
             }
         }
-        self.app.graph.track_node_ids[track].filter_id
+        self.app.graph.track_node_ids[track].delay_id
     }
 
     fn find_custom_slot_predecessor_with_channels(
@@ -909,7 +940,7 @@ impl GraphController<'_> {
                 }
             }
         }
-        (self.app.graph.track_node_ids[track].filter_id, 2)
+        (self.app.graph.track_node_ids[track].delay_id, 2)
     }
 
     fn connect_custom_effect_gap(
@@ -919,16 +950,39 @@ impl GraphController<'_> {
         successor_id: i32,
         successor_inputs: usize,
     ) {
-        let channels = predecessor_outputs.min(successor_inputs).max(1);
-        for ch in 0..channels {
-            unsafe {
-                crate::audiograph::graph_connect(
-                    self.app.graph.lg.0,
-                    predecessor_id,
-                    ch as i32,
-                    successor_id,
-                    ch as i32,
-                );
+        let predecessor_channels = predecessor_outputs.max(1).min(2);
+        let successor_channels = successor_inputs.max(1).min(2);
+        unsafe {
+            if predecessor_channels <= 1 {
+                for dst_port in 0..successor_channels {
+                    let _ = crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        predecessor_id,
+                        0,
+                        successor_id,
+                        dst_port as i32,
+                    );
+                }
+            } else if successor_channels <= 1 {
+                for src_port in 0..predecessor_channels {
+                    let _ = crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        predecessor_id,
+                        src_port as i32,
+                        successor_id,
+                        0,
+                    );
+                }
+            } else {
+                for ch in 0..predecessor_channels.min(successor_channels) {
+                    let _ = crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        predecessor_id,
+                        ch as i32,
+                        successor_id,
+                        ch as i32,
+                    );
+                }
             }
         }
     }
@@ -942,7 +996,7 @@ impl GraphController<'_> {
             return Err("Invalid track index".to_string());
         }
         if slot_idx < crate::effects::BUILTIN_SLOT_COUNT {
-            return Err("Only custom effects can be deleted".to_string());
+            return Err("This effect slot cannot be deleted".to_string());
         }
         let chain_len = self.app.state.pattern.effect_chains[track_idx].len();
         if slot_idx >= chain_len {
@@ -1101,7 +1155,9 @@ impl GraphController<'_> {
         unsafe {
             crate::audiograph::delete_node(self.app.graph.lg.0, track.send_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, track.delay_id);
-            crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
+            if track.filter_id != 0 {
+                crate::audiograph::delete_node(self.app.graph.lg.0, track.filter_id);
+            }
             crate::audiograph::remove_node_from_watchlist(self.app.graph.lg.0, track.pan_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, track.pan_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, track.voice_sum_r_id);
@@ -1216,11 +1272,7 @@ impl GraphController<'_> {
                     let Some(desc) = descs.get(slot_idx) else {
                         continue;
                     };
-                    let node_id = match slot_idx {
-                        0 => nodes.filter_id as u32,
-                        1 => nodes.delay_id as u32,
-                        _ => slot.node_id.load(Ordering::Relaxed),
-                    };
+                    let node_id = slot.node_id.load(Ordering::Relaxed);
                     slot.sync_descriptor(desc, node_id);
                 }
             }
@@ -1280,27 +1332,13 @@ impl GraphController<'_> {
             crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, pan_id);
         }
 
-        let filter_name = CString::new(format!("{}_filter", name)).unwrap();
-        let filter_id = unsafe {
+        let fx_out_name = CString::new(format!("{}_fx_out", name)).unwrap();
+        let fx_out_id = unsafe {
             crate::audiograph::add_node(
                 self.app.graph.lg.0,
-                crate::filter::filter_vtable(),
-                crate::filter::FILTER_STATE_SIZE * std::mem::size_of::<f32>(),
-                filter_name.as_ptr(),
-                2,
-                2,
-                std::ptr::null(),
-                0,
-            )
-        };
-
-        let delay_name = CString::new(format!("{}_delay", name)).unwrap();
-        let delay_id = unsafe {
-            crate::audiograph::add_node(
-                self.app.graph.lg.0,
-                crate::delay::delay_vtable(),
-                crate::delay::DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
-                delay_name.as_ptr(),
+                crate::stereo_panner::stereo_panner_vtable(),
+                crate::stereo_panner::STEREO_PANNER_STATE_SIZE * std::mem::size_of::<f32>(),
+                fx_out_name.as_ptr(),
                 2,
                 2,
                 std::ptr::null(),
@@ -1316,20 +1354,18 @@ impl GraphController<'_> {
         unsafe {
             crate::audiograph::graph_connect(self.app.graph.lg.0, voice_sum_id, 0, pan_id, 0);
             crate::audiograph::graph_connect(self.app.graph.lg.0, voice_sum_r_id, 0, pan_id, 1);
-            crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 0, filter_id, 0);
-            crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 1, filter_id, 1);
-            crate::audiograph::graph_connect(self.app.graph.lg.0, filter_id, 0, delay_id, 0);
-            crate::audiograph::graph_connect(self.app.graph.lg.0, filter_id, 1, delay_id, 1);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 0, fx_out_id, 0);
+            crate::audiograph::graph_connect(self.app.graph.lg.0, pan_id, 1, fx_out_id, 1);
         }
         let output = self.app.state.pattern.track_params[idx].output();
-        self.connect_delay_output_to(delay_id, &output);
+        self.connect_delay_output_to(fx_out_id, &output);
 
         TrackShell {
             voice_sum_id,
             voice_sum_r_id,
             pan_id,
-            filter_id,
-            delay_id,
+            filter_id: 0,
+            delay_id: fx_out_id,
             send_id,
         }
     }
@@ -1926,12 +1962,6 @@ impl GraphController<'_> {
             (instrument_type == InstrumentType::Custom) as u32,
             Ordering::Release,
         );
-
-        let filter_desc = EffectDescriptor::builtin_filter();
-        let delay_desc = EffectDescriptor::builtin_delay();
-        let chain = &self.app.state.pattern.effect_chains[idx];
-        chain[0].apply_descriptor(&filter_desc, shell.filter_id as u32);
-        chain[1].apply_descriptor(&delay_desc, shell.delay_id as u32);
 
         self.app.tracks.push(track_name.clone());
         self.app

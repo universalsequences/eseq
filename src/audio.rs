@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::audiograph::*;
-use crate::delay;
 use crate::effects::EffectSlotSnapshot;
-use crate::filter;
 use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
@@ -1869,41 +1867,12 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         data.last_pattern = pattern;
     }
 
-    // Push BPM to all delay nodes only when it changes
+    // Push BPM to custom-engine modulators only when it changes. Track Filter/Delay
+    // inserts are descriptor-managed on the control side.
     let bpm = data.state.transport.bpm.load(Ordering::Relaxed);
     if bpm != data.last_bpm {
         data.last_bpm = bpm;
         let bpm_f = bpm as f32;
-        for i in 0..num_tracks {
-            let filter_lid = data.state.pattern.effect_chains[i][0]
-                .node_id
-                .load(Ordering::Acquire) as u64;
-            if filter_lid != 0 {
-                unsafe {
-                    params_push_wrapper(
-                        data.lg.0,
-                        ParamMsg {
-                            idx: filter::FILTER_PARAM_BPM,
-                            logical_id: filter_lid,
-                            fvalue: bpm_f,
-                        },
-                    );
-                }
-            }
-            let delay_lid = data.state.runtime.delay_lids[i].load(Ordering::Acquire);
-            if delay_lid != 0 {
-                unsafe {
-                    params_push_wrapper(
-                        data.lg.0,
-                        ParamMsg {
-                            idx: delay::DELAY_PARAM_BPM,
-                            logical_id: delay_lid,
-                            fvalue: bpm_f,
-                        },
-                    );
-                }
-            }
-        }
         for engine in &data.state.runtime.engine_modulator_node_ids {
             for node in engine {
                 let logical_id = node.load(Ordering::Relaxed);

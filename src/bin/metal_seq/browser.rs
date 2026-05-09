@@ -7,7 +7,7 @@ use eseqlisp::vm::Value;
 use sequencer::ui;
 
 use super::current_custom_instrument_name;
-use super::values::build_flat_tree_items;
+use super::values::{build_flat_tree_items, list_value, map_value};
 
 #[derive(Clone)]
 pub(crate) struct SampleTreeNode {
@@ -308,6 +308,83 @@ pub(crate) fn build_preset_tree_from_list(items_value: Option<&Value>, query: &s
         items.retain(|item| item.to_lowercase().contains(&query));
     }
     build_flat_tree_items(&items)
+}
+
+fn effect_leaf(label: String, kind: &'static str) -> Value {
+    map_value([
+        ("label", Value::String(label.clone())),
+        ("name", Value::String(label)),
+        ("kind", Value::String(kind.to_string())),
+    ])
+}
+
+fn effect_section(label: &'static str, children: Vec<Value>) -> Option<Value> {
+    if children.is_empty() {
+        None
+    } else {
+        Some(map_value([
+            ("label", Value::String(label.to_string())),
+            ("kind", Value::String("section".to_string())),
+            ("children", list_value(children)),
+        ]))
+    }
+}
+
+fn filter_effect_names(names: Vec<String>, query_lower: &str) -> Vec<String> {
+    if query_lower.is_empty() {
+        names
+    } else {
+        names
+            .into_iter()
+            .filter(|name| name.to_lowercase().contains(query_lower))
+            .collect()
+    }
+}
+
+pub(crate) fn build_audio_effect_tree(query: &str) -> Value {
+    let query_lower = query.trim().to_lowercase();
+    let builtin: Vec<Value> = filter_effect_names(
+        sequencer::effects::EffectDescriptor::builtin_insert_names()
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect(),
+        &query_lower,
+    )
+    .into_iter()
+    .map(|name| effect_leaf(name, "builtin-audio-effect"))
+    .collect();
+
+    let custom: Vec<Value> =
+        filter_effect_names(sequencer::lisp_effect::list_saved_effects(), &query_lower)
+            .into_iter()
+            .map(|name| effect_leaf(name, "custom-audio-effect"))
+            .collect();
+
+    let mut sections = Vec::new();
+    if query_lower.is_empty() || "+ New Effect".to_lowercase().contains(&query_lower) {
+        sections.push(effect_leaf("+ New Effect".to_string(), "new-audio-effect"));
+    }
+    if let Some(section) = effect_section("Built-in", builtin) {
+        sections.push(section);
+    }
+    if let Some(section) = effect_section("Custom", custom) {
+        sections.push(section);
+    }
+    list_value(sections)
+}
+
+pub(crate) fn build_midi_effect_tree(query: &str) -> Value {
+    let query_lower = query.trim().to_lowercase();
+    let mut names: Vec<String> = sequencer::lisp_effect::load_midi_fx_descriptors()
+        .into_iter()
+        .map(|desc| desc.name)
+        .collect();
+    names.sort();
+    let items: Vec<Value> = filter_effect_names(names, &query_lower)
+        .into_iter()
+        .map(|name| effect_leaf(name, "midi-effect"))
+        .collect();
+    list_value(items)
 }
 
 pub(crate) fn instrument_display_name(name: &str) -> String {

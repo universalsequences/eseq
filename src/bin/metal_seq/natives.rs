@@ -2005,6 +2005,20 @@ pub(crate) fn init_runtime(
         };
         Ok(build_instrument_tree_value(query))
     });
+    runtime.register_native("seq-audio-effect-tree", move |args, _ctx| {
+        let query = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        Ok(build_audio_effect_tree(query))
+    });
+    runtime.register_native("seq-midi-effect-tree", move |args, _ctx| {
+        let query = match args.first() {
+            Some(Value::String(s)) => s.as_str(),
+            _ => "",
+        };
+        Ok(build_midi_effect_tree(query))
+    });
     document_metal_seq_natives(&mut runtime);
 
     RuntimeInit {
@@ -2285,6 +2299,16 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-saved-instrument-tree",
             "(seq-saved-instrument-tree query)",
             "Return the saved instrument browser tree filtered by query.",
+        ),
+        (
+            "seq-audio-effect-tree",
+            "(seq-audio-effect-tree query)",
+            "Return the audio effect browser tree filtered by query.",
+        ),
+        (
+            "seq-midi-effect-tree",
+            "(seq-midi-effect-tree query)",
+            "Return the MIDI effect browser tree filtered by query.",
         ),
     ]);
 }

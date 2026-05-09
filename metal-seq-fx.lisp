@@ -232,7 +232,7 @@
     (do
       (host-command "delete-midi-fx" (dict :slot selected-midi-fx-slot))
       (fx-clear-selected-effect))
-    (if (>= selected-fx-slot 2)
+    (if (>= selected-fx-slot 0)
     (do
       (host-command "delete-effect" (dict :slot selected-fx-slot))
       (fx-clear-selected-effect))
@@ -535,9 +535,7 @@
                (fx-select-midi-effect (get fx :slot-idx))
                (if (get fx :bus-fx)
                  (fx-select-bus-effect (get fx :slot-idx))
-               (if (>= (get fx :slot-idx) 2)
-                 (fx-select-effect (get fx :slot-idx))
-                 (fx-clear-selected-effect))))
+                 (fx-select-effect (get fx :slot-idx))))
         (h-stack :gap 0.5 :align :center
           (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param params) fx
@@ -547,8 +545,8 @@
                 (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
                 (str "audio-fx-enabled-" (get fx :slot-idx)))))
           (label title :font-size 11 :color :white :bg :transparent)
-          ;; Only show edit button for custom dgenlisp effects (not built-in Filter/Delay)
-          (if (and (not (get fx :midi-fx)) (not (= title "Filter")) (not (= title "Delay")))
+          ;; Only show edit button for custom dgenlisp effects.
+          (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
             (box :bg :dark-gray :width 4 :height 1.0 :align :center
               :on-click |x y r|
               (do
@@ -750,7 +748,8 @@
                       :selection-end (get inst :end-time)
                       :time-ruler (dict :mode :seconds)
                       :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
-                (label "No sample" :font-size 12 :color :dim :bg :transparent))
+                (box :width 70 :height 4.85 :h-align :center :v-align :center
+                  (label "No sample" :font-size 12 :color :dim :bg :transparent)))
               (sampler-param-knobs (get inst :params)))))))))
 
 (def instrument-panel (inst)

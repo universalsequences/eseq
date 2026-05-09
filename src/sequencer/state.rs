@@ -651,15 +651,9 @@ fn remap_snapshot_sidechain_references_after_track_delete(
 
 pub fn default_empty_effect_chain() -> Vec<EffectSlotState> {
     use crate::lisp_effect::MAX_CUSTOM_FX;
-    let filter_desc = EffectDescriptor::builtin_filter();
-    let delay_desc = EffectDescriptor::builtin_delay();
-    let filter_slot = EffectSlotState::new(&filter_desc, 0);
-    let delay_slot = EffectSlotState::new(&delay_desc, 0);
-    let mut chain = vec![filter_slot, delay_slot];
-    for _ in 0..MAX_CUSTOM_FX {
-        chain.push(EffectSlotState::empty());
-    }
-    chain
+    (0..MAX_CUSTOM_FX)
+        .map(|_| EffectSlotState::empty())
+        .collect()
 }
 
 pub struct PatternState {
@@ -2773,5 +2767,15 @@ mod tests {
         let (all_again, tracks_again) = state.take_accumulator_reset_requests();
         assert!(!all_again);
         assert!(!tracks_again[1]);
+    }
+
+    #[test]
+    fn default_empty_effect_chain_has_no_builtin_nodes() {
+        let chain = default_empty_effect_chain();
+        assert_eq!(chain.len(), crate::lisp_effect::MAX_CUSTOM_FX);
+        for slot in chain {
+            assert_eq!(slot.node_id.load(Ordering::Relaxed), 0);
+            assert_eq!(slot.num_params.load(Ordering::Relaxed), 0);
+        }
     }
 }

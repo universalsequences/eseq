@@ -39,6 +39,9 @@ impl App {
                 .ui
                 .effect_tab_cursor
                 .min(entries.len().saturating_sub(1));
+            if let Some(EffectPaneEntry::Tab(tab)) = entries.get(self.ui.effect_tab_cursor) {
+                self.ui.effect_tab = *tab;
+            }
         }
     }
 
@@ -573,13 +576,13 @@ impl App {
     }
 
     fn update_delay_time_param_kind(&mut self) {
-        const DELAY_SLOT: usize = 1;
         const SYNCED_PARAM: usize = 1;
         const TIME_PARAM: usize = 2;
 
-        if self.ui.effect_tab != EffectTab::Slot(DELAY_SLOT)
-            || self.ui.effect_param_cursor != SYNCED_PARAM
-        {
+        let EffectTab::Slot(slot_idx) = self.ui.effect_tab else {
+            return;
+        };
+        if self.ui.effect_param_cursor != SYNCED_PARAM {
             return;
         }
 
@@ -589,7 +592,7 @@ impl App {
             .pattern
             .effect_chains
             .get(track)
-            .and_then(|c| c.get(DELAY_SLOT))
+            .and_then(|c| c.get(slot_idx))
         {
             Some(s) => s,
             None => return,
@@ -600,11 +603,14 @@ impl App {
             .graph
             .effect_descriptors
             .get_mut(track)
-            .and_then(|d| d.get_mut(DELAY_SLOT))
+            .and_then(|d| d.get_mut(slot_idx))
         {
             Some(d) => d,
             None => return,
         };
+        if desc.name != "Delay" {
+            return;
+        }
         if TIME_PARAM >= desc.params.len() {
             return;
         }
@@ -621,7 +627,7 @@ impl App {
                 self,
                 AppCommand::SetEffectParam {
                     track,
-                    slot_idx: DELAY_SLOT,
+                    slot_idx,
                     param_idx: TIME_PARAM,
                     value: 6.0,
                 },
@@ -636,7 +642,7 @@ impl App {
                 self,
                 AppCommand::SetEffectParam {
                     track,
-                    slot_idx: DELAY_SLOT,
+                    slot_idx,
                     param_idx: TIME_PARAM,
                     value: 250.0,
                 },

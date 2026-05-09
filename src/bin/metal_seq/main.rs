@@ -532,6 +532,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "add-track-sampler" => match app.graph_controller().add_blank_sampler_track() {
+                        Ok(idx) => {
+                            current_track.store(idx, Ordering::Relaxed);
+                            let new_name = app.tracks[idx].clone();
+                            track_names.push(new_name.clone());
+                            {
+                                let mut pan_ids = track_pan_ids.lock().unwrap();
+                                pan_ids.push(app.graph.track_node_ids[idx].pan_id);
+                                push_solo_mutes(lg_raw, &state, &pan_ids);
+                            }
+                            record_armed.lock().unwrap().push(false);
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "num-tracks",
+                                Value::Number(track_names.len() as f64),
+                            );
+                            rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
+                            rt.set_reactive("SEQ", "current-track", Value::Number(idx as f64));
+                            rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
+                            sync_all_track_sequencer_state(rt, &state, &app);
+                            rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
+                            sync_step_param_lists(rt, &state, idx);
+                            sync_track_mixer_state(rt, &app, &state);
+                            sync_bus_mixer_state(rt, &app);
+                            sync_track_peak_fields(rt, &cached_track_peak_levels);
+                            sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                            rt.set_reactive(
+                                "SEQ",
+                                "effects",
+                                build_effects_value(
+                                    &state,
+                                    idx,
+                                    &app.graph.effect_descriptors,
+                                    &selected_steps,
+                                ),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "midi-effects",
+                                build_midi_effects_value(&state, idx, &selected_steps),
+                            );
+                            rt.set_reactive(
+                                "SEQ",
+                                "instrument-panel",
+                                build_instrument_panel_value(&app, idx, &selected_steps),
+                            );
+                            *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                            sync_track_params(rt, &app, &state, idx, &selected_steps);
+                            rt.set_reactive(
+                                "SEQ",
+                                "step-has-plocks",
+                                build_step_has_plocks(&state, idx, &app.graph.effect_descriptors),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Added sampler track {}: {new_name}",
+                                idx + 1
+                            )));
+                        }
+                        Err(e) => {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Error adding sampler track: {e}"
+                            )));
+                        }
+                    },
                     "add-track-sample" => {
                         let path_str = extract_path_from_payload(&payload);
                         if let Some(path_str) = path_str {
@@ -1076,7 +1144,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         _ => None,
                                     })
                                     .or_else(|| {
-                                        (slot_idx == 1 && param_idx == 2).then(|| {
+                                        let is_delay_time = app
+                                            .graph
+                                            .effect_descriptors
+                                            .get(track)
+                                            .and_then(|d| d.get(slot_idx))
+                                            .map(|d| d.name == "Delay")
+                                            .unwrap_or(false)
+                                            && param_idx == 2;
+                                        is_delay_time.then(|| {
                                             sequencer::effects::SyncDivision::ALL
                                                 .iter()
                                                 .position(|div| div.label() == label)
@@ -2043,7 +2119,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         _ => None,
                                     })
                                     .or_else(|| {
-                                        (slot_idx == 1 && param_idx == 2).then(|| {
+                                        let is_delay_time = app
+                                            .graph
+                                            .effect_descriptors
+                                            .get(track)
+                                            .and_then(|d| d.get(slot_idx))
+                                            .map(|d| d.name == "Delay")
+                                            .unwrap_or(false)
+                                            && param_idx == 2;
+                                        is_delay_time.then(|| {
                                             sequencer::effects::SyncDivision::ALL
                                                 .iter()
                                                 .position(|div| div.label() == label)

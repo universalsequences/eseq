@@ -390,7 +390,7 @@ impl App {
                 }
             }
         }
-        (self.graph.track_node_ids[track].filter_id, 2)
+        (self.graph.track_node_ids[track].delay_id, 2)
     }
 
     fn resolve_custom_slot_wiring(

@@ -8,8 +8,9 @@ use crate::sequencer::MAX_STEPS;
 /// instrument sizes so defaults/plocks/node indices stay aligned.
 pub const MAX_SLOT_PARAMS: usize = 128;
 
-/// Number of fixed built-in effect slots (Filter, Delay). Slots at this index or higher are insert/custom.
-pub const BUILTIN_SLOT_COUNT: usize = 2;
+/// Number of fixed built-in effect slots. Built-ins are now ordinary inserts,
+/// so track effect chains start at slot 0.
+pub const BUILTIN_SLOT_COUNT: usize = 0;
 
 /// NaN sentinel stored as bits — means "no p-lock override".
 const NAN_BITS: u32 = f32::NAN.to_bits();
@@ -413,6 +414,33 @@ mod tests {
             -0.3
         );
     }
+
+    #[test]
+    fn default_full_chain_contains_only_empty_insert_slots() {
+        let chain = EffectDescriptor::default_full_chain();
+        assert_eq!(chain.len(), crate::lisp_effect::MAX_CUSTOM_FX);
+        assert!(chain.iter().all(|desc| desc.name.is_empty()));
+        assert!(chain.iter().all(|desc| desc.params.is_empty()));
+    }
+
+    #[test]
+    fn manually_inserted_filter_and_delay_default_to_enabled() {
+        let filter = EffectDescriptor::builtin_insert("Filter").unwrap();
+        let delay = EffectDescriptor::builtin_insert("Delay").unwrap();
+        let filter_enabled = filter
+            .params
+            .iter()
+            .find(|param| param.name == "enabled")
+            .unwrap();
+        let delay_enabled = delay
+            .params
+            .iter()
+            .find(|param| param.name == "enabled")
+            .unwrap();
+
+        assert_eq!(filter_enabled.default, 1.0);
+        assert_eq!(delay_enabled.default, 1.0);
+    }
 }
 
 // ── EffectDescriptor ──
@@ -503,7 +531,7 @@ impl EffectDescriptor {
             input_channels: 2,
             output_channels: 2,
             params: vec![
-                Self::enabled_param(crate::filter::FILTER_PARAM_ENABLED as u32, 0.0),
+                Self::enabled_param(crate::filter::FILTER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
                     name: "mode".to_string(),
                     min: 0.0,
@@ -779,7 +807,7 @@ impl EffectDescriptor {
                     node_param_idx: 5,
                     host_control: None,
                 },
-                Self::enabled_param(crate::delay::DELAY_PARAM_ENABLED as u32, 0.0),
+                Self::enabled_param(crate::delay::DELAY_PARAM_ENABLED as u32, 1.0),
             ],
         }
     }
@@ -1183,12 +1211,12 @@ impl EffectDescriptor {
         }
     }
 
-    /// Default effect chain descriptors: [Filter, Delay].
+    /// Default fixed effect chain descriptors.
     pub fn default_chain() -> Vec<Self> {
-        vec![Self::builtin_filter(), Self::builtin_delay()]
+        Vec::new()
     }
 
-    /// Full default chain: [Filter, Delay] + MAX_CUSTOM_FX empty slots.
+    /// Full default chain: MAX_CUSTOM_FX empty insert slots.
     pub fn default_full_chain() -> Vec<Self> {
         let mut chain = Self::default_chain();
         for _ in 0..crate::lisp_effect::MAX_CUSTOM_FX {

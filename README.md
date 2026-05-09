@@ -10,7 +10,7 @@ A terminal-based step sequencer for sample playback, built in Rust with a lock-f
 - **Step sequencer** with up to 64 tracks and 64 steps per track
 - **Per-step parameter locks** (p-locks) for duration, velocity, transpose, chop, and two aux sends
 - **Multi-pattern bank** with clone, delete, and instant switching
-- **Per-track effects chain**: built-in filter and delay, plus custom DSP effects written in a Lisp dialect (DGenLisp) that hot-compile into the audio graph
+- **Per-track effects chain**: manually added built-in and custom DSP effects written in a Lisp dialect (DGenLisp) that hot-compile into the audio graph
 - **Embedded control Lisp via `eseqlisp`** for scratch scripting, hook-based pattern automation, and in-app instrument/effect editing
 - **Global reverb bus** with per-track send levels
 - **Polyphonic voice pool** with chord recording
@@ -99,7 +99,7 @@ On first launch, tinyseq creates `samples/` and `effects/` directories in the wo
 
 | Key | Action |
 |-----|--------|
-| `Left` / `Right` | Switch between effect slots (Filter, Delay, custom, Reverb) |
+| `Left` / `Right` | Switch between loaded effect slots and Reverb |
 | `Up` / `Down` | Navigate effect parameters |
 | `Shift+Up` / `Shift+Down` | Adjust parameter value |
 | `Enter` | Toggle on/off or cycle enum values |
