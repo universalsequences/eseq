@@ -3603,6 +3603,126 @@ fn focusable_timeline_click_still_dispatches_pointer_selection_before_drag() {
 }
 
 #[test]
+fn focusable_timeline_mouse_down_does_not_scroll_before_drag_gesture() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 13);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def last-action (state nil))
+                (effect
+                  (timeline
+                    :height 35
+                    :focusable true
+                    :lane-height 1
+                    :lanes (list
+                      (dict :id 0 :label "L0") (dict :id 1 :label "L1")
+                      (dict :id 2 :label "L2") (dict :id 3 :label "L3")
+                      (dict :id 4 :label "L4") (dict :id 5 :label "L5")
+                      (dict :id 6 :label "L6") (dict :id 7 :label "L7")
+                      (dict :id 8 :label "L8") (dict :id 9 :label "L9")
+                      (dict :id 10 :label "L10") (dict :id 11 :label "L11")
+                      (dict :id 12 :label "L12") (dict :id 13 :label "L13")
+                      (dict :id 14 :label "L14") (dict :id 15 :label "L15")
+                      (dict :id 16 :label "L16") (dict :id 17 :label "L17")
+                      (dict :id 18 :label "L18") (dict :id 19 :label "L19"))
+                    :items (list)
+                    :view-start 0
+                    :view-duration 16
+                    :on-action |e| (set! last-action e)))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 13);
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 5),
+        1,
+        1,
+        40,
+        13,
+    );
+
+    assert_eq!(
+        editor.widget_scroll_top(),
+        0.0,
+        "mouse down focus must not move widget scroll before gesture capture"
+    );
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 12, 7),
+        1,
+        1,
+        40,
+        13,
+    );
+
+    let action = editor.runtime.eval_str("last-action").unwrap().unwrap();
+    assert_eq!(
+        super::get_map_field_keyword(&action, "type"),
+        Some("marquee-select".to_string())
+    );
+    assert_eq!(super::get_map_field_number(&action, "lane-a"), Some(3.0));
+    assert_eq!(super::get_map_field_number(&action, "lane-b"), Some(5.0));
+}
+
+#[test]
+fn ui_only_widget_scrolls_when_content_is_taller_than_viewport() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(20, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect
+                  (box :width :fill :height 20
+                    (label "tall content")))
+                "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(20, 8);
+
+    editor.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 2, 2), 1, 1, 20, 8);
+
+    assert!(
+        editor.widget_scroll_top() > 0.0,
+        "UI-only overflow content should allow vertical widget scrolling"
+    );
+}
+
+#[test]
+fn ui_only_widget_does_not_scroll_when_content_exactly_fits_viewport() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(20, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect
+                  (box :width :fill :height 8.4
+                    (label "fitting content")))
+                "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(20, 8);
+    editor.active_leaf_mut().widget_viewport_height = 8.4;
+
+    editor.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 2, 2), 1, 1, 20, 8);
+
+    assert_eq!(
+        editor.widget_scroll_top(),
+        0.0,
+        "UI-only content that exactly fits the viewport should not scroll"
+    );
+}
+
+#[test]
 fn timeline_drag_item_edge_emits_resize_action() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

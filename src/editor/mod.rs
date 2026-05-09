@@ -60,6 +60,28 @@ fn metal_tile_content_viewport(
     (cols.max(1), rows.max(1))
 }
 
+fn metal_tile_content_viewport_height_exact(
+    rect: &Rect,
+    show_status: bool,
+    show_border: bool,
+    border_width_px: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> f32 {
+    let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
+    let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
+    let border_inset_px = if show_border {
+        border_width_px
+            .max(0.0)
+            .min(tile_width_px * 0.5)
+            .min(tile_height_px * 0.5)
+    } else {
+        0.0
+    };
+    (rect.height - border_inset_px * 2.0 / cell_h.max(1.0) - if show_status { 1.0 } else { 0.0 })
+        .max(0.0)
+}
+
 fn widget_only_scratch_buffer_should_show_ui(buffer: &Buffer) -> bool {
     buffer.widget_tree.is_some()
         && buffer.path.is_none()
@@ -432,6 +454,31 @@ impl Editor {
         self.cached_tile_rects =
             self.tile_root
                 .compute_rects(area, TILE_GAP_PX_PER_UNIT, cell_w, cell_h);
+        let viewport_heights: Vec<(TileId, f32)> = self
+            .cached_tile_rects
+            .iter()
+            .filter_map(|(tile_id, rect)| {
+                let leaf = self.tile_root.find_leaf(*tile_id)?;
+                let buffer = self.buffers.get(leaf.buffer_idx)?;
+                let show_status = leaf.show_status || buffer.view_mode != ViewMode::UiOnly;
+                Some((
+                    *tile_id,
+                    metal_tile_content_viewport_height_exact(
+                        rect,
+                        show_status,
+                        leaf.show_border,
+                        leaf.border_width_px,
+                        cell_w,
+                        cell_h,
+                    ),
+                ))
+            })
+            .collect();
+        for (tile_id, viewport_height) in viewport_heights {
+            if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
+                leaf.widget_viewport_height = viewport_height;
+            }
+        }
         // If rects changed, invalidate all inactive tile layouts so they recompute
         if old_rects != self.cached_tile_rects {
             let mut buf_indices: Vec<usize> = Vec::new();
@@ -1826,7 +1873,12 @@ impl Editor {
 
     /// Combined vertical scroll: widget scroll + text scroll.
     pub fn total_scroll_top(&self) -> f32 {
-        self.widget_scroll_top() + self.active_buffer().scroll_top as f32
+        let text_scroll = if self.active_buffer().view_mode == ViewMode::UiOnly {
+            0.0
+        } else {
+            self.active_buffer().scroll_top as f32
+        };
+        self.widget_scroll_top() + text_scroll
     }
 
     /// Whether widget viewport scrolling should be smooth (sub-cell).
@@ -1838,15 +1890,17 @@ impl Editor {
 
     pub(super) fn max_widget_vertical_scroll(&self) -> f32 {
         const SCROLL_SLOP_ROWS: f32 = 0.5;
-        let viewport_rows = self.runtime.layout_rows() as f32;
+        let viewport_rows = self.active_leaf().widget_viewport_height.max(0.0);
+        let viewport_rows = if viewport_rows > 0.0 {
+            viewport_rows
+        } else {
+            self.runtime.layout_rows() as f32
+        };
         let overflow = self
             .runtime
             .current_layout
             .as_ref()
-            .map(|layout| {
-                crate::ui::hit::max_extent(layout, self.runtime.layout_aspect()).1 as f32
-                    - viewport_rows
-            })
+            .map(|layout| max_layout_bottom(layout.as_ref()) - viewport_rows)
             .unwrap_or(0.0);
         if overflow <= SCROLL_SLOP_ROWS {
             0.0
@@ -5131,6 +5185,14 @@ fn debug_is_symbol_byte(byte: u8) -> bool {
             ch,
             '(' | ')' | '[' | ']' | '{' | '}' | '"' | '\'' | ';' | '#'
         )
+}
+
+fn max_layout_bottom(node: &crate::layout::LayoutNode) -> f32 {
+    node.children
+        .iter()
+        .fold(node.rect.row + node.rect.height, |bottom, child| {
+            bottom.max(max_layout_bottom(child))
+        })
 }
 
 #[cfg(test)]

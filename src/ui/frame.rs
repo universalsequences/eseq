@@ -258,6 +258,7 @@ pub fn build_render_frame(
     viewport_height: usize,
 ) -> RenderFrame {
     editor.set_layout_viewport(viewport_width as u16, viewport_height as u16);
+    editor.active_leaf_mut().widget_viewport_height = viewport_height as f32;
     editor.clamp_widget_scroll_offsets();
     if let Some(layout) = editor.widget_layout() {
         let aspect = editor.layout_aspect();
@@ -441,6 +442,12 @@ pub fn build_render_frame(
         _ => (editor.widget_layout(), editor.focused_widget_id()),
     };
 
+    let frame_text_scroll_top = if view_mode == ViewMode::UiOnly {
+        0
+    } else {
+        scroll_top
+    };
+
     RenderFrame {
         lines: frame_lines,
         cursor: frame_cursor,
@@ -457,7 +464,7 @@ pub fn build_render_frame(
         focused_widget_id: frame_focused_id,
         widget_scroll_top: editor.widget_scroll_top(),
         widget_scroll_left: editor.widget_scroll_left(),
-        text_scroll_top: scroll_top,
+        text_scroll_top: frame_text_scroll_top,
     }
 }
 
@@ -504,14 +511,14 @@ fn metal_content_cells(logical_extent: f32) -> usize {
     logical_extent.max(0.0).floor() as usize
 }
 
-fn metal_tile_inner_cells(
+fn metal_tile_inner_extents(
     rect: Rect,
     show_status: bool,
     show_border: bool,
     border_width_px: f32,
     cell_w: f32,
     cell_h: f32,
-) -> (usize, usize) {
+) -> (f32, f32) {
     let tile_width_px = rect.width.max(0.0) * cell_w.max(1.0);
     let tile_height_px = rect.height.max(0.0) * cell_h.max(1.0);
     let border_inset_px = if show_border {
@@ -526,6 +533,25 @@ fn metal_tile_inner_cells(
     let content_height = rect.height
         - (border_inset_px * 2.0 / cell_h.max(1.0))
         - if show_status { 1.0 } else { 0.0 };
+    (content_width.max(0.0), content_height.max(0.0))
+}
+
+fn metal_tile_inner_cells(
+    rect: Rect,
+    show_status: bool,
+    show_border: bool,
+    border_width_px: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> (usize, usize) {
+    let (content_width, content_height) = metal_tile_inner_extents(
+        rect,
+        show_status,
+        show_border,
+        border_width_px,
+        cell_w,
+        cell_h,
+    );
     (
         metal_content_cells(content_width),
         metal_content_cells(content_height),
@@ -686,6 +712,7 @@ fn build_tiled_render_frame_impl(
         // Compute inner dimensions
         let inner_width;
         let inner_height;
+        let inner_height_exact;
         if cell_borders {
             // TUI: subtract 1-cell borders on each side
             inner_width = (rect.width.round() as usize).saturating_sub(2);
@@ -694,11 +721,20 @@ fn build_tiled_render_frame_impl(
             } else {
                 (rect.height.round() as usize).saturating_sub(2) // border top/bottom
             };
+            inner_height_exact = inner_height as f32;
         } else {
             // Metal tile rects can be fractional because margins/splits are
             // stored in logical cell units, and the Metal backend clips content
             // inside pixel borders. Lay widgets out to the same inset content
             // rect so :width :fill children do not clip their right edge.
+            let (_, rows_exact) = metal_tile_inner_extents(
+                rect,
+                show_status,
+                show_border,
+                border_width_px,
+                cell_w,
+                cell_h,
+            );
             let (cols, rows) = metal_tile_inner_cells(
                 rect,
                 show_status,
@@ -709,6 +745,11 @@ fn build_tiled_render_frame_impl(
             );
             inner_width = cols;
             inner_height = rows;
+            inner_height_exact = rows_exact;
+        }
+
+        if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+            leaf.widget_viewport_height = inner_height_exact;
         }
 
         let frame_key = (
@@ -899,6 +940,7 @@ fn apply_view_mode(mut frame: RenderFrame, mode: ViewMode) -> RenderFrame {
         ViewMode::UiOnly => {
             frame.lines = vec![];
             frame.cursor = None;
+            frame.text_scroll_top = 0;
         }
         ViewMode::TextOnly => {
             frame.widget_layout = None;

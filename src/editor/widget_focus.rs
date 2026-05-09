@@ -113,7 +113,6 @@ impl Editor {
                     self.active_leaf_mut().focused_widget_id = Some(*id);
                 }
                 self.clear_focus_on_other_tiles();
-                self.adjust_widget_scroll(*row, *height);
                 self.mark_needs_redraw();
                 return self.activate_focused();
             }
@@ -333,11 +332,15 @@ impl Editor {
     }
 
     pub(super) fn adjust_widget_scroll(&mut self, focused_row: f32, focused_height: f32) {
-        let viewport_height = self.runtime.layout_rows();
-        if viewport_height == 0 {
+        let viewport_height = self.active_leaf().widget_viewport_height.max(0.0);
+        let viewport_height = if viewport_height > 0.0 {
+            viewport_height
+        } else {
+            self.runtime.layout_rows() as f32
+        };
+        if viewport_height <= 0.0 {
             return;
         }
-        let viewport_height = viewport_height as f32;
         let focused_top = focused_row.floor();
         let focused_bottom = (focused_row + focused_height).ceil();
         let leaf = self.active_leaf_mut();
@@ -391,6 +394,7 @@ impl Editor {
         leaf.focused_widget_id = None;
         leaf.focused_widget_node = None;
         leaf.widget_scroll_top = 0.0;
+        leaf.widget_viewport_height = 0.0;
         leaf.widget_scroll_left = 0.0;
         leaf.active_widget_gesture = None;
         leaf.cached_layout = None;

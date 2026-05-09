@@ -2013,6 +2013,12 @@ impl Runtime {
                 Vec::new(),
             ))
         });
+        let cached_layout = cached_layout.filter(|layout| {
+            viewport.is_none_or(|(cols, rows)| {
+                (layout.rect.width - cols as f32).abs() < 0.5
+                    && (layout.rect.height - rows as f32).abs() < 0.5
+            })
+        });
         if let Some(layout) = cached_layout {
             self.current_layout = Some(layout);
             self.layout_revision = layout_revision.wrapping_add(1);
