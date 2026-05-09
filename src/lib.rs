@@ -53,6 +53,8 @@ pub mod crash;
 #[allow(dead_code)]
 mod delay;
 #[allow(dead_code)]
+mod dj_mixer;
+#[allow(dead_code)]
 mod dynamics;
 #[allow(dead_code)]
 pub mod effects;
@@ -77,6 +79,8 @@ mod scheduler;
 pub mod sequencer;
 #[allow(dead_code)]
 pub mod stereo_panner;
+#[allow(dead_code)]
+mod str8_delay;
 pub mod ui;
 #[allow(dead_code)]
 mod voice;

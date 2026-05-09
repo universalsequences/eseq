@@ -40,6 +40,38 @@ pub(crate) fn build_all_track_num_steps_value(state: &Arc<SequencerState>, app: 
     Value::List(items)
 }
 
+fn build_track_duration_spans_value(state: &Arc<SequencerState>, track: usize) -> Value {
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    let spans: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
+        .map(|target_step| {
+            let covered = target_step < num_steps
+                && (0..=target_step).any(|source_step| {
+                    if !state.pattern.patterns[track].is_active(source_step) {
+                        return false;
+                    }
+                    let duration = state.pattern.step_data[track]
+                        .get(source_step, StepParam::Duration)
+                        .max(0.0);
+                    duration > (target_step - source_step) as f32
+                });
+            Rc::new(RefCell::new(Value::Bool(covered)))
+        })
+        .collect();
+    Value::List(spans)
+}
+
+pub(crate) fn build_all_track_duration_spans_value(
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+) -> Value {
+    let tracks: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
+        .map(|track| Rc::new(RefCell::new(build_track_duration_spans_value(state, track))))
+        .collect();
+    Value::List(tracks)
+}
+
 pub(crate) fn build_all_track_playheads_value(state: &Arc<SequencerState>, app: &ui::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
         .map(|t| {
@@ -193,6 +225,11 @@ pub(crate) fn sync_all_track_sequencer_state(
         "SEQ",
         "track-num-steps",
         build_all_track_num_steps_value(state, app),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "track-duration-spans",
+        build_all_track_duration_spans_value(state, app),
     );
     rt.set_reactive(
         "SEQ",
@@ -905,6 +942,7 @@ pub(crate) fn sync_track_topology_state(
         rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
+        rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
         rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
@@ -2985,6 +3023,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn metal_seq_builtin_fx_ui_lisp_loads() {
+        let mut runtime = Runtime::new();
+        let loaded = runtime
+            .eval_str(r#"(load "metal-seq-builtin-fx-ui.lisp")"#)
+            .expect("load builtin fx ui lisp")
+            .expect("load should return a value");
+        assert!(
+            !matches!(&loaded, Value::String(s) if s.starts_with("load:")),
+            "builtin fx ui load failed: {loaded:?}"
+        );
+        runtime
+            .eval_str("builtin-audio-fx-ui")
+            .expect("builtin-audio-fx-ui should be defined");
+    }
+
     fn browser_editor_on_instrument_tab() -> eseqlisp::Editor {
         let src = std::fs::read_to_string("metal-seq-browser.lisp").expect("read browser lisp");
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -3659,6 +3713,18 @@ mod tests {
                 .sum::<usize>()
     }
 
+    fn count_stable_key_prefix(node: &eseqlisp::layout::LayoutNode, prefix: &str) -> usize {
+        usize::from(
+            node.stable_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with(prefix)),
+        ) + node
+            .children
+            .iter()
+            .map(|child| count_stable_key_prefix(child, prefix))
+            .sum::<usize>()
+    }
+
     fn layout_contains_debug_name(node: &eseqlisp::layout::LayoutNode, needle: &str) -> bool {
         matches!(node.props.get("debug-name"), Some(Value::String(name)) if name.contains(needle))
             || node
@@ -3775,6 +3841,30 @@ mod tests {
         ]
     }
 
+    fn test_str8_delay_params() -> Vec<Value> {
+        let divs = vec![
+            "1/32", "1/16", "1/16t", "1/8", "1/8t", "1/8.", "1/4", "1/4t", "1/4.", "1/2", "1",
+        ];
+        vec![
+            Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("wet", 1, 0.5, 0.0, 1.0)),
+            Value::Map(test_param_map("feedback", 2, 0.5, 0.0, 0.95)),
+            Value::Map(test_param_map("left sync", 3, 1.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map("left div", 4, 6.0, divs.clone())),
+            Value::Map(test_param_map("left offset", 5, 0.0, -0.5, 0.5)),
+            Value::Map(test_param_map("left time", 6, 250.0, 1.0, 2000.0)),
+            Value::Map(test_param_map("right sync", 7, 1.0, 0.0, 1.0)),
+            Value::Map(test_enum_param_map("right div", 8, 6.0, divs)),
+            Value::Map(test_param_map("right offset", 9, 0.0, -0.5, 0.5)),
+            Value::Map(test_param_map("right time", 10, 250.0, 1.0, 2000.0)),
+            Value::Map(test_param_map("filter freq", 11, 1140.0, 20.0, 20000.0)),
+            Value::Map(test_param_map("filter width", 12, 4.5, 0.25, 6.0)),
+            Value::Map(test_param_map("mod rate", 13, 0.5, 0.01, 20.0)),
+            Value::Map(test_param_map("mod amount", 14, 0.0, 0.0, 1.0)),
+            Value::Map(test_param_map("mod phase", 15, 0.5, 0.0, 1.0)),
+        ]
+    }
+
     fn test_fx_map(
         name: &str,
         slot_idx: usize,
@@ -3864,6 +3954,37 @@ mod tests {
 
     fn test_bool_list(values: &[bool]) -> Value {
         test_list(values.iter().copied().map(Value::Bool).collect())
+    }
+
+    fn bool_list_values(value: &Value) -> Vec<bool> {
+        match value {
+            Value::List(items) => items
+                .iter()
+                .map(|item| match &*item.borrow() {
+                    Value::Bool(value) => *value,
+                    other => panic!("expected bool list item, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected bool list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duration_spans_cover_steps_held_by_active_sources() {
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let track = 0;
+        state.pattern.patterns[track].set_step_active(0, true);
+        state.pattern.patterns[track].set_step_active(3, true);
+        state.pattern.step_data[track].set(0, StepParam::Duration, 2.0);
+        state.pattern.step_data[track].set(3, StepParam::Duration, 0.5);
+
+        let spans = bool_list_values(&build_track_duration_spans_value(&state, track));
+
+        assert!(spans[0]);
+        assert!(spans[1]);
+        assert!(!spans[2]);
+        assert!(spans[3]);
+        assert!(!spans[4]);
     }
 
     fn test_string_list(values: &[&str]) -> Value {
@@ -3979,6 +4100,10 @@ mod tests {
                 ("track-bus-sends", test_list(vec![one_track_bus_sends])),
                 ("track-steps", test_list(vec![steps.clone()])),
                 ("track-num-steps", test_number_list(&[16.0])),
+                (
+                    "track-duration-spans",
+                    test_list(vec![test_bool_list(&[false; 16])]),
+                ),
                 (
                     "track-step-has-plocks",
                     test_list(vec![empty_plocks.clone()]),
@@ -4216,6 +4341,28 @@ mod tests {
             count_widget_type(&layout, "vslider"),
             16,
             "duration mode should keep rendering one slider per visible step"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_buffer_renders_step_cells() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(140, 20);
+        let layout = editor
+            .widget_layout()
+            .expect("sequencer layout should build");
+
+        assert_eq!(
+            count_stable_key_prefix(&layout, "seqv-step-cell-"),
+            16,
+            "sequencer buffer should render one cell per visible step"
         );
     }
 
@@ -4742,6 +4889,90 @@ mod tests {
         assert!(
             layout_contains_widget_type(&layout, "response-curve-editor"),
             "filter layout should contain the response curve editor"
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_str8_delay_layout_contains_curve_and_offsets() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Str8 Delay".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Str8 Delay",
+                        0,
+                        test_str8_delay_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let delay_ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe str8 delay ui")
+            .expect("str8 delay ui probe value");
+        assert!(
+            value_contains_keyword(&delay_ui_probe, "response-curve-editor"),
+            "str8 delay custom UI probe did not contain response editor: {delay_ui_probe:?}"
+        );
+        assert!(value_contains_string(&delay_ui_probe, "ofs"));
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("str8 delay fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(128, 20);
+        let layout = editor.widget_layout().expect("str8 delay fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Str8 Delay"),
+            "layout should contain the built-in Str8 Delay panel"
+        );
+        assert!(
+            layout_contains_widget_type(&layout, "response-curve-editor"),
+            "layout should contain the response curve editor"
         );
     }
 

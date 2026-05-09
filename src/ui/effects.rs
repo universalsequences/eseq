@@ -507,6 +507,14 @@ impl App {
                 crate::delay::delay_vtable(),
                 crate::delay::DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
             ),
+            "Str8 Delay" => (
+                crate::str8_delay::str8_delay_vtable(),
+                crate::str8_delay::STR8_DELAY_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
+            "DJ Mixer" => (
+                crate::dj_mixer::dj_mixer_vtable(),
+                crate::dj_mixer::DJ_MIXER_STATE_SIZE * std::mem::size_of::<f32>(),
+            ),
             "Reverb" => (
                 crate::reverb::reverb_vtable(),
                 crate::reverb::REVERB_STATE_SIZE * std::mem::size_of::<f32>(),
@@ -584,6 +592,7 @@ impl App {
                 if node_id != 0 {
                     let idx = match desc.name.as_str() {
                         "Delay" => crate::delay::DELAY_PARAM_BPM,
+                        "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
                         "Filter" => crate::filter::FILTER_PARAM_BPM,
                         _ => continue,
                     };
@@ -608,6 +617,7 @@ impl App {
                 if slot.node_id != 0 {
                     let idx = match desc.name.as_str() {
                         "Delay" => crate::delay::DELAY_PARAM_BPM,
+                        "Str8 Delay" => crate::str8_delay::STR8_DELAY_PARAM_BPM,
                         "Filter" => crate::filter::FILTER_PARAM_BPM,
                         _ => continue,
                     };

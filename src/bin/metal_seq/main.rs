@@ -4209,6 +4209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
+                            rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
                         } else {

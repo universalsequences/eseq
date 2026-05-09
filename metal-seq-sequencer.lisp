@@ -48,7 +48,7 @@
             (rgba 0.99 0.15 0.15 1.0)))))))
 
 (defwidget seqv-playhead-row-bar
-  :width 42.3 :height 0.24
+  :width 48.8 :height 0.24
   :paint-margin 0.18
   :state (col)
   :shader
@@ -91,34 +91,39 @@
 
 (defwidget seqv-step-shell
   :width 1.5 :height 1.5
-  :state (active plocked selected)
+  :state (active plocked selected duration)
   :shader
   (let ((border (if (= selected 1)
-                  (rgba 1.0 0.86 0.22 1.0)
-                  (if (= plocked 1)
-                    (rgba 0.95 0.22 0.72 1.0)
-                    (rgba 0.31 0.32 0.40 1.0)))))
+          (rgba 1.0 0.86 0.22 1.0)
+          (if (= plocked 1)
+            (rgba 0.95 0.22 0.72 1.0)
+            (rgba 0.31 0.32 0.40 1.0)))))
     (sdf/layer
-      (sdf/fill (sdf/circle 1.0)
+      (sdf/fill (sdf/rounded-rect (* 1.0 width) (* 1.0 height) 0)
         (material
-          :color border
-          :shadow (shadow
-            :color (if (= selected 1)
-                     (rgba 1.0 0.78 0.16 0.48)
-                     (if (= plocked 1) (rgba 0.85 0.14 0.60 0.42) (rgba 0 0 0 0.35)))
-            :blur (if (= selected 1) 0.20 (if (= plocked 1) 0.15 0.09))
-            :offset (vec2 0 0.02))))
-      (sdf/fill (sdf/circle 0.72)
+          :lighting (lighting :edge-min -0.3 :edge-max 1.3
+            :light (vec3 0.7 -0.8 2.5) :shininess 92.0)
+          :color (if (= duration 1)
+            (aqua-color  
+                 (rgba 0.24 0.34 0.84 0.60)
+              (rgba 0 0 1 1))
+            (rgba 0 0 0 0))))
+      (sdf/fill (sdf/rounded-rect (* 0.8 width) (* 0.8 height) 0.8)
+        (material
+          :lighting (lighting :edge-min -0.3 :edge-max 1.0
+            :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
+          :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
+      (sdf/fill (sdf/rounded-rect (* 0.7 width) (* 0.7 height) 0.62)
         (material
           :color (if (= active 1) (rgba 0.05 0.055 0.075 1.0) (rgba 0.015 0.016 0.025 1.0)))))))
 
 (defwidget seqv-step-dot
-  :width 1.5 :height 1.5
+  :width 2.7 :height 0.6
   :state (active plocked selected)
   :shader
   (if (= active 1)
     (sdf/layer
-      (sdf/fill (sdf/circle 0.48)
+      (sdf/fill (sdf/rounded-rect width height 0.88)
         (material
           :lighting (lighting :edge-min -0.35 :edge-max 0.5
             :light (vec3 0.0 -1.0 1.5) :shininess 32.0)
@@ -175,6 +180,16 @@
 (def sequencer-row-width 16)
 
 (defstate seqv-drag-track nil)
+(defstate seqv-duration-drag-source nil)
+
+(def seqv-duration-edge? (evt)
+  (let ((sx (get evt :sx)))
+    (and (not (= sx nil)) (> sx 0.48))))
+
+(def seqv-set-duration-from-drag (track source step)
+  (do
+    (seq-set-track track)
+    (seq-set-step-param source :duration (max 1 (min 32 (+ (- step source) 1))))))
 
 (def seqv-step-select-drag-start (track step evt)
   (do
@@ -184,34 +199,47 @@
     (step-select-drag-start step evt)))
 
 (def seqv-step-select-drag-over (track step evt)
-  (if (= seqv-drag-track track)
-    (do
-      (seq-set-track track)
-      (step-select-drag-over step evt))
-    nil))
+  (if (and (= seqv-drag-track track) (not (= seqv-duration-drag-source nil)))
+    (seqv-set-duration-from-drag track seqv-duration-drag-source step)
+    (if (= seqv-drag-track track)
+      (do
+        (seq-set-track track)
+        (step-select-drag-over step evt))
+      nil)))
 
-(def seqv-step-pointer-down (track step evt)
+(def seqv-step-pointer-down (track step active evt)
   (do
     (set! selected-bus -1)
     (seq-set-track track)
     (set! seqv-drag-track track)
-    (step-pointer-down step evt)))
+    (if (and active (not (selection-click? evt)) (seqv-duration-edge? evt))
+      (do
+        (set! seqv-duration-drag-source step)
+        (set! step-click-pending nil)
+        (set! step-drag-anchor nil)
+        (set! step-move-last nil)
+        (cool-off-follow)
+        (set! cursor-step step)
+        (seqv-set-duration-from-drag track step step))
+      (step-pointer-down step evt))))
 
 (def seqv-step-pointer-up (track step evt)
   (do
-    (if (= seqv-drag-track track)
+    (if (and (= seqv-drag-track track) (= seqv-duration-drag-source nil))
       (do
         (seq-set-track track)
         (step-pointer-up step evt))
       nil)
-    (set! seqv-drag-track nil)))
+    (set! seqv-drag-track nil)
+    (set! seqv-duration-drag-source nil)))
 
 ;; Single tight step button (no slider, no number).
-(def seqv-step-cell (track step active visible selected? plocked?)
-  (box :width 2.55 :height 1.45 :align :center :padding 0.03
+(def seqv-step-cell (track step active visible selected? plocked? duration?)
+  (box :width 3.05 :height 1.45 :align :center :padding 0.03
+    :key (str "seqv-step-cell-" track "-" step)
     :on-mouse-down (lambda (evt)
       (if visible
-        (seqv-step-pointer-down track step evt)
+        (seqv-step-pointer-down track step active evt)
         nil))
     :on-drag (lambda (evt)
       (if visible
@@ -225,8 +253,9 @@
       :active (if visible (if active 1 0) 0)
       :plocked (if visible (if plocked? 1 0) 0)
       :selected (if visible (if selected? 1 0) 0)
+      :duration (if visible (if duration? 1 0) 0)
       :background "seqv-step-shell"
-      :align :center :width 2.08 :height 1.31
+      :align :center :width 3.08 :height 1.01
       (box :width 1.62 :height 0.98 :align :center
         (seqv-step-dot :active (if visible (if active 1 0) 0)
           :plocked (if visible (if plocked? 1 0) 0)
@@ -241,6 +270,7 @@
 
 (def seqv-track-grid (track-idx)
   (let ((steps (nth SEQ.track-steps track-idx))
+        (duration-spans (nth SEQ.track-duration-spans track-idx))
         (plocks (nth SEQ.track-step-has-plocks track-idx))
         (num-steps (nth SEQ.track-num-steps track-idx))
         (rows (max 1 (floor (/ (+ num-steps (- sequencer-row-width 1)) sequencer-row-width)))))
@@ -248,7 +278,7 @@
       (box :width 0.1 :height 0.12 :bg :transparent)
       (each (range 0 rows) |row|
         (v-stack :gap -0.03
-          (h-stack :gap 0.1
+          (h-stack :gap 0.0
             (each (range 0 sequencer-row-width) |col|
               (let ((step (+ (* row sequencer-row-width) col)))
                 (seqv-step-cell
@@ -259,7 +289,8 @@
                   (and (= track-idx SEQ.current-track)
                     (< step (len SEQ.selected-steps))
                     (nth SEQ.selected-steps step))
-                  (and (< step (len plocks)) (nth plocks step))))))
+                  (and (< step (len plocks)) (nth plocks step))
+                  (and (< step (len duration-spans)) (nth duration-spans step))))))
           (seqv-playhead-row track-idx (nth SEQ.track-ids track-idx) row))))))
 
 (effect-buffer "*sequencer*"

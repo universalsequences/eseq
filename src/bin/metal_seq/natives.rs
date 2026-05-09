@@ -57,6 +57,10 @@ pub(crate) fn init_runtime(
                 ("track-ids", build_track_ids(&app)),
                 ("track-names", build_track_names(&track_names)),
                 (
+                    "track-duration-spans",
+                    build_all_track_duration_spans_value(&state, app),
+                ),
+                (
                     "steps",
                     if track_count == 0 {
                         Value::List(vec![])

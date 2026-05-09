@@ -379,6 +379,8 @@ mod tests {
             &[
                 "Filter",
                 "Delay",
+                "Str8 Delay",
+                "DJ Mixer",
                 "Reverb",
                 "444 Compressor",
                 "Glue Compressor",
@@ -413,6 +415,14 @@ mod tests {
             EffectDescriptor::builtin_insert("Limiter").unwrap().params[1].default,
             -0.3
         );
+        assert_eq!(
+            EffectDescriptor::builtin_insert("str8 delay").unwrap().name,
+            "Str8 Delay"
+        );
+        assert_eq!(
+            EffectDescriptor::builtin_insert("dj mixer").unwrap().name,
+            "DJ Mixer"
+        );
     }
 
     #[test]
@@ -440,6 +450,69 @@ mod tests {
 
         assert_eq!(filter_enabled.default, 1.0);
         assert_eq!(delay_enabled.default, 1.0);
+    }
+
+    #[test]
+    fn builtin_str8_delay_exposes_ableton_style_params() {
+        let desc = EffectDescriptor::builtin_str8_delay();
+        let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "enabled",
+                "wet",
+                "feedback",
+                "left sync",
+                "left div",
+                "left offset",
+                "left time",
+                "right sync",
+                "right div",
+                "right offset",
+                "right time",
+                "filter freq",
+                "filter width",
+                "mod rate",
+                "mod amount",
+                "mod phase",
+            ]
+        );
+        assert_eq!(desc.params[1].default, 0.5);
+        assert_eq!(desc.params[3].default, 1.0);
+        assert_eq!(desc.params[4].default, 6.0);
+        assert_eq!(desc.params[5].min, -0.5);
+        assert_eq!(desc.params[5].max, 0.5);
+        assert_eq!(
+            desc.params[11].node_param_idx,
+            crate::str8_delay::STR8_DELAY_PARAM_FILTER_FREQ as u32
+        );
+        assert_eq!(desc.params[12].max, 6.0);
+        assert_eq!(desc.params[12].default, 4.5);
+        match &desc.params[8].kind {
+            ParamKind::Enum { labels } => assert_eq!(labels[6], "1/4"),
+            other => panic!("right div should be enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builtin_dj_mixer_exposes_sp_style_params() {
+        let desc = EffectDescriptor::builtin_dj_mixer();
+        let names: Vec<&str> = desc.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["enabled", "speed", "length", "loop"]);
+        assert_eq!(desc.input_channels, 2);
+        assert_eq!(desc.output_channels, 2);
+        assert_eq!(desc.params[0].default, 1.0);
+        assert_eq!(desc.params[1].min, -1.0);
+        assert_eq!(desc.params[1].max, 1.0);
+        assert_eq!(desc.params[1].default, 1.0);
+        assert_eq!(desc.params[2].min, 0.012);
+        assert_eq!(desc.params[2].max, 0.230);
+        assert_eq!(desc.params[2].default, 0.230);
+        assert_eq!(desc.params[3].default, 0.0);
+        assert_eq!(
+            desc.params[2].node_param_idx,
+            crate::dj_mixer::DJ_MIXER_PARAM_LENGTH_SEC as u32
+        );
     }
 }
 
@@ -473,6 +546,8 @@ impl EffectDescriptor {
         &[
             "Filter",
             "Delay",
+            "Str8 Delay",
+            "DJ Mixer",
             "Reverb",
             "444 Compressor",
             "Glue Compressor",
@@ -515,6 +590,8 @@ impl EffectDescriptor {
         match Self::canonical_builtin_insert_name(name)? {
             "Filter" => Some(Self::builtin_filter()),
             "Delay" => Some(Self::builtin_delay()),
+            "Str8 Delay" => Some(Self::builtin_str8_delay()),
+            "DJ Mixer" => Some(Self::builtin_dj_mixer()),
             "Reverb" => Some(Self::builtin_reverb_insert()),
             "444 Compressor" => Some(Self::builtin_444_compressor()),
             "Glue Compressor" => Some(Self::builtin_glue_compressor()),
@@ -808,6 +885,247 @@ impl EffectDescriptor {
                     host_control: None,
                 },
                 Self::enabled_param(crate::delay::DELAY_PARAM_ENABLED as u32, 1.0),
+            ],
+        }
+    }
+
+    pub fn builtin_str8_delay() -> Self {
+        let sync_labels = || {
+            vec![
+                "1/32".to_string(),
+                "1/16".to_string(),
+                "1/16t".to_string(),
+                "1/8".to_string(),
+                "1/8t".to_string(),
+                "1/8.".to_string(),
+                "1/4".to_string(),
+                "1/4t".to_string(),
+                "1/4.".to_string(),
+                "1/2".to_string(),
+                "1".to_string(),
+            ]
+        };
+        Self {
+            name: "Str8 Delay".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                Self::enabled_param(crate::str8_delay::STR8_DELAY_PARAM_ENABLED as u32, 1.0),
+                ParamDescriptor {
+                    name: "wet".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_WET as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "feedback".to_string(),
+                    min: 0.0,
+                    max: 0.95,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FEEDBACK as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "left sync".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_SYNC as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "left div".to_string(),
+                    min: 0.0,
+                    max: 10.0,
+                    default: 6.0,
+                    kind: ParamKind::Enum {
+                        labels: sync_labels(),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_DIV as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "left offset".to_string(),
+                    min: -0.5,
+                    max: 0.5,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_OFFSET as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "left time".to_string(),
+                    min: 1.0,
+                    max: 2000.0,
+                    default: 250.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_TIME_MS as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "right sync".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_SYNC as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "right div".to_string(),
+                    min: 0.0,
+                    max: 10.0,
+                    default: 6.0,
+                    kind: ParamKind::Enum {
+                        labels: sync_labels(),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_DIV as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "right offset".to_string(),
+                    min: -0.5,
+                    max: 0.5,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_OFFSET as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "right time".to_string(),
+                    min: 1.0,
+                    max: 2000.0,
+                    default: 250.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_TIME_MS as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "filter freq".to_string(),
+                    min: 20.0,
+                    max: 20000.0,
+                    default: 1140.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FILTER_FREQ as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "filter width".to_string(),
+                    min: 0.25,
+                    max: 6.0,
+                    default: 4.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FILTER_Q as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mod rate".to_string(),
+                    min: 0.01,
+                    max: 20.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_RATE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mod amount".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_AMOUNT as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "mod phase".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous {
+                        unit: Some("%".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_PHASE as u32,
+                    host_control: None,
+                },
+            ],
+        }
+    }
+
+    pub fn builtin_dj_mixer() -> Self {
+        Self {
+            name: "DJ Mixer".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                Self::enabled_param(crate::dj_mixer::DJ_MIXER_PARAM_ENABLED as u32, 1.0),
+                ParamDescriptor {
+                    name: "speed".to_string(),
+                    min: -1.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_SPEED as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "length".to_string(),
+                    min: 0.012,
+                    max: 0.230,
+                    default: 0.230,
+                    kind: ParamKind::Continuous {
+                        unit: Some("s".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_LENGTH_SEC as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "loop".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_LOOP as u32,
+                    host_control: None,
+                },
             ],
         }
     }
