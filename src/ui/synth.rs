@@ -1143,9 +1143,28 @@ impl App {
             self.state.schedule_mod_resync();
         }
         if self.is_sampler_track(track) {
-            if idx != crate::sampler::PARAM_ENABLED {
-                return;
-            }
+            let sample_rate = self.graph.sample_rate as f32;
+            let (idx, fvalue) = match param_idx {
+                0 => (
+                    crate::sampler::PARAM_ATTACK_SAMPLES,
+                    value * sample_rate / 1000.0,
+                ),
+                1 => (
+                    crate::sampler::PARAM_RELEASE_SAMPLES,
+                    value * sample_rate / 1000.0,
+                ),
+                2 => (crate::sampler::PARAM_START_POINT, value),
+                3 => (crate::sampler::PARAM_END_POINT, value),
+                4 => (crate::sampler::PARAM_ENABLED, value),
+                5 => (crate::sampler::PARAM_REVERSE, value),
+                6 => (crate::sampler::PARAM_LOOP_MODE, value),
+                7 => (
+                    crate::sampler::PARAM_LOOP_XFADE_SAMPLES,
+                    value * sample_rate / 1000.0,
+                ),
+                8 => (crate::sampler::PARAM_SR_HZ, value),
+                _ => (idx, value),
+            };
             if let Some(nodes) = self.graph.track_node_ids.get(track) {
                 for &node_id in &nodes.sampler_ids {
                     unsafe {
@@ -1154,7 +1173,7 @@ impl App {
                             crate::audiograph::ParamMsg {
                                 idx,
                                 logical_id: node_id as u64,
-                                fvalue: value,
+                                fvalue,
                             },
                         );
                     }

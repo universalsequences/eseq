@@ -1436,6 +1436,33 @@ pub(crate) fn build_sampler_panel_value(
         .unwrap_or(1.0);
 
     let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let base_note = f32::from_bits(
+        app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+    );
+    {
+        let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        pmap.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("base".to_string()))),
+        );
+        pmap.insert(
+            "control".to_string(),
+            Rc::new(RefCell::new(Value::String("base-note".to_string()))),
+        );
+        pmap.insert(
+            "value".to_string(),
+            Rc::new(RefCell::new(Value::Number(base_note as f64))),
+        );
+        pmap.insert(
+            "min".to_string(),
+            Rc::new(RefCell::new(Value::Number(-48.0))),
+        );
+        pmap.insert(
+            "max".to_string(),
+            Rc::new(RefCell::new(Value::Number(48.0))),
+        );
+        params.push(Rc::new(RefCell::new(Value::Map(pmap))));
+    }
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
         let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
             slot.defaults.get(param_idx)
@@ -1455,6 +1482,10 @@ pub(crate) fn build_sampler_panel_value(
             Rc::new(RefCell::new(Value::Number(param_idx as f64))),
         );
         pmap.insert(
+            "control".to_string(),
+            Rc::new(RefCell::new(Value::String("param".to_string()))),
+        );
+        pmap.insert(
             "value".to_string(),
             Rc::new(RefCell::new(Value::Number(
                 pdesc.stored_to_user(current_val) as f64,
@@ -1472,6 +1503,34 @@ pub(crate) fn build_sampler_panel_value(
                 pdesc.stored_to_user(pdesc.max) as f64
             ))),
         );
+        match &pdesc.kind {
+            sequencer::effects::ParamKind::Boolean => {
+                pmap.insert(
+                    "boolean".to_string(),
+                    Rc::new(RefCell::new(Value::Bool(true))),
+                );
+            }
+            sequencer::effects::ParamKind::Enum { labels } => {
+                let selected = labels
+                    .get(current_val.round() as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let option_values = labels
+                    .iter()
+                    .cloned()
+                    .map(|label| Rc::new(RefCell::new(Value::String(label))))
+                    .collect();
+                pmap.insert(
+                    "text-value".to_string(),
+                    Rc::new(RefCell::new(Value::String(selected))),
+                );
+                pmap.insert(
+                    "options".to_string(),
+                    Rc::new(RefCell::new(Value::List(option_values))),
+                );
+            }
+            sequencer::effects::ParamKind::Continuous { .. } => {}
+        }
         params.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
 

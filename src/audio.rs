@@ -14,8 +14,9 @@ use crate::gatepitch;
 use crate::recorder::MasterRecorder;
 use crate::sampler::{
     PARAM_ATTACK_SAMPLES, PARAM_ENABLED, PARAM_END_POINT, PARAM_GATE_MODE, PARAM_GATE_SAMPLES,
-    PARAM_PLAYHEAD, PARAM_RELEASE_SAMPLES, PARAM_SPEED, PARAM_START_POINT, PARAM_TRANSPOSE,
-    PARAM_TRIGGER, PARAM_VELOCITY,
+    PARAM_LOOP_MODE, PARAM_LOOP_XFADE_SAMPLES, PARAM_PLAYHEAD, PARAM_RELEASE_SAMPLES,
+    PARAM_REVERSE, PARAM_SPEED, PARAM_SR_HZ, PARAM_START_POINT, PARAM_TRANSPOSE, PARAM_TRIGGER,
+    PARAM_VELOCITY,
 };
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
@@ -494,6 +495,10 @@ unsafe fn send_trigger(
     start_point: f32,
     end_point: f32,
     enabled: f32,
+    reverse: f32,
+    loop_mode: f32,
+    loop_xfade_samples: f32,
+    sr_hz: f32,
 ) {
     params_push_wrapper(
         lg,
@@ -578,6 +583,38 @@ unsafe fn send_trigger(
     params_push_wrapper(
         lg,
         ParamMsg {
+            idx: PARAM_REVERSE,
+            logical_id: lid,
+            fvalue: reverse,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_LOOP_MODE,
+            logical_id: lid,
+            fvalue: loop_mode,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_LOOP_XFADE_SAMPLES,
+            logical_id: lid,
+            fvalue: loop_xfade_samples,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_SR_HZ,
+            logical_id: lid,
+            fvalue: sr_hz,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
             idx: PARAM_PLAYHEAD,
             logical_id: lid,
             fvalue: 0.0,
@@ -605,6 +642,10 @@ unsafe fn send_keyboard_trigger(
     start_point: f32,
     end_point: f32,
     enabled: f32,
+    reverse: f32,
+    loop_mode: f32,
+    loop_xfade_samples: f32,
+    sr_hz: f32,
 ) {
     params_push_wrapper(
         lg,
@@ -684,6 +725,38 @@ unsafe fn send_keyboard_trigger(
             idx: PARAM_END_POINT,
             logical_id: lid,
             fvalue: end_point,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_REVERSE,
+            logical_id: lid,
+            fvalue: reverse,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_LOOP_MODE,
+            logical_id: lid,
+            fvalue: loop_mode,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_LOOP_XFADE_SAMPLES,
+            logical_id: lid,
+            fvalue: loop_xfade_samples,
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: PARAM_SR_HZ,
+            logical_id: lid,
+            fvalue: sr_hz,
         },
     );
     params_push_wrapper(
@@ -1298,7 +1371,7 @@ fn fire_resolved(
     let total_gate = (resolved.duration as f64 * samples_per_step) as f32;
     let chop_gate = total_gate / chop as f32;
 
-    // Envelope and sampler params from instrument slot (params 0-3)
+    // Envelope and sampler params from instrument slot.
     let inst_slot = &data.state.pattern.instrument_slots[track_idx];
     let attack_ms = inst_slot
         .plocks
@@ -1323,6 +1396,24 @@ fn fire_resolved(
         .plocks
         .get(step, 4)
         .unwrap_or_else(|| inst_slot.defaults.get(4));
+    let reverse = inst_slot
+        .plocks
+        .get(step, 5)
+        .unwrap_or_else(|| inst_slot.defaults.get(5));
+    let loop_mode = inst_slot
+        .plocks
+        .get(step, 6)
+        .unwrap_or_else(|| inst_slot.defaults.get(6));
+    let loop_xfade_samples = inst_slot
+        .plocks
+        .get(step, 7)
+        .unwrap_or_else(|| inst_slot.defaults.get(7))
+        * data.sample_rate as f32
+        / 1000.0;
+    let sr_hz = inst_slot
+        .plocks
+        .get(step, 8)
+        .unwrap_or_else(|| inst_slot.defaults.get(8));
     let velocity = resolved.velocity;
     let base_note_offset = f32::from_bits(
         data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
@@ -1482,10 +1573,14 @@ fn fire_resolved(
                         attack_samples,
                         release_samples,
                         gate_mode,
-                        transpose,
+                        transpose + base_note_offset,
                         start_point,
                         end_point,
                         instrument_enabled,
+                        reverse,
+                        loop_mode,
+                        loop_xfade_samples,
+                        sr_hz,
                     );
                 }
             }
@@ -1591,10 +1686,14 @@ fn fire_resolved(
                     attack_samples,
                     release_samples,
                     gate_mode,
-                    transpose,
+                    transpose + base_note_offset,
                     start_point,
                     end_point,
                     instrument_enabled,
+                    reverse,
+                    loop_mode,
+                    loop_xfade_samples,
+                    sr_hz,
                 );
             }
         }
@@ -1822,11 +1921,16 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let kb_start = kb_inst_slot.defaults.get(2);
                 let kb_end = kb_inst_slot.defaults.get(3);
                 let kb_enabled = kb_inst_slot.defaults.get(4);
+                let kb_reverse = kb_inst_slot.defaults.get(5);
+                let kb_loop_mode = kb_inst_slot.defaults.get(6);
+                let kb_loop_xfade_samples =
+                    kb_inst_slot.defaults.get(7) * data.sample_rate as f32 / 1000.0;
+                let kb_sr_hz = kb_inst_slot.defaults.get(8);
                 unsafe {
                     send_keyboard_trigger(
                         data.lg.0,
                         voice_lid,
-                        resolved_transpose,
+                        resolved_transpose + base_note_offset,
                         kt.velocity,
                         attack_samples,
                         release_samples,
@@ -1834,6 +1938,10 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         kb_start,
                         kb_end,
                         kb_enabled,
+                        kb_reverse,
+                        kb_loop_mode,
+                        kb_loop_xfade_samples,
+                        kb_sr_hz,
                     );
                 }
                 store_active_keyboard_note(
@@ -1946,6 +2054,27 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 .plocks
                 .get(cs.step, 3)
                 .unwrap_or_else(|| chop_inst_slot.defaults.get(3));
+            let chop_reverse = chop_inst_slot
+                .plocks
+                .get(cs.step, 5)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(5));
+            let chop_loop_mode = chop_inst_slot
+                .plocks
+                .get(cs.step, 6)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(6));
+            let chop_loop_xfade_samples = chop_inst_slot
+                .plocks
+                .get(cs.step, 7)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(7))
+                * data.sample_rate as f32
+                / 1000.0;
+            let chop_sr_hz = chop_inst_slot
+                .plocks
+                .get(cs.step, 8)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(8));
+            let chop_base_note_offset = f32::from_bits(
+                data.state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
+            );
             let sd = &data.state.pattern.step_data[track_idx];
             while cs.counter <= 0.0 && cs.remaining > 0 {
                 // Allocate a voice for the chop re-trigger
@@ -1970,13 +2099,17 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         attack_samples,
                         release_samples,
                         gate_mode,
-                        transpose,
+                        transpose + chop_base_note_offset,
                         chop_start,
                         chop_end,
                         chop_inst_slot
                             .plocks
                             .get(cs.step, 4)
                             .unwrap_or_else(|| chop_inst_slot.defaults.get(4)),
+                        chop_reverse,
+                        chop_loop_mode,
+                        chop_loop_xfade_samples,
+                        chop_sr_hz,
                     );
                 }
                 data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);

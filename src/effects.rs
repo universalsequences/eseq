@@ -752,7 +752,7 @@ impl EffectDescriptor {
                         unit: Some("%".to_string()),
                     },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: 0,
+                    node_param_idx: crate::sampler::PARAM_ATTACK_SAMPLES as u32,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -762,7 +762,7 @@ impl EffectDescriptor {
                     default: 0.0,
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
-                    node_param_idx: 1,
+                    node_param_idx: crate::sampler::PARAM_RELEASE_SAMPLES as u32,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -774,7 +774,7 @@ impl EffectDescriptor {
                         unit: Some("ms".to_string()),
                     },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: 2,
+                    node_param_idx: crate::sampler::PARAM_START_POINT as u32,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -784,7 +784,7 @@ impl EffectDescriptor {
                     default: 0.3,
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
-                    node_param_idx: 3,
+                    node_param_idx: crate::sampler::PARAM_END_POINT as u32,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1207,6 +1207,57 @@ impl EffectDescriptor {
                     host_control: None,
                 },
                 Self::enabled_param(crate::sampler::SAMPLER_PARAM_ENABLED as u32, 1.0),
+                ParamDescriptor {
+                    name: "reverse".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::sampler::PARAM_REVERSE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "loop".to_string(),
+                    min: 0.0,
+                    max: 3.0,
+                    default: 1.0,
+                    kind: ParamKind::Enum {
+                        labels: vec![
+                            "one-shot".to_string(),
+                            "gate".to_string(),
+                            "loop".to_string(),
+                            "ping-pong".to_string(),
+                        ],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::sampler::PARAM_LOOP_MODE as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "xfade".to_string(),
+                    min: 0.0,
+                    max: 250.0,
+                    default: 0.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("ms".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::sampler::PARAM_LOOP_XFADE_SAMPLES as u32,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "sr".to_string(),
+                    min: 2000.0,
+                    max: 44100.0,
+                    default: 44100.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: crate::sampler::PARAM_SR_HZ as u32,
+                    host_control: None,
+                },
             ],
         }
     }

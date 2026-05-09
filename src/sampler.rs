@@ -27,7 +27,16 @@ const STATE_RETRIGGER_OUT_R: usize = 18; // captured right sample at retrigger s
 const STATE_START_POINT: usize = 19; // normalized 0.0–1.0 start position in buffer
 const STATE_END_POINT: usize = 20; // normalized 0.0–1.0 end position in buffer
 const STATE_ENABLED: usize = 21;
-pub const SAMPLER_STATE_SIZE: usize = 22;
+const STATE_REVERSE: usize = 22;
+const STATE_LOOP_MODE: usize = 23; // 0=one-shot, 1=gate, 2=loop, 3=ping-pong
+const STATE_LOOP_XFADE_SAMPLES: usize = 24;
+const STATE_SR_HZ: usize = 25;
+const STATE_PLAY_DIRECTION: usize = 26;
+const STATE_SR_PHASE: usize = 27;
+const STATE_SR_HELD_L: usize = 28;
+const STATE_SR_HELD_R: usize = 29;
+const STATE_SAMPLE_RATE: usize = 30;
+pub const SAMPLER_STATE_SIZE: usize = 31;
 pub const SAMPLER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 // Envelope phase constants
@@ -59,6 +68,10 @@ pub const PARAM_BUFFER_ID: u64 = STATE_BUFFER_ID as u64;
 pub const PARAM_START_POINT: u64 = STATE_START_POINT as u64;
 pub const PARAM_END_POINT: u64 = STATE_END_POINT as u64;
 pub const PARAM_ENABLED: u64 = STATE_ENABLED as u64;
+pub const PARAM_REVERSE: u64 = STATE_REVERSE as u64;
+pub const PARAM_LOOP_MODE: u64 = STATE_LOOP_MODE as u64;
+pub const PARAM_LOOP_XFADE_SAMPLES: u64 = STATE_LOOP_XFADE_SAMPLES as u64;
+pub const PARAM_SR_HZ: u64 = STATE_SR_HZ as u64;
 
 pub struct SamplerTrack {
     pub name: String,
@@ -70,7 +83,7 @@ pub struct SamplerTrack {
 /// extern "C" init — called by audiograph when node is created.
 unsafe extern "C" fn sampler_init(
     state: *mut c_void,
-    _sample_rate: c_int,
+    sample_rate: c_int,
     _max_block: c_int,
     initial_state: *const c_void,
 ) {
@@ -100,6 +113,15 @@ unsafe extern "C" fn sampler_init(
     *s.add(STATE_START_POINT) = 0.0;
     *s.add(STATE_END_POINT) = 1.0;
     *s.add(STATE_ENABLED) = 1.0;
+    *s.add(STATE_REVERSE) = 0.0;
+    *s.add(STATE_LOOP_MODE) = 1.0;
+    *s.add(STATE_LOOP_XFADE_SAMPLES) = 0.0;
+    *s.add(STATE_SR_HZ) = 44_100.0;
+    *s.add(STATE_PLAY_DIRECTION) = 1.0;
+    *s.add(STATE_SR_PHASE) = 0.0;
+    *s.add(STATE_SR_HELD_L) = 0.0;
+    *s.add(STATE_SR_HELD_R) = 0.0;
+    *s.add(STATE_SAMPLE_RATE) = sample_rate as f32;
 }
 
 /// extern "C" process — reads sample data from buffer, writes to output.
@@ -139,6 +161,15 @@ unsafe extern "C" fn sampler_process(
     let start_point = (*s.add(STATE_START_POINT)).clamp(0.0, 1.0);
     let end_point = (*s.add(STATE_END_POINT)).clamp(0.0, 1.0);
     let enabled = *s.add(STATE_ENABLED);
+    let reverse = *s.add(STATE_REVERSE) > 0.5;
+    let loop_mode = (*s.add(STATE_LOOP_MODE)).round().clamp(0.0, 3.0) as i32;
+    let loop_xfade_samples = (*s.add(STATE_LOOP_XFADE_SAMPLES)).max(0.0);
+    let sr_hz = *s.add(STATE_SR_HZ);
+    let mut play_direction = *s.add(STATE_PLAY_DIRECTION);
+    let mut sr_phase = *s.add(STATE_SR_PHASE);
+    let mut sr_held_l = *s.add(STATE_SR_HELD_L);
+    let mut sr_held_r = *s.add(STATE_SR_HELD_R);
+    let sample_rate = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
 
     let buf_desc = buffers as *const BufferDesc;
     let desc = &*buf_desc.add(buffer_id);
@@ -176,7 +207,16 @@ unsafe extern "C" fn sampler_process(
         return;
     }
 
+    let region_len = (end_sample.saturating_sub(start_sample)).max(1) as f32;
+    let loop_xfade = loop_xfade_samples.min(region_len * 0.5);
     let effective_rate = speed * (2.0_f32).powf(transpose / 12.0);
+    let step_rate = effective_rate.abs().max(0.0);
+    let sr_step = if sr_hz > 0.0 {
+        (sample_rate / sr_hz).max(1.0)
+    } else {
+        1.0
+    };
+    let sr_reduced = sr_hz > 0.0 && sr_hz < sample_rate * 0.98 && sr_hz < 44_100.0 * 0.98;
     let amplitude = velocity * gain;
     let eff_release = release_samples.max(MIN_RELEASE_SAMPLES);
     // After a retrigger fade, use a small minimum attack to avoid click on ramp-up.
@@ -186,8 +226,14 @@ unsafe extern "C" fn sampler_process(
     // ── Trigger detection ──
     // playhead==0 means params just reset it. Distinguish fresh vs retrigger:
     if playhead == 0.0 && env_phase != ENV_RETRIGGER {
-        playhead = start_sample as f32; // start from the user-defined start point
+        play_direction = if reverse { -1.0 } else { 1.0 };
+        playhead = if reverse {
+            (end_sample.saturating_sub(1)) as f32
+        } else {
+            start_sample as f32
+        };
         gate_counter = 0.0; // reset real-time duration counter
+        sr_phase = 0.0;
         if env_level > 0.001 || last_out_l.abs() > 0.000_1 || last_out_r.abs() > 0.000_1 {
             // Voice was still audible → fade the actual previous output to zero
             // before starting the new waveform attack.
@@ -207,18 +253,46 @@ unsafe extern "C" fn sampler_process(
 
     // ── Pre-loop gate-off check (gate may have changed between blocks) ──
     if env_phase == ENV_ATTACK || env_phase == ENV_SUSTAIN {
-        if gate_samples <= 0.0 {
+        if gate_samples <= 0.0 && loop_mode != 0 {
             env_phase = ENV_RELEASE;
             release_level = env_level;
-        } else if gate_mode > 0.5 && gate_counter >= gate_samples {
+        } else if loop_mode == 1
+            && gate_mode > 0.5
+            && gate_samples.is_finite()
+            && gate_counter >= gate_samples
+        {
+            env_phase = ENV_RELEASE;
+            release_level = env_level;
+        } else if (loop_mode == 2 || loop_mode == 3)
+            && gate_samples.is_finite()
+            && gate_counter >= gate_samples
+        {
             env_phase = ENV_RELEASE;
             release_level = env_level;
         }
     }
 
     for i in 0..nf {
+        let past_forward = playhead >= end_sample as f32;
+        let past_reverse = playhead < start_sample as f32;
+        if (past_forward || past_reverse) && (loop_mode == 2 || loop_mode == 3) {
+            if loop_mode == 3 {
+                play_direction = -play_direction;
+                playhead = if past_forward {
+                    (end_sample.saturating_sub(1)) as f32
+                } else {
+                    start_sample as f32
+                };
+            } else if play_direction >= 0.0 {
+                playhead = start_sample as f32 + (playhead - end_sample as f32);
+            } else {
+                playhead =
+                    (end_sample.saturating_sub(1)) as f32 - ((start_sample as f32) - playhead);
+            }
+        }
+
         // Past end of sample region: stop
-        if playhead >= end_sample as f32 || playhead < 0.0 {
+        if playhead >= end_sample as f32 || playhead < start_sample as f32 {
             *out0.add(i) = 0.0;
             *out1.add(i) = 0.0;
             env_phase = ENV_IDLE;
@@ -245,7 +319,7 @@ unsafe extern "C" fn sampler_process(
             last_out_r = *out1.add(i);
 
             env_level -= 1.0 / RETRIGGER_FADE_SAMPLES;
-            playhead += effective_rate;
+            playhead += step_rate * play_direction;
             gate_counter += 1.0;
             if env_level <= 0.0 {
                 env_level = 0.0;
@@ -278,15 +352,25 @@ unsafe extern "C" fn sampler_process(
         }
 
         if env_phase == ENV_SUSTAIN {
-            if gate_samples <= 0.0 {
+            if gate_samples <= 0.0 && loop_mode != 0 {
                 // Explicit note-off (keyboard release)
                 env_phase = ENV_RELEASE;
                 release_level = env_level;
-            } else if gate_mode > 0.5 && gate_counter >= gate_samples {
+            } else if loop_mode == 1 && gate_mode > 0.5 && gate_counter >= gate_samples {
                 // Duration gating (real-time counter, independent of playback rate)
                 env_phase = ENV_RELEASE;
                 release_level = env_level;
-            } else if gate_mode <= 0.5 && playhead >= (end_sample as f32 - eff_release) {
+            } else if (loop_mode == 2 || loop_mode == 3)
+                && gate_samples.is_finite()
+                && gate_counter >= gate_samples
+            {
+                // Sequenced looping notes must still end at their trigger duration.
+                env_phase = ENV_RELEASE;
+                release_level = env_level;
+            } else if loop_mode == 0
+                && ((play_direction >= 0.0 && playhead >= (end_sample as f32 - eff_release))
+                    || (play_direction < 0.0 && playhead <= (start_sample as f32 + eff_release)))
+            {
                 // Auto-release near end of sample (gate off = play full sample)
                 env_phase = ENV_RELEASE;
                 release_level = env_level;
@@ -339,8 +423,63 @@ unsafe extern "C" fn sampler_process(
         } else {
             s1_l
         };
-        let sample_l = s0_l + frac * (s1_l - s0_l);
-        let sample_r = s0_r + frac * (s1_r - s0_r);
+        let mut sample_l = s0_l + frac * (s1_l - s0_l);
+        let mut sample_r = s0_r + frac * (s1_r - s0_r);
+        if loop_mode == 2 && loop_xfade > 0.0 {
+            let fade_pos = if play_direction >= 0.0 {
+                (end_sample as f32 - playhead) / loop_xfade
+            } else {
+                (playhead - start_sample as f32) / loop_xfade
+            };
+            if fade_pos <= 1.0 {
+                let target_head = if play_direction >= 0.0 {
+                    start_sample as f32 + (loop_xfade - (end_sample as f32 - playhead))
+                } else {
+                    (end_sample.saturating_sub(1)) as f32
+                        - (loop_xfade - (playhead - start_sample as f32))
+                }
+                .clamp(start_sample as f32, (end_sample.saturating_sub(1)) as f32);
+                let t_idx = target_head as usize;
+                let t_frac = target_head - t_idx as f32;
+                let t_sample_index = t_idx * channel_count;
+                let t_next_sample_index = (t_idx + 1) * channel_count;
+                let t0_l = if t_idx < sample_len {
+                    *sample_data.add(t_sample_index)
+                } else {
+                    0.0
+                };
+                let t1_l = if t_idx + 1 < sample_len {
+                    *sample_data.add(t_next_sample_index)
+                } else {
+                    0.0
+                };
+                let t0_r = if channel_count > 1 && t_idx < sample_len {
+                    *sample_data.add(t_sample_index + 1)
+                } else {
+                    t0_l
+                };
+                let t1_r = if channel_count > 1 && t_idx + 1 < sample_len {
+                    *sample_data.add(t_next_sample_index + 1)
+                } else {
+                    t1_l
+                };
+                let wrapped_l = t0_l + t_frac * (t1_l - t0_l);
+                let wrapped_r = t0_r + t_frac * (t1_r - t0_r);
+                let mix = (1.0 - fade_pos.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+                sample_l = sample_l * (1.0 - mix) + wrapped_l * mix;
+                sample_r = sample_r * (1.0 - mix) + wrapped_r * mix;
+            }
+        }
+        if sr_reduced {
+            if sr_phase <= 0.0 {
+                sr_held_l = sample_l;
+                sr_held_r = sample_r;
+                sr_phase += sr_step;
+            }
+            sr_phase -= 1.0;
+            sample_l = sr_held_l;
+            sample_r = sr_held_r;
+        }
         let env_amp = amplitude * env_level;
 
         *out0.add(i) = sample_l * env_amp;
@@ -348,7 +487,7 @@ unsafe extern "C" fn sampler_process(
         last_out_l = *out0.add(i);
         last_out_r = *out1.add(i);
 
-        playhead += effective_rate;
+        playhead += step_rate * play_direction;
         gate_counter += 1.0; // real-time counter (1 per sample, independent of transpose/speed)
     }
 
@@ -362,6 +501,10 @@ unsafe extern "C" fn sampler_process(
     *s.add(STATE_LAST_OUT_R) = last_out_r;
     *s.add(STATE_RETRIGGER_OUT_L) = retrigger_out_l;
     *s.add(STATE_RETRIGGER_OUT_R) = retrigger_out_r;
+    *s.add(STATE_PLAY_DIRECTION) = play_direction;
+    *s.add(STATE_SR_PHASE) = sr_phase;
+    *s.add(STATE_SR_HELD_L) = sr_held_l;
+    *s.add(STATE_SR_HELD_R) = sr_held_r;
 }
 
 pub fn sampler_vtable() -> NodeVTable {

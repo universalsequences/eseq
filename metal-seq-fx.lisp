@@ -697,6 +697,25 @@
       :width 4.0 :height 2.05
       :on-change (lambda (v) (fx-set-instrument-value p v)))))
 
+(def sampler-param-button (p key)
+  (subtree :key key
+    (v-stack :align :center :gap 0.2
+      (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
+      (button (if (> (get p :value) 0.5) "ON" "OFF")
+        :width 3.2 :height 1.0 :padding 0 :font-size 10
+        :background-color (if (> (get p :value) 0.5) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+        :color (if (> (get p :value) 0.5) :black :dim)
+        :on-click |x y r| (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1))))))
+
+(def sampler-param-dropdown (p key)
+  (subtree :key key
+    (v-stack :align :center :gap 0.2
+      (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
+      (dropdown :value (get p :text-value)
+        :options (get p :options)
+        :on-change (lambda (v) (fx-set-instrument-option p v))
+        :width 5.8 :height 1.0 :font-size 9))))
+
 (def sampler-gate-button ()
   (v-stack :align :center :gap 0.2
     (label "gate" :font-size 10 :color :dim :bg :transparent)
@@ -706,11 +725,21 @@
       :color (if SEQ.tp-gate :black :dim)
       :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :gate (if SEQ.tp-gate 0 1))))))
 
+(def sampler-param-control (p)
+  (let ((key (if (get p :idx)
+               (str "sampler-param-" (get p :idx))
+               (str "sampler-param-" (get p :name)))))
+    (if (get p :boolean)
+      (sampler-param-button p key)
+      (if (get p :options)
+        (sampler-param-dropdown p key)
+        (sampler-param-knob p key)))))
+
 (def sampler-param-knobs (params)
   (h-stack :gap 0.65 :padding 0.05 :align :center
     (sampler-gate-button)
     (each (visible-params params) |p pi|
-      (sampler-param-knob p (str "sampler-param-knob-" (get p :idx))))))
+      (sampler-param-control p))))
 
 (def sampler-panel (inst)
   (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
@@ -812,81 +841,21 @@
     (nth SEQ.bus-effects selected-bus)
     '()))
 
-(def fx-add-dropdown-section (label-text dropdown-node)
-  (v-stack :gap 0.25 :align :start
-    (label label-text :font-size 9 :color :dim :bg :transparent)
-    dropdown-node))
-
-(def fx-add-panel-shell (children)
-  (box :debug-name "fx-add-panel"
+(def fx-drop-placeholder-panel ()
+  (box :debug-name "fx-drop-placeholder-panel"
        :background-color :fx-panel-bg
        :corner-radius 8
        :height fx-fixed-panel-height
+       :width 34
        :padding 0
-       :on-click |x y r| (fx-clear-selected-effect)
-    (fx-panel-body "fx-add-panel-content" children)))
-
-(def fx-add-bus-panel ()
-  (fx-add-panel-shell
-    (v-stack :gap 0.55 :align :center
-      (fx-add-dropdown-section "Built-in"
-        (dropdown :value ""
-          :options SEQ.available-builtin-effects
-          :placeholder "Add Built-in"
-          :on-change (lambda (v)
-            (fx-clear-selected-effect)
-            (host-command "add-builtin-bus-effect" (dict :bus selected-bus :name v)))
-          :width 12 :height 1.5 :font-size 14))
-      (fx-add-dropdown-section "Bus FX"
-        (dropdown :value ""
-          :options SEQ.available-effects
-          :placeholder "Add Bus FX"
-          :on-change (lambda (v)
-            (fx-clear-selected-effect)
-            (if (= v "+ New Effect")
-              (do
-                (set! sbrowser-editor-name "")
-                (host-command "enter-new-effect-editor" (dict)))
-              (host-command "add-bus-effect" (dict :bus selected-bus :name v))))
-          :width 12 :height 1.5 :font-size 14))
-      (compile-progress
-        :active (if SEQ.compiling 1 0)
-        :width 12 :height 0.3))))
-
-(def fx-add-track-panel ()
-  (fx-add-panel-shell
-    (v-stack :gap 0.55 :align :center
-      (fx-add-dropdown-section "MIDI FX"
-        (dropdown :value ""
-          :options SEQ.available-midi-effects
-          :placeholder "Add MIDI FX"
-          :on-change (lambda (v)
-            (fx-clear-selected-effect)
-            (host-command "add-midi-fx" (dict :name v)))
-          :width 12 :height 1.5 :font-size 14))
-      (fx-add-dropdown-section "Built-in"
-        (dropdown :value ""
-          :options SEQ.available-builtin-effects
-          :placeholder "Add Built-in"
-          :on-change (lambda (v)
-            (fx-clear-selected-effect)
-            (host-command "add-builtin-effect" (dict :name v)))
-          :width 12 :height 1.5 :font-size 14))
-      (fx-add-dropdown-section "Audio FX"
-        (dropdown :value ""
-          :options SEQ.available-effects
-          :placeholder "Add Effect"
-          :on-change (lambda (v)
-            (fx-clear-selected-effect)
-            (if (= v "+ New Effect")
-              (do
-                (set! sbrowser-editor-name "")
-                (host-command "enter-new-effect-editor" (dict)))
-              (host-command "add-effect" (dict :name v))))
-          :width 12 :height 1.5 :font-size 14))
-      (compile-progress
-        :active (if SEQ.compiling 1 0)
-        :width 12 :height 0.3))))
+       :h-align :center
+       :v-align :center
+    (label "Drop Audio or Midi Effect Here"
+      :width 30
+      :font-size 12
+      :h-align :center
+      :color :dim
+      :bg :transparent)))
 
 (def fx-bus-selection-panel ()
   (v-stack :padding 0.5 :gap 1
@@ -894,7 +863,7 @@
       (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
         (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
           (fx-panel (get fx :name) (get fx :params) fx)))
-      (fx-add-bus-panel))))
+      (fx-drop-placeholder-panel))))
 
 (effect-buffer "*track*"
   (if (= SEQ.num-tracks 0)
@@ -919,7 +888,7 @@
         (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
           (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
             (fx-panel (get fx :name) (get fx :params) fx)))
-        (fx-add-track-panel))))))
+        (fx-drop-placeholder-panel))))))
 
 (define-mode "seq-fx-mode" :read-only true)
 (mode-bind-key "seq-fx-mode" "BS" "fx-delete-selected-effect")
