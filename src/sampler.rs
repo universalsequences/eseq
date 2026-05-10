@@ -47,7 +47,9 @@ const STATE_WARP_XFADE_REMAINING: usize = 38;
 const STATE_WARP_PREV_PLAYHEAD: usize = 39;
 const STATE_WARP_SAMPLE_BPM: usize = 40;
 const STATE_WARP_PROJECT_BPM: usize = 41;
-pub const SAMPLER_STATE_SIZE: usize = 42;
+const STATE_WARP_SLICE_SOURCE_FRAME_START: usize = 42;
+const STATE_WARP_LAST_TARGET_RATIO: usize = 43;
+pub const SAMPLER_STATE_SIZE: usize = 44;
 pub const SAMPLER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 // Envelope phase constants
@@ -102,6 +104,7 @@ unsafe fn read_interpolated(
 // Param indices (match state layout for direct write)
 pub const PARAM_PLAYHEAD: u64 = STATE_PLAYHEAD as u64;
 pub const PARAM_TRIGGER: u64 = STATE_PLAYING as u64;
+pub const PARAM_GATE_COUNTER: u64 = STATE_GATE_COUNTER as u64;
 pub const PARAM_VELOCITY: u64 = STATE_VELOCITY as u64;
 pub const PARAM_SPEED: u64 = STATE_SPEED as u64;
 pub const PARAM_GATE_SAMPLES: u64 = STATE_GATE_SAMPLES as u64;
@@ -193,6 +196,8 @@ unsafe extern "C" fn sampler_init(
     *s.add(STATE_WARP_PREV_PLAYHEAD) = 0.0;
     *s.add(STATE_WARP_SAMPLE_BPM) = 120.0;
     *s.add(STATE_WARP_PROJECT_BPM) = 120.0;
+    *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START) = 0.0;
+    *s.add(STATE_WARP_LAST_TARGET_RATIO) = 1.0;
 }
 
 /// extern "C" process — reads sample data from buffer, writes to output.
@@ -264,6 +269,8 @@ unsafe extern "C" fn sampler_process(
     let mut slice_project_frame_start = *s.add(STATE_WARP_SLICE_PROJECT_FRAME_START);
     let mut warp_xfade_remaining = (*s.add(STATE_WARP_XFADE_REMAINING)).max(0.0);
     let mut warp_prev_playhead = *s.add(STATE_WARP_PREV_PLAYHEAD);
+    let mut slice_source_frame_start = *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START);
+    let mut last_warp_target_ratio = (*s.add(STATE_WARP_LAST_TARGET_RATIO)).clamp(0.01, 32.0);
 
     let buf_desc = buffers as *const BufferDesc;
     let desc = &*buf_desc.add(buffer_id);
@@ -309,20 +316,20 @@ unsafe extern "C" fn sampler_process(
                 .iter()
                 .filter(|&&frame| {
                     let frame = frame as usize;
-                    frame >= start_sample && frame < end_sample
+                    frame > start_sample && frame < end_sample
                 })
-                .take(2)
+                .take(1)
                 .count()
-                >= 2
+                >= 1
         })
         .unwrap_or(false);
     if let Some(table) = onset_table {
-        if current_slice >= table.onsets_frames.len() {
+        if current_slice > table.onsets_frames.len() {
             current_slice = 0;
         }
     }
     let reverse = reverse_param && !warp_active;
-    let loop_mode = if warp_active { 1 } else { loop_mode_param };
+    let loop_mode = loop_mode_param;
     let loop_xfade = loop_xfade_samples.min(region_len * 0.5);
     let effective_rate = speed * (2.0_f32).powf(transpose / 12.0);
     let step_rate = effective_rate.abs().max(0.0);
@@ -339,6 +346,28 @@ unsafe extern "C" fn sampler_process(
     // For fresh triggers from silence this flag stays false → attack=0 stays punchy.
     let mut post_retrigger = false;
 
+    let reset_forward_warp_state = |table: &crate::analysis::OnsetTableShared,
+                                    current_slice: &mut usize,
+                                    slice_project_frame_start: &mut f32,
+                                    slice_source_frame_start: &mut f32,
+                                    warp_xfade_remaining: &mut f32,
+                                    warp_prev_playhead: &mut f32,
+                                    playhead: f32,
+                                    gate_counter: f32| {
+        *current_slice = table
+            .onsets_frames
+            .iter()
+            .position(|&frame| {
+                let frame = frame as usize;
+                frame > start_sample && frame < end_sample
+            })
+            .unwrap_or(table.onsets_frames.len());
+        *slice_project_frame_start = gate_counter;
+        *slice_source_frame_start = playhead;
+        *warp_xfade_remaining = 0.0;
+        *warp_prev_playhead = playhead;
+    };
+
     // ── Trigger detection ──
     // playhead==0 means params just reset it. Distinguish fresh vs retrigger:
     if playhead == 0.0 && env_phase != ENV_RETRIGGER {
@@ -350,18 +379,17 @@ unsafe extern "C" fn sampler_process(
         };
         if warp_active {
             if let Some(table) = onset_table {
-                current_slice = table
-                    .onsets_frames
-                    .iter()
-                    .position(|&frame| {
-                        let frame = frame as usize;
-                        frame >= start_sample && frame < end_sample
-                    })
-                    .unwrap_or(0);
-                playhead = table.onsets_frames[current_slice] as f32;
-                slice_project_frame_start = 0.0;
-                warp_xfade_remaining = 0.0;
-                warp_prev_playhead = playhead;
+                playhead = start_sample as f32;
+                reset_forward_warp_state(
+                    table,
+                    &mut current_slice,
+                    &mut slice_project_frame_start,
+                    &mut slice_source_frame_start,
+                    &mut warp_xfade_remaining,
+                    &mut warp_prev_playhead,
+                    playhead,
+                    0.0,
+                );
             }
         }
         gate_counter = 0.0; // reset real-time duration counter
@@ -381,6 +409,61 @@ unsafe extern "C" fn sampler_process(
             retrigger_out_l = 0.0;
             retrigger_out_r = 0.0;
         }
+    }
+
+    if warp_active && (warp_target_ratio - last_warp_target_ratio).abs() > 0.0001 {
+        if let Some(table) = onset_table {
+            let old_playhead = playhead;
+            warp_ratio = warp_target_ratio;
+            last_warp_target_ratio = warp_target_ratio;
+            slice_project_frame_start = 0.0;
+            slice_source_frame_start = start_sample as f32;
+            current_slice = table
+                .onsets_frames
+                .iter()
+                .position(|&frame| {
+                    let frame = frame as usize;
+                    frame > start_sample && frame < end_sample
+                })
+                .unwrap_or(table.onsets_frames.len());
+
+            while current_slice < table.onsets_frames.len() {
+                let next = table.onsets_frames[current_slice] as f32;
+                if next as usize >= end_sample {
+                    break;
+                }
+                let next_project_frame =
+                    slice_project_frame_start + (next - slice_source_frame_start) / warp_ratio;
+                if gate_counter < next_project_frame {
+                    break;
+                }
+                slice_project_frame_start = next_project_frame;
+                slice_source_frame_start = next;
+                current_slice += 1;
+            }
+
+            let elapsed_in_slice = (gate_counter - slice_project_frame_start).max(0.0);
+            let mut next_boundary = end_sample as f32;
+            if current_slice < table.onsets_frames.len() {
+                let next = table.onsets_frames[current_slice] as f32;
+                if next as usize >= start_sample && next as usize <= end_sample {
+                    next_boundary = next;
+                }
+            }
+            playhead = (slice_source_frame_start + elapsed_in_slice * step_rate)
+                .clamp(start_sample as f32, (end_sample.saturating_sub(1)) as f32);
+            if warp_ratio < 1.0 && playhead >= next_boundary {
+                playhead = next_boundary.min((end_sample.saturating_sub(1)) as f32);
+            }
+            if (playhead - old_playhead).abs() > 1.0 {
+                warp_prev_playhead = old_playhead;
+                warp_xfade_remaining = (sample_rate * WARP_XFADE_SECONDS).max(1.0);
+            } else {
+                warp_prev_playhead = playhead;
+            }
+        }
+    } else if !warp_active {
+        last_warp_target_ratio = warp_target_ratio;
     }
 
     // ── Pre-loop gate-off check (gate may have changed between blocks) ──
@@ -424,6 +507,20 @@ unsafe extern "C" fn sampler_process(
                 playhead =
                     (end_sample.saturating_sub(1)) as f32 - ((start_sample as f32) - playhead);
             }
+            if warp_active && play_direction >= 0.0 {
+                if let Some(table) = onset_table {
+                    reset_forward_warp_state(
+                        table,
+                        &mut current_slice,
+                        &mut slice_project_frame_start,
+                        &mut slice_source_frame_start,
+                        &mut warp_xfade_remaining,
+                        &mut warp_prev_playhead,
+                        playhead,
+                        gate_counter,
+                    );
+                }
+            }
         }
 
         // Past end of sample region: stop
@@ -454,7 +551,7 @@ unsafe extern "C" fn sampler_process(
             last_out_r = *out1.add(i);
 
             env_level -= 1.0 / RETRIGGER_FADE_SAMPLES;
-            playhead += if warp_active {
+            playhead += if warp_active && play_direction >= 0.0 {
                 step_rate
             } else {
                 step_rate * play_direction
@@ -538,17 +635,18 @@ unsafe extern "C" fn sampler_process(
 
         // ── Read sample with linear interpolation ──
 
-        if warp_active {
+        if warp_active && play_direction >= 0.0 {
             if let Some(table) = onset_table {
-                if current_slice + 1 < table.onsets_frames.len() {
-                    let cur = table.onsets_frames[current_slice] as f32;
-                    let next = table.onsets_frames[current_slice + 1] as f32;
-                    let next_project_frame = slice_project_frame_start + (next - cur) / warp_ratio;
+                if current_slice < table.onsets_frames.len() {
+                    let next = table.onsets_frames[current_slice] as f32;
+                    let next_project_frame =
+                        slice_project_frame_start + (next - slice_source_frame_start) / warp_ratio;
                     if gate_counter >= next_project_frame {
                         warp_prev_playhead = playhead;
-                        current_slice += 1;
                         slice_project_frame_start = gate_counter;
-                        playhead = table.onsets_frames[current_slice] as f32;
+                        playhead = next;
+                        slice_source_frame_start = next;
+                        current_slice += 1;
                         warp_xfade_remaining = (sample_rate * WARP_XFADE_SECONDS).max(1.0);
                     }
                 }
@@ -556,10 +654,10 @@ unsafe extern "C" fn sampler_process(
         }
 
         let mut warp_silent = false;
-        if warp_active {
+        if warp_active && play_direction >= 0.0 {
             if let Some(table) = onset_table {
-                if warp_ratio < 1.0 && current_slice + 1 < table.onsets_frames.len() {
-                    let next = table.onsets_frames[current_slice + 1] as f32;
+                if warp_ratio < 1.0 && current_slice < table.onsets_frames.len() {
+                    let next = table.onsets_frames[current_slice] as f32;
                     if playhead >= next {
                         warp_silent = true;
                     }
@@ -593,7 +691,7 @@ unsafe extern "C" fn sampler_process(
                 sample_r = sample_r * (1.0 - mix) + wrapped_r * mix;
             }
         }
-        if warp_active && warp_xfade_remaining > 0.0 {
+        if warp_active && play_direction >= 0.0 && warp_xfade_remaining > 0.0 {
             let total = (sample_rate * WARP_XFADE_SECONDS).max(1.0);
             let t = 1.0 - (warp_xfade_remaining / total).clamp(0.0, 1.0);
             let old_gain = (t * std::f32::consts::FRAC_PI_2).cos();
@@ -622,7 +720,7 @@ unsafe extern "C" fn sampler_process(
         last_out_l = *out0.add(i);
         last_out_r = *out1.add(i);
 
-        playhead += if warp_active {
+        playhead += if warp_active && play_direction >= 0.0 {
             step_rate
         } else {
             step_rate * play_direction
@@ -649,6 +747,8 @@ unsafe extern "C" fn sampler_process(
     *s.add(STATE_WARP_SLICE_PROJECT_FRAME_START) = slice_project_frame_start;
     *s.add(STATE_WARP_XFADE_REMAINING) = warp_xfade_remaining;
     *s.add(STATE_WARP_PREV_PLAYHEAD) = warp_prev_playhead;
+    *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START) = slice_source_frame_start;
+    *s.add(STATE_WARP_LAST_TARGET_RATIO) = last_warp_target_ratio;
 }
 
 pub fn sampler_vtable() -> NodeVTable {

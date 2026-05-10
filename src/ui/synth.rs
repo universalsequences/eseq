@@ -1165,7 +1165,7 @@ impl App {
                 8 => (crate::sampler::PARAM_SR_HZ, value),
                 9 => (crate::sampler::PARAM_WARP_ENABLED, value),
                 10 => (crate::sampler::PARAM_WARP_MODE, value),
-                11 => return,
+                11 => (crate::sampler::PARAM_WARP_SAMPLE_BPM, value),
                 _ => (idx, value),
             };
             if let Some(voice_lids) = self.graph.track_voice_lids.get(track) {

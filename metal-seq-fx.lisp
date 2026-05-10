@@ -655,6 +655,7 @@
 (defstate sampler-view-start 0.0)
 (defstate sampler-view-duration 0)
 (defstate sampler-cursor-time 0.0)
+(defstate sampler-active-marker "none")
 
 (def sampler-set-start-end (start-seconds end-seconds duration)
   (if (> duration 0)
@@ -674,6 +675,10 @@
     (set! sampler-cursor-time event.time)
     :set-selection
     (sampler-set-start-end event.start event.end duration)
+    :begin-marker-drag
+    (set! sampler-active-marker (if (= event.marker :start) "start" "end"))
+    :end-marker-drag
+    (set! sampler-active-marker "none")
     :clear-selection
     (sampler-set-start-end 0 duration duration)
     :scroll-view
@@ -763,11 +768,11 @@
         (button "1/2"
           :width 1.85 :height 0.82 :padding 0 :font-size 8
           :background-color :mixer-control-bg :color :dim
-          :on-click |x y r| (fx-set-instrument-value p (max 20 (/ (get p :value) 2))))
+          :on-click |x y r| (fx-set-instrument-value p (min 400 (* (get p :value) 2))))
         (button "2x"
           :width 1.85 :height 0.82 :padding 0 :font-size 8
           :background-color :mixer-control-bg :color :dim
-          :on-click |x y r| (fx-set-instrument-value p (min 400 (* (get p :value) 2))))))))
+          :on-click |x y r| (fx-set-instrument-value p (max 20 (/ (get p :value) 2))))))))
 
 (def sampler-param-knobs (params inst)
   (h-stack :gap 0.65 :padding 0.55 :align :center
@@ -805,6 +810,12 @@
                       :grid-minor-color :black
                       :bg :instrument-control-bg
                       :focusable true
+                      :marker-selection true
+                      :active-marker sampler-active-marker
+                      :marker-color :dim
+                      :active-marker-color :widget-knob-filled
+                      :waveform-color :yellow
+                      :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
                       :buffer (get inst :buffer)
                       :view-start sampler-view-start
                       :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)

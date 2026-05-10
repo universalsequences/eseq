@@ -1,8 +1,7 @@
 use super::*;
 
 /// Read the current sampler playhead position (in seconds) for a track.
-/// Scans all voices and returns the most recently triggered one (smallest
-/// non-zero playhead, meaning it just started playing).
+/// Scans all voices and returns the newest active voice.
 pub(crate) fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 {
     let sampler_ids = match app.graph.track_node_ids.get(track) {
         Some(ids) => &ids.sampler_ids,
@@ -10,9 +9,9 @@ pub(crate) fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 
     };
     let min_state_bytes = sequencer::sampler::SAMPLER_STATE_SIZE * std::mem::size_of::<f32>();
 
-    // Find the voice with the smallest positive playhead (most recently triggered)
     let mut best_playhead: f64 = 0.0;
-    let mut best_is_playing = false;
+    let mut best_gate_counter: f32 = f32::INFINITY;
+    let mut found_playing = false;
 
     for &node_id in sampler_ids {
         if node_id < 0 {
@@ -32,30 +31,59 @@ pub(crate) fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 
         if !copied || state_size < min_state_bytes {
             continue;
         }
-        let ph = state[sequencer::sampler::PARAM_PLAYHEAD as usize] as f64;
+        let mut ph = state[sequencer::sampler::PARAM_PLAYHEAD as usize];
         let playing = state[sequencer::sampler::PARAM_TRIGGER as usize] > 0.0;
-        // Prefer playing voices; among those, pick the smallest playhead (most recent trigger)
-        if playing && (!best_is_playing || ph < best_playhead) {
-            best_playhead = ph;
-            best_is_playing = true;
-        } else if !best_is_playing && ph > best_playhead {
-            // No playing voice found yet — pick the largest playhead (last to finish)
-            best_playhead = ph;
+        if !playing {
+            continue;
         }
+
+        let start = state[sequencer::sampler::PARAM_START_POINT as usize].clamp(0.0, 1.0);
+        let end = state[sequencer::sampler::PARAM_END_POINT as usize].clamp(0.0, 1.0);
+        let gate_counter = state[sequencer::sampler::PARAM_GATE_COUNTER as usize];
+        if gate_counter >= best_gate_counter {
+            continue;
+        }
+
+        let sample_frames = app
+            .sampler_paths
+            .get(track)
+            .and_then(|p| p.as_ref())
+            .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()))
+            .map(|s| s.frames as f32)
+            .filter(|frames| *frames > 0.0)
+            .unwrap_or(app.graph.sample_rate.max(1) as f32);
+        let start_frame = start * sample_frames;
+        let end_frame = if end > start {
+            end * sample_frames
+        } else {
+            sample_frames
+        };
+        ph = ph.clamp(start_frame, end_frame.max(start_frame));
+        best_playhead = ph as f64;
+        best_gate_counter = gate_counter;
+        found_playing = true;
+    }
+
+    if !found_playing {
+        return 0.0;
     }
 
     if best_playhead <= 0.0 {
         return 0.0;
     }
 
-    // Convert frame index to seconds using the registered sample's metadata
+    // Convert frame index to seconds using the registered sample's metadata.
     let sample = app
         .sampler_paths
         .get(track)
         .and_then(|p| p.as_ref())
         .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()));
     match sample {
-        Some(s) if s.frames > 0 => best_playhead * s.duration_seconds / s.frames as f64,
+        Some(s) if s.frames > 0 => {
+            let duration = s.duration_seconds;
+            let seconds = best_playhead * duration / s.frames as f64;
+            seconds.clamp(0.0, duration)
+        }
         _ => {
             let sr = app.graph.sample_rate.max(1) as f64;
             best_playhead / sr
