@@ -390,9 +390,16 @@ struct WaveformInstance {
     float aspect_ratio;
     float selection_start;
     float selection_end;
+    int show_selection_start;
+    int show_selection_end;
     float playhead_position;
     int show_playhead;
     packed_float4 waveform_color;
+    packed_float4 inactive_waveform_color;
+    packed_float4 marker_color;
+    packed_float4 active_marker_color;
+    int active_selection_start;
+    int active_selection_end;
     packed_float4 selection_color;
     packed_float4 bg_color;
     packed_float4 border_color;
@@ -407,9 +414,16 @@ struct WaveformVaryings {
     float aspect_ratio [[flat]];
     float selection_start [[flat]];
     float selection_end [[flat]];
+    int show_selection_start [[flat]];
+    int show_selection_end [[flat]];
     float playhead_position [[flat]];
     int show_playhead [[flat]];
     float4 waveform_color [[flat]];
+    float4 inactive_waveform_color [[flat]];
+    float4 marker_color [[flat]];
+    float4 active_marker_color [[flat]];
+    int active_selection_start [[flat]];
+    int active_selection_end [[flat]];
     float4 selection_color [[flat]];
     float4 bg_color [[flat]];
     float4 border_color [[flat]];
@@ -436,9 +450,16 @@ vertex WaveformVaryings waveform_vert(
     out.aspect_ratio = inst.aspect_ratio;
     out.selection_start = inst.selection_start;
     out.selection_end = inst.selection_end;
+    out.show_selection_start = inst.show_selection_start;
+    out.show_selection_end = inst.show_selection_end;
     out.playhead_position = inst.playhead_position;
     out.show_playhead = inst.show_playhead;
     out.waveform_color = inst.waveform_color;
+    out.inactive_waveform_color = inst.inactive_waveform_color;
+    out.marker_color = inst.marker_color;
+    out.active_marker_color = inst.active_marker_color;
+    out.active_selection_start = inst.active_selection_start;
+    out.active_selection_end = inst.active_selection_end;
     out.selection_color = inst.selection_color;
     out.bg_color = inst.bg_color;
     out.border_color = inst.border_color;
@@ -463,7 +484,7 @@ fragment float4 waveform_frag(
         content_uv.x >= in.selection_start &&
         content_uv.x <= in.selection_end) {
         rgb = mix(rgb, in.selection_color.rgb, 0.30);
-        alpha = max(alpha, 0.22);
+        alpha = max(alpha, 0.06);
     }
 
     float center_line = 1.0 - smoothstep(0.0, 0.004, abs(content_uv.y - 0.5));
@@ -475,15 +496,41 @@ fragment float4 waveform_frag(
     float boundary_aa = max(fwidth(content_uv.x) * 0.75, 0.00075);
     float start_dist = abs(content_uv.x - in.selection_start);
     float end_dist = abs(content_uv.x - in.selection_end);
-    float start_boundary = has_selection
+    float start_boundary = has_selection && in.show_selection_start == 1
         ? 1.0 - smoothstep(boundary_width, boundary_width + boundary_aa, start_dist)
         : 0.0;
-    float end_boundary = has_selection
+    float end_boundary = has_selection && in.show_selection_end == 1
         ? 1.0 - smoothstep(boundary_width, boundary_width + boundary_aa, end_dist)
         : 0.0;
+    float3 start_marker_rgb = in.active_selection_start == 1
+        ? in.active_marker_color.rgb
+        : in.marker_color.rgb;
+    float3 end_marker_rgb = in.active_selection_end == 1
+        ? in.active_marker_color.rgb
+        : in.marker_color.rgb;
+    rgb = mix(rgb, start_marker_rgb, start_boundary * 0.85);
+    rgb = mix(rgb, end_marker_rgb, end_boundary * 0.85);
     float boundary_mask = max(start_boundary, end_boundary);
-    rgb = mix(rgb, in.selection_color.rgb, boundary_mask * 0.85);
     alpha = max(alpha, boundary_mask * 0.75);
+
+    float flag_height = 0.1575;
+    float flag_width = flag_height / max(in.aspect_ratio, 0.0001);
+    float flag_y = 1.0 - content_uv.y;
+    float flag_taper = 1.0 - clamp(flag_y / flag_height, 0.0, 1.0);
+    float start_flag_dx = content_uv.x - in.selection_start;
+    float start_flag = has_selection && in.show_selection_start == 1 && flag_y <= flag_height &&
+        start_flag_dx >= 0.0 && start_flag_dx <= flag_width * flag_taper
+        ? 1.0
+        : 0.0;
+    float end_flag_dx = in.selection_end - content_uv.x;
+    float end_flag = has_selection && in.show_selection_end == 1 && flag_y <= flag_height &&
+        end_flag_dx >= 0.0 && end_flag_dx <= flag_width * flag_taper
+        ? 1.0
+        : 0.0;
+    float flag_mask = max(start_flag, end_flag);
+    rgb = mix(rgb, start_marker_rgb, start_flag);
+    rgb = mix(rgb, end_marker_rgb, end_flag);
+    alpha = max(alpha, flag_mask);
 
     float sample_t = clamp(mix(in.sample_start, in.sample_end, content_uv.x), 0.0, 1.0);
     float exact_idx = sample_t * float(in.bucket_count - 1);
@@ -532,8 +579,12 @@ fragment float4 waveform_frag(
     float lower_edge = 1.0 - smoothstep(0.0, edge_aa * 1.5, abs(content_uv.y - y_min));
     float edge_alpha = max(upper_edge, lower_edge);
 
-    float3 fill_color = mix(rgb, in.waveform_color.rgb, 0.88);
-    float3 edge_color = mix(in.waveform_color.rgb, float3(1.0, 1.0, 1.0), 0.15);
+    bool in_selection = has_selection &&
+        content_uv.x >= in.selection_start &&
+        content_uv.x <= in.selection_end;
+    float3 wave_color = in_selection ? in.waveform_color.rgb : in.inactive_waveform_color.rgb;
+    float3 fill_color = mix(rgb, wave_color, 0.88);
+    float3 edge_color = mix(wave_color, float3(1.0, 1.0, 1.0), 0.15);
     rgb = mix(rgb, fill_color, fill_alpha);
     rgb = mix(rgb, edge_color, edge_alpha * 0.9);
     alpha = max(alpha, fill_alpha);
@@ -546,8 +597,10 @@ fragment float4 waveform_frag(
         float playhead_alpha = 1.0 - smoothstep(playhead_width - playhead_aa, playhead_width + playhead_aa, playhead_dist);
         bool playhead_overlaps_selection_boundary =
             has_selection && (playhead_dist <= boundary_width + boundary_aa) &&
-            (abs(in.playhead_position - in.selection_start) <= boundary_width + boundary_aa ||
-             abs(in.playhead_position - in.selection_end) <= boundary_width + boundary_aa);
+            ((in.show_selection_start == 1 &&
+              abs(in.playhead_position - in.selection_start) <= boundary_width + boundary_aa) ||
+             (in.show_selection_end == 1 &&
+              abs(in.playhead_position - in.selection_end) <= boundary_width + boundary_aa));
         float3 playhead_color = playhead_overlaps_selection_boundary
             ? in.selection_color.rgb
             : float3(0.2, 0.9, 1.0);
@@ -610,9 +663,16 @@ fragment float4 waveform_frag(
         aspect_ratio: f32,
         selection_start: f32,
         selection_end: f32,
+        show_selection_start: i32,
+        show_selection_end: i32,
         playhead_position: f32,
         show_playhead: i32,
         waveform_color: [f32; 4],
+        inactive_waveform_color: [f32; 4],
+        marker_color: [f32; 4],
+        active_marker_color: [f32; 4],
+        active_selection_start: i32,
+        active_selection_end: i32,
         selection_color: [f32; 4],
         bg_color: [f32; 4],
         border_color: [f32; 4],
@@ -1346,9 +1406,20 @@ fragment float4 waveform_frag(
                         .max(0.0001),
                     selection_start: primitive.selection_start,
                     selection_end: primitive.selection_end,
+                    show_selection_start: if primitive.show_selection_start { 1 } else { 0 },
+                    show_selection_end: if primitive.show_selection_end { 1 } else { 0 },
                     playhead_position: primitive.playhead_position,
                     show_playhead: if primitive.show_playhead { 1 } else { 0 },
                     waveform_color: primitive.waveform_color.to_rgba(),
+                    inactive_waveform_color: primitive.inactive_waveform_color.to_rgba(),
+                    marker_color: primitive.marker_color.to_rgba(),
+                    active_marker_color: primitive.active_marker_color.to_rgba(),
+                    active_selection_start: if primitive.active_selection_start {
+                        1
+                    } else {
+                        0
+                    },
+                    active_selection_end: if primitive.active_selection_end { 1 } else { 0 },
                     selection_color: primitive.selection_color.to_rgba(),
                     bg_color: theme::BG().to_rgba(),
                     border_color: theme::BORDER_INACTIVE().to_rgba(),
@@ -1651,8 +1722,7 @@ fragment float4 waveform_frag(
                 // then offset the resulting primitives to screen position.
                 if let Some(ref layout) = tile.frame.widget_layout {
                     let time_seconds = self.elapsed_time_seconds();
-                    let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h)
-                        .max(0.0);
+                    let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h).max(0.0);
                     let inner_rows = inner_rows_exact.floor() as u16;
 
                     let viewport = WidgetViewport {

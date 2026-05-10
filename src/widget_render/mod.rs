@@ -407,9 +407,16 @@ pub struct MetalWaveformPrimitive {
     pub bucket_count: u32,
     pub selection_start: f32,
     pub selection_end: f32,
+    pub show_selection_start: bool,
+    pub show_selection_end: bool,
     pub playhead_position: f32,
     pub show_playhead: bool,
     pub waveform_color: Color,
+    pub inactive_waveform_color: Color,
+    pub marker_color: Color,
+    pub active_marker_color: Color,
+    pub active_selection_start: bool,
+    pub active_selection_end: bool,
     pub selection_color: Color,
 }
 

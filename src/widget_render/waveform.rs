@@ -30,9 +30,35 @@ pub static WAVEFORM_WIDGET: WaveformWidget = WaveformWidget;
 
 const WAVEFORM_BODY_TOP_INSET: f32 = 0.45;
 const WAVEFORM_BODY_BOTTOM_INSET: f32 = 0.25;
+const MARKER_FLAG_HEIGHT_NORM: f32 = 0.1575;
+const MARKER_LINE_SLOP_PX: f32 = 2.0;
 
 fn waveform_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "waveform-color", theme::WHITE())
+}
+
+fn inactive_waveform_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(
+        props,
+        "inactive-waveform-color",
+        crate::backend::Color::from_hex(0x72, 0x72, 0x78),
+    )
+}
+
+fn marker_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(
+        props,
+        "marker-color",
+        crate::backend::Color::from_hex(0x8a, 0x8a, 0x90),
+    )
+}
+
+fn active_marker_color(props: &HashMap<String, Value>) -> crate::backend::Color {
+    resolve_named_color(
+        props,
+        "active-marker-color",
+        crate::backend::Color::from_hex(0x22, 0x9c, 0xff),
+    )
 }
 
 fn selection_color(props: &HashMap<String, Value>) -> crate::backend::Color {
@@ -70,12 +96,16 @@ struct WaveformView {
     cursor_time: Option<f64>,
     selection_start: Option<f64>,
     selection_end: Option<f64>,
+    marker_selection: bool,
+    active_marker: Option<String>,
     buffer: Option<WaveformBuffer>,
 }
 
 #[derive(Clone)]
 enum HitRegion {
     Header,
+    StartMarker,
+    EndMarker,
     Content { time: f64 },
 }
 
@@ -230,14 +260,16 @@ impl WidgetDefinition for WaveformWidget {
         if let Some((selection_start, selection_end)) = view.selection_range() {
             let start_col = view.col_for_time(selection_start);
             let end_col = view.col_for_time(selection_end);
-            for row_offset in 0..(content.height.round() as u16) {
-                let row = content.row.round() as u16 + row_offset;
-                for col in start_col.min(end_col)..=start_col.max(end_col) {
-                    buf.set(
-                        row,
-                        col,
-                        styled_cell(' ', theme::FG(), Some(selection_color(props))),
-                    );
+            if !view.marker_selection {
+                for row_offset in 0..(content.height.round() as u16) {
+                    let row = content.row.round() as u16 + row_offset;
+                    for col in start_col.min(end_col)..=start_col.max(end_col) {
+                        buf.set(
+                            row,
+                            col,
+                            styled_cell(' ', theme::FG(), Some(selection_color(props))),
+                        );
+                    }
                 }
             }
         }
@@ -252,9 +284,46 @@ impl WidgetDefinition for WaveformWidget {
                     continue;
                 };
                 let col = content.col.round() as u16 + offset as u16;
+                let selected = view
+                    .selection_range()
+                    .map(|(start, end)| {
+                        let time = view.time_at_col(col as f32);
+                        time >= start.min(end) && time <= start.max(end)
+                    })
+                    .unwrap_or(true);
+                let color = if selected {
+                    waveform_color(props)
+                } else {
+                    inactive_waveform_color(props)
+                };
                 for row in top..=bottom {
-                    buf.set(row, col, styled_cell('|', waveform_color(props), None));
+                    buf.set(row, col, styled_cell('|', color, None));
                 }
+            }
+        }
+
+        if let Some((selection_start, selection_end)) = view.selection_range() {
+            let inactive_marker_color = marker_color(props);
+            let active_marker_color = active_marker_color(props);
+            for (time, col, ch) in [
+                (selection_start, view.col_for_time(selection_start), '<'),
+                (selection_end, view.col_for_time(selection_end), '>'),
+            ] {
+                if !view.time_visible(time) {
+                    continue;
+                }
+                let color = if (ch == '<' && view.active_marker_is("start"))
+                    || (ch == '>' && view.active_marker_is("end"))
+                {
+                    active_marker_color
+                } else {
+                    inactive_marker_color
+                };
+                for row_offset in 0..(content.height.round() as u16) {
+                    let row = content.row.round() as u16 + row_offset;
+                    buf.set(row, col, styled_cell('|', color, None));
+                }
+                buf.set(content_top, col, styled_cell(ch, color, None));
             }
         }
 
@@ -492,9 +561,16 @@ fn build_metal_primitives(node: &LayoutNode) -> Vec<MetalPrimitive> {
             bucket_count: level.buckets.len() as u32,
             selection_start: selection.map(|(start, _)| start).unwrap_or(0.0),
             selection_end: selection.map(|(_, end)| end).unwrap_or(0.0),
+            show_selection_start: view.selection_start_visible(),
+            show_selection_end: view.selection_end_visible(),
             playhead_position: playhead.unwrap_or(0.0),
             show_playhead: playhead.is_some(),
             waveform_color: waveform_color(&node.props),
+            inactive_waveform_color: inactive_waveform_color(&node.props),
+            marker_color: marker_color(&node.props),
+            active_marker_color: active_marker_color(&node.props),
+            active_selection_start: view.active_marker_is("start"),
+            active_selection_end: view.active_marker_is("end"),
             selection_color: selection_color(&node.props),
         }));
     }
@@ -529,6 +605,8 @@ impl WaveformView {
             cursor_time: props.get("cursor-time").and_then(as_number),
             selection_start: props.get("selection-start").and_then(as_number),
             selection_end: props.get("selection-end").and_then(as_number),
+            marker_selection: get_bool(props, "marker-selection", false),
+            active_marker: props.get("active-marker").and_then(as_name),
             buffer: props.get("buffer").and_then(parse_waveform_buffer),
         }
     }
@@ -564,6 +642,14 @@ impl WaveformView {
 
     fn playhead_col(&self, time: Option<f64>) -> Option<u16> {
         self.time_viewport().playhead_col(time)
+    }
+
+    fn x_for_time(&self, time: f64) -> f32 {
+        self.time_viewport().x_for_time(time)
+    }
+
+    fn time_visible(&self, time: f64) -> bool {
+        time >= self.view_start && time <= self.view_start + self.view_duration
     }
 
     fn time_at_col(&self, local_col: f32) -> f64 {
@@ -617,6 +703,22 @@ impl WaveformView {
         Some((self.selection_start?, self.selection_end?))
     }
 
+    fn selection_start_visible(&self) -> bool {
+        self.selection_start
+            .map(|time| self.time_visible(time))
+            .unwrap_or(false)
+    }
+
+    fn selection_end_visible(&self) -> bool {
+        self.selection_end
+            .map(|time| self.time_visible(time))
+            .unwrap_or(false)
+    }
+
+    fn active_marker_is(&self, marker: &str) -> bool {
+        self.active_marker.as_deref() == Some(marker)
+    }
+
     fn waveform_body_rect(&self) -> Rect {
         let content = self.content_rect();
         let top_inset = WAVEFORM_BODY_TOP_INSET.min(content.height.max(0.0));
@@ -645,14 +747,89 @@ impl WaveformView {
         if local_row < waveform.row || local_row >= waveform.row + waveform.height {
             return None;
         }
+        if self.marker_selection {
+            if let Some(marker) = self.marker_hit_test(local_col, local_row, waveform) {
+                return Some(marker);
+            }
+        }
         Some(HitRegion::Content {
             time: self.time_at_col(local_col),
         })
     }
 
+    fn marker_hit_test(&self, local_col: f32, local_row: f32, waveform: Rect) -> Option<HitRegion> {
+        let (start, end) = self.selection_range()?;
+        let mut start_hit = None;
+        let mut end_hit = None;
+        if self.time_visible(start) {
+            let x = self.x_for_time(start);
+            if self.marker_hit(local_col, local_row, waveform, x, true) {
+                start_hit = Some((HitRegion::StartMarker, (local_col - x).abs()));
+            }
+        }
+        if self.time_visible(end) {
+            let x = self.x_for_time(end);
+            if self.marker_hit(local_col, local_row, waveform, x, false) {
+                end_hit = Some((HitRegion::EndMarker, (local_col - x).abs()));
+            }
+        }
+        match (start_hit, end_hit) {
+            (Some(start), Some(end)) => {
+                if start.1 <= end.1 {
+                    Some(start.0)
+                } else {
+                    Some(end.0)
+                }
+            }
+            (Some(start), None) => Some(start.0),
+            (None, Some(end)) => Some(end.0),
+            (None, None) => None,
+        }
+    }
+
+    fn marker_hit(
+        &self,
+        local_col: f32,
+        local_row: f32,
+        waveform: Rect,
+        marker_x: f32,
+        points_right: bool,
+    ) -> bool {
+        let line_hit = (local_col - marker_x).abs() <= MARKER_LINE_SLOP_PX;
+        let flag_height = (waveform.height * MARKER_FLAG_HEIGHT_NORM).max(1.0);
+        let flag_width = flag_height;
+        let flag_y = local_row - waveform.row;
+        let flag_hit = if flag_y >= 0.0 && flag_y <= flag_height {
+            let taper = 1.0 - (flag_y / flag_height).clamp(0.0, 1.0);
+            let width_at_y = flag_width * taper;
+            if points_right {
+                local_col >= marker_x && local_col <= marker_x + width_at_y
+            } else {
+                local_col <= marker_x && local_col >= marker_x - width_at_y
+            }
+        } else {
+            false
+        };
+        line_hit || flag_hit
+    }
+
     fn begin_gesture(&self, local_col: f32, local_row: f32) -> Option<Value> {
         match self.hit_test(local_col, local_row)? {
             HitRegion::Header => Some(map_value(vec![("kind", keyword(":scrub"))])),
+            HitRegion::StartMarker => {
+                let (start, _) = self.selection_range()?;
+                Some(map_value(vec![
+                    ("kind", keyword(":drag-start-marker")),
+                    ("offset", Value::Number(self.time_at_col(local_col) - start)),
+                ]))
+            }
+            HitRegion::EndMarker => {
+                let (_, end) = self.selection_range()?;
+                Some(map_value(vec![
+                    ("kind", keyword(":drag-end-marker")),
+                    ("offset", Value::Number(self.time_at_col(local_col) - end)),
+                ]))
+            }
             HitRegion::Content { time } => Some(map_value(vec![
                 ("kind", keyword(":select-range")),
                 ("time", Value::Number(time)),
@@ -665,6 +842,14 @@ impl WaveformView {
             HitRegion::Header | HitRegion::Content { .. } => Some(action_map(vec![
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(self.time_at_col(local_col))),
+            ])),
+            HitRegion::StartMarker => Some(action_map(vec![
+                ("type", keyword(":begin-marker-drag")),
+                ("marker", keyword(":start")),
+            ])),
+            HitRegion::EndMarker => Some(action_map(vec![
+                ("type", keyword(":begin-marker-drag")),
+                ("marker", keyword(":end")),
             ])),
         }
     }
@@ -687,6 +872,26 @@ impl WaveformView {
                     ("end", Value::Number(start.max(end))),
                 ]))
             }
+            Some(Value::Keyword(kind)) if kind == "drag-start-marker" => {
+                let (_, end) = self.selection_range()?;
+                let offset = gesture.get("offset").and_then(as_number).unwrap_or(0.0);
+                let start = (self.time_at_col(local_col) - offset).clamp(0.0, end);
+                Some(action_map(vec![
+                    ("type", keyword(":set-selection")),
+                    ("start", Value::Number(start)),
+                    ("end", Value::Number(end)),
+                ]))
+            }
+            Some(Value::Keyword(kind)) if kind == "drag-end-marker" => {
+                let (start, _) = self.selection_range()?;
+                let offset = gesture.get("offset").and_then(as_number).unwrap_or(0.0);
+                let end = (self.time_at_col(local_col) - offset).max(start);
+                Some(action_map(vec![
+                    ("type", keyword(":set-selection")),
+                    ("start", Value::Number(start)),
+                    ("end", Value::Number(end)),
+                ]))
+            }
             Some(Value::Keyword(kind)) if kind == "scrub" => Some(action_map(vec![
                 ("type", keyword(":set-cursor")),
                 ("time", Value::Number(self.time_at_col(local_col))),
@@ -699,9 +904,17 @@ impl WaveformView {
         &self,
         _local_col: f32,
         _local_row: f32,
-        _gesture: Option<&Value>,
+        gesture: Option<&Value>,
     ) -> Option<Value> {
-        None
+        let gesture = get_map(gesture?)?;
+        match gesture.get("kind") {
+            Some(Value::Keyword(kind))
+                if kind == "drag-start-marker" || kind == "drag-end-marker" =>
+            {
+                Some(action_map(vec![("type", keyword(":end-marker-drag"))]))
+            }
+            _ => None,
+        }
     }
 
     fn handle_scroll(
@@ -905,6 +1118,13 @@ fn get_num(props: &HashMap<String, Value>, key: &str, default: f64) -> f64 {
     }
 }
 
+fn get_bool(props: &HashMap<String, Value>, key: &str, default: bool) -> bool {
+    match props.get(key) {
+        Some(Value::Bool(value)) => *value,
+        _ => default,
+    }
+}
+
 fn get_map(value: &Value) -> Option<HashMap<String, Value>> {
     match value {
         Value::Map(map) => Some(
@@ -919,6 +1139,14 @@ fn get_map(value: &Value) -> Option<HashMap<String, Value>> {
 fn as_number(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn as_name(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Keyword(s) => Some(s.trim_start_matches(':').to_string()),
         _ => None,
     }
 }
