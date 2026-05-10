@@ -99,7 +99,7 @@
             (rgba 0.95 0.22 0.72 1.0)
             (rgba 0.31 0.32 0.40 1.0)))))
     (sdf/layer
-      (sdf/fill (sdf/rounded-rect (* 1.0 width) (* 1.0 height) 0)
+      (sdf/fill (sdf/rounded-rect (* 1.0 width) (* 1.0 height) 0.01)
         (material
           :lighting (lighting :edge-min -0.3 :edge-max 1.3
             :light (vec3 0.7 -0.8 2.5) :shininess 92.0)
@@ -108,12 +108,12 @@
                  (rgba 0.24 0.34 0.84 0.60)
               (rgba 0 0 1 1))
             (rgba 0 0 0 0))))
-      (sdf/fill (sdf/rounded-rect (* 0.8 width) (* 0.8 height) 0.8)
+      (sdf/fill (sdf/rounded-rect (* 0.75 width) (* 0.75 height) 0.75)
         (material
           :lighting (lighting :edge-min -0.3 :edge-max 1.0
             :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
           :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
-      (sdf/fill (sdf/rounded-rect (* 0.7 width) (* 0.7 height) 0.62)
+      (sdf/fill (sdf/rounded-rect (* 0.63 width) (* 0.63 height) 0.62)
         (material
           :color (if (= active 1) (rgba 0.05 0.055 0.075 1.0) (rgba 0.015 0.016 0.025 1.0)))))))
 
