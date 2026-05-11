@@ -37,7 +37,7 @@ use values::*;
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -122,6 +122,368 @@ fn map_string(
         Value::String(value) => Some(value.clone()),
         _ => None,
     })
+}
+
+struct AgentDraftApplyResult {
+    track_index: usize,
+    created_track: bool,
+}
+
+struct AgentFinalizeResult {
+    track_index: usize,
+    instrument_name: String,
+}
+
+fn sync_after_agent_instrument_apply(
+    app: &mut ui::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    track_index: usize,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    track_pan_ids: &Arc<Mutex<Vec<i32>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &[f64],
+    cached_bus_peak_levels: &[f64],
+    ui_epoch: &Arc<AtomicUsize>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+) {
+    current_track.store(track_index, Ordering::Relaxed);
+    app.ui.cursor_track = track_index;
+    let track_name = app.tracks[track_index].clone();
+    if track_names.len() < app.tracks.len() {
+        track_names.push(track_name);
+    } else if let Some(name) = track_names.get_mut(track_index) {
+        *name = track_name;
+    }
+    {
+        let mut pan_ids = track_pan_ids.lock().unwrap();
+        if pan_ids.len() < app.graph.track_node_ids.len() {
+            pan_ids.push(app.graph.track_node_ids[track_index].pan_id);
+        }
+        push_solo_mutes(lg_raw, state, &pan_ids);
+    }
+    if record_armed.lock().unwrap().len() < app.tracks.len() {
+        record_armed.lock().unwrap().push(false);
+    }
+
+    let rt = editor.runtime_mut();
+    rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
+    rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
+    rt.set_reactive("SEQ", "current-track", Value::Number(track_index as f64));
+    rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
+    sync_all_track_sequencer_state(rt, state, app);
+    rt.set_reactive("SEQ", "steps", build_steps_value(state, track_index));
+    sync_step_param_lists(rt, state, track_index);
+    sync_track_mixer_state(rt, app, state);
+    sync_bus_mixer_state(rt, app);
+    sync_track_peak_fields(rt, cached_track_peak_levels);
+    sync_bus_peak_fields(rt, cached_bus_peak_levels);
+    rt.set_reactive(
+        "SEQ",
+        "effects",
+        build_effects_value(
+            state,
+            track_index,
+            &app.graph.effect_descriptors,
+            selected_steps,
+        ),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "midi-effects",
+        build_midi_effects_value(state, track_index, selected_steps),
+    );
+    rt.set_reactive(
+        "SEQ",
+        "instrument-panel",
+        build_instrument_panel_value(app, track_index, selected_steps),
+    );
+    *accumulator_names.lock().unwrap() = build_accumulator_names(app);
+    sync_track_params(rt, app, state, track_index, selected_steps);
+    rt.set_reactive(
+        "SEQ",
+        "step-has-plocks",
+        build_step_has_plocks(state, track_index, &app.graph.effect_descriptors),
+    );
+    sync_sidebar_browser(rt, app, track_index);
+    rt.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+fn apply_agent_draft_to_owned_instrument(
+    app: &mut ui::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    track_pan_ids: &Arc<Mutex<Vec<i32>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &[f64],
+    cached_bus_peak_levels: &[f64],
+    ui_epoch: &Arc<AtomicUsize>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    conv_id: sequencer::agent::store::ConvId,
+) -> Result<AgentDraftApplyResult, String> {
+    let snapshot = app
+        .agent_store
+        .snapshot(conv_id)
+        .ok_or_else(|| format!("Agent conversation {conv_id} not found"))?;
+    let draft = snapshot
+        .state
+        .draft
+        .ok_or_else(|| format!("Agent conversation {conv_id} has no compiled draft"))?;
+
+    let target = snapshot.state.accepted_instrument_target;
+    let inst_name = target
+        .as_ref()
+        .map(|target| target.instrument_name.clone())
+        .unwrap_or_else(|| format!("agent-draft-{conv_id}/"));
+
+    sequencer::lisp_effect::save_instrument(&inst_name, &draft.dsp_source)
+        .map_err(|error| format!("Failed to save agent draft dsp.lisp: {error}"))?;
+    sequencer::lisp_effect::save_instrument_ui(&inst_name, &draft.ui_source)
+        .map_err(|error| format!("Failed to save agent draft ui.lisp: {error}"))?;
+
+    let (idx, created_track) = if let Some(target) = target {
+        if target.track_index < app.tracks.len()
+            && app.graph.track_instrument_types.get(target.track_index)
+                == Some(&sequencer::sequencer::InstrumentType::Custom)
+        {
+            app.replace_custom_instrument_track_sync(
+                target.track_index,
+                &inst_name,
+                &draft.dsp_source,
+            )
+            .map_err(|error| format!("Failed to update agent instrument: {error}"))?;
+            (target.track_index, false)
+        } else {
+            let idx = app
+                .add_saved_instrument_track_sync(&inst_name)
+                .map_err(|error| format!("Failed to recreate agent instrument track: {error}"))?;
+            (idx, true)
+        }
+    } else {
+        let idx = app
+            .add_saved_instrument_track_sync(&inst_name)
+            .map_err(|error| format!("Failed to accept agent draft: {error}"))?;
+        (idx, true)
+    };
+    reload_custom_instrument_ui(editor);
+    editor.refresh_visible_layouts_for_buffer_named("*fx*");
+    let track_name = app.tracks[idx].clone();
+
+    if let Err(error) = app.agent_store.discard(conv_id) {
+        eprintln!("[agent-ui] accepted conv={conv_id} but failed to discard draft: {error}");
+    }
+    if let Err(error) = app.agent_store.set_accepted_instrument_target(
+        conv_id,
+        sequencer::agent::store::AcceptedInstrumentTarget {
+            track_index: idx,
+            instrument_name: inst_name,
+        },
+    ) {
+        eprintln!("[agent-ui] accepted conv={conv_id} but failed to record target: {error}");
+    }
+    if let Err(error) = app.agent_store.push_system_message(
+        conv_id,
+        if created_track {
+            format!("Created instrument track {}: {}", idx + 1, track_name)
+        } else {
+            format!("Updated instrument track {}: {}", idx + 1, track_name)
+        },
+    ) {
+        eprintln!("[agent-ui] accepted conv={conv_id} but failed to record success: {error}");
+    }
+
+    sync_after_agent_instrument_apply(
+        app,
+        editor,
+        state,
+        idx,
+        current_track,
+        track_names,
+        track_pan_ids,
+        record_armed,
+        selected_steps,
+        accumulator_names,
+        cached_track_peak_levels,
+        cached_bus_peak_levels,
+        ui_epoch,
+        lg_raw,
+    );
+
+    Ok(AgentDraftApplyResult {
+        track_index: idx,
+        created_track,
+    })
+}
+
+fn finalized_instrument_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
+    (
+        Path::new("instruments").join(slug),
+        Path::new("instruments").join(format!("{slug}.lisp")),
+    )
+}
+
+fn display_instrument_name(name: &str) -> String {
+    let trimmed = name.trim_end_matches('/');
+    Path::new(trimmed)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(trimmed)
+        .trim_end_matches(".lisp")
+        .to_string()
+}
+
+fn cleanup_agent_draft_storage(name: &str) {
+    let slug = name.trim_end_matches('/');
+    if !slug.starts_with("agent-draft-") {
+        return;
+    }
+    let dir = Path::new("instruments").join(slug);
+    if dir.is_dir() {
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            eprintln!(
+                "[agent-ui] finalized {name:?} but failed to remove draft directory {}: {error}",
+                dir.display()
+            );
+        }
+    }
+    let legacy_file = Path::new("instruments").join(format!("{slug}.lisp"));
+    if legacy_file.exists() {
+        if let Err(error) = std::fs::remove_file(&legacy_file) {
+            eprintln!(
+                "[agent-ui] finalized {name:?} but failed to remove legacy draft file {}: {error}",
+                legacy_file.display()
+            );
+        }
+    }
+}
+
+fn finalize_agent_instrument(
+    app: &mut ui::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    track_pan_ids: &Arc<Mutex<Vec<i32>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &[f64],
+    cached_bus_peak_levels: &[f64],
+    ui_epoch: &Arc<AtomicUsize>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    conv_id: sequencer::agent::store::ConvId,
+    requested_name: &str,
+) -> Result<AgentFinalizeResult, String> {
+    let final_slug = sequencer::agent::actions::normalize_patch_name(
+        requested_name,
+        &format!("agent-instrument-{conv_id}"),
+    );
+    let final_name = format!("{final_slug}/");
+    let (final_dir, legacy_file) = finalized_instrument_storage_paths(&final_slug);
+    if final_dir.exists() || legacy_file.exists() {
+        return Err(format!("Instrument '{final_slug}' already exists."));
+    }
+
+    let snapshot = app
+        .agent_store
+        .snapshot(conv_id)
+        .ok_or_else(|| format!("Agent conversation {conv_id} not found"))?;
+    let target = snapshot
+        .state
+        .accepted_instrument_target
+        .ok_or_else(|| "No applied agent artifact is available to finalize.".to_string())?;
+    if target.track_index >= app.tracks.len()
+        || app.graph.track_instrument_types.get(target.track_index)
+            != Some(&sequencer::sequencer::InstrumentType::Custom)
+    {
+        return Err(
+            "The applied agent artifact is no longer attached to a custom instrument track."
+                .to_string(),
+        );
+    }
+
+    let dsp_source = sequencer::lisp_effect::load_instrument_source(&target.instrument_name)
+        .map_err(|error| format!("Failed to read draft dsp.lisp: {error}"))?;
+    let ui_source = sequencer::lisp_effect::load_instrument_ui_source(&target.instrument_name)
+        .map_err(|error| format!("Failed to read draft ui.lisp: {error}"))?;
+
+    sequencer::lisp_effect::save_instrument(&final_name, &dsp_source)
+        .map_err(|error| format!("Failed to save finalized dsp.lisp: {error}"))?;
+    if let Err(error) = sequencer::lisp_effect::save_instrument_ui(&final_name, &ui_source) {
+        let _ = std::fs::remove_dir_all(&final_dir);
+        return Err(format!("Failed to save finalized ui.lisp: {error}"));
+    }
+
+    if let Err(error) =
+        app.replace_custom_instrument_track_sync(target.track_index, &final_name, &dsp_source)
+    {
+        let _ = std::fs::remove_dir_all(&final_dir);
+        return Err(format!("Failed to load finalized instrument: {error}"));
+    }
+    reload_custom_instrument_ui(editor);
+    editor.refresh_visible_layouts_for_buffer_named("*fx*");
+
+    app.agent_store
+        .set_accepted_instrument_target(
+            conv_id,
+            sequencer::agent::store::AcceptedInstrumentTarget {
+                track_index: target.track_index,
+                instrument_name: final_name.clone(),
+            },
+        )
+        .map_err(|error| format!("Failed to update artifact target: {error}"))?;
+    app.agent_store
+        .set_finalized_instrument_name(conv_id, final_name.clone())
+        .map_err(|error| format!("Failed to mark artifact finalized: {error}"))?;
+    app.agent_store
+        .push_system_message(
+            conv_id,
+            format!("Saved artifact as {}", display_instrument_name(&final_name)),
+        )
+        .map_err(|error| format!("Failed to record finalize message: {error}"))?;
+
+    sync_after_agent_instrument_apply(
+        app,
+        editor,
+        state,
+        target.track_index,
+        current_track,
+        track_names,
+        track_pan_ids,
+        record_armed,
+        selected_steps,
+        accumulator_names,
+        cached_track_peak_levels,
+        cached_bus_peak_levels,
+        ui_epoch,
+        lg_raw,
+    );
+    cleanup_agent_draft_storage(&target.instrument_name);
+
+    Ok(AgentFinalizeResult {
+        track_index: target.track_index,
+        instrument_name: final_name,
+    })
+}
+
+fn agent_generation_watermark(app: &ui::App) -> u64 {
+    app.agent_store
+        .list()
+        .into_iter()
+        .filter_map(|id| app.agent_store.snapshot(id).map(|snapshot| snapshot.state))
+        .fold(0u64, |acc, state| {
+            acc.wrapping_add(state.id)
+                .wrapping_add(state.generation.wrapping_mul(31))
+        })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -240,6 +602,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_current_track_playhead_visible = false;
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
+    let mut prev_agent_generation_watermark = agent_generation_watermark(&app);
     let mut prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)> = None;
     let mut prev_auto_follow = true;
     let mut watched_sampler_voice_track: Option<usize> = None;
@@ -261,6 +624,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pull_shared_bus_state(&mut app, &bus_state);
         pull_named_scratch_buffer_into_project(&editor, &mut app);
         editor.update_timers();
+        let agent_generation = agent_generation_watermark(&app);
+        if agent_generation != prev_agent_generation_watermark {
+            eprintln!(
+                "[agent-ui] generation changed {} -> {}; refreshing *agent*",
+                prev_agent_generation_watermark, agent_generation
+            );
+            prev_agent_generation_watermark = agent_generation;
+            {
+                let rt = editor.runtime_mut();
+                rt.set_reactive(
+                    "AGENT",
+                    "generation",
+                    Value::Number(agent_generation as f64),
+                );
+                rt.run_reactive_cycle();
+            }
+            editor.refresh_runtime_side_effects();
+            editor.refresh_visible_layouts_for_buffer_named("*agent*");
+            editor.refresh_visible_layouts_for_buffer_named("*agent-artifacts*");
+            editor.mark_needs_redraw();
+
+            let ready_agent_drafts = app
+                .agent_store
+                .list()
+                .into_iter()
+                .filter(|id| {
+                    app.agent_store.snapshot(*id).is_some_and(|snapshot| {
+                        snapshot.state.kind == sequencer::agent::store::AgentKind::Instrument
+                            && snapshot.state.status == sequencer::agent::store::AgentStatus::Idle
+                            && snapshot.state.draft.is_some()
+                    })
+                })
+                .collect::<Vec<_>>();
+            for conv_id in ready_agent_drafts {
+                eprintln!("[agent-ui] applying ready agent draft conv={conv_id}");
+                match apply_agent_draft_to_owned_instrument(
+                    &mut app,
+                    &mut editor,
+                    &state,
+                    &current_track,
+                    &mut track_names,
+                    &track_pan_ids,
+                    &record_armed,
+                    &selected_steps,
+                    &accumulator_names,
+                    &cached_track_peak_levels,
+                    &cached_bus_peak_levels,
+                    &ui_epoch,
+                    lg_raw,
+                    conv_id,
+                ) {
+                    Ok(result) => {
+                        let verb = if result.created_track {
+                            "Created"
+                        } else {
+                            "Updated"
+                        };
+                        editor.handle_host_event(HostEvent::Status(format!(
+                            "{verb} agent instrument on track {}",
+                            result.track_index + 1
+                        )));
+                    }
+                    Err(error) => {
+                        eprintln!("[agent-ui] auto-accept failed conv={conv_id}: {error}");
+                        editor.handle_host_event(HostEvent::Error(error));
+                    }
+                }
+            }
+        }
         let (cols, rows) = backend.viewport_size();
         let (cell_w, cell_h) = backend.cell_dimensions();
         if cell_w > 0.0 {
@@ -3347,6 +3779,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ui_epoch.fetch_add(1, Ordering::Relaxed);
                         }
                     }
+                    "agent-accept" => {
+                        let conv_id = match payload {
+                            Value::Number(id) if id >= 1.0 => id as sequencer::agent::store::ConvId,
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "agent-accept: expected conversation id".to_string(),
+                                ));
+                                continue;
+                            }
+                        };
+                        match apply_agent_draft_to_owned_instrument(
+                            &mut app,
+                            &mut editor,
+                            &state,
+                            &current_track,
+                            &mut track_names,
+                            &track_pan_ids,
+                            &record_armed,
+                            &selected_steps,
+                            &accumulator_names,
+                            &cached_track_peak_levels,
+                            &cached_bus_peak_levels,
+                            &ui_epoch,
+                            lg_raw,
+                            conv_id,
+                        ) {
+                            Ok(result) => {
+                                let verb = if result.created_track {
+                                    "Accepted agent draft as track"
+                                } else {
+                                    "Updated agent draft on track"
+                                };
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "{verb} {}",
+                                    result.track_index + 1
+                                )));
+                            }
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Error(error));
+                            }
+                        }
+                    }
+                    "agent-finalize" => {
+                        let Value::Map(map) = payload else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "agent-finalize: expected payload map".to_string(),
+                            ));
+                            continue;
+                        };
+                        let conv_id = match map.get("id").map(|cell| cell.borrow().clone()) {
+                            Some(Value::Number(id)) if id >= 1.0 => {
+                                id as sequencer::agent::store::ConvId
+                            }
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "agent-finalize: expected conversation id".to_string(),
+                                ));
+                                continue;
+                            }
+                        };
+                        let requested_name = match map.get("name").map(|cell| cell.borrow().clone())
+                        {
+                            Some(Value::String(name)) if !name.trim().is_empty() => name,
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "agent-finalize: expected non-empty instrument name"
+                                        .to_string(),
+                                ));
+                                continue;
+                            }
+                        };
+                        match finalize_agent_instrument(
+                            &mut app,
+                            &mut editor,
+                            &state,
+                            &current_track,
+                            &mut track_names,
+                            &track_pan_ids,
+                            &record_armed,
+                            &selected_steps,
+                            &accumulator_names,
+                            &cached_track_peak_levels,
+                            &cached_bus_peak_levels,
+                            &ui_epoch,
+                            lg_raw,
+                            conv_id,
+                            &requested_name,
+                        ) {
+                            Ok(result) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Saved agent artifact {} as track {}",
+                                    display_instrument_name(&result.instrument_name),
+                                    result.track_index + 1
+                                )));
+                            }
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Error(error));
+                            }
+                        }
+                    }
                     // ── Inline instrument/effect editor commands ──
                     "enter-new-instrument-editor" => {
                         let temp_path =
@@ -4354,6 +4886,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
                 editor.reset_widget_scroll_for_buffer_named("*fx*");
                 let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
+                let _ = editor.runtime_mut().eval_str("(sampler-reset-view)");
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
@@ -4418,6 +4951,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 needs_reactive_cycle = true;
             }
             if bpm != prev_bpm {
+                app.push_all_delay_bpm();
                 editor
                     .runtime_mut()
                     .set_reactive("SEQ", "bpm", Value::Number(bpm as f64));

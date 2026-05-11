@@ -2,12 +2,18 @@ use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::error::Error as StdError;
+use std::time::Duration;
 
 use super::actions::{AgentAppAction, AgentSessionContext};
 use super::protocol::{AgentToolRuntime, ToolCall, ToolCallOutcome, ToolSpec};
-use super::providers::{AgentMessage, AgentMessageRole, AgentProviderKind, AgentTurnRequest};
+use super::providers::{
+    build_openai_responses_payload, AgentMessage, AgentMessageRole, AgentProviderKind,
+    AgentTurnRequest,
+};
 
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
+const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_REPEAT_TOOL_FAILURES: usize = 2;
@@ -34,6 +40,8 @@ pub struct AgentNetworkClient {
 impl AgentNetworkClient {
     pub fn load_default() -> Result<Self, String> {
         let http = Client::builder()
+            .connect_timeout(Duration::from_secs(20))
+            .timeout(Duration::from_secs(180))
             .build()
             .map_err(|error| format!("Failed to build HTTP client: {error}"))?;
         Ok(Self {
@@ -62,6 +70,72 @@ impl AgentNetworkClient {
             AgentProviderKind::OpenAi => self.execute_openai_turn(&request),
             AgentProviderKind::Gemini => self.execute_gemini_turn(&request),
         }
+    }
+
+    pub fn execute_text_turn(
+        &self,
+        provider: AgentProviderKind,
+        model: &str,
+        system_prompt: &str,
+        messages: &[AgentMessage],
+    ) -> Result<String, AgentTurnError> {
+        let request = AgentTurnRequest {
+            model: model.to_string(),
+            system_prompt: system_prompt.to_string(),
+            messages: messages.to_vec(),
+            tools: Vec::new(),
+            session_context: AgentSessionContext::default(),
+        };
+
+        match provider {
+            AgentProviderKind::OpenAi => self.execute_openai_responses_text_turn(&request),
+            AgentProviderKind::Gemini => {
+                self.execute_gemini_turn(&request).map(|result| result.text)
+            }
+        }
+    }
+
+    fn execute_openai_responses_text_turn(
+        &self,
+        request: &AgentTurnRequest,
+    ) -> Result<String, AgentTurnError> {
+        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| AgentTurnError {
+            message: "Missing required OPENAI_API_KEY.".to_string(),
+            tool_outcomes: Vec::new(),
+        })?;
+        let payload = build_openai_responses_payload(request);
+        let response = self
+            .http
+            .post(OPENAI_RESPONSES_URL)
+            .header(AUTHORIZATION, format!("Bearer {api_key}"))
+            .header(CONTENT_TYPE, "application/json")
+            .json(&payload)
+            .send()
+            .map_err(|error| AgentTurnError {
+                message: format!(
+                    "OpenAI Responses request failed: {}",
+                    format_reqwest_error(&error)
+                ),
+                tool_outcomes: Vec::new(),
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .unwrap_or_else(|_| "<failed to read response body>".to_string());
+            return Err(AgentTurnError {
+                message: format!("OpenAI Responses request failed: HTTP {status} body: {body}"),
+                tool_outcomes: Vec::new(),
+            });
+        }
+        let value: Value = response.json().map_err(|error| AgentTurnError {
+            message: format!("Failed to decode OpenAI Responses response: {error}"),
+            tool_outcomes: Vec::new(),
+        })?;
+        extract_openai_responses_text(&value).ok_or_else(|| AgentTurnError {
+            message: format!("OpenAI Responses returned no output text: {value}"),
+            tool_outcomes: Vec::new(),
+        })
     }
 
     fn execute_openai_turn(
@@ -608,6 +682,70 @@ fn format_tool_loop_error(
     }
 }
 
+fn format_reqwest_error(error: &reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    if error.is_timeout() {
+        parts.push("timeout=true".to_string());
+    }
+    if error.is_connect() {
+        parts.push("connect=true".to_string());
+    }
+    if error.is_request() {
+        parts.push("request=true".to_string());
+    }
+    if let Some(status) = error.status() {
+        parts.push(format!("status={status}"));
+    }
+
+    let mut source = error.source();
+    while let Some(current) = source {
+        parts.push(format!("source={current}"));
+        source = current.source();
+    }
+
+    parts.join("; ")
+}
+
+fn extract_openai_responses_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.get("output_text").and_then(Value::as_str) {
+        if !text.trim().is_empty() {
+            return Some(text.to_string());
+        }
+    }
+
+    let mut parts = Vec::new();
+    collect_openai_response_text_parts(value, &mut parts);
+    let text = parts.join("\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn collect_openai_response_text_parts(value: &Value, parts: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            let is_text_part = map
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| matches!(kind, "output_text" | "text"));
+            if is_text_part {
+                if let Some(text) = map.get("text").and_then(Value::as_str) {
+                    if !text.trim().is_empty() {
+                        parts.push(text.to_string());
+                    }
+                }
+            }
+            for child in map.values() {
+                collect_openai_response_text_parts(child, parts);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_openai_response_text_parts(item, parts);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenAiChatCompletionResponse {
     choices: Vec<OpenAiChoice>,
@@ -802,7 +940,7 @@ mod tests {
     #[test]
     fn openai_messages_skip_persisted_tool_transcript_entries() {
         let request = AgentTurnRequest {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
             system_prompt: "You are helpful.".to_string(),
             messages: vec![
                 AgentMessage {

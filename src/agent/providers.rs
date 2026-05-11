@@ -94,20 +94,20 @@ pub struct AgentTurnRequest {
 pub fn default_model_presets() -> Vec<AgentModelPreset> {
     vec![
         AgentModelPreset {
-            id: "gpt-5.4".to_string(),
-            display_name: "GPT-5.4".to_string(),
+            id: "gpt-5.5".to_string(),
+            display_name: "GPT-5.5".to_string(),
             provider: AgentProviderKind::OpenAi,
             capability: ModelCapability::Balanced,
         },
         AgentModelPreset {
-            id: "gpt-5.2-codex".to_string(),
-            display_name: "GPT-5.2 Codex".to_string(),
+            id: "gpt-5-mini".to_string(),
+            display_name: "GPT-5 mini".to_string(),
             provider: AgentProviderKind::OpenAi,
             capability: ModelCapability::Fast,
         },
         AgentModelPreset {
-            id: "gpt-5-mini".to_string(),
-            display_name: "GPT-5 mini".to_string(),
+            id: "gpt-5-nano".to_string(),
+            display_name: "GPT-5 nano".to_string(),
             provider: AgentProviderKind::OpenAi,
             capability: ModelCapability::Cheap,
         },
@@ -271,6 +271,11 @@ fn gemini_tool_json(spec: &ToolSpec) -> Value {
 
 fn openai_message_json(message: &AgentMessage) -> Value {
     match message.role {
+        AgentMessageRole::Assistant => json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "output_text", "text": message.content }],
+        }),
         AgentMessageRole::Tool => json!({
             "type": "message",
             "role": "tool",
@@ -339,7 +344,7 @@ mod tests {
     fn openai_payload_contains_tools() {
         let runtime = AgentToolRuntime::load_default().expect("runtime");
         let request = AgentTurnRequest {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
             system_prompt: "You are helpful.".to_string(),
             messages: vec![AgentMessage {
                 role: AgentMessageRole::User,
@@ -363,10 +368,63 @@ mod tests {
             },
         };
         let payload = build_openai_responses_payload(&request);
-        assert_eq!(payload["model"], json!("gpt-5.4"));
+        assert_eq!(payload["model"], json!("gpt-5.5"));
         assert!(payload["tools"]
             .as_array()
             .is_some_and(|tools| !tools.is_empty()));
+    }
+
+    #[test]
+    fn openai_payload_uses_output_text_for_assistant_history() {
+        let request = AgentTurnRequest {
+            model: "gpt-5.5".to_string(),
+            system_prompt: "You are helpful.".to_string(),
+            messages: vec![
+                AgentMessage {
+                    role: AgentMessageRole::User,
+                    content: "make an organ".to_string(),
+                    tool_name: None,
+                },
+                AgentMessage {
+                    role: AgentMessageRole::Assistant,
+                    content: "```dgenlisp\n(out 0 1 @name audio)\n```".to_string(),
+                    tool_name: None,
+                },
+                AgentMessage {
+                    role: AgentMessageRole::System,
+                    content: "compile error: parse error".to_string(),
+                    tool_name: None,
+                },
+            ],
+            tools: Vec::new(),
+            session_context: AgentSessionContext {
+                has_tracks: false,
+                current_track_name: None,
+                current_track_index: None,
+                can_apply_effect_to_current_track: false,
+                current_effect_name: None,
+                current_effect_source: None,
+                current_effect_slot: None,
+                can_update_current_effect: false,
+                current_instrument_name: None,
+                current_instrument_source: None,
+                can_update_current_instrument: false,
+                current_instrument_preset_schema: None,
+            },
+        };
+        let payload = build_openai_responses_payload(&request);
+        assert_eq!(
+            payload["input"][0]["content"][0]["type"],
+            json!("input_text")
+        );
+        assert_eq!(
+            payload["input"][1]["content"][0]["type"],
+            json!("output_text")
+        );
+        assert_eq!(
+            payload["input"][2]["content"][0]["type"],
+            json!("input_text")
+        );
     }
 
     #[test]

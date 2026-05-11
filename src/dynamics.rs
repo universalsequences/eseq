@@ -67,6 +67,73 @@ fn time_coef(ms: f32, sample_rate: f32) -> f32 {
 }
 
 #[inline]
+fn time_coef_lsp(ms: f32, sample_rate: f32) -> f32 {
+    if ms <= 0.0 {
+        return 1.0;
+    }
+    let samples = (ms * 0.001 * sample_rate.max(1.0)).max(1.0);
+    let k = (1.0 - std::f32::consts::FRAC_1_SQRT_2).ln();
+    1.0 - (k / samples).exp()
+}
+
+#[inline]
+fn glue_attack_ms(idx: usize) -> f32 {
+    [0.3, 1.0, 3.0, 10.0][idx.min(3)]
+}
+
+#[inline]
+fn glue_release_ms(idx: usize) -> Option<f32> {
+    match idx.min(3) {
+        0 => Some(100.0),
+        1 => Some(300.0),
+        2 => None,
+        _ => Some(1200.0),
+    }
+}
+
+#[inline]
+fn glue_threshold_db(amount: f32) -> f32 {
+    -2.0 - amount.clamp(0.0, 1.0) * 26.0
+}
+
+#[inline]
+fn glue_ratio(amount: f32) -> f32 {
+    2.0 + amount.clamp(0.0, 1.0) * 8.0
+}
+
+#[inline]
+fn glue_low_cut_hz(idx: usize) -> Option<f32> {
+    match idx.min(3) {
+        0 => None,
+        1 => Some(60.0),
+        2 => Some(90.0),
+        _ => Some(150.0),
+    }
+}
+
+#[inline]
+fn glue_auto_makeup_db(threshold_db: f32, ratio: f32) -> f32 {
+    let slope = 1.0 - 1.0 / ratio.max(1.0);
+    (-threshold_db * slope * 0.45).clamp(0.0, 8.0)
+}
+
+#[inline]
+fn phat_saturate(x: f32, drive: f32) -> f32 {
+    let amt = drive.clamp(0.0, 1.0);
+    if amt <= 0.0001 {
+        return x;
+    }
+    // Two-stage tube-style: input drive into asymmetric soft-clip, then
+    // generous makeup so saturation feels louder/fuller, not quieter.
+    let pre = 1.0 + amt * 2.2;
+    let bias = 0.22 * amt;
+    let xd = x * pre + bias;
+    let y = xd.tanh() - bias.tanh();
+    let makeup = (1.0 + amt * 0.9) / pre;
+    y * makeup
+}
+
+#[inline]
 fn attack_ms(mode: DynamicsMode, idx: usize) -> f32 {
     let idx = idx.min(3);
     match mode {
@@ -170,6 +237,90 @@ fn target_gain_db(mode: DynamicsMode, detector_db: f32, amount: f32) -> f32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+unsafe fn process_glue(
+    s: *mut f32,
+    in0: *const f32,
+    in1: *const f32,
+    out0: *mut f32,
+    out1: *mut f32,
+    nf: usize,
+    amount: f32,
+    attack_idx: usize,
+    release_idx: usize,
+    low_cut: f32,
+    drive: f32,
+    output: f32,
+    mix: f32,
+    sr: f32,
+) {
+    let threshold_db = glue_threshold_db(amount);
+    let ratio = glue_ratio(amount);
+    const KNEE_DB: f32 = 6.0;
+    let auto_makeup = db_to_amp(glue_auto_makeup_db(threshold_db, ratio));
+
+    let attack_coef = time_coef_lsp(glue_attack_ms(attack_idx), sr);
+    let auto = glue_release_ms(release_idx).is_none();
+    let rel_main_coef = time_coef_lsp(glue_release_ms(release_idx).unwrap_or(80.0), sr);
+    let rel_slow_coef = time_coef_lsp(1500.0, sr);
+
+    let low_cut_idx = low_cut.round().clamp(0.0, 3.0) as usize;
+    let low_cut_hz = glue_low_cut_hz(low_cut_idx);
+
+    let mut sc_x1 = *s.add(STATE_SC_X1_L);
+    let mut sc_y1 = *s.add(STATE_SC_Y1_L);
+    let mut env_fast_db = *s.add(STATE_ENV_FAST);
+    let mut env_slow_db = *s.add(STATE_ENV_SLOW);
+    let mut gain_db = *s.add(STATE_GAIN_DB);
+
+    for i in 0..nf {
+        let inp_l = *in0.add(i);
+        let inp_r = *in1.add(i);
+
+        // Feedback: detect from previously-attenuated signal.
+        let last_g = db_to_amp(gain_db);
+        let mono = (inp_l + inp_r) * 0.5 * last_g;
+        let sc = match low_cut_hz {
+            Some(hz) => sidechain_highpass(mono, hz, sr, &mut sc_x1, &mut sc_y1),
+            None => mono,
+        };
+        let detector_db = amp_to_db(sc.abs());
+
+        // Log-domain envelope: smooth dB directly.
+        if detector_db > env_fast_db {
+            env_fast_db += attack_coef * (detector_db - env_fast_db);
+        } else {
+            env_fast_db += rel_main_coef * (detector_db - env_fast_db);
+        }
+        if detector_db > env_slow_db {
+            env_slow_db += attack_coef * (detector_db - env_slow_db);
+        } else {
+            env_slow_db += rel_slow_coef * (detector_db - env_slow_db);
+        }
+
+        let env_db = if auto {
+            (env_fast_db + env_slow_db) * 0.5
+        } else {
+            env_fast_db
+        };
+
+        // Soft-knee gain reduction in dB.
+        gain_db = compression_gain_db(env_db, threshold_db, ratio, KNEE_DB);
+
+        let g = db_to_amp(gain_db) * auto_makeup * output;
+        let wet_l = phat_saturate(inp_l * g, drive);
+        let wet_r = phat_saturate(inp_r * g, drive);
+        *out0.add(i) = inp_l + (wet_l - inp_l) * mix;
+        *out1.add(i) = inp_r + (wet_r - inp_r) * mix;
+    }
+
+    *s.add(STATE_SC_X1_L) = sc_x1;
+    *s.add(STATE_SC_Y1_L) = sc_y1;
+    *s.add(STATE_ENV_FAST) = env_fast_db;
+    *s.add(STATE_ENV_SLOW) = env_slow_db;
+    *s.add(STATE_GAIN_DB) = gain_db;
+}
+
 unsafe extern "C" fn dynamics_init(
     state: *mut c_void,
     sample_rate: c_int,
@@ -224,11 +375,32 @@ unsafe extern "C" fn dynamics_process(
     let amount = (*s.add(STATE_AMOUNT)).clamp(0.0, 1.0);
     let attack_idx = (*s.add(STATE_ATTACK)).round().clamp(0.0, 3.0) as usize;
     let release_idx = (*s.add(STATE_RELEASE)).round().clamp(0.0, 3.0) as usize;
-    let low_cut = (*s.add(STATE_LOW_CUT_HZ)).clamp(20.0, 250.0);
+    let low_cut_raw = *s.add(STATE_LOW_CUT_HZ);
+    let low_cut = low_cut_raw.clamp(20.0, 250.0);
     let drive = (*s.add(STATE_DRIVE)).clamp(0.0, 1.0);
     let output = db_to_amp((*s.add(STATE_OUTPUT_DB)).clamp(-12.0, 12.0));
     let mix = (*s.add(STATE_MIX)).clamp(0.0, 1.0);
     let sr = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+
+    if matches!(mode, DynamicsMode::Glue) {
+        process_glue(
+            s,
+            in0,
+            in1,
+            out0,
+            out1,
+            nf,
+            amount,
+            attack_idx,
+            release_idx,
+            low_cut_raw,
+            drive,
+            output,
+            mix,
+            sr,
+        );
+        return;
+    }
 
     let attack_coef = time_coef(attack_ms(mode, attack_idx), sr);
     let release_fast_coef = time_coef(release_ms(release_idx), sr);
@@ -401,10 +573,10 @@ mod tests {
         let mut low_cut_low = init_state();
         low_cut_low[STATE_MODE] = 0.0;
         low_cut_low[STATE_AMOUNT] = 1.0;
-        low_cut_low[STATE_LOW_CUT_HZ] = 20.0;
+        low_cut_low[STATE_LOW_CUT_HZ] = 0.0;
         low_cut_low[STATE_DRIVE] = 0.0;
         let mut low_cut_high = low_cut_low;
-        low_cut_high[STATE_LOW_CUT_HZ] = 250.0;
+        low_cut_high[STATE_LOW_CUT_HZ] = 3.0;
 
         let sr = 48_000.0;
         let left: Vec<f32> = (0..8192)

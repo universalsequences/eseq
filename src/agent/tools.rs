@@ -409,6 +409,25 @@ mod tests {
     }
 
     #[test]
+    fn lookup_docs_finds_preamble_filters() {
+        let tools = AgentToolRegistry::load_default().expect("load tools");
+        let result = tools.lookup_dgen_docs(&["svf".to_string(), "ladder".to_string()], 3);
+        assert!(result.content.contains("operator svf"));
+        assert!(result.content.contains("operator ladder"));
+    }
+
+    #[test]
+    fn lookup_docs_finds_polyblep_helpers() {
+        let tools = AgentToolRegistry::load_default().expect("load tools");
+        let result = tools.lookup_dgen_docs(
+            &["polyblep_saw".to_string(), "polyblep_pulse".to_string()],
+            3,
+        );
+        assert!(result.content.contains("operator polyblep_saw"));
+        assert!(result.content.contains("operator polyblep_pulse"));
+    }
+
+    #[test]
     fn list_instrument_examples_returns_known_example() {
         let tools = AgentToolRegistry::load_default().expect("load tools");
         let result = tools.list_examples(ExampleKind::Instrument, 200);

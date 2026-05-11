@@ -391,6 +391,14 @@ pub(crate) fn handle_metal_command_shortcut(
         return false;
     }
 
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
+    {
+        let _ = editor.runtime_mut().eval_str("(agent-open-instrument)");
+        editor.refresh_runtime_side_effects();
+        return true;
+    }
+
     if editor.active_buffer().name != "*metal*" {
         return false;
     }

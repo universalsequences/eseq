@@ -579,7 +579,7 @@ impl GraphController<'_> {
         for bound_track in 0..self.app.tracks.len() {
             if self.app.graph.track_engine_ids.get(bound_track) == Some(&Some(engine_id)) {
                 let track_name = self.app.tracks[bound_track].clone();
-                self.initialize_instrument_slot(bound_track, &track_name, manifest);
+                self.sync_instrument_slot(bound_track, &track_name, manifest);
             }
         }
 
@@ -1788,6 +1788,47 @@ impl GraphController<'_> {
         Ok(())
     }
 
+    fn silence_engine_routes(&self, engine_id: usize, engine: &EngineNodeIds) {
+        for voice_idx in 0..MAX_VOICES {
+            let lid = self.app.state.runtime.engine_voice_lids[engine_id][voice_idx]
+                .load(Ordering::Acquire);
+            if lid != 0 {
+                unsafe {
+                    crate::audiograph::params_push_wrapper(
+                        self.app.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            idx: crate::gatepitch::PARAM_GATE,
+                            logical_id: lid,
+                            fvalue: 0.0,
+                        },
+                    );
+                }
+            }
+        }
+
+        for route_pair in engine
+            .route_gain_ids
+            .iter()
+            .flat_map(|routes| routes.iter())
+        {
+            for &route_id in route_pair {
+                if route_id <= 0 {
+                    continue;
+                }
+                unsafe {
+                    crate::audiograph::params_push_wrapper(
+                        self.app.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            idx: 0,
+                            logical_id: route_id as u64,
+                            fvalue: 0.0,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     fn rebuild_custom_engine_runtime(
         &mut self,
         engine_id: usize,
@@ -1797,6 +1838,7 @@ impl GraphController<'_> {
         let Some(mut engine) = self.app.graph.engine_node_ids[engine_id].take() else {
             return Err("Missing engine runtime".to_string());
         };
+        self.silence_engine_routes(engine_id, &engine);
         lisp_effect::reset_dgen_engine_enabled_voices(engine_id);
 
         let mut new_synth_ids = Vec::with_capacity(MAX_VOICES);
@@ -1933,10 +1975,18 @@ impl GraphController<'_> {
         }
 
         engine.synth_ids = new_synth_ids;
+        engine.synth_outputs = manifest.n_outputs.max(1);
         for (v, &mid) in engine.modulator_ids.iter().enumerate() {
             self.app.state.runtime.engine_modulator_node_ids[engine_id][v]
                 .store(mid as u32, Ordering::Release);
         }
+        for bound_track in 0..self.app.graph.track_engine_ids.len() {
+            if self.app.graph.track_engine_ids[bound_track] == Some(engine_id) {
+                self.app.graph.track_synth_node_ids[bound_track] = engine.synth_ids.clone();
+                self.app.graph.track_gatepitch_node_ids[bound_track] = engine.gatepitch_ids.clone();
+            }
+        }
+        self.silence_engine_routes(engine_id, &engine);
         self.app.graph.engine_node_ids[engine_id] = Some(engine);
         Ok(())
     }
@@ -2078,6 +2128,20 @@ impl GraphController<'_> {
     }
 
     fn initialize_instrument_slot(&mut self, track: usize, name: &str, manifest: &DGenManifest) {
+        self.apply_instrument_slot_descriptor(track, name, manifest, false);
+    }
+
+    fn sync_instrument_slot(&mut self, track: usize, name: &str, manifest: &DGenManifest) {
+        self.apply_instrument_slot_descriptor(track, name, manifest, true);
+    }
+
+    fn apply_instrument_slot_descriptor(
+        &mut self,
+        track: usize,
+        name: &str,
+        manifest: &DGenManifest,
+        preserve_runtime_values: bool,
+    ) {
         let mut inst_desc = EffectDescriptor::from_lisp_manifest(
             name,
             &manifest.params,
@@ -2150,13 +2214,18 @@ impl GraphController<'_> {
             });
         }
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
-        inst_slot
-            .num_params
-            .store(inst_desc.params.len() as u32, Ordering::Relaxed);
-        for (i, p) in inst_desc.params.iter().enumerate() {
-            inst_slot.defaults.set(i, p.default);
-            if i < inst_slot.param_node_indices.len() {
-                inst_slot.param_node_indices[i].store(p.node_param_idx, Ordering::Relaxed);
+        if preserve_runtime_values {
+            let node_id = inst_slot.node_id.load(Ordering::Relaxed);
+            inst_slot.sync_descriptor(&inst_desc, node_id);
+        } else {
+            inst_slot
+                .num_params
+                .store(inst_desc.params.len() as u32, Ordering::Relaxed);
+            for (i, p) in inst_desc.params.iter().enumerate() {
+                inst_slot.defaults.set(i, p.default);
+                if i < inst_slot.param_node_indices.len() {
+                    inst_slot.param_node_indices[i].store(p.node_param_idx, Ordering::Relaxed);
+                }
             }
         }
 

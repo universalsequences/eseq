@@ -151,6 +151,15 @@ impl App {
             return Err("No current track is available.".to_string());
         }
         let track = self.ui.cursor_track;
+        self.replace_custom_instrument_track_sync(track, name, source)
+    }
+
+    pub fn replace_custom_instrument_track_sync(
+        &mut self,
+        track: usize,
+        name: &str,
+        source: &str,
+    ) -> Result<(), String> {
         if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
             return Err("The current track is not a custom instrument track.".to_string());
         }
@@ -171,17 +180,15 @@ impl App {
             self.graph.sample_rate,
             asset_base.as_deref(),
         )?;
-        let cache_idx = self.cache_instrument_engine(name, source, &result.manifest, result.lib);
-        let manifest = self.editor.engine_registry.engines[cache_idx]
-            .manifest
-            .clone();
-        let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+        let manifest = result.manifest.clone();
+        let lib_index = self.push_instrument_lib(result.lib);
         let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
         unsafe {
             self.graph_controller()
                 .hot_reload_instrument(track, &manifest, &*lib_ptr)
         }
         .map_err(|e| e.to_string())?;
+        self.push_instrument_defaults_for_track(track);
         self.editor.engine_registry.replace_at(
             runtime_engine_id,
             super::EngineDescriptor {
@@ -228,6 +235,12 @@ impl App {
             lib_index,
         };
         self.editor.engine_registry.upsert(entry)
+    }
+
+    fn push_instrument_lib(&mut self, lib: lisp_effect::LoadedDGenLib) -> usize {
+        let lib_index = self.editor.instrument_libs.len();
+        self.editor.instrument_libs.push(lib);
+        lib_index
     }
 
     fn try_add_cached_instrument_track(&mut self, name: &str, source: &str) -> bool {
@@ -1648,12 +1661,8 @@ impl App {
                     let track = self.ui.cursor_track;
                     let runtime_engine_id =
                         self.graph.track_engine_ids.get(track).and_then(|id| *id);
-                    let cache_idx =
-                        self.cache_instrument_engine(name, source, &result.manifest, result.lib);
-                    let manifest = self.editor.engine_registry.engines[cache_idx]
-                        .manifest
-                        .clone();
-                    let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+                    let manifest = result.manifest.clone();
+                    let lib_index = self.push_instrument_lib(result.lib);
                     let lib_ptr: *const lisp_effect::LoadedDGenLib =
                         &self.editor.instrument_libs[lib_index];
                     unsafe {
@@ -1661,6 +1670,7 @@ impl App {
                             .hot_reload_instrument(track, &manifest, &*lib_ptr)
                     }
                     .map_err(|e| e.to_string())?;
+                    self.push_instrument_defaults_for_track(track);
                     if let Some(runtime_engine_id) = runtime_engine_id {
                         self.editor.engine_registry.replace_at(
                             runtime_engine_id,
@@ -1700,12 +1710,8 @@ impl App {
             if is_existing_custom {
                 let track = self.ui.cursor_track;
                 let runtime_engine_id = self.graph.track_engine_ids.get(track).and_then(|id| *id);
-                let cache_idx =
-                    self.cache_instrument_engine(&r.name, &r.source, &r.manifest, r.lib);
-                let manifest = self.editor.engine_registry.engines[cache_idx]
-                    .manifest
-                    .clone();
-                let lib_index = self.editor.engine_registry.engines[cache_idx].lib_index;
+                let manifest = r.manifest.clone();
+                let lib_index = self.push_instrument_lib(r.lib);
                 let lib_ptr: *const lisp_effect::LoadedDGenLib =
                     &self.editor.instrument_libs[lib_index];
                 match unsafe {
@@ -1713,6 +1719,7 @@ impl App {
                         .hot_reload_instrument(track, &manifest, &*lib_ptr)
                 } {
                     Ok(()) => {
+                        self.push_instrument_defaults_for_track(track);
                         if let Some(runtime_engine_id) = runtime_engine_id {
                             self.editor.engine_registry.replace_at(
                                 runtime_engine_id,

@@ -1506,11 +1506,39 @@ pub fn build_init_message_for_voice(
 // ── Instrument storage ──
 
 pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
-    let path = resolve_instrument_storage_path(name, "lisp")?;
+    let path = if name.ends_with('/') {
+        Path::new(INSTRUMENTS_DIR)
+            .join(name.trim_end_matches('/'))
+            .join("dsp.lisp")
+    } else {
+        resolve_instrument_storage_path(name, "lisp")?
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, source)
+}
+
+pub fn save_instrument_ui(name: &str, source: &str) -> io::Result<()> {
+    let path = instrument_ui_path(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, source)
+}
+
+pub fn instrument_ui_path(name: &str) -> PathBuf {
+    if name.ends_with('/') {
+        Path::new(INSTRUMENTS_DIR)
+            .join(name.trim_end_matches('/'))
+            .join("ui.lisp")
+    } else {
+        Path::new(INSTRUMENTS_DIR).join(name).join("ui.lisp")
+    }
+}
+
+pub fn load_instrument_ui_source(name: &str) -> io::Result<String> {
+    std::fs::read_to_string(instrument_ui_path(name))
 }
 
 pub fn list_saved_instruments() -> Vec<String> {
@@ -1568,7 +1596,9 @@ pub fn load_instrument_source(name: &str) -> io::Result<String> {
 // ── Instrument compilation ──
 
 const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at compile time.
-; Assumes 44.1 kHz for time-based helpers.
+; `samplerate` is substituted by the Rust host before DGenLisp compilation.
+
+(def samplerate __SAMPLE_RATE__)
 
 (defmacro mod_unipolar (m)
   (* (+ m 1.0) 0.5))
@@ -1586,7 +1616,7 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
 ; PolyBLEP transition correction for anti-aliased hard edges.
 ; Kept with a polypleb alias because that typo is memorable and fun.
 (defmacro polyblep (phase freq)
-  (def dt (clip (/ freq 44100.0) 0.000001 0.5))
+  (def dt (clip (/ freq samplerate) 0.000001 0.5))
   (def left_x (/ phase dt))
   (def left (+ (- (* 2.0 left_x) (* left_x left_x)) -1.0))
   (def right_x (/ (- phase 1.0) dt))
@@ -1616,6 +1646,96 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
 (defmacro wavetable-morph-512 (table wave_a wave_b phase morph)
   (wavetable-read-512 table (+ wave_a (* (clip morph 0 1) (- wave_b wave_a))) phase))
 
+; Cytomic-style ZDF state variable filter.
+; cutoff in Hz, q is resonance (0.5 = no resonance, higher = more).
+; mode: 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass.
+(defmacro svf (input cutoff q mode)
+  (def safe_cutoff (clip cutoff 1.0 (* samplerate 0.49)))
+  (def safe_q (max q 0.001))
+  (def g (tan (* pi (/ safe_cutoff samplerate))))
+  (def k (/ 1.0 safe_q))
+  (def a1 (/ 1.0 (+ 1.0 (* g (+ g k)))))
+  (def a2 (* g a1))
+  (def a3 (* g a2))
+
+  (make-history ic1eq)
+  (make-history ic2eq)
+
+  (def ic1 (read-history ic1eq))
+  (def ic2 (read-history ic2eq))
+  (def v3 (- input ic2))
+  (def v1 (+ (* a1 ic1) (* a2 v3)))
+  (def v2 (+ ic2 (* a2 ic1) (* a3 v3)))
+
+  (write-history ic1eq (- (* 2.0 v1) ic1))
+  (write-history ic2eq (- (* 2.0 v2) ic2))
+
+  (def lp v2)
+  (def bp v1)
+  (def hp (- input (* k v1) v2))
+  (def notch (+ hp lp))
+  (def peak (- lp hp))
+  (def ap (- notch (* k v1)))
+
+  (+ (* (eq mode 0) lp)
+     (* (eq mode 1) bp)
+     (* (eq mode 2) hp)
+     (* (eq mode 3) notch)
+     (* (eq mode 4) peak)
+     (* (eq mode 5) ap)))
+
+; ZDF Moog ladder filter, 4-pole, with input drive, tanh feedback saturation,
+; and resonance-proportional passband gain compensation.
+; cutoff in Hz, res is 0..1, drive pre-saturates the input.
+(defmacro ladder (input cutoff res drive)
+  (def wd (* twopi cutoff))
+  (def T (/ 1 samplerate))
+  (def wa (* (/ 2.0 T) (tan (* wd T 0.5))))
+  (def g (* wa T 0.5))
+  (def G (/ g (+ 1 g)))
+  (def G4 (* G G G G))
+  (def k (* res 4))
+
+  (def fb_trim 0.5)
+
+  (make-history z1)
+  (make-history z2)
+  (make-history z3)
+  (make-history z4)
+
+  (def hz1 (read-history z1))
+  (def hz2 (read-history z2))
+  (def hz3 (read-history z3))
+  (def hz4 (read-history z4))
+  (def inv_1pg (/ 1 (+ 1 g)))
+  (def S (+ (* hz1 G G G inv_1pg)
+            (* hz2 G G inv_1pg)
+            (* hz3 G inv_1pg)
+            (* hz4 inv_1pg)))
+
+  (def driven_input (tanh (* drive input)))
+  (def u (/ (- driven_input (* k fb_trim S))
+            (+ 1 (* k fb_trim G4))))
+  (def x1 (- u (* k (tanh (* fb_trim (+ (* G4 u) S))))))
+
+  (def v1 (* (- x1 hz1) G))
+  (def y1 (+ v1 hz1))
+  (write-history z1 (+ y1 v1))
+
+  (def v2 (* (- y1 hz2) G))
+  (def y2 (+ v2 hz2))
+  (write-history z2 (+ y2 v2))
+
+  (def v3 (* (- y2 hz3) G))
+  (def y3 (+ v3 hz3))
+  (write-history z3 (+ y3 v3))
+
+  (def v4 (* (- y3 hz4) G))
+  (def y4 (+ v4 hz4))
+  (write-history z4 (+ y4 v4))
+
+  (+ y4 (* res 0.3 input)))
+
 (defmacro adsr (gate_sig trigger_sig attack_ms decay_ms sustain release_ms)
   (make-history env)
   (make-history gate_hist)
@@ -1625,7 +1745,7 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
   ; short de-click window, then start a linear attack from near zero.
   ; Decay/release are one-pole curves scaled to settle near the target
   ; over the requested number of milliseconds.
-  (def sr 44100.0)
+  (def sr samplerate)
   (def env_time_scale 6.907755)
   (def reset_samples (* 0.003 sr))
   (def attack_samples (max 1.0 (* attack_ms 0.001 sr)))
@@ -1687,6 +1807,10 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
   level)
 "#;
 
+fn instrument_preamble(sample_rate: u32) -> String {
+    INSTRUMENT_PREAMBLE.replace("__SAMPLE_RATE__", &format!("{sample_rate}.0"))
+}
+
 pub fn compile_instrument(source: &str, sample_rate: u32) -> Result<String, String> {
     compile_instrument_with_asset_base(source, sample_rate, None)
 }
@@ -1703,7 +1827,7 @@ pub fn compile_instrument_with_asset_base(
     let dylib_name = format!("instrument_{}", seq);
 
     let src_path = dir.join(format!("instrument_{seq}.lisp"));
-    let source_with_preamble = format!("{INSTRUMENT_PREAMBLE}\n\n{source}");
+    let source_with_preamble = format!("{}\n\n{source}", instrument_preamble(sample_rate));
     std::fs::write(&src_path, source_with_preamble)
         .map_err(|e| format!("Failed to write source: {e}"))?;
 
@@ -8381,6 +8505,36 @@ mod tests {
         assert_eq!(manifest.tensor_init_data[0].data.len(), 8);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn save_folder_instrument_writes_dsp_lisp_even_when_folder_is_new() {
+        let name = format!("__test-agent-folder-{}/", std::process::id());
+        let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));
+        let legacy_file = std::path::Path::new(super::INSTRUMENTS_DIR)
+            .join(format!("{}.lisp", name.trim_end_matches('/')));
+        let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_file(&legacy_file);
+
+        super::save_instrument(&name, "(out 0 1 @name audio)").unwrap();
+        super::save_instrument_ui(&name, "(defsynth-ui (label \"ok\"))").unwrap();
+
+        assert!(folder.join("dsp.lisp").exists());
+        assert!(folder.join("ui.lisp").exists());
+        assert!(
+            !legacy_file.exists(),
+            "folder-style saves must not fall back to legacy single-file instruments"
+        );
+
+        let _ = std::fs::remove_dir_all(&folder);
+        let _ = std::fs::remove_file(&legacy_file);
+    }
+
+    #[test]
+    fn instrument_preamble_substitutes_sample_rate_constant() {
+        let preamble = super::instrument_preamble(48_000);
+        assert!(preamble.contains("(def samplerate 48000.0)"));
+        assert!(!preamble.contains("__SAMPLE_RATE__"));
     }
 
     #[test]

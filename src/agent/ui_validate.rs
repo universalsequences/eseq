@@ -1,0 +1,277 @@
+use std::collections::BTreeSet;
+
+use eseqlisp::parser::{ASTParser, Expression, Parser};
+use eseqlisp::Runtime;
+
+use crate::lisp_effect::DGenManifest;
+
+pub fn validate_instrument_ui_source(
+    ui_source: &str,
+    manifest: &DGenManifest,
+) -> Result<(), String> {
+    let tokens = Parser::new(ui_source.to_string())
+        .parse()
+        .map_err(|error| format!("ui.lisp parse error: {error:?}"))?;
+    let exprs = ASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("ui.lisp AST error: {error:?}"))?;
+
+    let mut defsynth_ui_count = 0;
+    let mut referenced_params = BTreeSet::new();
+    for expr in &exprs {
+        collect_ui_validation_refs(expr, &mut defsynth_ui_count, &mut referenced_params);
+        validate_layout_contract(expr, UiContext::Root)?;
+    }
+
+    if defsynth_ui_count == 0 {
+        return Err("ui.lisp must contain exactly one (defsynth-ui ...) form".to_string());
+    }
+    if defsynth_ui_count > 1 {
+        return Err(format!(
+            "ui.lisp must contain exactly one (defsynth-ui ...) form, found {defsynth_ui_count}"
+        ));
+    }
+
+    let valid_params = manifest
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let unknown = referenced_params
+        .iter()
+        .filter(|name| name.as_str() != "base_note" && !valid_params.contains(name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !unknown.is_empty() {
+        return Err(format!(
+            "ui.lisp references unknown parameter(s): {}. Valid DSP params: {}",
+            unknown.join(", "),
+            valid_params.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    validate_ui_evaluates(ui_source)?;
+
+    Ok(())
+}
+
+fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
+    let mut runtime = Runtime::new();
+    runtime
+        .eval_str(
+            r#"
+            (def defsynth-ui (body) body)
+            (def ui-section (title body) body)
+            (def ui-panel (title section body) body)
+            (def ui-param-control (name) (label name :font-size 10 :color :gray :bg :transparent))
+            (def ui-param-knob (name title) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-adsr (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+            (def base-note () (label "base" :font-size 10 :color :gray :bg :transparent))
+            "#,
+        )
+        .map_err(|error| format!("ui validation runtime setup failed: {error:?}"))?;
+    runtime
+        .eval_str(ui_source)
+        .map_err(|error| format!("ui.lisp evaluation error: {error:?}"))?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UiContext {
+    Root,
+    RowPanel,
+}
+
+fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(), String> {
+    let Expression::List(items) = expr else {
+        return Ok(());
+    };
+    let head = match items.first() {
+        Some(Expression::Symbol(head)) => head.as_str(),
+        _ => "",
+    };
+
+    if head == "scroll" {
+        return Err(
+            "ui.lisp must not use scroll; custom synth UIs must fit the fixed-height rack panel"
+                .to_string(),
+        );
+    }
+    if head == "ui-adsr" && context == UiContext::RowPanel {
+        return Err("ui.lisp must not nest ui-adsr inside ui-panel/ui-section; place ADSR as a standalone rack column or use ui-adsr-switch".to_string());
+    }
+
+    let child_context = if matches!(head, "ui-panel" | "ui-section") {
+        UiContext::RowPanel
+    } else {
+        context
+    };
+    for item in items {
+        validate_layout_contract(item, child_context)?;
+    }
+    Ok(())
+}
+
+fn collect_ui_validation_refs(
+    expr: &Expression,
+    defsynth_ui_count: &mut usize,
+    referenced_params: &mut BTreeSet<String>,
+) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    let Some(Expression::Symbol(head)) = items.first() else {
+        for item in items {
+            collect_ui_validation_refs(item, defsynth_ui_count, referenced_params);
+        }
+        return;
+    };
+
+    match head.as_str() {
+        "defsynth-ui" => *defsynth_ui_count += 1,
+        "param" | "ui-param-control" | "ui-param-knob" => {
+            if let Some(name) = items.get(1).and_then(ui_param_ref_name) {
+                referenced_params.insert(name);
+            }
+        }
+        "params" => {
+            for item in items.iter().skip(1) {
+                if matches!(item, Expression::Keyword(_)) {
+                    continue;
+                }
+                if let Some(name) = ui_param_ref_name(item) {
+                    referenced_params.insert(name);
+                }
+            }
+        }
+        "ui-adsr" => {
+            for item in items.iter().skip(2).take(4) {
+                if let Some(name) = ui_param_ref_name(item) {
+                    referenced_params.insert(name);
+                }
+            }
+        }
+        "ui-adsr-switch" => {
+            for item in items.iter().skip(3).take(4) {
+                if let Some(name) = ui_param_ref_name(item) {
+                    referenced_params.insert(name);
+                }
+            }
+            for item in items.iter().skip(9).take(4) {
+                if let Some(name) = ui_param_ref_name(item) {
+                    referenced_params.insert(name);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    for item in items {
+        collect_ui_validation_refs(item, defsynth_ui_count, referenced_params);
+    }
+}
+
+fn ui_param_ref_name(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::String(name) | Expression::Symbol(name) => Some(name.clone()),
+        Expression::List(items) => items.first().and_then(ui_param_ref_name),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_instrument_ui_source;
+    use crate::lisp_effect::{DGenManifest, DGenParam};
+
+    fn manifest_with_params(names: &[&str]) -> DGenManifest {
+        DGenManifest {
+            dylib_path: std::path::PathBuf::new(),
+            total_memory_slots: 0,
+            params: names
+                .iter()
+                .map(|name| DGenParam {
+                    name: name.to_string(),
+                    cell_id: 0,
+                    default: 0.0,
+                    min: 0.0,
+                    max: 1.0,
+                    unit: None,
+                    hidden: false,
+                })
+                .collect(),
+            inputs: Vec::new(),
+            modulators: Vec::new(),
+            mod_destinations: Vec::new(),
+            n_inputs: 0,
+            n_outputs: 1,
+            tensors: Vec::new(),
+            tensor_init_data: Vec::new(),
+            voice_cell_id: None,
+        }
+    }
+
+    #[test]
+    fn validates_defsynth_ui_and_param_refs() {
+        let manifest = manifest_with_params(&[
+            "amp_attack",
+            "amp_decay",
+            "amp_sustain",
+            "amp_release",
+            "cutoff",
+        ]);
+        validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (h-stack
+                (ui-panel "FILT" 1
+                  (h-stack (ui-param-knob "cutoff" "cut")))
+                (ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
+            "#,
+            &manifest,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_param_refs() {
+        let manifest = manifest_with_params(&["gain"]);
+        let err =
+            validate_instrument_ui_source(r#"(defsynth-ui (ui-param-control "gaim"))"#, &manifest)
+                .unwrap_err();
+        assert!(err.contains("gaim"));
+        assert!(err.contains("gain"));
+    }
+
+    #[test]
+    fn rejects_ui_eval_errors() {
+        let manifest = manifest_with_params(&["gain"]);
+        let err =
+            validate_instrument_ui_source(r#"(defsynth-ui (missing-widget "gain"))"#, &manifest)
+                .unwrap_err();
+        assert!(err.contains("evaluation error"));
+    }
+
+    #[test]
+    fn rejects_scroll_and_nested_adsr() {
+        let manifest =
+            manifest_with_params(&["amp_attack", "amp_decay", "amp_sustain", "amp_release"]);
+        let scroll_err =
+            validate_instrument_ui_source(r#"(defsynth-ui (scroll (label "bad")))"#, &manifest)
+                .unwrap_err();
+        assert!(scroll_err.contains("must not use scroll"));
+
+        let nested_err = validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (ui-panel "AMP" 0
+                (ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+        assert!(nested_err.contains("must not nest ui-adsr"));
+    }
+}

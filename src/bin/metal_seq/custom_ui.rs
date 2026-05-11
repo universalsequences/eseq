@@ -229,6 +229,7 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     }
 
     for (instrument_name, ui_path, src) in ui_sources {
+        eprintln!("[custom-ui] loading instrument ui name={instrument_name:?} path={ui_path}");
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
             Err(err) => {
@@ -256,6 +257,9 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             helpers.push(transform_synth_ui_expr(expr));
         }
         let Some(body) = body else {
+            eprintln!(
+                "[custom-ui] instrument ui skipped name={instrument_name:?} path={ui_path}: missing defsynth-ui"
+            );
             continue;
         };
         let fn_name = format!("custom-synth-ui-{}", safe_lisp_ident(&instrument_name));

@@ -11,6 +11,7 @@ use crate::agent::actions::{
 use crate::agent::network::{AgentTurnError, AgentTurnResult};
 use crate::agent::protocol::{AgentToolRuntime, ToolCallOutcome};
 use crate::agent::providers::{AgentMessage, AgentMessageRole, AgentProviderState};
+use crate::agent::store::ConversationStore;
 use crate::analysis::{AnalysisJob, AnalysisService};
 use crate::audiograph::LiveGraphPtr;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScaling};
@@ -271,6 +272,49 @@ impl EngineRegistry {
             self.engines.push(entry);
             self.engines.len() - 1
         }
+    }
+}
+
+#[cfg(test)]
+mod engine_registry_tests {
+    use super::{EngineDescriptor, EngineRegistry};
+    use crate::lisp_effect::DGenManifest;
+
+    fn manifest() -> DGenManifest {
+        DGenManifest {
+            dylib_path: std::path::PathBuf::new(),
+            total_memory_slots: 0,
+            params: Vec::new(),
+            inputs: Vec::new(),
+            modulators: Vec::new(),
+            mod_destinations: Vec::new(),
+            n_inputs: 0,
+            n_outputs: 1,
+            tensors: Vec::new(),
+            tensor_init_data: Vec::new(),
+            voice_cell_id: None,
+        }
+    }
+
+    #[test]
+    fn duplicate_instrument_sources_reuse_runtime_engine_id() {
+        let mut registry = EngineRegistry::default();
+        let first = registry.upsert(EngineDescriptor {
+            name: "bass/".to_string(),
+            source: "(out 0 1 @name audio)".to_string(),
+            manifest: manifest(),
+            lib_index: 0,
+        });
+        let second = registry.upsert(EngineDescriptor {
+            name: "bass/".to_string(),
+            source: "(out 0 1 @name audio)".to_string(),
+            manifest: manifest(),
+            lib_index: 1,
+        });
+
+        assert_eq!(first, second);
+        assert_eq!(registry.engines.len(), 1);
+        assert_eq!(registry.engines[first].lib_index, 1);
     }
 }
 
@@ -709,6 +753,7 @@ pub struct App {
     pub browser: BrowserState,
     pub preset_browser: PresetBrowserState,
     pub agent_panel: AgentPanelState,
+    pub agent_store: ConversationStore,
     pub graph: GraphState,
     pub master_recorder: Arc<MasterRecorder>,
     pub sample_analysis: AnalysisService,
@@ -1054,6 +1099,7 @@ impl App {
                 pending_request: None,
                 load_error,
             },
+            agent_store: ConversationStore::new(sample_rate),
             master_recorder,
             sample_analysis: AnalysisService::new(),
             pending_recording_take: None,

@@ -20,6 +20,7 @@
 (load "metal-seq-piano-roll.lisp")
 (load "metal-seq-mixer-v2.lisp")
 (load "metal-seq-transport.lisp")
+(load "metal-seq-agent.lisp")
 
 (def seq-clear-ui-selection ()
   (do

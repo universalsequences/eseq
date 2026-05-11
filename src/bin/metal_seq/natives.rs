@@ -421,6 +421,7 @@ pub(crate) fn init_runtime(
         },
         false,
     );
+    runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
 
     // ── Native functions ──
 
@@ -2023,6 +2024,7 @@ pub(crate) fn init_runtime(
         };
         Ok(build_midi_effect_tree(query))
     });
+    register_agent_mode_natives(&mut runtime, app.agent_store.clone());
     document_metal_seq_natives(&mut runtime);
 
     RuntimeInit {
@@ -2030,6 +2032,460 @@ pub(crate) fn init_runtime(
         accumulator_names,
         midi_fx_names,
     }
+}
+
+fn register_agent_mode_natives(
+    runtime: &mut Runtime,
+    store: sequencer::agent::store::ConversationStore,
+) {
+    let s = store.clone();
+    runtime.register_native("agent/new", move |args, _ctx| {
+        let kind =
+            parse_agent_kind(&args).unwrap_or(sequencer::agent::store::AgentKind::Instrument);
+        let id = s.new_conversation(kind);
+        eprintln!("[agent-ui] agent/new kind={kind:?} conv={id}");
+        Ok(Value::Number(id as f64))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/list", move |_args, _ctx| {
+        Ok(Value::List(
+            s.list()
+                .into_iter()
+                .map(|id| Rc::new(RefCell::new(Value::Number(id as f64))))
+                .collect(),
+        ))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/send", move |args, _ctx| {
+        let id = conv_id_arg(args.first())?;
+        let prompt = match args.get(1) {
+            Some(Value::String(value)) => value.clone(),
+            _ => return Err("agent/send: expected conv-id and prompt string".to_string()),
+        };
+        eprintln!(
+            "[agent-ui] agent/send conv={id} prompt_len={} prompt={:?}",
+            prompt.len(),
+            prompt
+        );
+        s.send(id, prompt)?;
+        Ok(Value::Nil)
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/cancel", move |args, _ctx| {
+        let id = conv_id_arg(args.first())?;
+        eprintln!("[agent-ui] agent/cancel conv={id}");
+        s.cancel(id)?;
+        Ok(Value::Nil)
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/discard", move |args, _ctx| {
+        let id = conv_id_arg(args.first())?;
+        eprintln!("[agent-ui] agent/discard conv={id}");
+        s.discard(id)?;
+        Ok(Value::Nil)
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/close", move |args, _ctx| {
+        let id = conv_id_arg(args.first())?;
+        eprintln!("[agent-ui] agent/close conv={id}");
+        s.close(id);
+        Ok(Value::Nil)
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/accept", move |args, ctx| {
+        let id = conv_id_arg(args.first())?;
+        eprintln!("[agent-ui] agent/accept conv={id}");
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "agent-accept".to_string(),
+            payload: Value::Number(id as f64),
+        });
+        // The host command performs graph mutation and returns status asynchronously.
+        let _ = &s;
+        Ok(Value::Number(id as f64))
+    });
+
+    runtime.register_native("agent/finalize", move |args, ctx| {
+        let id = conv_id_arg(args.first())?;
+        let name = match args.get(1) {
+            Some(Value::String(value)) if !value.trim().is_empty() => value.clone(),
+            _ => return Err("agent/finalize: expected conv-id and name string".to_string()),
+        };
+        eprintln!("[agent-ui] agent/finalize conv={id} name={name:?}");
+        let mut payload = std::collections::HashMap::new();
+        payload.insert(
+            "id".to_string(),
+            Rc::new(RefCell::new(Value::Number(id as f64))),
+        );
+        payload.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(name))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "agent-finalize".to_string(),
+            payload: Value::Map(payload),
+        });
+        Ok(Value::Number(id as f64))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/artifact", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(agent_artifact_value(state))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/kind", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(Value::Symbol(agent_kind_symbol(state.kind).to_string()))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/status", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(Value::Symbol(agent_status_symbol(state.status).to_string()))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/messages", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(Value::List(
+            state
+                .messages
+                .into_iter()
+                .map(agent_message_value)
+                .map(|value| Rc::new(RefCell::new(value)))
+                .collect(),
+        ))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/draft-source", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(state
+            .draft
+            .map(|draft| Value::String(draft.dsp_source))
+            .unwrap_or(Value::Nil))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/draft-ui-source", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(state
+            .draft
+            .map(|draft| Value::String(draft.ui_source))
+            .unwrap_or(Value::Nil))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/draft-handle", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(if state.draft_handle.is_some() {
+            Value::Number(state.id as f64)
+        } else {
+            Value::Nil
+        })
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/last-error", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(state
+            .last_compile_error
+            .map(Value::String)
+            .unwrap_or(Value::Nil))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/last-audition", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(state
+            .last_audition
+            .map(agent_audition_value)
+            .unwrap_or(Value::Nil))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/generation", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(Value::Number(state.generation as f64))
+    });
+
+    runtime.register_native("agent/models", move |_args, _ctx| {
+        Ok(Value::List(
+            sequencer::agent::providers::default_model_presets()
+                .into_iter()
+                .map(|model| Rc::new(RefCell::new(Value::String(model.id))))
+                .collect(),
+        ))
+    });
+
+    let s = store.clone();
+    runtime.register_native("agent/model", move |args, _ctx| {
+        let state = snapshot_state(&s, args.first())?;
+        Ok(Value::String(state.model))
+    });
+
+    let s = store;
+    runtime.register_native("agent/set-model", move |args, _ctx| {
+        let id = conv_id_arg(args.first())?;
+        let model = match args.get(1) {
+            Some(Value::String(value)) => value.clone(),
+            _ => return Err("agent/set-model: expected conv-id and model string".to_string()),
+        };
+        let provider = sequencer::agent::providers::default_model_presets()
+            .into_iter()
+            .find(|preset| preset.id == model)
+            .map(|preset| preset.provider)
+            .unwrap_or(sequencer::agent::providers::AgentProviderKind::OpenAi);
+        s.set_model(id, provider, model)?;
+        Ok(Value::Nil)
+    });
+}
+
+fn conv_id_arg(value: Option<&Value>) -> Result<sequencer::agent::store::ConvId, String> {
+    match value {
+        Some(Value::Number(id)) if *id >= 1.0 => Ok(*id as sequencer::agent::store::ConvId),
+        _ => Err("expected agent conversation id".to_string()),
+    }
+}
+
+fn snapshot_state(
+    store: &sequencer::agent::store::ConversationStore,
+    value: Option<&Value>,
+) -> Result<sequencer::agent::store::ConversationState, String> {
+    let id = conv_id_arg(value)?;
+    store
+        .snapshot(id)
+        .map(|snapshot| snapshot.state)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))
+}
+
+fn parse_agent_kind(args: &[Value]) -> Option<sequencer::agent::store::AgentKind> {
+    let candidate = args.iter().rev().find_map(|value| match value {
+        Value::String(value) | Value::Symbol(value) | Value::Keyword(value) => Some(value.as_str()),
+        _ => None,
+    })?;
+    match candidate.trim_start_matches(':') {
+        "instrument" => Some(sequencer::agent::store::AgentKind::Instrument),
+        "effect" => Some(sequencer::agent::store::AgentKind::Effect),
+        _ => None,
+    }
+}
+
+fn agent_kind_symbol(kind: sequencer::agent::store::AgentKind) -> &'static str {
+    match kind {
+        sequencer::agent::store::AgentKind::Instrument => "instrument",
+        sequencer::agent::store::AgentKind::Effect => "effect",
+    }
+}
+
+fn agent_status_symbol(status: sequencer::agent::store::AgentStatus) -> &'static str {
+    match status {
+        sequencer::agent::store::AgentStatus::Idle => "idle",
+        sequencer::agent::store::AgentStatus::Streaming => "streaming",
+        sequencer::agent::store::AgentStatus::Compiling => "compiling",
+        sequencer::agent::store::AgentStatus::Auditioning => "auditioning",
+        sequencer::agent::store::AgentStatus::Error => "error",
+        sequencer::agent::store::AgentStatus::Cancelled => "cancelled",
+    }
+}
+
+fn agent_role_symbol(role: sequencer::agent::store::Role) -> &'static str {
+    match role {
+        sequencer::agent::store::Role::User => "user",
+        sequencer::agent::store::Role::Assistant => "assistant",
+        sequencer::agent::store::Role::System => "system",
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentMessageDisplay {
+    text: String,
+    code_block_count: usize,
+}
+
+fn agent_message_display_text(text: &str) -> AgentMessageDisplay {
+    let mut visible_lines = Vec::new();
+    let mut in_fenced_block = false;
+    let mut code_block_count = 0;
+
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            if !in_fenced_block {
+                code_block_count += 1;
+            }
+            in_fenced_block = !in_fenced_block;
+            continue;
+        }
+
+        if !in_fenced_block {
+            visible_lines.push(line);
+        }
+    }
+
+    let mut display = visible_lines.join("\n");
+    display = display.trim().to_string();
+
+    if code_block_count > 0 {
+        if display.is_empty() {
+            display = "Generated instrument source.".to_string();
+        }
+    }
+
+    AgentMessageDisplay {
+        text: display,
+        code_block_count,
+    }
+}
+
+fn agent_message_value(message: sequencer::agent::store::Message) -> Value {
+    let display = agent_message_display_text(&message.text);
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "role".to_string(),
+        Rc::new(RefCell::new(Value::Symbol(
+            agent_role_symbol(message.role).to_string(),
+        ))),
+    );
+    map.insert(
+        "text".to_string(),
+        Rc::new(RefCell::new(Value::String(message.text))),
+    );
+    map.insert(
+        "display-text".to_string(),
+        Rc::new(RefCell::new(Value::String(display.text))),
+    );
+    map.insert(
+        "has-code-blocks".to_string(),
+        Rc::new(RefCell::new(Value::Bool(display.code_block_count > 0))),
+    );
+    map.insert(
+        "code-block-count".to_string(),
+        Rc::new(RefCell::new(Value::Number(display.code_block_count as f64))),
+    );
+    let ts = message
+        .ts
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0);
+    map.insert("ts".to_string(), Rc::new(RefCell::new(Value::Number(ts))));
+    Value::Map(map)
+}
+
+fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Value {
+    fn display_name(name: &str) -> String {
+        let trimmed = name.trim_end_matches('/');
+        std::path::Path::new(trimmed)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(trimmed)
+            .trim_end_matches(".lisp")
+            .to_string()
+    }
+
+    let target_name = state
+        .accepted_instrument_target
+        .as_ref()
+        .map(|target| target.instrument_name.clone());
+    let draft_name = state
+        .draft
+        .as_ref()
+        .map(|_| format!("agent-draft-{}/", state.id));
+    let instrument_name = state
+        .finalized_instrument_name
+        .clone()
+        .or(target_name)
+        .or(draft_name);
+
+    let mut map = std::collections::HashMap::new();
+    let exists = instrument_name.is_some();
+    map.insert(
+        "exists".to_string(),
+        Rc::new(RefCell::new(Value::Bool(exists))),
+    );
+    map.insert(
+        "name".to_string(),
+        Rc::new(RefCell::new(
+            instrument_name
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    map.insert(
+        "display-name".to_string(),
+        Rc::new(RefCell::new(
+            instrument_name
+                .as_ref()
+                .map(|name| Value::String(display_name(name)))
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    let status = if state.finalized_instrument_name.is_some() {
+        "saved"
+    } else if state.accepted_instrument_target.is_some() {
+        "applied"
+    } else if state.draft.is_some() {
+        "ready"
+    } else {
+        "none"
+    };
+    map.insert(
+        "status".to_string(),
+        Rc::new(RefCell::new(Value::Symbol(status.to_string()))),
+    );
+    map.insert(
+        "track".to_string(),
+        Rc::new(RefCell::new(
+            state
+                .accepted_instrument_target
+                .as_ref()
+                .map(|target| Value::Number((target.track_index + 1) as f64))
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    map.insert(
+        "has-draft".to_string(),
+        Rc::new(RefCell::new(Value::Bool(state.draft.is_some()))),
+    );
+    map.insert(
+        "can-finalize".to_string(),
+        Rc::new(RefCell::new(Value::Bool(
+            state.accepted_instrument_target.is_some() && state.finalized_instrument_name.is_none(),
+        ))),
+    );
+    Value::Map(map)
+}
+
+fn agent_audition_value(audition: sequencer::agent::store::AuditionResult) -> Value {
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "ran".to_string(),
+        Rc::new(RefCell::new(Value::Bool(audition.ran))),
+    );
+    map.insert(
+        "peak-db".to_string(),
+        Rc::new(RefCell::new(Value::Number(audition.peak_db as f64))),
+    );
+    map.insert(
+        "rms-db".to_string(),
+        Rc::new(RefCell::new(Value::Number(audition.rms_db as f64))),
+    );
+    map.insert(
+        "clipped".to_string(),
+        Rc::new(RefCell::new(Value::Bool(audition.clipped))),
+    );
+    map.insert(
+        "duration-ms".to_string(),
+        Rc::new(RefCell::new(Value::Number(audition.duration_ms as f64))),
+    );
+    Value::Map(map)
 }
 
 fn document_metal_seq_natives(runtime: &mut Runtime) {
@@ -2315,4 +2771,35 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "Return the MIDI effect browser tree filtered by query.",
         ),
     ]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_display_text_omits_fenced_source_blocks() {
+        let display = agent_message_display_text(
+            "Built it.\n```dgenlisp\n(def x 1)\n(out x 1 @name audio)\n```\n```eseqlisp\n(defsynth-ui)\n```",
+        );
+
+        assert_eq!(display.code_block_count, 2);
+        assert_eq!(display.text, "Built it.");
+    }
+
+    #[test]
+    fn agent_display_text_uses_placeholder_for_source_only_messages() {
+        let display = agent_message_display_text("```dgenlisp\n(def x 1)\n```");
+
+        assert_eq!(display.code_block_count, 1);
+        assert_eq!(display.text, "Generated instrument source.");
+    }
+
+    #[test]
+    fn agent_display_text_preserves_plain_messages() {
+        let display = agent_message_display_text("No code here.\nStill normal.");
+
+        assert_eq!(display.code_block_count, 0);
+        assert_eq!(display.text, "No code here.\nStill normal.");
+    }
 }

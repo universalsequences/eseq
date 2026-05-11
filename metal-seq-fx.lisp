@@ -617,6 +617,109 @@
       (fx-param-row p false (str "custom-ui-" synth-ui-current-name "-base-note"))
       (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
 
+(defstate custom-ui-selected-section 0)
+
+(def ui-select-section (section)
+  (set! custom-ui-selected-section section))
+
+(def ui-panel-bg (section)
+  (if (= section 0)
+    :instrument-group-bg
+    (if (= custom-ui-selected-section section)
+      :instrument-group-selected-bg
+      :instrument-group-bg)))
+
+(def ui-row-label (title)
+  (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
+    (label title :font-size 8.0 :width 2.7 :color :dim :bg :transparent)))
+
+(def ui-section (title body)
+  (box :height 2.35
+       :background-color :instrument-group-bg
+       :border-width 1 :corner-radius 16 :padding 0.1
+    (h-stack :gap 0.20 :align :start
+      (ui-row-label title)
+      body)))
+
+(def ui-panel (title section body)
+  (box :height 2.35
+       :background-color (ui-panel-bg section)
+       :border-width 1 :corner-radius 16 :padding 0.1
+       :on-click (lambda (info) (ui-select-section section))
+    (h-stack :gap 0.20 :align :start
+      (ui-row-label title)
+      body)))
+
+(def ui-param-knob (name title)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p
+      (subtree :key (str "custom-ui-knob-" synth-ui-current-name "-" name)
+        (knob-number :label title
+          :value (get p :value)
+          :min (get p :min) :max (get p :max) :decimals 2
+          :font-size 10.5 :label-font-size 10
+          :text-color :dim :label-color :dim
+          :width 4.4 :height 2.05
+          :on-change (lambda (v) (fx-set-instrument-value p v))))
+      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
+
+(def ui-param-value (name fallback)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p (get p :value) fallback)))
+
+(def ui-set-param (name value)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p (fx-set-instrument-value p value) false)))
+
+(def ui-adsr-number (name title decimals unit)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p
+      (subtree :key (str "custom-ui-adsr-number-" synth-ui-current-name "-" name)
+        (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
+          (label title :font-size 10 :color :dim :bg :transparent)
+          (number-picker :value (get p :value)
+            :min (get p :min) :max (get p :max) :decimals decimals
+            :unit unit
+            :noui true :font-size 10.5
+            :text-align :center
+            :text-color :widget_focus_bg :edit-color :yellow
+            :width 5.0 :height 0.95
+            :on-change (lambda (v) (fx-set-instrument-value p v)))))
+      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
+
+(def ui-adsr (title attack decay sustain release)
+  (box :width 23.1 :height 6.55
+       :background-color :instrument-control-bg
+       :border-width 1 :corner-radius 16 :padding 0.15
+    (v-stack :width :fill :gap 0.10
+      (adsr-editor
+        :attack (ui-param-value attack 5)
+        :decay (ui-param-value decay 120)
+        :sustain (ui-param-value sustain 0.7)
+        :release (ui-param-value release 120)
+        :width 22.0 :height 3.55
+        :background-color :instrument-control-bg
+        :on-change (lambda (env)
+          (do
+            (ui-set-param attack (get env :attack))
+            (ui-set-param decay (get env :decay))
+            (ui-set-param sustain (get env :sustain))
+            (ui-set-param release (get env :release)))))
+      (box :width :fill :height 1.75 :padding 0.15
+        (h-stack :width :fill :gap 0.20 :align :start
+          (ui-adsr-number attack "atk" 0 "ms")
+          (ui-adsr-number decay "dec" 0 "ms")
+          (ui-adsr-number sustain "sus" 2 false)
+          (ui-adsr-number release "rel" 0 "ms")))
+      (box :width :fill :height 0.35 :h-align :center :v-align :center
+        (label title :font-size 8.5 :color :dim :bg :transparent)))))
+
+(def ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a
+                     section-b title-b attack-b decay-b sustain-b release-b)
+  (if (= custom-ui-selected-section section-b)
+    (ui-adsr title-b attack-b decay-b sustain-b release-b)
+    (ui-adsr title-a attack-a decay-a sustain-a release-a)))
+
 (def midi-fx-ui-param (fx name)
   (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
 
@@ -656,6 +759,12 @@
 (defstate sampler-view-duration 0)
 (defstate sampler-cursor-time 0.0)
 (defstate sampler-active-marker "none")
+
+(def sampler-reset-view ()
+  (set! sampler-view-start 0.0)
+  (set! sampler-view-duration 0)
+  (set! sampler-cursor-time 0.0)
+  (set! sampler-active-marker "none"))
 
 (def sampler-set-start-end (start-seconds end-seconds duration)
   (if (> duration 0)

@@ -1223,6 +1223,98 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 4,
+          "minimum": 4
+        },
+        "attributes": [],
+        "category": "filter",
+        "implementation": {
+          "function": "preamble macro",
+          "source_file": "src/lisp_effect.rs"
+        },
+        "name": "svf",
+        "signatures": [
+          "(svf input cutoff q mode)"
+        ],
+        "summary": "Cytomic-style ZDF state variable filter. Cutoff is Hz, q is resonance/Q, mode is 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass. Prefer this over biquad for most synth filtering."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 4,
+          "minimum": 4
+        },
+        "attributes": [],
+        "category": "filter",
+        "implementation": {
+          "function": "preamble macro",
+          "source_file": "src/lisp_effect.rs"
+        },
+        "name": "ladder",
+        "signatures": [
+          "(ladder input cutoff res drive)"
+        ],
+        "summary": "ZDF Moog-style 4-pole low-pass filter with pre-saturated input drive, tanh feedback saturation, and resonance-proportional passband gain compensation. Cutoff is Hz, res is 0..1, drive is the warm character knob before the ladder core. Use for analog, acid, Moog, mono bass, warm, or driven low-pass character."
+      },
+      {
+        "aliases": [
+          "polypleb"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "oscillator",
+        "implementation": {
+          "function": "preamble macro",
+          "source_file": "src/lisp_effect.rs"
+        },
+        "name": "polyblep",
+        "signatures": [
+          "(polyblep phase freq)"
+        ],
+        "summary": "PolyBLEP transition correction helper for anti-aliased hard oscillator edges. Prefer polyblep_saw and polyblep_pulse directly for normal saw and pulse instruments."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "oscillator",
+        "implementation": {
+          "function": "preamble macro",
+          "source_file": "src/lisp_effect.rs"
+        },
+        "name": "polyblep_saw",
+        "signatures": [
+          "(polyblep_saw phase freq)"
+        ],
+        "summary": "Anti-aliased saw oscillator helper. Pass a phasor phase and frequency in Hz. Use instead of raw phase-to-saw math for bright saw, acid, SH-101, polysynth, or supersaw patches."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 3
+        },
+        "attributes": [],
+        "category": "oscillator",
+        "implementation": {
+          "function": "preamble macro",
+          "source_file": "src/lisp_effect.rs"
+        },
+        "name": "polyblep_pulse",
+        "signatures": [
+          "(polyblep_pulse phase width freq)"
+        ],
+        "summary": "Anti-aliased pulse/square oscillator helper with pulse-width control. Pass a phasor phase, width, and frequency in Hz. Clip width to roughly 0.05..0.95; 0.5 is square."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": 3,
           "minimum": 2
         },

@@ -1259,17 +1259,37 @@ impl EffectDescriptor {
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_RELEASE as u32,
                     host_control: None,
                 },
-                ParamDescriptor {
-                    name: "low cut".to_string(),
-                    min: 20.0,
-                    max: 250.0,
-                    default: low_cut_hz,
-                    kind: ParamKind::Continuous {
-                        unit: Some("Hz".to_string()),
-                    },
-                    scaling: ParamScaling::Exponential,
-                    node_param_idx: crate::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
-                    host_control: None,
+                if mode == 0.0 {
+                    ParamDescriptor {
+                        name: "low cut".to_string(),
+                        min: 0.0,
+                        max: 3.0,
+                        default: low_cut_hz,
+                        kind: ParamKind::Enum {
+                            labels: vec![
+                                "off".to_string(),
+                                "60".to_string(),
+                                "90".to_string(),
+                                "150".to_string(),
+                            ],
+                        },
+                        scaling: ParamScaling::Linear,
+                        node_param_idx: crate::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
+                        host_control: None,
+                    }
+                } else {
+                    ParamDescriptor {
+                        name: "low cut".to_string(),
+                        min: 20.0,
+                        max: 250.0,
+                        default: low_cut_hz,
+                        kind: ParamKind::Continuous {
+                            unit: Some("Hz".to_string()),
+                        },
+                        scaling: ParamScaling::Exponential,
+                        node_param_idx: crate::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
+                        host_control: None,
+                    }
                 },
                 ParamDescriptor {
                     name: "drive".to_string(),
@@ -1319,7 +1339,7 @@ impl EffectDescriptor {
 
     /// SSL-style bus glue: linked stereo detection, low-cut sidechain, and auto release.
     pub fn builtin_glue_compressor() -> Self {
-        Self::builtin_dynamics_variant("Glue Compressor", 0.0, 0.42, 2.0, 2.0, 90.0, 0.12, 0.0, 1.0)
+        Self::builtin_dynamics_variant("Glue Compressor", 0.0, 0.42, 2.0, 2.0, 2.0, 0.12, 0.0, 1.0)
     }
 
     /// General-purpose compressor with conservative hybrid behavior.

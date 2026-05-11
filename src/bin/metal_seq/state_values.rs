@@ -3009,6 +3009,7 @@ mod tests {
             "metal-seq-piano-roll.lisp",
             "metal-seq-mixer-v2.lisp",
             "metal-seq-transport.lisp",
+            "metal-seq-agent.lisp",
             "metal-seq-metal.lisp",
             "metal-seq-sequencer.lisp",
             "metal-seq-grid.lisp",
@@ -3021,6 +3022,44 @@ mod tests {
                 .parse()
                 .unwrap_or_else(|e| panic!("parse {path}: {e:?}"));
         }
+    }
+
+    #[test]
+    fn metal_seq_agent_lisp_creates_agent_buffer_tree() {
+        let mut editor =
+            eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "AGENT",
+            vec![("generation", Value::Number(0.0))],
+            false,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "mac-osx-dark.lisp")"#)
+            .expect("load theme");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "metal-seq-agent.lisp")"#)
+            .expect("load agent lisp");
+        editor.refresh_runtime_side_effects();
+        let agent = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*agent*")
+            .expect("agent lisp should create the *agent* buffer");
+        assert!(
+            agent.widget_tree.is_some(),
+            "*agent* should own a widget tree instead of showing stale UI"
+        );
+        let artifacts = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*agent-artifacts*")
+            .expect("agent lisp should create the *agent-artifacts* buffer");
+        assert!(
+            artifacts.widget_tree.is_some(),
+            "*agent-artifacts* should own the artifact-side panel"
+        );
     }
 
     #[test]
@@ -3936,9 +3975,13 @@ mod tests {
         );
         inst.insert(
             "synth".to_string(),
-            Rc::new(RefCell::new(test_list(vec![Value::Map(test_param_map(
-                "cutoff", 0, 0.5, 0.0, 1.0,
-            ))]))),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("cutoff", 0, 0.5, 0.0, 1.0)),
+                Value::Map(test_param_map("amp_attack", 1, 5.0, 1.0, 1000.0)),
+                Value::Map(test_param_map("amp_decay", 2, 120.0, 1.0, 2000.0)),
+                Value::Map(test_param_map("amp_sustain", 3, 0.7, 0.0, 1.0)),
+                Value::Map(test_param_map("amp_release", 4, 120.0, 1.0, 3000.0)),
+            ]))),
         );
         inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
         inst.insert(
@@ -4744,6 +4787,44 @@ mod tests {
             )
             .expect("install fx test helpers");
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(
+                "(do (set! sampler-view-start 3.5)
+                     (set! sampler-view-duration 1.25)
+                     (set! sampler-cursor-time 3.75)
+                     (set! sampler-active-marker \"start\")
+                     (sampler-reset-view))",
+            )
+            .expect("reset sampler waveform viewport");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sampler-view-start")
+                .expect("read sampler view start"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sampler-view-duration")
+                .expect("read sampler view duration"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sampler-cursor-time")
+                .expect("read sampler cursor time"),
+            Some(Value::Number(0.0))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sampler-active-marker")
+                .expect("read sampler active marker"),
+            Some(Value::String("none".to_string()))
+        );
         let filter_ui_probe = editor
             .runtime_mut()
             .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
@@ -5005,11 +5086,11 @@ mod tests {
             r#"
             (defsynth-ui
               (h-stack :width :fill :gap 0.5
-                (v-stack :width 20 :gap 0.25
-                  (label "CUSTOM_OK" :font-size 10 :color :gray :bg :transparent)
-                  (box :width :fill :height 2
-                    (h-stack :width :fill :gap 0.25
-                      (param "cutoff"))))))
+                (v-stack :width 16.0 :gap 0.10
+                  (ui-panel "CUSTOM_OK" 0
+                    (h-stack :gap 0.25
+                      (ui-param-knob "cutoff" "cut"))))
+                (ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
             "#
             .to_string(),
         )));
