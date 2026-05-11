@@ -840,6 +840,8 @@ pub struct VM {
     execution_depth: usize,
     processing_reactive: bool,
     reactive_exec_timings: Vec<ReactiveExecTiming>,
+    last_reactive_error_context: Option<String>,
+    last_reactive_error_detail: Option<String>,
     current_effect_source_buffer_id: Option<BufferId>,
     current_effect_target: EffectTarget,
     current_effect_reactive_reads: Option<HashSet<ReactiveFieldKey>>,
@@ -1777,6 +1779,8 @@ impl VM {
             execution_depth: 0,
             processing_reactive: false,
             reactive_exec_timings: Vec::new(),
+            last_reactive_error_context: None,
+            last_reactive_error_detail: None,
             current_effect_source_buffer_id: None,
             current_effect_target: EffectTarget::BufferId(None),
             current_effect_reactive_reads: None,
@@ -1999,6 +2003,14 @@ impl VM {
 
     pub fn take_reactive_exec_timings(&mut self) -> Vec<ReactiveExecTiming> {
         std::mem::take(&mut self.reactive_exec_timings)
+    }
+
+    pub fn take_last_reactive_error_context(&mut self) -> Option<String> {
+        self.last_reactive_error_context.take()
+    }
+
+    pub fn take_last_reactive_error_detail(&mut self) -> Option<String> {
+        self.last_reactive_error_detail.take()
     }
 
     fn record_reactive_read(&mut self, namespace: &str, field: &str) {
@@ -2344,6 +2356,8 @@ impl VM {
         }
 
         self.processing_reactive = true;
+        self.last_reactive_error_context = None;
+        self.last_reactive_error_detail = None;
         self.reactive_exec_timings.clear();
         let result = (|| -> Result<(), VMError> {
             loop {
@@ -2390,7 +2404,13 @@ impl VM {
                             self.current_effect_reactive_reads = Some(HashSet::new());
                             let label = self.reactive_node_label(node_id);
                             let started = Instant::now();
-                            let rendered_tree = self.render_registered_subtree_owner(&owner)?;
+                            let rendered_tree = self
+                                .render_registered_subtree_owner(&owner)
+                                .map_err(|error| {
+                                    self.last_reactive_error_context =
+                                        label.clone().or_else(|| Some(format!("node:{node_id}")));
+                                    error
+                                })?;
                             let mut path = Vec::new();
                             let annotated_tree = annotate_widget_tree_stable_ids(
                                 &rendered_tree,
@@ -2456,7 +2476,11 @@ impl VM {
                     }
                     let label = self.reactive_node_label(node_id);
                     let started = Instant::now();
-                    self.execute_from(chunk_idx)?;
+                    self.execute_from(chunk_idx).map_err(|error| {
+                        self.last_reactive_error_context =
+                            label.clone().or_else(|| Some(format!("node:{node_id}")));
+                        error
+                    })?;
                     let captured_reactive_reads = if capturing_effect_reads {
                         self.sorted_current_reactive_reads()
                     } else {
@@ -2613,9 +2637,13 @@ impl VM {
                     let mut sum: f64 = 0.0;
                     for _ in 0..arity {
                         if let Some(val) = stack.pop() {
-                            match *val.borrow() {
+                            match &*val.borrow() {
                                 Value::Number(val) => sum += val,
-                                _ => return Err(VMError::IncorrectType),
+                                other => {
+                                    self.last_reactive_error_detail =
+                                        Some(format!("Add operand={other:?}"));
+                                    return Err(VMError::IncorrectType);
+                                }
                             }
                         }
                     }
@@ -2629,9 +2657,13 @@ impl VM {
                     let mut nums: Vec<f64> = vec![];
                     for _ in 0..arity {
                         if let Some(val) = stack.pop() {
-                            match *val.borrow() {
-                                Value::Number(val) => nums.push(val),
-                                _ => return Err(VMError::IncorrectType),
+                            match &*val.borrow() {
+                                Value::Number(val) => nums.push(*val),
+                                other => {
+                                    self.last_reactive_error_detail =
+                                        Some(format!("Sub operand={other:?}"));
+                                    return Err(VMError::IncorrectType);
+                                }
                             }
                         }
                     }
@@ -2647,9 +2679,13 @@ impl VM {
                     let mut product: f64 = 1.0;
                     for _ in 0..arity {
                         if let Some(val) = stack.pop() {
-                            match *val.borrow() {
+                            match &*val.borrow() {
                                 Value::Number(val) => product *= val,
-                                _ => return Err(VMError::IncorrectType),
+                                other => {
+                                    self.last_reactive_error_detail =
+                                        Some(format!("Mul operand={other:?}"));
+                                    return Err(VMError::IncorrectType);
+                                }
                             }
                         }
                     }
@@ -2663,9 +2699,13 @@ impl VM {
                     let mut nums: Vec<f64> = vec![];
                     for _ in 0..arity {
                         if let Some(val) = stack.pop() {
-                            match *val.borrow() {
-                                Value::Number(val) => nums.push(val),
-                                _ => return Err(VMError::IncorrectType),
+                            match &*val.borrow() {
+                                Value::Number(val) => nums.push(*val),
+                                other => {
+                                    self.last_reactive_error_detail =
+                                        Some(format!("Div operand={other:?}"));
+                                    return Err(VMError::IncorrectType);
+                                }
                             }
                         }
                     }
@@ -2685,9 +2725,13 @@ impl VM {
                     let mut current = f64::INFINITY;
                     for _ in 0..arity {
                         if let Some(val) = stack.pop() {
-                            match *val.borrow() {
-                                Value::Number(val) => current = current.min(val),
-                                _ => return Err(VMError::IncorrectType),
+                            match &*val.borrow() {
+                                Value::Number(val) => current = current.min(*val),
+                                other => {
+                                    self.last_reactive_error_detail =
+                                        Some(format!("Min operand={other:?}"));
+                                    return Err(VMError::IncorrectType);
+                                }
                             }
                         }
                     }
@@ -2701,9 +2745,13 @@ impl VM {
                     let mut current = f64::NEG_INFINITY;
                     for _ in 0..arity {
                         if let Some(val) = stack.pop() {
-                            match *val.borrow() {
-                                Value::Number(val) => current = current.max(val),
-                                _ => return Err(VMError::IncorrectType),
+                            match &*val.borrow() {
+                                Value::Number(val) => current = current.max(*val),
+                                other => {
+                                    self.last_reactive_error_detail =
+                                        Some(format!("Max operand={other:?}"));
+                                    return Err(VMError::IncorrectType);
+                                }
                             }
                         }
                     }
@@ -2742,7 +2790,11 @@ impl VM {
                                 };
                                 stack.push(Rc::new(RefCell::new(Value::Bool(result))));
                             }
-                            _ => return Err(VMError::IncorrectType),
+                            (right, left) => {
+                                self.last_reactive_error_detail =
+                                    Some(format!("{op:?} left={left:?} right={right:?}"));
+                                return Err(VMError::IncorrectType);
+                            }
                         }
                     }
                     frames.last_mut().unwrap().pc += 1;

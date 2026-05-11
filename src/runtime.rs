@@ -1492,6 +1492,8 @@ impl Runtime {
 
     pub fn set_reactive(&mut self, namespace: &str, field: &str, value: Value) {
         let enqueue_effect_dirty = self.vm.has_reactive_subscribers(namespace, field);
+        self.vm
+            .update_reactive_global(namespace, field, value.clone());
         let dirty_widgets =
             self.reactive_registry
                 .set(namespace, field, value, enqueue_effect_dirty);
@@ -1604,42 +1606,61 @@ impl Runtime {
             .map(|(namespace, field, _)| format!("{namespace}.{field}"))
             .collect::<Vec<_>>();
         let apply_started = Instant::now();
-        if self.vm.apply_reactive_changes(dirty).is_ok() {
-            let apply_elapsed = apply_started.elapsed();
-            let exec_timings = self.vm.take_reactive_exec_timings();
-            if self.sync_theme_to_global {
-                self.sync_theme_from_vm();
+        let apply_result = self.vm.apply_reactive_changes(dirty);
+        match apply_result {
+            Ok(()) => {
+                let apply_elapsed = apply_started.elapsed();
+                let exec_timings = self.vm.take_reactive_exec_timings();
+                if self.sync_theme_to_global {
+                    self.sync_theme_from_vm();
+                }
+                self.last_ui_invalidation_trace = Some(UiInvalidationTrace {
+                    dirty_fields,
+                    ..UiInvalidationTrace::default()
+                });
+                let flush_started = Instant::now();
+                let flush_stats = self.flush_widget_trees();
+                if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
+                    trace.affected_buffers = flush_stats.affected_buffers.clone();
+                    trace.active_buffer_targets = flush_stats.active_buffer_targets;
+                    trace.inactive_buffer_targets = flush_stats.inactive_buffer_targets;
+                    trace.widget_tree_flushes = flush_stats.widget_tree_flushes;
+                    trace.pending_widget_tree_count = flush_stats.pending_widget_tree_count;
+                    trace.full_buffer_reruns = flush_stats.full_buffer_reruns;
+                    trace.subtree_reruns = flush_stats.subtree_reruns;
+                    trace.reevaluated_subtree_roots = flush_stats.reevaluated_subtree_roots;
+                    trace.pending_subtree_patch_count = flush_stats.pending_subtree_patch_count;
+                }
+                if std::env::var_os("ESEQLISP_TRACE_UI").is_some()
+                    && let Some(trace) = self.last_ui_invalidation_trace.as_ref()
+                {
+                    eprintln!("{}", format_ui_invalidation_trace(trace, &exec_timings));
+                }
+                self.perf_stats.note_reactive_cycle(
+                    dirty_len,
+                    apply_elapsed,
+                    flush_started.elapsed(),
+                    total_started.elapsed(),
+                    exec_timings,
+                    &flush_stats,
+                );
             }
-            self.last_ui_invalidation_trace = Some(UiInvalidationTrace {
-                dirty_fields,
-                ..UiInvalidationTrace::default()
-            });
-            let flush_started = Instant::now();
-            let flush_stats = self.flush_widget_trees();
-            if let Some(trace) = self.last_ui_invalidation_trace.as_mut() {
-                trace.affected_buffers = flush_stats.affected_buffers.clone();
-                trace.active_buffer_targets = flush_stats.active_buffer_targets;
-                trace.inactive_buffer_targets = flush_stats.inactive_buffer_targets;
-                trace.widget_tree_flushes = flush_stats.widget_tree_flushes;
-                trace.pending_widget_tree_count = flush_stats.pending_widget_tree_count;
-                trace.full_buffer_reruns = flush_stats.full_buffer_reruns;
-                trace.subtree_reruns = flush_stats.subtree_reruns;
-                trace.reevaluated_subtree_roots = flush_stats.reevaluated_subtree_roots;
-                trace.pending_subtree_patch_count = flush_stats.pending_subtree_patch_count;
+            Err(error) => {
+                if std::env::var_os("ESEQLISP_TRACE_UI").is_some() {
+                    let context = self
+                        .vm
+                        .take_last_reactive_error_context()
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    let detail = self
+                        .vm
+                        .take_last_reactive_error_detail()
+                        .unwrap_or_else(|| "-".to_string());
+                    let dirty_label = dirty_fields.join(",");
+                    eprintln!(
+                        "[ui-trace] reactive-cycle-error dirty=[{dirty_label}] context={context} error={error:?} detail={detail}"
+                    );
+                }
             }
-            if std::env::var_os("ESEQLISP_TRACE_UI").is_some()
-                && let Some(trace) = self.last_ui_invalidation_trace.as_ref()
-            {
-                eprintln!("{}", format_ui_invalidation_trace(trace, &exec_timings));
-            }
-            self.perf_stats.note_reactive_cycle(
-                dirty_len,
-                apply_elapsed,
-                flush_started.elapsed(),
-                total_started.elapsed(),
-                exec_timings,
-                &flush_stats,
-            );
         }
     }
 

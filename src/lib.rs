@@ -1378,6 +1378,56 @@ mod tests {
     }
 
     #[test]
+    fn set_reactive_updates_unsubscribed_fields_before_dependent_rerun() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive(
+            "APP",
+            vec![
+                ("names", Value::List(vec![])),
+                ("values", Value::List(vec![])),
+            ],
+            true,
+        );
+
+        runtime
+            .eval_str(
+                r#"
+                (effect-buffer "*list*"
+                  (v-stack
+                    (each (range 0 (len APP.names)) |i|
+                      (label (fmt "{}" (+ (nth APP.values i) 1))))))
+                "#,
+            )
+            .expect("install sparse-list effect");
+        let _ = runtime.take_pending_buffer_widget_trees();
+
+        runtime.set_reactive(
+            "APP",
+            "names",
+            Value::List(vec![Rc::new(RefCell::new(Value::String(
+                "first".to_string(),
+            )))]),
+        );
+        runtime.set_reactive(
+            "APP",
+            "values",
+            Value::List(vec![Rc::new(RefCell::new(Value::Number(41.0)))]),
+        );
+        runtime.run_reactive_cycle();
+
+        let pending = runtime.take_pending_buffer_widget_trees();
+        assert_eq!(pending.len(), 1, "names should rerun the list effect");
+        let crate::vm::PendingUiUpdate::FullTree(update) = &pending[0] else {
+            panic!("expected full-tree update");
+        };
+        assert!(
+            format!("{:?}", update.tree).contains("42"),
+            "rerun must see the latest unsubscribed APP.values field: {:?}",
+            update.tree
+        );
+    }
+
+    #[test]
     fn transport_clock_widget_constructor_is_registered() {
         let mut runtime = Runtime::new();
         runtime.register_reactive("APP", vec![("playhead", Value::Number(0.0))], true);
