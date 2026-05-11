@@ -122,6 +122,7 @@
 (defwidget page-playhead-dot
   :width 0.7 :height 0.7
   :state (active)
+  :bindable (active)
   :shader
   (if (= active 1)
     (sdf/layer
@@ -132,6 +133,7 @@
 (defwidget step-playhead-dot
   :width 1.0 :height 0.7
   :state (active)
+  :bindable (active)
   :shader
   (sdf/layer
     (sdf/fill (sdf/circle 0.45)

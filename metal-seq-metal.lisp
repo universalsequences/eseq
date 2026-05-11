@@ -331,7 +331,7 @@
                         :dim))
               (subtree :key (str "step-playhead-probe-" step)
                 (step-playhead-dot
-                  :active (if (reactive-get "SEQ" (str "playhead-active-" step)) 1 0)))))))) 
+                  :active (bind-seq (str "playhead-active-" step)))))))))
 
     ; Step cursor info
     (h-stack :gap 1 :align :center

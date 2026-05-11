@@ -379,8 +379,10 @@
               :font-size 12 :width 2.5
               :color '(rgba 0.30 0.30 0.32 1)
               :bg :transparent)
-            (label (fmt "{:>2.0}%" SEQ.cpu-load-pct)
-              :font-size 12 :width 4.5
+            (number-label :value (bind-seq "cpu-load-pct")
+              :decimals 0 :suffix "%"
+              :font-size 12 :width 4.5 :height 1
+              :h-align :right
               :color :gray
               :bg :transparent)))))
     

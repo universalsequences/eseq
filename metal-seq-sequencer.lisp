@@ -51,6 +51,7 @@
   :width 48.8 :height 0.24
   :paint-margin 0.18
   :state (col)
+  :bindable (col)
   :shader
   (if (< col 0)
     (rgba 0 0 0 0)
