@@ -71,12 +71,38 @@ fn decimals(props: &HashMap<String, Value>) -> usize {
     get_f32_prop(props, "decimals", 0.0).round().clamp(0.0, 6.0) as usize
 }
 
+fn min_integer_digits(props: &HashMap<String, Value>) -> usize {
+    get_f32_prop(props, "min-integer-digits", 0.0)
+        .round()
+        .clamp(0.0, 12.0) as usize
+}
+
+fn pad_integer_part(mut text: String, min_digits: usize) -> String {
+    if min_digits == 0 {
+        return text;
+    }
+    let sign_len = usize::from(text.starts_with('-') || text.starts_with('+'));
+    let number_start = sign_len;
+    let number_end = text[number_start..]
+        .find('.')
+        .map(|idx| number_start + idx)
+        .unwrap_or(text.len());
+    let digit_count = text[number_start..number_end].chars().count();
+    if digit_count >= min_digits {
+        return text;
+    }
+    let padding = " ".repeat(min_digits - digit_count);
+    text.insert_str(number_start, &padding);
+    text
+}
+
 fn formatted_value(props: &HashMap<String, Value>) -> String {
     let value = get_f32_prop(props, "value", 0.0) as f64;
     let decimals = decimals(props);
+    let number = pad_integer_part(format!("{value:.decimals$}"), min_integer_digits(props));
     let prefix = string_prop(props, "prefix");
     let suffix = string_prop(props, "suffix");
-    format!("{prefix}{value:.decimals$}{suffix}")
+    format!("{prefix}{number}{suffix}")
 }
 
 fn text_row(props: &HashMap<String, Value>, rect: Rect) -> f32 {
@@ -198,6 +224,17 @@ mod tests {
         props.insert("suffix".to_string(), Value::String("%".to_string()));
 
         assert_eq!(formatted_value(&props), "12.3%");
+    }
+
+    #[test]
+    fn pads_integer_part_before_suffix() {
+        let mut props = HashMap::new();
+        props.insert("value".to_string(), Value::Number(3.0));
+        props.insert("decimals".to_string(), Value::Number(0.0));
+        props.insert("min-integer-digits".to_string(), Value::Number(2.0));
+        props.insert("suffix".to_string(), Value::String("%".to_string()));
+
+        assert_eq!(formatted_value(&props), " 3%");
     }
 
     #[test]
