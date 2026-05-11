@@ -5188,6 +5188,9 @@ fn debug_is_symbol_byte(byte: u8) -> bool {
 }
 
 fn max_layout_bottom(node: &crate::layout::LayoutNode) -> f32 {
+    if node.widget_type == "scroll" {
+        return node.rect.row + node.rect.height;
+    }
     node.children
         .iter()
         .fold(node.rect.row + node.rect.height, |bottom, child| {

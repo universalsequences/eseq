@@ -81,12 +81,21 @@ impl WidgetDefinition for HStackWidget {
             inner_constraints.max_width = f32::MAX;
         }
 
-        // Pass 1: measure all children, collect flex values
+        // Pass 1: measure all children, collect flex values. In a fill row,
+        // flex children should not consume their intrinsic/default width before
+        // flex distribution; they receive the remaining width after fixed
+        // children and gaps are reserved.
         let measured: Vec<(&Value, Size, f32)> = children
             .iter()
             .filter_map(|child| {
-                let size = measure_child(child, inner_constraints)?;
                 let flex = get_prop_num(child, "flex").map(f64_to_f32).unwrap_or(0.0);
+                let size = if prop_is_keyword(node, "width", "fill") && flex > 0.0 {
+                    let mut flex_constraints = inner_constraints;
+                    flex_constraints.max_width = 0.0;
+                    measure_child(child, flex_constraints)?
+                } else {
+                    measure_child(child, inner_constraints)?
+                };
                 Some((child, size, flex))
             })
             .collect();

@@ -69,6 +69,10 @@ fn clamp_offset(state: &mut ScrollState) {
     state.offset_y = state.offset_y.clamp(0.0, max_scroll);
 }
 
+fn stick_to_bottom_enabled(node: &LayoutNode) -> bool {
+    matches!(node.props.get("stick-to-bottom"), Some(Value::Bool(true)))
+}
+
 fn current_content_height(node: &LayoutNode) -> f32 {
     if let Some(child) = node.children.first()
         && let Some(height) = super::tree::current_content_height(child)
@@ -117,9 +121,15 @@ pub(crate) fn sync_node_state(node: &LayoutNode) -> ScrollState {
 
     let key = scroll_state_key(node);
     let mut state = get_scroll_state(key);
+    let old_content_height = state.content_height;
+    let old_max_scroll = (state.content_height - state.viewport_height).max(0.0);
+    let was_at_bottom = state.offset_y >= old_max_scroll - 0.001;
     state.content_height = content_height;
     state.viewport_height = viewport_height;
     sync_selected_child_into_view(node, &mut state);
+    if stick_to_bottom_enabled(node) && (old_content_height <= 0.0 || was_at_bottom) {
+        state.offset_y = (state.content_height - state.viewport_height).max(0.0);
+    }
     clamp_offset(&mut state);
     set_scroll_state(key, state.clone());
     state

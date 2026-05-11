@@ -6,7 +6,7 @@ use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 use super::sdf_widget;
 use super::{
     CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetDefinition, WidgetEvent,
-    get_f32_prop, metal_widget_instance, ndc_bounds, resolve_named_color,
+    get_f32_prop, mapped_haptic_value, metal_widget_instance, ndc_bounds, resolve_named_color,
     should_trigger_integer_haptic, styled_cell, trigger_level_change_haptic,
 };
 use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
@@ -156,7 +156,17 @@ impl WidgetDefinition for HorizontalSliderWidget {
         let min = get_f32_prop(&node.props, "min", 0.0);
         let max = get_f32_prop(&node.props, "max", 1.0);
         let value = min + (max - min) * t.clamp(0.0, 1.0);
-        if should_trigger_integer_haptic(node.widget_id, previous, value, min, max) {
+        let haptic_previous = get_f32_prop(&node.props, "haptic-value", previous);
+        let haptic_min = get_f32_prop(&node.props, "haptic-min", min);
+        let haptic_max = get_f32_prop(&node.props, "haptic-max", max);
+        let haptic_value = mapped_haptic_value(&node.props, t, value);
+        if should_trigger_integer_haptic(
+            node.widget_id,
+            haptic_previous,
+            haptic_value,
+            haptic_min,
+            haptic_max,
+        ) {
             trigger_level_change_haptic();
         }
         Some(EventOutput {

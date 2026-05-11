@@ -3723,6 +3723,44 @@ fn ui_only_widget_does_not_scroll_when_content_exactly_fits_viewport() {
 }
 
 #[test]
+fn ui_only_nested_scroll_content_does_not_inflate_outer_widget_scroll() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(20, 8);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (effect
+                  (v-stack :width :fill :height 8 :gap 0
+                    (scroll :width :fill :height 4
+                      (box :width :fill :height 20
+                        (label "tall clipped inner content")))
+                    (box :width :fill :height 4
+                      (label "footer"))))
+                "#,
+        )
+        .unwrap();
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    editor.set_layout_viewport(20, 8);
+    editor.active_leaf_mut().widget_viewport_height = 8.0;
+
+    assert_eq!(
+        editor.max_widget_vertical_scroll(),
+        0.0,
+        "outer widget scroll should ignore content clipped inside a nested scroll container"
+    );
+
+    editor.handle_mouse(mouse_event(MouseEventKind::ScrollDown, 10, 7), 1, 1, 20, 8);
+
+    assert_eq!(
+        editor.widget_scroll_top(),
+        0.0,
+        "scrolling outside the inner scroll should not move the outer viewport"
+    );
+}
+
+#[test]
 fn timeline_drag_item_edge_emits_resize_action() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

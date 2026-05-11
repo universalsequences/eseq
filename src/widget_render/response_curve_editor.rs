@@ -4,11 +4,11 @@ use std::{cell::RefCell, rc::Rc};
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
 
 use super::{
-    ndc_bounds, resolve_named_color, styled_cell, CellBuffer, EventOutput, MetalPrimitive,
-    MouseEventOutcome, WidgetCursor, WidgetDefinition, WidgetEvent, WidgetInstance, WidgetViewport,
+    CellBuffer, EventOutput, MetalPrimitive, MouseEventOutcome, WidgetCursor, WidgetDefinition,
+    WidgetEvent, WidgetInstance, WidgetViewport, ndc_bounds, resolve_named_color, styled_cell,
 };
 use crate::backend::Color;
-use crate::layout::{f64_to_f32, get_prop_num, Constraints, LayoutNode, MeasureCtx, Rect, Size};
+use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
 use crate::theme;
 use crate::vm::Value;
 
@@ -159,6 +159,7 @@ fn band_type_code(band_type: &str) -> f32 {
         "lowpass" | "lowcut" => 0.0,
         "highpass" | "highcut" => 1.0,
         "bandpass" | "notch" => 2.0,
+        "passband" => 6.0,
         "lowshelf" => 3.0,
         "highshelf" => 4.0,
         _ => 5.0,
@@ -245,11 +246,7 @@ fn nearest_band(node: &LayoutNode, col: f32, row: f32) -> Option<i32> {
             best = Some(band.id);
         }
     }
-    if best_dist <= 1.25 {
-        best
-    } else {
-        None
-    }
+    if best_dist <= 1.25 { best } else { None }
 }
 
 fn selected_or_first_band(node: &LayoutNode, gesture: Option<&Value>) -> Option<ResponseBand> {
@@ -625,6 +622,20 @@ float rce_curveY(float bandType, float x, float freqT, float yT, float qT, float
     float q = mix(0.22, 0.045, qT);
     if (isFilter > 0.5) {
         float resonance = qT * 0.92;
+        if (bandType > 5.5 && bandType < 6.5) {
+            float octaveSpan = 9.97;
+            float widthOctaves = mix(0.25, 6.0, qT);
+            float halfWidth = (widthOctaves * 0.5) / octaveSpan;
+            float lowEdge = freqT - halfWidth;
+            float highEdge = freqT + halfWidth;
+            float hpOctaves = (x - lowEdge) * octaveSpan;
+            float lpOctaves = (highEdge - x) * octaveSpan;
+            float hp = 1.0 / sqrt(1.0 + pow(2.0, -hpOctaves * 3.6));
+            float lp = 1.0 / sqrt(1.0 + pow(2.0, -lpOctaves * 3.6));
+            float pass = clamp(hp * lp * 1.14, 0.0, 1.0);
+            float eased = smoothstep(0.0, 1.0, pass);
+            return -0.95 + eased * 1.45;
+        }
         if (bandType < 0.5) {
             float slopeStart = freqT - q * mix(1.10, 0.0, qT);
             float slopeEnd = freqT + q * mix(2.85, 1.42, qT);
@@ -816,6 +827,11 @@ mod tests {
             let rel = (roundtrip - freq).abs() / freq;
             assert!(rel < 0.0001, "freq={freq} roundtrip={roundtrip}");
         }
+    }
+
+    #[test]
+    fn passband_has_dedicated_shader_code() {
+        assert_eq!(band_type_code("passband"), 6.0);
     }
 
     #[test]

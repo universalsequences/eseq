@@ -727,10 +727,12 @@ fn size_affecting_props_equal(
         let height_equal = value_option_eq(old_props.get("height"), new_props.get("height"));
         let font_size_equal =
             value_option_eq(old_props.get("font-size"), new_props.get("font-size"));
+        let wrap_equal = value_option_eq(old_props.get("wrap"), new_props.get("wrap"));
         let width_locked = old_props.contains_key("width") || new_props.contains_key("width");
         return width_equal
             && height_equal
             && font_size_equal
+            && wrap_equal
             && (width_locked || value_option_eq(old_props.get("text"), new_props.get("text")));
     }
 
@@ -1072,6 +1074,15 @@ mod tests {
         build_widget("label", args)
     }
 
+    fn wrapped_label(text: &str, width: Option<f64>) -> Value {
+        let mut args = vec![s(text), kw("wrap"), Value::Bool(true)];
+        if let Some(w) = width {
+            args.push(kw("width"));
+            args.push(num(w));
+        }
+        build_widget("label", args)
+    }
+
     /// Build a hslider: (hslider :min 0 :max 1 :value 0.5)
     fn hslider() -> Value {
         build_widget(
@@ -1145,6 +1156,17 @@ mod tests {
         build_widget("box", args)
     }
 
+    fn flex_text_input(flex: f64, placeholder: &str) -> Value {
+        build_widget(
+            "text-input",
+            vec![kw("placeholder"), s(placeholder), kw("flex"), num(flex)],
+        )
+    }
+
+    fn button(text: &str) -> Value {
+        build_widget("button", vec![s(text)])
+    }
+
     /// Build a grid: (grid :cols c :col-width w children...)
     fn grid(cols: f64, col_width: f64, children: Vec<Value>) -> Value {
         let mut args = vec![kw("cols"), num(cols), kw("col-width"), num(col_width)];
@@ -1172,6 +1194,26 @@ mod tests {
                         kw("background-color"),
                         s(background),
                     ],
+                ),
+            ],
+        )
+    }
+
+    fn sticky_scroll_with_content_height(stable_id: f64, content_height: f64) -> Value {
+        build_widget(
+            "scroll",
+            vec![
+                kw("__stable-widget-id"),
+                num(stable_id),
+                kw("width"),
+                num(20.0),
+                kw("height"),
+                num(3.0),
+                kw("stick-to-bottom"),
+                Value::Bool(true),
+                build_widget(
+                    "box",
+                    vec![kw("width"), num(20.0), kw("height"), num(content_height)],
                 ),
             ],
         )
@@ -1369,6 +1411,38 @@ mod tests {
         assert_f32_approx(state.content_height, 2.5);
         assert_eq!(state.viewport_height, 3.0);
         assert_eq!(state.offset_y, 0.0);
+    }
+
+    #[test]
+    fn sticky_scroll_starts_at_bottom_and_follows_content_growth() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = sticky_scroll_with_content_height(500.0, 8.0);
+        let first_layout = engine.layout(&first).unwrap();
+        let first_state = crate::widget_render::scroll::sync_node_state(&first_layout);
+
+        assert_f32_approx(first_state.offset_y, 5.0);
+
+        let second = sticky_scroll_with_content_height(500.0, 12.0);
+        let second_layout = engine.layout(&second).unwrap();
+        let second_state = crate::widget_render::scroll::sync_node_state(&second_layout);
+
+        assert_f32_approx(second_state.offset_y, 9.0);
+    }
+
+    #[test]
+    fn sticky_scroll_preserves_manual_scroll_when_not_at_bottom() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = sticky_scroll_with_content_height(501.0, 8.0);
+        let first_layout = engine.layout(&first).unwrap();
+        let mut first_state = crate::widget_render::scroll::sync_node_state(&first_layout);
+        first_state.offset_y = 2.0;
+        crate::widget_render::scroll::set_scroll_state(501, first_state);
+
+        let second = sticky_scroll_with_content_height(501.0, 12.0);
+        let second_layout = engine.layout(&second).unwrap();
+        let second_state = crate::widget_render::scroll::sync_node_state(&second_layout);
+
+        assert_f32_approx(second_state.offset_y, 2.0);
     }
 
     #[test]
@@ -1658,6 +1732,27 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_label_measures_multiple_lines_with_finite_width() {
+        let tree = bx(
+            Some(12.0),
+            None,
+            vec![wrapped_label(
+                "Added a resonant low-pass filter after the carrier",
+                None,
+            )],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+        let label = &layout.children[0];
+
+        assert_eq!(label.rect.width, 12.0);
+        assert!(
+            label.rect.height > 1.0,
+            "wrapped chat text should occupy multiple rows"
+        );
+    }
+
+    #[test]
     fn width_fill_hstack_expands_to_parent_width() {
         let tree = bx(
             Some(40.0),
@@ -1703,6 +1798,41 @@ mod tests {
         assert_eq!(stack.rect.width, 40.0);
         assert_eq!(fixed_child.rect.width, 1.0);
         assert_eq!(flex_child.rect.width, 38.0);
+    }
+
+    #[test]
+    fn width_fill_hstack_reserves_fixed_buttons_before_flex_text_input() {
+        let tree = bx(
+            Some(40.0),
+            None,
+            vec![hstack_fill(
+                0.5,
+                vec![
+                    flex_text_input(1.0, "Describe..."),
+                    button("Send"),
+                    button("Cancel"),
+                ],
+            )],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+        let stack = &layout.children[0];
+        let input = &stack.children[0];
+        let send = &stack.children[1];
+        let cancel = &stack.children[2];
+
+        assert_eq!(stack.rect.width, 40.0);
+        assert!(input.rect.width > 0.0);
+        assert!(
+            cancel.rect.col + cancel.rect.width <= stack.rect.col + stack.rect.width,
+            "trailing button must stay inside h-stack; stack={:?} cancel={:?}",
+            stack.rect,
+            cancel.rect
+        );
+        assert!(
+            send.rect.col >= input.rect.col + input.rect.width + 0.5 - 0.000_01,
+            "fixed button should be laid out after flex input"
+        );
     }
 
     #[test]

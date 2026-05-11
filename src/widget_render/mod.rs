@@ -98,6 +98,29 @@ pub fn should_trigger_integer_haptic(
     })
 }
 
+pub fn mapped_haptic_value(props: &HashMap<String, Value>, normalized: f32, fallback: f32) -> f32 {
+    let Some(Value::Number(_)) = props.get("haptic-value") else {
+        return fallback;
+    };
+    let min = get_f32_prop(props, "haptic-min", get_f32_prop(props, "min", 0.0));
+    let max = get_f32_prop(props, "haptic-max", get_f32_prop(props, "max", 1.0));
+    let pivot_pos = get_f32_prop(props, "haptic-pivot-position", 1.0).clamp(0.0, 1.0);
+    let pivot_value = get_f32_prop(props, "haptic-pivot-value", max).clamp(min, max);
+    let exponent = get_f32_prop(props, "haptic-exponent", 1.0).max(0.001);
+    let t = normalized.clamp(0.0, 1.0);
+
+    if pivot_pos <= 0.0 || pivot_pos >= 1.0 {
+        return min + (max - min) * t;
+    }
+
+    if t <= pivot_pos {
+        min + (pivot_value - min) * (t / pivot_pos)
+    } else {
+        let upper_t = (t - pivot_pos) / (1.0 - pivot_pos);
+        pivot_value + (max - pivot_value) * upper_t.powf(exponent)
+    }
+}
+
 #[cfg(target_os = "macos")]
 pub fn trigger_level_change_haptic() {
     let performer = NSHapticFeedbackManager::defaultPerformer();
@@ -1081,6 +1104,22 @@ mod tests {
         clear_haptic_buckets();
         assert!(!should_trigger_integer_haptic(11, 5.2, 5.9, 5.0, 12.0));
         assert!(should_trigger_integer_haptic(11, 5.2, 6.1, 5.0, 12.0));
+    }
+
+    #[test]
+    fn mapped_haptic_value_supports_piecewise_exponential_slider() {
+        let mut props = HashMap::new();
+        props.insert("haptic-value".to_string(), Value::Number(2.0));
+        props.insert("haptic-min".to_string(), Value::Number(0.0));
+        props.insert("haptic-max".to_string(), Value::Number(32.0));
+        props.insert("haptic-pivot-position".to_string(), Value::Number(0.5));
+        props.insert("haptic-pivot-value".to_string(), Value::Number(2.0));
+        props.insert("haptic-exponent".to_string(), Value::Number(4.0));
+
+        assert!((mapped_haptic_value(&props, 0.25, 0.0) - 1.0).abs() < 0.0001);
+        assert!((mapped_haptic_value(&props, 0.5, 0.0) - 2.0).abs() < 0.0001);
+        assert!((mapped_haptic_value(&props, 0.75, 0.0) - 3.875).abs() < 0.0001);
+        assert!((mapped_haptic_value(&props, 1.0, 0.0) - 32.0).abs() < 0.0001);
     }
 }
 

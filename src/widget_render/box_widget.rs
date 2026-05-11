@@ -206,21 +206,28 @@ impl WidgetDefinition for BoxWidget {
     ) -> Option<Size> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
         let pad_y = padding / constraints.aspect;
-        let inner = shrink_constraints_xy(constraints, padding, pad_y);
+        let fixed_width =
+            if prop_is_keyword(node, "width", "fill") && constraints.max_width.is_finite() {
+                Some(constraints.max_width)
+            } else {
+                get_prop_num(node, "width").map(f64_to_f32)
+            };
+        let child_constraints = if let Some(width) = fixed_width {
+            let mut constrained = constraints;
+            constrained.max_width = (width - padding * 2.0).max(0.0);
+            constrained.min_width = constrained.min_width.min(constrained.max_width);
+            shrink_constraints_xy(constrained, 0.0, pad_y)
+        } else {
+            shrink_constraints_xy(constraints, padding, pad_y)
+        };
         let child_size = children
             .first()
-            .and_then(|child| measure_child(child, inner));
-        let width = if prop_is_keyword(node, "width", "fill") && constraints.max_width.is_finite() {
-            constraints.max_width
-        } else {
-            get_prop_num(node, "width")
-                .map(f64_to_f32)
-                .unwrap_or_else(|| {
-                    child_size
-                        .map(|size| size.width + padding * 2.0)
-                        .unwrap_or(padding * 2.0)
-                })
-        };
+            .and_then(|child| measure_child(child, child_constraints));
+        let width = fixed_width.unwrap_or_else(|| {
+            child_size
+                .map(|size| size.width + padding * 2.0)
+                .unwrap_or(padding * 2.0)
+        });
         let height =
             if prop_is_keyword(node, "height", "fill") && constraints.max_height.is_finite() {
                 constraints.max_height
