@@ -211,7 +211,21 @@ fn sync_after_agent_instrument_apply(
     sync_sidebar_browser(rt, app, track_index);
     rt.run_reactive_cycle();
     editor.refresh_runtime_side_effects();
+    refresh_visible_track_topology_layouts(editor);
     ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
+    for buffer_name in [
+        "*metal*",
+        "*sequencer*",
+        "*mixer*",
+        "*track*",
+        "*fx*",
+        "*piano-roll*",
+    ] {
+        editor.refresh_visible_layouts_for_buffer_named(buffer_name);
+    }
 }
 
 fn apply_agent_draft_to_owned_instrument(
@@ -1265,7 +1279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
-                                editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                                refresh_visible_track_topology_layouts(&mut editor);
                                 prev_track_playheads = track_playheads_snapshot(&state, &app);
                                 prev_track_button_states = track_button_state_snapshot(&state);
                                 ui_epoch.fetch_add(1, Ordering::Relaxed);
