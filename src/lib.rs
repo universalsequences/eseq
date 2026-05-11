@@ -1287,6 +1287,45 @@ mod tests {
     }
 
     #[test]
+    fn number_label_native_accepts_value_binding() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive("APP", vec![("cpu", Value::Number(12.0))], true);
+
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (number-label
+                    :value (bind "APP" "cpu")
+                    :decimals 0
+                    :suffix "%"
+                    :width 4
+                    :height 1))
+                "#,
+            )
+            .expect("install bound number-label effect");
+
+        let layout = runtime
+            .current_layout
+            .as_ref()
+            .expect("number-label layout");
+        assert_eq!(layout.widget_type, "number-label");
+        let widget_id = layout.widget_id;
+        let _ = runtime.take_dirty_widget_ids();
+        let _ = runtime.drain_rendered_layouts();
+
+        runtime.set_reactive("APP", "cpu", Value::Number(35.0));
+        runtime.run_reactive_cycle();
+
+        assert_eq!(runtime.take_dirty_widget_ids(), vec![widget_id]);
+        assert!(
+            runtime.drain_rendered_layouts().is_empty(),
+            "number-label binding-only writes must not rerun effects"
+        );
+    }
+
+    #[test]
     fn bind_nth_marks_only_widgets_for_changed_indices_dirty() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);

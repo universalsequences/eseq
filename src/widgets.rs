@@ -19,6 +19,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "mixer-meter",
         "text-input",
         "number-picker",
+        "number-label",
         "response-curve-editor",
         "dropdown",
         "select",
