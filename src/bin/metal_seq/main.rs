@@ -4960,60 +4960,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 needs_reactive_cycle = true;
             }
             if transport_visible && cpu_load_bits != prev_cpu_load_bits {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "cpu-load-pct",
-                    Value::Number(f32::from_bits(cpu_load_bits) as f64),
-                );
+                needs_reactive_cycle |= editor
+                    .runtime_mut()
+                    .set_reactive(
+                        "SEQ",
+                        "cpu-load-pct",
+                        Value::Number(f32::from_bits(cpu_load_bits) as f64),
+                    )
+                    .effects_dirty;
                 prev_cpu_load_bits = cpu_load_bits;
-                needs_reactive_cycle = true;
             }
             if !transport_visible && cpu_load_bits != prev_cpu_load_bits {
                 prev_cpu_load_bits = cpu_load_bits;
             }
             if master_meter_visible && cached_peak_l_level != prev_peak_l_level {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "master-peak-l",
-                    Value::Number(cached_peak_l_level),
-                );
+                needs_reactive_cycle |= editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "master-peak-l", Value::Number(cached_peak_l_level))
+                    .effects_dirty;
                 prev_peak_l_level = cached_peak_l_level;
-                needs_reactive_cycle = true;
             }
             if !master_meter_visible && cached_peak_l_level != prev_peak_l_level {
                 prev_peak_l_level = cached_peak_l_level;
             }
             if master_meter_visible && cached_peak_r_level != prev_peak_r_level {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "master-peak-r",
-                    Value::Number(cached_peak_r_level),
-                );
+                needs_reactive_cycle |= editor
+                    .runtime_mut()
+                    .set_reactive("SEQ", "master-peak-r", Value::Number(cached_peak_r_level))
+                    .effects_dirty;
                 prev_peak_r_level = cached_peak_r_level;
-                needs_reactive_cycle = true;
             }
             if !master_meter_visible && cached_peak_r_level != prev_peak_r_level {
                 prev_peak_r_level = cached_peak_r_level;
             }
             if cached_track_peak_levels != prev_track_peak_levels {
                 if mixer_visible {
-                    sync_track_peak_field_delta(
+                    needs_reactive_cycle |= sync_track_peak_field_delta(
                         editor.runtime_mut(),
                         &prev_track_peak_levels,
                         &cached_track_peak_levels,
                     );
-                    needs_reactive_cycle = true;
                 }
                 prev_track_peak_levels = cached_track_peak_levels.clone();
             }
             if cached_bus_peak_levels != prev_bus_peak_levels {
                 if mixer_visible {
-                    sync_bus_peak_field_delta(
+                    needs_reactive_cycle |= sync_bus_peak_field_delta(
                         editor.runtime_mut(),
                         &prev_bus_peak_levels,
                         &cached_bus_peak_levels,
                     );
-                    needs_reactive_cycle = true;
                 }
                 prev_bus_peak_levels = cached_bus_peak_levels.clone();
             }
@@ -5045,21 +5041,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 && !app.tracks.is_empty()
             {
                 if prev_current_track_playhead_visible {
-                    sync_playhead_field_delta(
+                    needs_reactive_cycle |= sync_playhead_field_delta(
                         editor.runtime_mut(),
                         prev_playhead as usize,
                         playhead as usize,
                         state.pattern.track_params[ct].get_num_steps(),
                     );
                 } else {
-                    sync_playhead_fields(
+                    needs_reactive_cycle |= sync_playhead_fields(
                         editor.runtime_mut(),
                         playhead as usize,
                         state.pattern.track_params[ct].get_num_steps(),
                     );
                 }
                 prev_playhead = playhead;
-                needs_reactive_cycle = true;
             }
             if !current_track_playhead_visible && prev_playhead != playhead {
                 prev_playhead = playhead;
@@ -5223,13 +5218,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 needs_reactive_cycle = true;
             }
             if transport_visible && transport_playhead != prev_transport_playhead {
-                editor.runtime_mut().set_reactive(
-                    "SEQ",
-                    "transport-playhead",
-                    Value::Number(transport_playhead as f64),
-                );
+                needs_reactive_cycle |= editor
+                    .runtime_mut()
+                    .set_reactive(
+                        "SEQ",
+                        "transport-playhead",
+                        Value::Number(transport_playhead as f64),
+                    )
+                    .effects_dirty;
                 prev_transport_playhead = transport_playhead;
-                needs_reactive_cycle = true;
             }
             if !transport_visible && transport_playhead != prev_transport_playhead {
                 prev_transport_playhead = transport_playhead;

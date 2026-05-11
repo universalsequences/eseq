@@ -806,66 +806,101 @@ pub(crate) fn build_track_peaks_value(levels: &[f64]) -> Value {
     Value::List(items)
 }
 
-pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) {
+pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
+    let mut effects_dirty = false;
     for (idx, &level) in levels.iter().enumerate() {
-        rt.set_reactive("SEQ", &format!("track-peak-{idx}"), Value::Number(level));
+        effects_dirty |= rt
+            .set_reactive("SEQ", &format!("track-peak-{idx}"), Value::Number(level))
+            .effects_dirty;
     }
+    effects_dirty
 }
 
-pub(crate) fn sync_bus_peak_fields(rt: &mut Runtime, levels: &[f64]) {
+pub(crate) fn sync_bus_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
+    let mut effects_dirty = false;
     for (idx, &level) in levels.iter().enumerate() {
-        rt.set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(level));
+        effects_dirty |= rt
+            .set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(level))
+            .effects_dirty;
     }
+    effects_dirty
 }
 
-pub(crate) fn sync_track_peak_field_delta(rt: &mut Runtime, previous: &[f64], levels: &[f64]) {
+pub(crate) fn sync_track_peak_field_delta(
+    rt: &mut Runtime,
+    previous: &[f64],
+    levels: &[f64],
+) -> bool {
+    let mut effects_dirty = false;
     if previous.len() != levels.len() {
-        sync_track_peak_fields(rt, levels);
+        effects_dirty |= sync_track_peak_fields(rt, levels);
         for idx in levels.len()..previous.len() {
-            rt.set_reactive("SEQ", &format!("track-peak-{idx}"), Value::Number(0.0));
+            effects_dirty |= rt
+                .set_reactive("SEQ", &format!("track-peak-{idx}"), Value::Number(0.0))
+                .effects_dirty;
         }
-        return;
+        return effects_dirty;
     }
 
     for (idx, (&old_level, &level)) in previous.iter().zip(levels.iter()).enumerate() {
         if old_level != level {
-            rt.set_reactive("SEQ", &format!("track-peak-{idx}"), Value::Number(level));
+            effects_dirty |= rt
+                .set_reactive("SEQ", &format!("track-peak-{idx}"), Value::Number(level))
+                .effects_dirty;
         }
     }
+    effects_dirty
 }
 
-pub(crate) fn sync_bus_peak_field_delta(rt: &mut Runtime, previous: &[f64], levels: &[f64]) {
+pub(crate) fn sync_bus_peak_field_delta(
+    rt: &mut Runtime,
+    previous: &[f64],
+    levels: &[f64],
+) -> bool {
+    let mut effects_dirty = false;
     if previous.len() != levels.len() {
-        sync_bus_peak_fields(rt, levels);
+        effects_dirty |= sync_bus_peak_fields(rt, levels);
         for idx in levels.len()..previous.len() {
-            rt.set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(0.0));
+            effects_dirty |= rt
+                .set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(0.0))
+                .effects_dirty;
         }
-        return;
+        return effects_dirty;
     }
 
     for (idx, (&old_level, &level)) in previous.iter().zip(levels.iter()).enumerate() {
         if old_level != level {
-            rt.set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(level));
+            effects_dirty |= rt
+                .set_reactive("SEQ", &format!("bus-peak-{idx}"), Value::Number(level))
+                .effects_dirty;
         }
     }
+    effects_dirty
 }
 
-pub(crate) fn sync_playhead_fields(rt: &mut Runtime, playhead: usize, num_steps: usize) {
+pub(crate) fn sync_playhead_fields(rt: &mut Runtime, playhead: usize, num_steps: usize) -> bool {
     let clamped_steps = num_steps.max(1).min(MAX_STEPS);
     let active_step = playhead.min(clamped_steps.saturating_sub(1));
-    rt.set_reactive(
-        "SEQ",
-        "playhead-page",
-        Value::Number((active_step / PAGE_SIZE) as f64),
-    );
-    rt.set_reactive("SEQ", "playhead", Value::Number(active_step as f64));
-    for idx in 0..MAX_STEPS {
-        rt.set_reactive(
+    let mut effects_dirty = rt
+        .set_reactive(
             "SEQ",
-            &format!("playhead-active-{idx}"),
-            Value::Bool(idx == active_step && idx < clamped_steps),
-        );
+            "playhead-page",
+            Value::Number((active_step / PAGE_SIZE) as f64),
+        )
+        .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive("SEQ", "playhead", Value::Number(active_step as f64))
+        .effects_dirty;
+    for idx in 0..MAX_STEPS {
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &format!("playhead-active-{idx}"),
+                Value::Bool(idx == active_step && idx < clamped_steps),
+            )
+            .effects_dirty;
     }
+    effects_dirty
 }
 
 pub(crate) fn sync_playhead_field_delta(
@@ -873,28 +908,37 @@ pub(crate) fn sync_playhead_field_delta(
     prev_playhead: usize,
     playhead: usize,
     num_steps: usize,
-) {
+) -> bool {
     let clamped_steps = num_steps.max(1).min(MAX_STEPS);
     let prev_active = prev_playhead.min(clamped_steps.saturating_sub(1));
     let active_step = playhead.min(clamped_steps.saturating_sub(1));
-    rt.set_reactive(
-        "SEQ",
-        "playhead-page",
-        Value::Number((active_step / PAGE_SIZE) as f64),
-    );
-    rt.set_reactive("SEQ", "playhead", Value::Number(active_step as f64));
+    let mut effects_dirty = rt
+        .set_reactive(
+            "SEQ",
+            "playhead-page",
+            Value::Number((active_step / PAGE_SIZE) as f64),
+        )
+        .effects_dirty;
+    effects_dirty |= rt
+        .set_reactive("SEQ", "playhead", Value::Number(active_step as f64))
+        .effects_dirty;
     if prev_active != active_step {
-        rt.set_reactive(
-            "SEQ",
-            &format!("playhead-active-{prev_active}"),
-            Value::Bool(false),
-        );
-        rt.set_reactive(
-            "SEQ",
-            &format!("playhead-active-{active_step}"),
-            Value::Bool(true),
-        );
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &format!("playhead-active-{prev_active}"),
+                Value::Bool(false),
+            )
+            .effects_dirty;
+        effects_dirty |= rt
+            .set_reactive(
+                "SEQ",
+                &format!("playhead-active-{active_step}"),
+                Value::Bool(true),
+            )
+            .effects_dirty;
     }
+    effects_dirty
 }
 
 pub(crate) fn sync_track_topology_state(
