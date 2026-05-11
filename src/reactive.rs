@@ -111,6 +111,12 @@ struct Namespace {
     writable: bool,
 }
 
+#[derive(Debug, Default)]
+pub struct ReactiveSetOutcome {
+    pub effect_dirty: bool,
+    pub widget_ids: Vec<u64>,
+}
+
 impl ReactiveRegistry {
     pub fn new() -> Self {
         Self {
@@ -150,16 +156,16 @@ impl ReactiveRegistry {
         field: &str,
         value: Value,
         enqueue_effect_dirty: bool,
-    ) -> Vec<u64> {
+    ) -> ReactiveSetOutcome {
         let Some(namespace_entry) = self.namespaces.get_mut(namespace) else {
-            return Vec::new();
+            return ReactiveSetOutcome::default();
         };
 
         let previous = namespace_entry.fields.get(field);
         let changed_indices = changed_numeric_indices(previous, &value);
         let unchanged = previous.is_some_and(|current| *current == value);
         if unchanged {
-            return Vec::new();
+            return ReactiveSetOutcome::default();
         }
 
         let key = ReactiveBindingKey::field(namespace, field);
@@ -198,7 +204,10 @@ impl ReactiveRegistry {
         }
         widgets.sort_unstable();
         widgets.dedup();
-        widgets
+        ReactiveSetOutcome {
+            effect_dirty: enqueue_effect_dirty,
+            widget_ids: widgets,
+        }
     }
 
     pub fn batch_begin(&mut self) {

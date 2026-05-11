@@ -65,6 +65,12 @@ pub struct UiInvalidationTrace {
     pub relayout_failure_reason: Option<String>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReactiveSetResult {
+    pub effects_dirty: bool,
+    pub widgets_dirty: bool,
+}
+
 struct RuntimePerfStats {
     enabled: bool,
     window_start: Instant,
@@ -1490,14 +1496,20 @@ impl Runtime {
         self.invalidate_symbol_cache();
     }
 
-    pub fn set_reactive(&mut self, namespace: &str, field: &str, value: Value) {
+    pub fn set_reactive(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        value: Value,
+    ) -> ReactiveSetResult {
         let enqueue_effect_dirty = self.vm.has_reactive_subscribers(namespace, field);
         self.vm
             .update_reactive_global(namespace, field, value.clone());
-        let dirty_widgets =
-            self.reactive_registry
-                .set(namespace, field, value, enqueue_effect_dirty);
-        for widget_id in dirty_widgets {
+        let outcome = self
+            .reactive_registry
+            .set(namespace, field, value, enqueue_effect_dirty);
+        let widgets_dirty = !outcome.widget_ids.is_empty();
+        for widget_id in outcome.widget_ids {
             if !self.dirty_widget_ids.contains(&widget_id) {
                 self.dirty_widget_ids.push(widget_id);
             }
@@ -1507,6 +1519,10 @@ impl Runtime {
         }
         if self.sync_theme_to_global && namespace == "THEME" {
             self.sync_theme_from_registry();
+        }
+        ReactiveSetResult {
+            effects_dirty: outcome.effect_dirty,
+            widgets_dirty,
         }
     }
 

@@ -203,6 +203,10 @@ mod tests {
     #[test]
     fn value_is_bindable_but_not_size_affecting() {
         assert_eq!(NUMBER_LABEL_WIDGET.bindable_props(), &["value"]);
-        assert!(!NUMBER_LABEL_WIDGET.size_affecting_props().contains(&"value"));
+        assert!(
+            !NUMBER_LABEL_WIDGET
+                .size_affecting_props()
+                .contains(&"value")
+        );
     }
 }
