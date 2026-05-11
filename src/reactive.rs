@@ -1,13 +1,55 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::layout::LayoutNode;
+use crate::vm::ReactiveFieldKey;
 use crate::vm::Value;
+
+static REACTIVE_FLOATS: OnceLock<Mutex<HashMap<ReactiveFieldKey, Arc<AtomicU64>>>> =
+    OnceLock::new();
+
+fn reactive_floats() -> &'static Mutex<HashMap<ReactiveFieldKey, Arc<AtomicU64>>> {
+    REACTIVE_FLOATS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn numeric_value(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => Some(*n),
+        Value::Bool(true) => Some(1.0),
+        Value::Bool(false) => Some(0.0),
+        _ => None,
+    }
+}
+
+pub fn reactive_float_slot(namespace: &str, field: &str) -> Arc<AtomicU64> {
+    let key = ReactiveFieldKey {
+        namespace: namespace.to_string(),
+        field: field.to_string(),
+    };
+    let mut slots = reactive_floats()
+        .lock()
+        .expect("reactive float store lock poisoned");
+    slots
+        .entry(key)
+        .or_insert_with(|| Arc::new(AtomicU64::new(0.0f64.to_bits())))
+        .clone()
+}
+
+fn store_float(namespace: &str, field: &str, value: &Value) {
+    let Some(number) = numeric_value(value) else {
+        return;
+    };
+    reactive_float_slot(namespace, field).store(number.to_bits(), Ordering::Relaxed);
+}
 
 pub struct ReactiveRegistry {
     namespaces: HashMap<String, Namespace>,
     dirty: Vec<(String, String, Value)>,
     batched: Vec<(String, String, Value)>,
+    field_to_widgets: HashMap<ReactiveFieldKey, HashSet<u64>>,
     batching: bool,
 }
 
@@ -23,6 +65,7 @@ impl ReactiveRegistry {
             namespaces: HashMap::new(),
             dirty: Vec::new(),
             batched: Vec::new(),
+            field_to_widgets: HashMap::new(),
             batching: false,
         }
     }
@@ -32,6 +75,7 @@ impl ReactiveRegistry {
         let mut map = HashMap::new();
 
         for (field, value) in fields {
+            store_float(name, field, &value);
             stored_fields.insert(field.to_string(), value.clone());
             map.insert(field.to_string(), Rc::new(RefCell::new(value)));
         }
@@ -48,9 +92,15 @@ impl ReactiveRegistry {
         Value::Map(map)
     }
 
-    pub fn set(&mut self, namespace: &str, field: &str, value: Value) {
+    pub fn set(
+        &mut self,
+        namespace: &str,
+        field: &str,
+        value: Value,
+        enqueue_effect_dirty: bool,
+    ) -> Vec<u64> {
         let Some(namespace_entry) = self.namespaces.get_mut(namespace) else {
-            return;
+            return Vec::new();
         };
 
         let unchanged = namespace_entry
@@ -58,9 +108,14 @@ impl ReactiveRegistry {
             .get(field)
             .is_some_and(|current| *current == value);
         if unchanged {
-            return;
+            return Vec::new();
         }
 
+        let key = ReactiveFieldKey {
+            namespace: namespace.to_string(),
+            field: field.to_string(),
+        };
+        store_float(namespace, field, &value);
         namespace_entry
             .fields
             .insert(field.to_string(), value.clone());
@@ -72,12 +127,18 @@ impl ReactiveRegistry {
                 .insert(field.to_string(), Rc::new(RefCell::new(value.clone())));
         }
 
-        let dirty = (namespace.to_string(), field.to_string(), value);
-        if self.batching {
-            self.batched.push(dirty);
-        } else {
-            self.dirty.push(dirty);
+        if enqueue_effect_dirty {
+            let dirty = (namespace.to_string(), field.to_string(), value);
+            if self.batching {
+                self.batched.push(dirty);
+            } else {
+                self.dirty.push(dirty);
+            }
         }
+        self.field_to_widgets
+            .get(&key)
+            .map(|widgets| widgets.iter().copied().collect())
+            .unwrap_or_default()
     }
 
     pub fn batch_begin(&mut self) {
@@ -91,6 +152,51 @@ impl ReactiveRegistry {
 
     pub fn drain_dirty(&mut self) -> Vec<(String, String, Value)> {
         std::mem::take(&mut self.dirty)
+    }
+
+    pub fn replace_widget_bindings_from_layout(&mut self, layout: Option<&LayoutNode>) {
+        self.field_to_widgets.clear();
+        if let Some(layout) = layout {
+            self.collect_widget_bindings(layout);
+        }
+    }
+
+    pub fn replace_widget_bindings_from_layouts<'a>(
+        &mut self,
+        layouts: impl IntoIterator<Item = &'a LayoutNode>,
+    ) {
+        self.field_to_widgets.clear();
+        for layout in layouts {
+            self.collect_widget_bindings(layout);
+        }
+    }
+
+    pub fn widget_bindings_snapshot(&self) -> HashMap<ReactiveFieldKey, HashSet<u64>> {
+        self.field_to_widgets.clone()
+    }
+
+    pub fn restore_widget_bindings(&mut self, bindings: HashMap<ReactiveFieldKey, HashSet<u64>>) {
+        self.field_to_widgets = bindings;
+    }
+
+    fn collect_widget_bindings(&mut self, node: &LayoutNode) {
+        for value in node.props.values() {
+            if let Value::ReactiveRef {
+                namespace, field, ..
+            } = value
+            {
+                self.field_to_widgets
+                    .entry(ReactiveFieldKey {
+                        namespace: namespace.clone(),
+                        field: field.clone(),
+                    })
+                    .or_default()
+                    .insert(node.widget_id);
+            }
+        }
+        for child in &node.children {
+            self.collect_widget_bindings(child);
+        }
     }
 
     pub fn namespace_names(&self) -> Vec<String> {

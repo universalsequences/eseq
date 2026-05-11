@@ -53,6 +53,10 @@ impl WidgetDefinition for MixerMeterWidget {
         &["width", "height", "font-size"]
     }
 
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["level-l", "level-r"]
+    }
+
     fn measure(
         &self,
         node: &Value,
@@ -225,5 +229,84 @@ mod tests {
 
         assert!((first_bar_row - rect.row).abs() < 0.0001);
         assert!((top_label_row - (rect.row + 0.45)).abs() < 0.0001);
+    }
+
+    #[test]
+    fn metal_primitives_resolve_reactive_ref_levels_at_draw_time() {
+        let mut registry = crate::reactive::ReactiveRegistry::new();
+        registry.register("APP", vec![("peak", Value::Number(0.0))], true);
+
+        let rect = Rect {
+            row: 10.0,
+            col: 3.0,
+            width: 2.22,
+            height: 4.24,
+        };
+        let mut props = HashMap::new();
+        props.insert(
+            "level-l".to_string(),
+            Value::ReactiveRef {
+                namespace: "APP".to_string(),
+                field: "peak".to_string(),
+                kind: crate::vm::BindingKind::Float,
+                slot: crate::reactive::reactive_float_slot("APP", "peak"),
+            },
+        );
+        let node = LayoutNode {
+            widget_id: 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "mixer-meter".to_string(),
+            rect,
+            props,
+            children: Vec::new(),
+            focusable: false,
+        };
+        let viewport = WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            vp_w: 1000.0,
+            vp_h: 1000.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 50.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+
+        let near_top_left_color = |prims: Vec<MetalPrimitive>| {
+            prims
+                .into_iter()
+                .filter_map(|prim| match prim {
+                    MetalPrimitive::Rect(rect) => Some(rect.color),
+                    _ => None,
+                })
+                .nth(2)
+                .expect("first meter segment")
+        };
+
+        assert_eq!(
+            near_top_left_color(MIXER_METER_WIDGET.build_metal_primitives(
+                "mixer-meter",
+                &node,
+                viewport
+            )),
+            Color::rgba(0.045, 0.048, 0.052, 1.0)
+        );
+
+        registry.set("APP", "peak", Value::Number(1.0), false);
+
+        assert_eq!(
+            near_top_left_color(MIXER_METER_WIDGET.build_metal_primitives(
+                "mixer-meter",
+                &node,
+                viewport
+            )),
+            Color::rgba(0.95, 0.18, 0.16, 1.0)
+        );
     }
 }

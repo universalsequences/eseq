@@ -1375,7 +1375,7 @@ impl Editor {
     }
 
     pub fn needs_redraw(&self) -> bool {
-        self.needs_redraw
+        self.needs_redraw || self.runtime.has_dirty_widget_ids()
     }
 
     pub fn clear_needs_redraw(&mut self) {
@@ -2026,6 +2026,22 @@ impl Editor {
         leaf.cached_layout = layout;
         leaf.layout_revision = revision;
         self.remap_focused_widget_after_layout_change();
+        self.sync_reactive_bindings_for_visible_layouts();
+    }
+
+    pub fn sync_reactive_bindings_for_visible_layouts(&mut self) {
+        let layouts = self
+            .tile_root
+            .leaf_ids()
+            .into_iter()
+            .filter_map(|id| {
+                self.tile_root
+                    .find_leaf(id)
+                    .and_then(|leaf| leaf.cached_layout.clone())
+            })
+            .collect::<Vec<_>>();
+        self.runtime
+            .replace_widget_bindings_from_layouts(layouts.iter().map(|layout| layout.as_ref()));
     }
 
     fn refresh_all_inactive_tile_layouts(&mut self) {
@@ -2046,6 +2062,7 @@ impl Editor {
         for buf_idx in buf_indices {
             self.refresh_inactive_tile_layouts_for_buffer(buf_idx);
         }
+        self.sync_reactive_bindings_for_visible_layouts();
         self.mark_needs_redraw();
     }
 
@@ -3844,6 +3861,7 @@ impl Editor {
                 leaf.cached_inactive_frame = None;
             }
         }
+        self.sync_reactive_bindings_for_visible_layouts();
         self.mark_needs_redraw();
     }
 
@@ -4005,6 +4023,7 @@ impl Editor {
                 leaf.cached_inactive_frame = None;
             }
         }
+        self.sync_reactive_bindings_for_visible_layouts();
         self.mark_needs_redraw();
     }
 

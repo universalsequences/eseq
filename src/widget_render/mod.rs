@@ -538,6 +538,9 @@ pub trait WidgetDefinition: Sync {
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &[]
     }
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &[]
+    }
     fn measure(
         &self,
         node: &Value,
@@ -736,6 +739,16 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
         }
         Value::Closure(idx, _) | Value::Function(idx) => idx.hash(hasher),
         Value::NodeRef(id) => id.hash(hasher),
+        Value::ReactiveRef {
+            namespace,
+            field,
+            kind,
+            ..
+        } => {
+            namespace.hash(hasher);
+            field.hash(hasher);
+            kind.hash(hasher);
+        }
         Value::NativeFunction(_) => {}
     }
 }
@@ -743,6 +756,9 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
 #[cfg(target_os = "macos")]
 fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Option<u64> {
     if overlay_widget_id().is_some() || !cacheable_widget_primitives(&node.widget_type) {
+        return None;
+    }
+    if props_contain_reactive_ref(&node.props) {
         return None;
     }
 
@@ -766,6 +782,13 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
     viewport.scroll_left.to_bits().hash(&mut hasher);
     hash_props(&node.props, &mut hasher);
     Some(hasher.finish())
+}
+
+#[cfg(target_os = "macos")]
+fn props_contain_reactive_ref(props: &HashMap<String, Value>) -> bool {
+    props
+        .values()
+        .any(|value| matches!(value, Value::ReactiveRef { .. }))
 }
 
 #[cfg(target_os = "macos")]
@@ -1052,6 +1075,9 @@ pub fn captures_scroll_gesture(node: &LayoutNode) -> bool {
 pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     match props.get(key) {
         Some(Value::Number(n)) => *n as f32,
+        Some(Value::ReactiveRef { slot, .. }) => {
+            f64::from_bits(slot.load(Ordering::Relaxed)) as f32
+        }
         _ => default,
     }
 }

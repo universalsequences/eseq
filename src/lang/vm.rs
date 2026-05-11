@@ -6,6 +6,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,11 @@ pub struct ReactiveFieldKey {
     pub field: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BindingKind {
+    Float,
+}
+
 pub enum Value {
     Number(f64),
     Bool(bool),
@@ -52,6 +58,12 @@ pub enum Value {
     Closure(usize, Vec<Rc<RefCell<Value>>>),
     Function(usize),
     NodeRef(NodeId),
+    ReactiveRef {
+        namespace: String,
+        field: String,
+        kind: BindingKind,
+        slot: Arc<AtomicU64>,
+    },
     NativeFunction(NativeFn),
 }
 
@@ -228,6 +240,9 @@ pub fn format_lisp_value(value: &Value) -> String {
         Value::Closure(i, _) => format!("<closure:{i}>"),
         Value::Function(i) => format!("<fn:{i}>"),
         Value::NodeRef(id) => format!("<node:{id}>"),
+        Value::ReactiveRef {
+            namespace, field, ..
+        } => format!("<bind:{namespace}.{field}>"),
         Value::NativeFunction(_) => "<native>".to_string(),
     }
 }
@@ -270,6 +285,9 @@ pub fn format_lisp_source(value: &Value) -> String {
         Value::Closure(i, _) => format!("<closure:{i}>"),
         Value::Function(i) => format!("<fn:{i}>"),
         Value::NodeRef(id) => format!("<node:{id}>"),
+        Value::ReactiveRef {
+            namespace, field, ..
+        } => format!("<bind:{namespace}.{field}>"),
         Value::NativeFunction(_) => "<native>".to_string(),
     }
 }
@@ -434,6 +452,20 @@ impl PartialEq for Value {
             (Self::Closure(a, _), Self::Closure(b, _)) => a == b,
             (Self::Function(a), Self::Function(b)) => a == b,
             (Self::NodeRef(a), Self::NodeRef(b)) => a == b,
+            (
+                Self::ReactiveRef {
+                    namespace: a_ns,
+                    field: a_field,
+                    kind: a_kind,
+                    ..
+                },
+                Self::ReactiveRef {
+                    namespace: b_ns,
+                    field: b_field,
+                    kind: b_kind,
+                    ..
+                },
+            ) => a_ns == b_ns && a_field == b_field && a_kind == b_kind,
             _ => false,
         }
     }
@@ -453,6 +485,17 @@ impl Clone for Value {
             Self::Closure(i, u) => Self::Closure(*i, u.clone()),
             Self::Function(i) => Self::Function(*i),
             Self::NodeRef(id) => Self::NodeRef(*id),
+            Self::ReactiveRef {
+                namespace,
+                field,
+                kind,
+                slot,
+            } => Self::ReactiveRef {
+                namespace: namespace.clone(),
+                field: field.clone(),
+                kind: *kind,
+                slot: slot.clone(),
+            },
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
         }
     }
@@ -486,6 +529,17 @@ impl Value {
             Self::Closure(i, upvalues) => Self::Closure(*i, upvalues.clone()),
             Self::Function(i) => Self::Function(*i),
             Self::NodeRef(id) => Self::NodeRef(*id),
+            Self::ReactiveRef {
+                namespace,
+                field,
+                kind,
+                slot,
+            } => Self::ReactiveRef {
+                namespace: namespace.clone(),
+                field: field.clone(),
+                kind: *kind,
+                slot: slot.clone(),
+            },
             Self::NativeFunction(f) => Self::NativeFunction(f.clone()),
         }
     }
@@ -814,6 +868,32 @@ pub fn register_core_natives(vm: &mut VM) {
             vm.dag.add_edge(source_id, ctx_id);
         }
         vm.current_reactive_value(namespace, field)
+    });
+
+    vm.register_native("bind", |args| {
+        let (Some(Value::String(namespace)), Some(Value::String(field))) =
+            (args.first(), args.get(1))
+        else {
+            return Value::Nil;
+        };
+        Value::ReactiveRef {
+            namespace: namespace.clone(),
+            field: field.clone(),
+            kind: BindingKind::Float,
+            slot: crate::reactive::reactive_float_slot(namespace, field),
+        }
+    });
+
+    vm.register_native("bind-seq", |args| {
+        let Some(Value::String(field)) = args.first() else {
+            return Value::Nil;
+        };
+        Value::ReactiveRef {
+            namespace: "SEQ".to_string(),
+            field: field.clone(),
+            kind: BindingKind::Float,
+            slot: crate::reactive::reactive_float_slot("SEQ", field),
+        }
     });
 
     vm.register_native_with_vm("subtree-owner", |args, vm| {
@@ -2086,6 +2166,20 @@ impl VM {
             dependents: HashSet::new(),
         });
         id
+    }
+
+    pub fn has_reactive_subscribers(&self, namespace: &str, field: &str) -> bool {
+        let source = ReactiveSource::NamespaceField {
+            namespace: namespace.to_string(),
+            field: field.to_string(),
+        };
+        self.dag
+            .find_source_node(&source)
+            .and_then(|id| self.dag.nodes.get(&id))
+            .is_some_and(|node| match node {
+                ReactiveNode::Source { dependents, .. } => !dependents.is_empty(),
+                _ => false,
+            })
     }
 
     fn get_or_create_local_state_node(

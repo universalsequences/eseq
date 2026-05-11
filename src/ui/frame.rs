@@ -624,6 +624,7 @@ fn build_tiled_render_frame_impl(
 ) -> TiledRenderFrame {
     // Ensure cached rects are up to date, then reuse them.
     editor.update_tile_rects(total_width as u16, total_height as u16);
+    editor.sync_reactive_bindings_for_visible_layouts();
     let tile_rects: Vec<_> = editor.tile_rects().to_vec();
     let active_tile = editor.active_tile;
     let (cell_w, cell_h) = editor.layout_cell_dims();

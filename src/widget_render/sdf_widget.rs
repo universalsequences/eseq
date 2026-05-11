@@ -16,6 +16,7 @@ pub struct SdfWidgetDef {
     pub shader_source: String,
     pub sdf_expr: Expression, // macro-expanded SDF expression for CPU hit testing
     pub state_uniforms: Vec<String>,
+    pub bindable_props: Vec<String>,
     pub region_count: usize,
     pub width: f32,
     pub height: f32,
@@ -342,6 +343,9 @@ fn resolve_state_prop(props: &HashMap<String, Value>, name: &str) -> Option<f64>
         Some(Value::Number(n)) => Some(*n),
         Some(Value::Bool(true)) => Some(1.0),
         Some(Value::Bool(false)) => Some(0.0),
+        Some(Value::ReactiveRef { slot, .. }) => Some(f64::from_bits(
+            slot.load(std::sync::atomic::Ordering::Relaxed),
+        )),
         _ => None,
     }
 }
@@ -490,6 +494,7 @@ pub fn register_inline_shader(
         shader_source,
         sdf_expr: crate::parser::Expression::Number(0.0), // placeholder — not used for hit testing
         state_uniforms,
+        bindable_props: Vec::new(),
         region_count: 0,
         width: 1.0,
         height: 1.0,
@@ -1040,6 +1045,7 @@ mod tests {
                 ]),
             ]),
             state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
             region_count: 1,
             width: 2.8,
             height: 1.4,
@@ -1074,6 +1080,7 @@ mod tests {
             shader_source: String::new(),
             sdf_expr: Expression::Symbol("shape".to_string()),
             state_uniforms: Vec::new(),
+            bindable_props: Vec::new(),
             region_count: 0,
             width: 1.0,
             height: 1.0,

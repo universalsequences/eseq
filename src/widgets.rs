@@ -66,6 +66,13 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     while i < args.len() {
         match args.get(i) {
             Some(Value::Keyword(key)) if i + 1 < args.len() => {
+                if matches!(args.get(i + 1), Some(Value::ReactiveRef { .. }))
+                    && !prop_accepts_binding(widget_type, key)
+                {
+                    return Value::String(format!(
+                        "{widget_type}: :{key} does not accept reactive bindings"
+                    ));
+                }
                 map.insert(key.clone(), Rc::new(RefCell::new(args[i + 1].clone())));
                 i += 2;
             }
@@ -108,4 +115,12 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     }
 
     Value::Map(map)
+}
+
+fn prop_accepts_binding(widget_type: &str, prop: &str) -> bool {
+    if let Some(definition) = crate::widget_render::widget_definition(widget_type) {
+        return definition.bindable_props().contains(&prop);
+    }
+    crate::widget_render::sdf_widget::sdf_widget_def(widget_type)
+        .is_some_and(|definition| definition.bindable_props.iter().any(|name| name == prop))
 }

@@ -1240,6 +1240,133 @@ mod tests {
     }
 
     #[test]
+    fn bind_does_not_subscribe_effects_and_marks_bound_widget_dirty() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
+
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (mixer-meter
+                    :level-l (bind "APP" "peak")
+                    :level-r 0.0
+                    :width 2.22 :height 4.24))
+                "#,
+            )
+            .expect("install bound meter effect");
+
+        let layout = runtime.current_layout.as_ref().expect("bound meter layout");
+        assert_eq!(layout.widget_type, "mixer-meter");
+        let widget_id = layout.widget_id;
+        assert!(matches!(
+            layout.props.get("level-l"),
+            Some(Value::ReactiveRef { namespace, field, .. })
+                if namespace == "APP" && field == "peak"
+        ));
+        let _ = runtime.take_dirty_widget_ids();
+        let _ = runtime.drain_rendered_layouts();
+
+        runtime.set_reactive("APP", "peak", Value::Number(0.8));
+        runtime.run_reactive_cycle();
+
+        assert_eq!(
+            runtime.current_layout.as_ref().map(|layout| layout.widget_id),
+            Some(widget_id),
+            "binding-only writes must not rebuild or relayout the widget tree"
+        );
+        assert_eq!(runtime.take_dirty_widget_ids(), vec![widget_id]);
+        assert!(
+            runtime.drain_rendered_layouts().is_empty(),
+            "binding-only writes must not rerun effects"
+        );
+    }
+
+    #[test]
+    fn reactive_get_still_subscribes_effects() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
+
+        runtime
+            .eval_str(r#"(effect (label (fmt "peak: {}" (reactive-get "APP" "peak"))))"#)
+            .expect("install reactive-get effect");
+        let _ = runtime.drain_rendered_layouts();
+
+        runtime.set_reactive("APP", "peak", Value::Number(0.8));
+        runtime.run_reactive_cycle();
+
+        let rendered = runtime.drain_rendered_layouts();
+        assert!(
+            rendered
+                .iter()
+                .flatten()
+                .any(|line| line.contains("peak: 0.8")),
+            "reactive-get writes should rerun dependent effects: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn reactive_ref_rejected_for_non_bindable_widget_prop() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
+
+        let value = runtime
+            .eval_str(r#"(mixer-meter :width (bind "APP" "peak") :level-l 0 :level-r 0)"#)
+            .expect("evaluate invalid binding")
+            .expect("invalid binding returns an error value");
+
+        assert_eq!(
+            value,
+            Value::String("mixer-meter: :width does not accept reactive bindings".to_string())
+        );
+    }
+
+    #[test]
+    fn removed_bound_subtree_stops_receiving_binding_dirty_marks() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive(
+            "APP",
+            vec![("show", Value::Bool(true)), ("peak", Value::Number(0.1))],
+            true,
+        );
+
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (if APP.show
+                    (mixer-meter
+                      :level-l (bind "APP" "peak")
+                      :level-r 0.0
+                      :width 2.22 :height 4.24)
+                    (label "off")))
+                "#,
+            )
+            .expect("install conditional bound meter");
+        let meter_id = runtime.current_layout.as_ref().expect("meter layout").widget_id;
+        let _ = runtime.take_dirty_widget_ids();
+
+        runtime.set_reactive("APP", "show", Value::Bool(false));
+        runtime.run_reactive_cycle();
+        assert_eq!(
+            runtime.current_layout.as_ref().map(|layout| layout.widget_type.as_str()),
+            Some("label")
+        );
+        let _ = runtime.take_dirty_widget_ids();
+
+        runtime.set_reactive("APP", "peak", Value::Number(0.9));
+        runtime.run_reactive_cycle();
+
+        assert!(
+            !runtime.take_dirty_widget_ids().contains(&meter_id),
+            "stale widget binding registrations must be removed when a subtree is replaced"
+        );
+    }
+
+    #[test]
     fn test_derived_reactive_flow_updates_only_dependent_effects() {
         let mut runtime = Runtime::new();
         runtime.register_reactive("APP", vec![("x", Value::Number(3.0))], true);

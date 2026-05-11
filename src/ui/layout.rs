@@ -786,6 +786,20 @@ fn value_eq(left: &Value, right: &Value) -> bool {
         (Value::Closure(a, _), Value::Closure(b, _)) => a == b,
         (Value::Function(a), Value::Function(b)) => a == b,
         (Value::NodeRef(a), Value::NodeRef(b)) => a == b,
+        (
+            Value::ReactiveRef {
+                namespace: a_ns,
+                field: a_field,
+                kind: a_kind,
+                ..
+            },
+            Value::ReactiveRef {
+                namespace: b_ns,
+                field: b_field,
+                kind: b_kind,
+                ..
+            },
+        ) => a_ns == b_ns && a_field == b_field && a_kind == b_kind,
         _ => false,
     }
 }

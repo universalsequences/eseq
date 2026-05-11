@@ -3020,6 +3020,68 @@ fn effect_buffer_ui_is_visible_immediately_in_split_target_window() {
 }
 
 #[test]
+fn visible_inactive_tile_binding_write_marks_editor_for_redraw() {
+    let mut runtime = Runtime::new();
+    runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+    editor.update_tile_rects(60, 12);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*meters*"
+              (mixer-meter
+                :level-l (bind "APP" "peak")
+                :level-r 0.0
+                :width 2.22
+                :height 4.24))
+            (split-window-right "*meters*")
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    editor.update_tile_rects(60, 12);
+    editor.sync_reactive_bindings_for_visible_layouts();
+
+    let meters_idx = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*meters*")
+        .unwrap();
+    let meters_leaf = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .filter_map(|tile_id| editor.tile_root.find_leaf(tile_id))
+        .find(|leaf| leaf.buffer_idx == meters_idx)
+        .unwrap();
+    assert_ne!(
+        meters_leaf.id, editor.active_tile,
+        "regression setup expects the bound widget to be in an inactive visible tile"
+    );
+    let widget_id = meters_leaf
+        .cached_layout
+        .as_ref()
+        .expect("meter layout should be cached for visible inactive tile")
+        .widget_id;
+
+    editor.clear_needs_redraw();
+    let _ = editor.take_dirty_widget_ids();
+
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "peak", Value::Number(0.7));
+
+    assert!(
+        editor.needs_redraw(),
+        "binding-only writes in inactive visible tiles must schedule a render"
+    );
+    assert_eq!(editor.take_dirty_widget_ids(), vec![widget_id]);
+}
+
+#[test]
 fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

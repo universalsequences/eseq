@@ -1038,6 +1038,7 @@ impl Runtime {
                 let mut paint_margin: f32 = 0.0;
                 let mut shader_val = None;
                 let mut widget_state_names: Vec<String> = Vec::new();
+                let mut bindable_props: Vec<String> = Vec::new();
 
                 let mut i = 1;
                 while i + 1 < args.len() {
@@ -1067,6 +1068,18 @@ impl Runtime {
                                     for item in items {
                                         if let Value::Symbol(s) = &*item.borrow() {
                                             widget_state_names.push(s.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            "bindable" => {
+                                if let Value::List(items) = &args[i + 1] {
+                                    for item in items {
+                                        match &*item.borrow() {
+                                            Value::Symbol(s)
+                                            | Value::Keyword(s)
+                                            | Value::String(s) => bindable_props.push(s.clone()),
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -1104,6 +1117,7 @@ impl Runtime {
                     shader_source: compiled.output.shader_source,
                     sdf_expr: compiled.expanded_expr,
                     state_uniforms: compiled.state_symbols.clone(),
+                    bindable_props,
                     region_count: compiled.output.region_count,
                     width,
                     height,
@@ -1476,7 +1490,18 @@ impl Runtime {
     }
 
     pub fn set_reactive(&mut self, namespace: &str, field: &str, value: Value) {
-        self.reactive_registry.set(namespace, field, value);
+        let enqueue_effect_dirty = self.vm.has_reactive_subscribers(namespace, field);
+        let dirty_widgets =
+            self.reactive_registry
+                .set(namespace, field, value, enqueue_effect_dirty);
+        for widget_id in dirty_widgets {
+            if !self.dirty_widget_ids.contains(&widget_id) {
+                self.dirty_widget_ids.push(widget_id);
+            }
+        }
+        if !self.dirty_widget_ids.is_empty() {
+            crate::widget_render::bump_widget_state_generation();
+        }
         if self.sync_theme_to_global && namespace == "THEME" {
             self.sync_theme_from_registry();
         }
@@ -1699,6 +1724,18 @@ impl Runtime {
         std::mem::take(&mut self.dirty_widget_ids)
     }
 
+    pub fn has_dirty_widget_ids(&self) -> bool {
+        !self.dirty_widget_ids.is_empty()
+    }
+
+    pub fn replace_widget_bindings_from_layouts<'a>(
+        &mut self,
+        layouts: impl IntoIterator<Item = &'a LayoutNode>,
+    ) {
+        self.reactive_registry
+            .replace_widget_bindings_from_layouts(layouts);
+    }
+
     pub fn last_ui_invalidation_trace(&self) -> Option<UiInvalidationTrace> {
         self.last_ui_invalidation_trace.clone()
     }
@@ -1901,6 +1938,7 @@ impl Runtime {
         let saved_revision = self.layout_revision;
         let saved_dirty = self.dirty_widget_ids.clone();
         let saved_force_layout_revision_bump = self.force_layout_revision_bump;
+        let saved_widget_bindings = self.reactive_registry.widget_bindings_snapshot();
         #[cfg(test)]
         let saved_rendered_layouts = self.rendered_layouts.clone();
         let saved_cols = self.layout_cols;
@@ -1932,6 +1970,8 @@ impl Runtime {
         self.layout_revision = saved_revision;
         self.dirty_widget_ids = saved_dirty;
         self.force_layout_revision_bump = saved_force_layout_revision_bump;
+        self.reactive_registry
+            .restore_widget_bindings(saved_widget_bindings);
         #[cfg(test)]
         {
             self.rendered_layouts = saved_rendered_layouts;
@@ -1948,6 +1988,8 @@ impl Runtime {
         self.current_widget_tree = None;
         self.current_committed_ui_snapshot = None;
         self.current_layout = None;
+        self.reactive_registry
+            .replace_widget_bindings_from_layout(None);
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
     }
@@ -2021,6 +2063,8 @@ impl Runtime {
         });
         if let Some(layout) = cached_layout {
             self.current_layout = Some(layout);
+            self.reactive_registry
+                .replace_widget_bindings_from_layout(self.current_layout.as_deref());
             self.layout_revision = layout_revision.wrapping_add(1);
             self.dirty_widget_ids.clear();
         } else {
@@ -2162,6 +2206,8 @@ impl Runtime {
             .pending_cleared_effect_sources
             .push(current_buffer_id);
         self.current_layout = None;
+        self.reactive_registry
+            .replace_widget_bindings_from_layout(None);
         self.layout_revision = self.layout_revision.wrapping_add(1);
         self.dirty_widget_ids.clear();
         self.current_widget_tree = None;
@@ -2317,6 +2363,8 @@ impl Runtime {
         let Some(tree) = self.current_widget_tree.as_ref() else {
             let had_layout = self.current_layout.is_some();
             self.current_layout = None;
+            self.reactive_registry
+                .replace_widget_bindings_from_layout(None);
             self.dirty_widget_ids.clear();
             if had_layout {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
@@ -2338,6 +2386,8 @@ impl Runtime {
             self.rendered_layouts
                 .push(crate::layout::format_layout_tree_lines(&updated, 0));
             self.current_layout = Some(Arc::new(updated));
+            self.reactive_registry
+                .replace_widget_bindings_from_layout(self.current_layout.as_deref());
             self.dirty_widget_ids = dirty_widget_ids;
             if self.force_layout_revision_bump {
                 self.layout_revision = self.layout_revision.wrapping_add(1);
@@ -2369,6 +2419,8 @@ impl Runtime {
             self.rendered_layouts
                 .push(crate::layout::format_layout_tree_lines(&layout, 0));
             self.current_layout = Some(Arc::new(layout));
+            self.reactive_registry
+                .replace_widget_bindings_from_layout(self.current_layout.as_deref());
             if geometry_changed {
                 self.dirty_widget_ids.clear();
                 self.layout_revision = self.layout_revision.wrapping_add(1);
