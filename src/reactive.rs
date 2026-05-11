@@ -25,10 +25,7 @@ fn numeric_value(value: &Value) -> Option<f64> {
 }
 
 pub fn reactive_float_slot(namespace: &str, field: &str) -> Arc<AtomicU64> {
-    let key = ReactiveFieldKey {
-        namespace: namespace.to_string(),
-        field: field.to_string(),
-    };
+    let key = ReactiveFieldKey::new(namespace, field);
     let mut slots = reactive_floats()
         .lock()
         .expect("reactive float store lock poisoned");
@@ -38,11 +35,19 @@ pub fn reactive_float_slot(namespace: &str, field: &str) -> Arc<AtomicU64> {
         .clone()
 }
 
+pub fn read_float_slot(slot: &AtomicU64) -> f64 {
+    f64::from_bits(slot.load(Ordering::Relaxed))
+}
+
+fn store_float_slot(slot: &AtomicU64, value: f64) {
+    slot.store(value.to_bits(), Ordering::Relaxed);
+}
+
 fn store_float(namespace: &str, field: &str, value: &Value) {
     let Some(number) = numeric_value(value) else {
         return;
     };
-    reactive_float_slot(namespace, field).store(number.to_bits(), Ordering::Relaxed);
+    store_float_slot(&reactive_float_slot(namespace, field), number);
 }
 
 pub struct ReactiveRegistry {
@@ -111,10 +116,7 @@ impl ReactiveRegistry {
             return Vec::new();
         }
 
-        let key = ReactiveFieldKey {
-            namespace: namespace.to_string(),
-            field: field.to_string(),
-        };
+        let key = ReactiveFieldKey::new(namespace, field);
         store_float(namespace, field, &value);
         namespace_entry
             .fields
@@ -135,10 +137,13 @@ impl ReactiveRegistry {
                 self.dirty.push(dirty);
             }
         }
-        self.field_to_widgets
+        let mut widgets: Vec<u64> = self
+            .field_to_widgets
             .get(&key)
             .map(|widgets| widgets.iter().copied().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        widgets.sort_unstable();
+        widgets
     }
 
     pub fn batch_begin(&mut self) {
@@ -186,10 +191,7 @@ impl ReactiveRegistry {
             } = value
             {
                 self.field_to_widgets
-                    .entry(ReactiveFieldKey {
-                        namespace: namespace.clone(),
-                        field: field.clone(),
-                    })
+                    .entry(ReactiveFieldKey::new(namespace.clone(), field.clone()))
                     .or_default()
                     .insert(node.widget_id);
             }

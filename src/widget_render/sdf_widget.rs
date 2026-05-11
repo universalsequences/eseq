@@ -343,9 +343,7 @@ fn resolve_state_prop(props: &HashMap<String, Value>, name: &str) -> Option<f64>
         Some(Value::Number(n)) => Some(*n),
         Some(Value::Bool(true)) => Some(1.0),
         Some(Value::Bool(false)) => Some(0.0),
-        Some(Value::ReactiveRef { slot, .. }) => Some(f64::from_bits(
-            slot.load(std::sync::atomic::Ordering::Relaxed),
-        )),
+        Some(Value::ReactiveRef { slot, .. }) => Some(crate::reactive::read_float_slot(slot)),
         _ => None,
     }
 }

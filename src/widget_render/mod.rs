@@ -1075,9 +1075,7 @@ pub fn captures_scroll_gesture(node: &LayoutNode) -> bool {
 pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     match props.get(key) {
         Some(Value::Number(n)) => *n as f32,
-        Some(Value::ReactiveRef { slot, .. }) => {
-            f64::from_bits(slot.load(Ordering::Relaxed)) as f32
-        }
+        Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot) as f32,
         _ => default,
     }
 }

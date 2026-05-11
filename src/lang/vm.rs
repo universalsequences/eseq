@@ -41,6 +41,15 @@ pub struct ReactiveFieldKey {
     pub field: String,
 }
 
+impl ReactiveFieldKey {
+    pub fn new(namespace: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            field: field.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingKind {
     Float,
@@ -876,24 +885,14 @@ pub fn register_core_natives(vm: &mut VM) {
         else {
             return Value::Nil;
         };
-        Value::ReactiveRef {
-            namespace: namespace.clone(),
-            field: field.clone(),
-            kind: BindingKind::Float,
-            slot: crate::reactive::reactive_float_slot(namespace, field),
-        }
+        reactive_float_ref(namespace, field)
     });
 
     vm.register_native("bind-seq", |args| {
         let Some(Value::String(field)) = args.first() else {
             return Value::Nil;
         };
-        Value::ReactiveRef {
-            namespace: "SEQ".to_string(),
-            field: field.clone(),
-            kind: BindingKind::Float,
-            slot: crate::reactive::reactive_float_slot("SEQ", field),
-        }
+        reactive_float_ref("SEQ", field)
     });
 
     vm.register_native_with_vm("subtree-owner", |args, vm| {
@@ -1310,6 +1309,15 @@ pub fn register_core_natives(vm: &mut VM) {
         }
         Value::String(rendered)
     });
+}
+
+fn reactive_float_ref(namespace: &str, field: &str) -> Value {
+    Value::ReactiveRef {
+        namespace: namespace.to_string(),
+        field: field.to_string(),
+        kind: BindingKind::Float,
+        slot: crate::reactive::reactive_float_slot(namespace, field),
+    }
 }
 
 /// Register math intrinsics needed for SDF and general numeric work.
@@ -1907,20 +1915,15 @@ impl VM {
     }
 
     fn record_reactive_read(&mut self, namespace: &str, field: &str) {
+        let key = ReactiveFieldKey::new(namespace, field);
         if let Some(context) = self.current_subtree_capture_stack.last() {
             self.current_subtree_reactive_reads
                 .entry(context.root_id)
                 .or_default()
-                .insert(ReactiveFieldKey {
-                    namespace: namespace.to_string(),
-                    field: field.to_string(),
-                });
+                .insert(key.clone());
         }
         if let Some(reads) = self.current_effect_reactive_reads.as_mut() {
-            reads.insert(ReactiveFieldKey {
-                namespace: namespace.to_string(),
-                field: field.to_string(),
-            });
+            reads.insert(key);
         }
     }
 

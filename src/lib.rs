@@ -1272,7 +1272,10 @@ mod tests {
         runtime.run_reactive_cycle();
 
         assert_eq!(
-            runtime.current_layout.as_ref().map(|layout| layout.widget_id),
+            runtime
+                .current_layout
+                .as_ref()
+                .map(|layout| layout.widget_id),
             Some(widget_id),
             "binding-only writes must not rebuild or relayout the widget tree"
         );
@@ -1346,13 +1349,20 @@ mod tests {
                 "#,
             )
             .expect("install conditional bound meter");
-        let meter_id = runtime.current_layout.as_ref().expect("meter layout").widget_id;
+        let meter_id = runtime
+            .current_layout
+            .as_ref()
+            .expect("meter layout")
+            .widget_id;
         let _ = runtime.take_dirty_widget_ids();
 
         runtime.set_reactive("APP", "show", Value::Bool(false));
         runtime.run_reactive_cycle();
         assert_eq!(
-            runtime.current_layout.as_ref().map(|layout| layout.widget_type.as_str()),
+            runtime
+                .current_layout
+                .as_ref()
+                .map(|layout| layout.widget_type.as_str()),
             Some("label")
         );
         let _ = runtime.take_dirty_widget_ids();

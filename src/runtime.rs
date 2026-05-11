@@ -1908,10 +1908,7 @@ impl Runtime {
         let Some(snapshot) = self.current_committed_ui_snapshot.as_ref() else {
             return Vec::new();
         };
-        snapshot.subtree_roots_for_field(&ReactiveFieldKey {
-            namespace: namespace.to_string(),
-            field: field.to_string(),
-        })
+        snapshot.subtree_roots_for_field(&ReactiveFieldKey::new(namespace, field))
     }
 
     pub fn layout_snapshot_for_tree(&mut self, tree: &Value) -> Option<Arc<LayoutNode>> {
