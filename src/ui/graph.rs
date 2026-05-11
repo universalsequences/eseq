@@ -607,8 +607,9 @@ impl GraphController<'_> {
 
     pub fn clear_all_tracks(&mut self) {
         let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let old_track_count = self.app.tracks.len();
 
-        for track_idx in 0..self.app.tracks.len() {
+        for track_idx in 0..old_track_count {
             for slot_idx in crate::effects::BUILTIN_SLOT_COUNT
                 ..self.app.state.pattern.effect_chains[track_idx].len()
             {
@@ -714,8 +715,11 @@ impl GraphController<'_> {
         self.app.ui.cursor_step = 0;
         self.app.ui.pattern_page = 0;
         self.app.ui.focused_region = super::Region::Sidebar;
+        self.app.ui.sidebar_tab = super::SidebarTab::Sounds;
         self.app.ui.sidebar_mode = super::SidebarMode::InstrumentPicker;
+        self.app.ui.sidebar_search_focused = false;
 
+        self.app.state.clear_live_track_state(old_track_count);
         self.app
             .state
             .transport
@@ -733,6 +737,19 @@ impl GraphController<'_> {
             .store(1, Ordering::Relaxed);
         *self.app.state.pattern.pattern_bank.lock().unwrap() =
             vec![crate::sequencer::PatternSnapshot::new_default(0, &[])];
+        self.app
+            .state
+            .transport
+            .topology_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app
+            .state
+            .transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app.state.schedule_mod_resync();
+        self.app.state.request_all_accumulator_resets();
+        self.app.state.publish_scheduler_snapshot();
     }
 
     pub fn delete_track(&mut self, track_idx: usize) -> Result<usize, String> {
@@ -2125,6 +2142,28 @@ impl GraphController<'_> {
             .transport
             .num_tracks
             .store((idx + 1) as u32, Ordering::Release);
+        self.app.ui.cursor_track = idx;
+        self.app.ui.cursor_step = 0;
+        self.app.ui.focused_region = super::Region::Cirklon;
+        self.app.ui.sidebar_tab = super::SidebarTab::Tools;
+        self.app.ui.sidebar_mode = match instrument_type {
+            InstrumentType::Custom => super::SidebarMode::Presets,
+            InstrumentType::Sampler => super::SidebarMode::Audition,
+        };
+        self.app.ui.sidebar_search_focused = false;
+        self.app
+            .state
+            .transport
+            .topology_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app
+            .state
+            .transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.app.state.schedule_mod_resync();
+        self.app.state.request_all_accumulator_resets();
+        self.app.state.publish_scheduler_snapshot();
     }
 
     fn initialize_instrument_slot(&mut self, track: usize, name: &str, manifest: &DGenManifest) {

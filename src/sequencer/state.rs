@@ -131,6 +131,68 @@ impl PatternSnapshot {
         }
     }
 
+    /// Normalize every track-indexed lane to the exact live track count.
+    ///
+    /// Project files can be older than the current in-memory snapshot shape, or
+    /// can legitimately omit lanes for newly-added track-scoped data. Restoring
+    /// a partial snapshot is unsafe because any missing lane would leave the
+    /// previous live project's lane intact. This method makes the snapshot a
+    /// complete replacement before it is committed to the pattern bank.
+    pub fn normalize_track_count(
+        &mut self,
+        track_count: usize,
+        slot_descriptors: &[Vec<EffectDescriptor>],
+    ) {
+        self.truncate_tracks(track_count);
+        while self.track_bits.len() < track_count {
+            let track = self.track_bits.len();
+            self.track_bits.push([0u64; TRACK_PATTERN_WORDS]);
+            self.step_data.push(Self::default_step_data());
+            self.track_params.push(TrackParamsSnapshot::default());
+            self.effect_slots
+                .push(Self::default_effect_slots(track, slot_descriptors));
+            self.midi_fx_slots.push(Self::default_midi_fx_slots());
+            self.instrument_slots.push(Self::default_instrument_slot());
+            self.instrument_base_note_offsets.push(0.0);
+            self.track_sound_states.push(TrackSoundState::default());
+            self.sample_ids.push((-1, String::new()));
+            self.chord_snapshots.push(ChordSnapshot::new_default());
+            self.timebase_plock_snapshots.push([None; MAX_STEPS]);
+            self.swing_plock_snapshots.push([None; MAX_STEPS]);
+            self.swing_resolution_plock_snapshots
+                .push([None; MAX_STEPS]);
+            self.instrument_types.push(InstrumentType::Sampler);
+        }
+
+        for steps in &mut self.step_data {
+            steps.truncate(MAX_STEPS);
+            while steps.len() < MAX_STEPS {
+                let mut params = [0.0f32; NUM_PARAMS];
+                for param in StepParam::ALL {
+                    params[param.index()] = param.default_value();
+                }
+                steps.push(params);
+            }
+        }
+    }
+
+    fn truncate_tracks(&mut self, track_count: usize) {
+        self.track_bits.truncate(track_count);
+        self.step_data.truncate(track_count);
+        self.track_params.truncate(track_count);
+        self.effect_slots.truncate(track_count);
+        self.midi_fx_slots.truncate(track_count);
+        self.instrument_slots.truncate(track_count);
+        self.instrument_base_note_offsets.truncate(track_count);
+        self.track_sound_states.truncate(track_count);
+        self.sample_ids.truncate(track_count);
+        self.chord_snapshots.truncate(track_count);
+        self.timebase_plock_snapshots.truncate(track_count);
+        self.swing_plock_snapshots.truncate(track_count);
+        self.swing_resolution_plock_snapshots.truncate(track_count);
+        self.instrument_types.truncate(track_count);
+    }
+
     pub fn capture(
         state: &SequencerState,
         num_tracks: usize,
@@ -471,10 +533,32 @@ impl PatternSnapshot {
         new_count: usize,
         slot_descriptors: &[Vec<EffectDescriptor>],
     ) {
-        while self.track_bits.len() < new_count {
-            let t = self.track_bits.len();
-            self.push_default_track(t, slot_descriptors);
+        if new_count <= self.track_bits.len() {
+            return;
         }
+        let old_count = self.track_bits.len();
+        self.normalize_track_count(new_count, slot_descriptors);
+        debug_assert_eq!(self.track_bits.len(), new_count);
+        debug_assert!(old_count <= new_count);
+    }
+
+    #[cfg(test)]
+    fn track_lane_count_is_consistent(&self) -> bool {
+        let n = self.track_bits.len();
+        self.step_data.len() == n
+            && self.track_params.len() == n
+            && self.effect_slots.len() == n
+            && self.midi_fx_slots.len() == n
+            && self.instrument_slots.len() == n
+            && self.instrument_base_note_offsets.len() == n
+            && self.track_sound_states.len() == n
+            && self.sample_ids.len() == n
+            && self.chord_snapshots.len() == n
+            && self.timebase_plock_snapshots.len() == n
+            && self.swing_plock_snapshots.len() == n
+            && self.swing_resolution_plock_snapshots.len() == n
+            && self.instrument_types.len() == n
+            && self.step_data.iter().all(|steps| steps.len() == MAX_STEPS)
     }
 
     pub fn sync_effect_slot(
@@ -963,6 +1047,13 @@ impl SequencerState {
         params.set_accum_limit(defaults.accum_limit);
         params.set_accum_mode(defaults.accum_mode);
         params.set_fts_scale(defaults.fts_scale);
+    }
+
+    pub fn clear_live_track_state(&self, track_count: usize) {
+        for track in 0..track_count.min(MAX_TRACKS) {
+            self.clear_live_track_lane(track);
+            self.clear_runtime_track_binding_in_place(track);
+        }
     }
 
     fn clear_live_track_lane(&self, track: usize) {
@@ -1950,6 +2041,45 @@ mod tests {
         assert_eq!(snapshot.track_bits[1][0], 3);
         assert_eq!(snapshot.sample_ids[0], (1, "track-1".to_string()));
         assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string()));
+    }
+
+    #[test]
+    fn pattern_snapshot_normalize_fills_missing_loaded_project_lanes() {
+        let mut snapshot = sample_pattern_snapshot(1);
+        snapshot.step_data[0].truncate(3);
+        snapshot.normalize_track_count(3, &[]);
+
+        assert!(snapshot.track_lane_count_is_consistent());
+        assert_eq!(snapshot.track_bits.len(), 3);
+        assert_eq!(snapshot.track_bits[0][0], 1);
+        assert_eq!(snapshot.track_bits[1], [0; TRACK_PATTERN_WORDS]);
+        assert_eq!(snapshot.track_bits[2], [0; TRACK_PATTERN_WORDS]);
+        assert_eq!(snapshot.step_data[0].len(), MAX_STEPS);
+        assert_eq!(
+            snapshot.step_data[0][3][StepParam::Velocity.index()],
+            StepParam::Velocity.default_value()
+        );
+        assert_eq!(
+            snapshot.track_params[1].num_steps,
+            TrackParamsSnapshot::default().num_steps
+        );
+        assert_eq!(snapshot.sample_ids[2], (-1, String::new()));
+        assert_eq!(snapshot.instrument_types[1], InstrumentType::Sampler);
+    }
+
+    #[test]
+    fn pattern_snapshot_normalize_truncates_extra_loaded_project_lanes() {
+        let mut snapshot = sample_pattern_snapshot(4);
+        snapshot.normalize_track_count(2, &[]);
+
+        assert!(snapshot.track_lane_count_is_consistent());
+        assert_eq!(snapshot.track_bits.len(), 2);
+        assert_eq!(snapshot.track_bits[0][0], 1);
+        assert_eq!(snapshot.track_bits[1][0], 2);
+        assert_eq!(
+            snapshot.sample_ids,
+            vec![(0, "track-0".to_string()), (1, "track-1".to_string())]
+        );
     }
 
     #[test]

@@ -929,7 +929,7 @@
                       :view-start sampler-view-start
                       :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
                       :cursor-time sampler-cursor-time
-                      :playhead-time SEQ.sampler-playhead
+                      :playhead-time (bind-seq "sampler-playhead")
                       :selection-start (get inst :start-time)
                       :selection-end (get inst :end-time)
                       :time-ruler (dict :mode :seconds)

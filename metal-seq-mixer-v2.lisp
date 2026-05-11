@@ -59,6 +59,7 @@
   :width 1.35 :height 4.24
   :paint-margin 0.15
   :state (value)
+  :bindable (value)
   :shader
   (let ((marker-y (* (- 1.0 (* 2.0 value)) (* height 1.04))))
     (sdf/layer
@@ -105,7 +106,7 @@
       (seq-set-track-volume i (mixer-v2-event-volume event)))
     (h-stack :gap 0.06 :align :center
       (mixer-v2-volume-triangle
-        :value (nth SEQ.track-volumes i)
+        :value (bind-seq-nth "track-volumes" i)
         :on-click (lambda (sx sy region)
           (seq-set-track-volume i (mixer-v2-pointer-volume sy)))
         :on-drag (lambda (sx sy region)
@@ -124,7 +125,7 @@
         (seq-set-bus-volume i (mixer-v2-event-volume event))))
     (h-stack :gap 0.06 :align :center
       (mixer-v2-volume-triangle
-        :value (nth SEQ.bus-volumes i)
+        :value (bind-seq-nth "bus-volumes" i)
         :on-click (lambda (sx sy region)
           (do
             (mixer-v2-select-bus i)
@@ -178,7 +179,7 @@
         (h-stack :gap 1.6 :align :center
           (knob-number :label "pan"
             :key (str "mixer-v2-track-pan-" i)
-            :value (nth SEQ.track-pans i)
+            :value (bind-seq-nth "track-pans" i)
             :min -1 :max 1 :decimals 2
             :font-size 9 :label-font-size 8
             :text-color :dim :label-color :dim

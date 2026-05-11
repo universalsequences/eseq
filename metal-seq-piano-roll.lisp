@@ -105,7 +105,7 @@
     :item-color "#48aaf8"
     :loop-color "#48aaf8"
     :tool piano-roll-tool
-    :playhead-time SEQ.playhead
+    :playhead-time (bind-seq "playhead")
     :lanes SEQ.piano-roll-lanes
     :items SEQ.piano-roll-items
     :selection SEQ.piano-roll-selection

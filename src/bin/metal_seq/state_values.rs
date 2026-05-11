@@ -4447,6 +4447,25 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_transport_playhead_is_render_bound() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "transport-playhead", Value::Number(12.0));
+        editor.runtime_mut().run_reactive_cycle();
+
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "bound transport playhead updates must not enqueue transport widget tree rebuilds"
+        );
+    }
+
+    #[test]
     fn metal_seq_duration_mode_renders_all_steps_above_two() {
         let mut editor = full_grid_editor_for_scroll_tests();
         editor
@@ -4753,6 +4772,51 @@ mod tests {
                 .take_pending_buffer_widget_trees()
                 .is_empty(),
             "bound bus peak updates must not enqueue mixer widget tree rebuilds"
+        );
+
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-volumes",
+            test_list(vec![Value::Number(0.42)]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "bound track volume updates must not enqueue mixer widget tree rebuilds"
+        );
+
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "track-pans",
+            test_list(vec![Value::Number(-0.35)]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "bound track pan updates must not enqueue mixer widget tree rebuilds"
+        );
+
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "bus-volumes",
+            test_list(vec![Value::Number(1.0), Value::Number(0.37)]),
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "bound bus volume updates must not enqueue mixer widget tree rebuilds"
         );
     }
 
@@ -5657,6 +5721,18 @@ mod tests {
             .widget_layout()
             .expect("piano roll should have a widget layout");
         assert_eq!(layout.widget_type, "timeline");
+        let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "playhead", Value::Number(4.0));
+        editor.runtime_mut().run_reactive_cycle();
+        assert!(
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "bound piano-roll playhead updates must not enqueue timeline widget tree rebuilds"
+        );
         editor
             .runtime_mut()
             .eval_str("(set! piano-roll-view-duration 8)")

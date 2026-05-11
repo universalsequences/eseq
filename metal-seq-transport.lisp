@@ -33,6 +33,7 @@
   :width 10.5 :height 0.34
   :paint-margin 0.12
   :state (level)
+  :bindable (level)
   :shader
   (let ((lvl (min 1.0 (max 0.0 level)))
         (track (sdf/rounded-rect width height height))
@@ -346,16 +347,8 @@
       (h-stack
         (subtree :key "transport-clock"
           (h-stack :gap 0 :align :center :padding 0.5
-            (label (fmt "{:>3}" (+ (floor (/ SEQ.transport-playhead 16)) 1))
-              :font-size 15 :width 4
-              :color '(rgba 0.85 0.85 0.85 1)
-              :bg :transparent)
-            (label (fmt "{:>3}" (+ (floor (/ (mod SEQ.transport-playhead 16) 4)) 1))
-              :font-size 15 :width 3
-              :color '(rgba 0.85 0.85 0.85 1)
-              :bg :transparent)
-            (label (fmt "{:>3}" (+ (mod (mod SEQ.transport-playhead 16) 4) 1))
-              :font-size 15 :width 3
+            (transport-clock :playhead (bind-seq "transport-playhead")
+              :font-size 15 :width 10 :height 1.2
               :color '(rgba 0.85 0.85 0.85 1)
               :bg :transparent)
             (label "" :width 1 :bg :transparent)
@@ -372,14 +365,14 @@
               :color '(rgba 0.63 0.88 0.41 1)
               :bg :transparent)
             (subtree :key "master-meter-l"
-              (transport-master-meter :level SEQ.master-peak-l)))
+              (transport-master-meter :level (bind-seq "master-peak-l"))))
           (h-stack :gap 0.25 :align :center
             (label "R"
               :font-size 8 :width 0.9
               :color '(rgba 0.63 0.88 0.41 1)
               :bg :transparent)
             (subtree :key "master-meter-r"
-              (transport-master-meter :level SEQ.master-peak-r))))
+              (transport-master-meter :level (bind-seq "master-peak-r")))))
         (subtree :key "transport-cpu"
           (h-stack :gap 0 :align :center :padding 0.3
             (label "cpu"

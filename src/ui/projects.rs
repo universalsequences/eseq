@@ -1330,7 +1330,7 @@ impl App {
             .map(|tp| (tp.attack_ms, tp.release_ms))
             .collect();
 
-        let snapshot = PatternSnapshot {
+        let mut snapshot = PatternSnapshot {
             track_bits,
             step_data,
             track_params: track_params.into_iter().map(Into::into).collect(),
@@ -1494,6 +1494,7 @@ impl App {
                 .collect(),
             instrument_types: self.graph.track_instrument_types.clone(),
         };
+        snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
 
         Ok((snapshot, bus_patterns, fallback_count))
     }
