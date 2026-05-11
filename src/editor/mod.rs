@@ -159,6 +159,7 @@ pub enum EditorExit {
 }
 
 type LispBindings = HashMap<String, String>;
+type VisibleBindingLayoutSignature = Vec<(TileId, u64, usize)>;
 
 struct SavePrompt {
     input: String,
@@ -306,6 +307,7 @@ pub struct Editor {
     cached_tile_rects: Vec<(TileId, Rect)>,
     /// Outer margin around the tiled layout, in cell units.
     tile_outer_gap: f32,
+    visible_binding_layout_signature: Option<VisibleBindingLayoutSignature>,
     widget_cursor: WidgetCursor,
     suppress_mouse_until_left_up: bool,
     pointer_drag_started_on_slider: bool,
@@ -382,6 +384,7 @@ impl Editor {
             typing_undo_buffer_id: None,
             cached_tile_rects: vec![],
             tile_outer_gap: 0.0,
+            visible_binding_layout_signature: None,
             widget_cursor: WidgetCursor::Default,
             suppress_mouse_until_left_up: false,
             pointer_drag_started_on_slider: false,
@@ -2030,18 +2033,31 @@ impl Editor {
     }
 
     pub fn sync_reactive_bindings_for_visible_layouts(&mut self) {
-        let layouts = self
+        let visible_layouts = self
             .tile_root
             .leaf_ids()
             .into_iter()
             .filter_map(|id| {
-                self.tile_root
-                    .find_leaf(id)
-                    .and_then(|leaf| leaf.cached_layout.clone())
+                let leaf = self.tile_root.find_leaf(id)?;
+                let layout = leaf.cached_layout.clone()?;
+                Some((id, leaf.layout_revision, layout))
             })
             .collect::<Vec<_>>();
-        self.runtime
-            .replace_widget_bindings_from_layouts(layouts.iter().map(|layout| layout.as_ref()));
+        let signature = visible_layouts
+            .iter()
+            .map(|(id, revision, layout)| (*id, *revision, Arc::as_ptr(layout) as usize))
+            .collect::<Vec<_>>();
+        if self
+            .visible_binding_layout_signature
+            .as_ref()
+            .is_some_and(|cached| cached == &signature)
+        {
+            return;
+        }
+        self.runtime.replace_widget_bindings_from_layouts(
+            visible_layouts.iter().map(|(_, _, layout)| layout.as_ref()),
+        );
+        self.visible_binding_layout_signature = Some(signature);
     }
 
     fn refresh_all_inactive_tile_layouts(&mut self) {
