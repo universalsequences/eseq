@@ -380,9 +380,8 @@
               :color '(rgba 0.30 0.30 0.32 1)
               :bg :transparent)
             (number-label :value (bind-seq "cpu-load-pct")
-              :decimals 0 :suffix "%"
+              :decimals 0 :min-integer-digits 2 :suffix "%"
               :font-size 12 :width 4.5 :height 1
-              :h-align :right
               :color :gray
               :bg :transparent)))))
     
