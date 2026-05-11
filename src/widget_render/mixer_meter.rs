@@ -248,6 +248,7 @@ mod tests {
             Value::ReactiveRef {
                 namespace: "APP".to_string(),
                 field: "peak".to_string(),
+                index: None,
                 kind: crate::vm::BindingKind::Float,
                 slot: crate::reactive::reactive_float_slot("APP", "peak"),
             },

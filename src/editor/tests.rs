@@ -3118,6 +3118,53 @@ fn effect_buffer_updates_live_when_named_target_buffer_is_active() {
 }
 
 #[test]
+fn active_named_buffer_reactive_full_update_replaces_current_runtime_tree() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 12);
+    editor
+        .runtime_mut()
+        .register_reactive("APP", vec![("count", Value::Number(2.0))], true);
+
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*controls*"
+              (label (fmt "{}" APP.count)))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let controls_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .unwrap()
+        .id;
+    editor.set_active_buffer(controls_id);
+
+    editor
+        .runtime_mut()
+        .set_reactive("APP", "count", Value::Number(7.0));
+    editor.runtime_mut().run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+
+    let tree = editor.runtime.current_widget_tree().unwrap();
+    let rendered = crate::vm::format_lisp_value(&tree);
+    assert!(
+        rendered.contains("\"7\""),
+        "active named buffer runtime tree should reflect full reactive update: {rendered}"
+    );
+    let layout = editor.widget_layout().expect("updated active layout");
+    assert!(
+        matches!(layout.props.get("text"), Some(Value::String(text)) if text == "7"),
+        "active named buffer hit-test layout should be rebuilt from the updated tree"
+    );
+}
+
+#[test]
 fn named_effect_buffer_commits_nested_subtree_roots() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

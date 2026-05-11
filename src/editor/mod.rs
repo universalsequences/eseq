@@ -4498,9 +4498,11 @@ impl Editor {
                             eprintln!("[ui-update full-active] target={buffer_name}");
                         }
                         crate::widget_render::clear_overlay();
-                        let buffer = &mut self.buffers[buffer_idx];
-                        buffer.set_widget_tree(Some(pending.tree), pending.source_buffer_id);
-                        buffer.view_mode = ViewMode::UiOnly;
+                        self.apply_widget_tree_to_buffer(
+                            buffer_idx,
+                            pending.source_buffer_id,
+                            Some(pending.tree),
+                        );
                     } else {
                         if debug_ui_updates_enabled() {
                             eprintln!("[ui-update full-inactive] target={buffer_name}");

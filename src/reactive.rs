@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::layout::LayoutNode;
-use crate::vm::ReactiveFieldKey;
+use crate::vm::ReactiveBindingKey;
 use crate::vm::Value;
 
-static REACTIVE_FLOATS: OnceLock<Mutex<HashMap<ReactiveFieldKey, Arc<AtomicU64>>>> =
+static REACTIVE_FLOATS: OnceLock<Mutex<HashMap<ReactiveBindingKey, Arc<AtomicU64>>>> =
     OnceLock::new();
 
-fn reactive_floats() -> &'static Mutex<HashMap<ReactiveFieldKey, Arc<AtomicU64>>> {
+fn reactive_floats() -> &'static Mutex<HashMap<ReactiveBindingKey, Arc<AtomicU64>>> {
     REACTIVE_FLOATS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -25,7 +25,14 @@ fn numeric_value(value: &Value) -> Option<f64> {
 }
 
 pub fn reactive_float_slot(namespace: &str, field: &str) -> Arc<AtomicU64> {
-    let key = ReactiveFieldKey::new(namespace, field);
+    reactive_float_slot_for_key(ReactiveBindingKey::field(namespace, field))
+}
+
+pub fn reactive_indexed_float_slot(namespace: &str, field: &str, index: usize) -> Arc<AtomicU64> {
+    reactive_float_slot_for_key(ReactiveBindingKey::indexed(namespace, field, index))
+}
+
+fn reactive_float_slot_for_key(key: ReactiveBindingKey) -> Arc<AtomicU64> {
     let mut slots = reactive_floats()
         .lock()
         .expect("reactive float store lock poisoned");
@@ -43,18 +50,58 @@ fn store_float_slot(slot: &AtomicU64, value: f64) {
     slot.store(value.to_bits(), Ordering::Relaxed);
 }
 
-fn store_float(namespace: &str, field: &str, value: &Value) {
+fn store_float_slots(namespace: &str, field: &str, value: &Value) {
     let Some(number) = numeric_value(value) else {
+        if let Value::List(items) = value {
+            for (index, item) in items.iter().enumerate() {
+                if let Some(number) = numeric_value(&item.borrow()) {
+                    store_float_slot(
+                        &reactive_indexed_float_slot(namespace, field, index),
+                        number,
+                    );
+                }
+            }
+        }
         return;
     };
     store_float_slot(&reactive_float_slot(namespace, field), number);
+}
+
+fn changed_numeric_indices(previous: Option<&Value>, next: &Value) -> Vec<usize> {
+    let Value::List(next_items) = next else {
+        return match previous {
+            Some(Value::List(items)) => (0..items.len()).collect(),
+            _ => Vec::new(),
+        };
+    };
+    let previous_items = match previous {
+        Some(Value::List(items)) => Some(items.as_slice()),
+        _ => None,
+    };
+    let max_len = previous_items
+        .map(|items| items.len())
+        .unwrap_or(0)
+        .max(next_items.len());
+    let mut changed = Vec::new();
+    for index in 0..max_len {
+        let previous_number = previous_items
+            .and_then(|items| items.get(index))
+            .and_then(|value| numeric_value(&value.borrow()));
+        let next_number = next_items
+            .get(index)
+            .and_then(|value| numeric_value(&value.borrow()));
+        if previous_number != next_number {
+            changed.push(index);
+        }
+    }
+    changed
 }
 
 pub struct ReactiveRegistry {
     namespaces: HashMap<String, Namespace>,
     dirty: Vec<(String, String, Value)>,
     batched: Vec<(String, String, Value)>,
-    field_to_widgets: HashMap<ReactiveFieldKey, HashSet<u64>>,
+    field_to_widgets: HashMap<ReactiveBindingKey, HashSet<u64>>,
     batching: bool,
 }
 
@@ -80,7 +127,7 @@ impl ReactiveRegistry {
         let mut map = HashMap::new();
 
         for (field, value) in fields {
-            store_float(name, field, &value);
+            store_float_slots(name, field, &value);
             stored_fields.insert(field.to_string(), value.clone());
             map.insert(field.to_string(), Rc::new(RefCell::new(value)));
         }
@@ -108,16 +155,15 @@ impl ReactiveRegistry {
             return Vec::new();
         };
 
-        let unchanged = namespace_entry
-            .fields
-            .get(field)
-            .is_some_and(|current| *current == value);
+        let previous = namespace_entry.fields.get(field);
+        let changed_indices = changed_numeric_indices(previous, &value);
+        let unchanged = previous.is_some_and(|current| *current == value);
         if unchanged {
             return Vec::new();
         }
 
-        let key = ReactiveFieldKey::new(namespace, field);
-        store_float(namespace, field, &value);
+        let key = ReactiveBindingKey::field(namespace, field);
+        store_float_slots(namespace, field, &value);
         namespace_entry
             .fields
             .insert(field.to_string(), value.clone());
@@ -142,7 +188,16 @@ impl ReactiveRegistry {
             .get(&key)
             .map(|widgets| widgets.iter().copied().collect())
             .unwrap_or_default();
+        for index in changed_indices {
+            if let Some(index_widgets) = self
+                .field_to_widgets
+                .get(&ReactiveBindingKey::indexed(namespace, field, index))
+            {
+                widgets.extend(index_widgets.iter().copied());
+            }
+        }
         widgets.sort_unstable();
+        widgets.dedup();
         widgets
     }
 
@@ -176,22 +231,31 @@ impl ReactiveRegistry {
         }
     }
 
-    pub fn widget_bindings_snapshot(&self) -> HashMap<ReactiveFieldKey, HashSet<u64>> {
+    pub fn widget_bindings_snapshot(&self) -> HashMap<ReactiveBindingKey, HashSet<u64>> {
         self.field_to_widgets.clone()
     }
 
-    pub fn restore_widget_bindings(&mut self, bindings: HashMap<ReactiveFieldKey, HashSet<u64>>) {
+    pub fn restore_widget_bindings(&mut self, bindings: HashMap<ReactiveBindingKey, HashSet<u64>>) {
         self.field_to_widgets = bindings;
     }
 
     fn collect_widget_bindings(&mut self, node: &LayoutNode) {
         for value in node.props.values() {
             if let Value::ReactiveRef {
-                namespace, field, ..
+                namespace,
+                field,
+                index,
+                ..
             } = value
             {
+                let key = match index {
+                    Some(index) => {
+                        ReactiveBindingKey::indexed(namespace.clone(), field.clone(), *index)
+                    }
+                    None => ReactiveBindingKey::field(namespace.clone(), field.clone()),
+                };
                 self.field_to_widgets
-                    .entry(ReactiveFieldKey::new(namespace.clone(), field.clone()))
+                    .entry(key)
                     .or_default()
                     .insert(node.widget_id);
             }

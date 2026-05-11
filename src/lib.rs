@@ -1287,6 +1287,73 @@ mod tests {
     }
 
     #[test]
+    fn bind_nth_marks_only_widgets_for_changed_indices_dirty() {
+        let mut runtime = Runtime::new();
+        runtime.set_layout_viewport(40, 10);
+        runtime.register_reactive(
+            "APP",
+            vec![(
+                "levels",
+                Value::List(vec![
+                    Rc::new(RefCell::new(Value::Number(0.1))),
+                    Rc::new(RefCell::new(Value::Number(0.2))),
+                ]),
+            )],
+            true,
+        );
+
+        runtime
+            .eval_str(
+                r#"
+                (effect
+                  (h-stack
+                    (mixer-meter
+                      :level-l (bind-nth "APP" "levels" 0)
+                      :level-r 0.0
+                      :width 2.22 :height 4.24)
+                    (mixer-meter
+                      :level-l (bind-nth "APP" "levels" 1)
+                      :level-r 0.0
+                      :width 2.22 :height 4.24)))
+                "#,
+            )
+            .expect("install indexed bound meter effect");
+
+        let layout = runtime.current_layout.as_ref().expect("bound meter layout");
+        let first_meter_id = layout.children[0].widget_id;
+        let second_meter_id = layout.children[1].widget_id;
+        let _ = runtime.take_dirty_widget_ids();
+        let _ = runtime.drain_rendered_layouts();
+
+        runtime.set_reactive(
+            "APP",
+            "levels",
+            Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(0.1))),
+                Rc::new(RefCell::new(Value::Number(0.9))),
+            ]),
+        );
+        runtime.run_reactive_cycle();
+
+        assert_eq!(runtime.take_dirty_widget_ids(), vec![second_meter_id]);
+        assert!(
+            runtime.drain_rendered_layouts().is_empty(),
+            "indexed binding-only writes must not rerun effects"
+        );
+
+        runtime.set_reactive(
+            "APP",
+            "levels",
+            Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(0.8))),
+                Rc::new(RefCell::new(Value::Number(0.9))),
+            ]),
+        );
+
+        assert_eq!(runtime.take_dirty_widget_ids(), vec![first_meter_id]);
+    }
+
+    #[test]
     fn reactive_get_still_subscribes_effects() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);
@@ -1308,6 +1375,30 @@ mod tests {
                 .any(|line| line.contains("peak: 0.8")),
             "reactive-get writes should rerun dependent effects: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn transport_clock_widget_constructor_is_registered() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("playhead", Value::Number(0.0))], true);
+
+        let value = runtime
+            .eval_str(
+                r#"(transport-clock
+                    :playhead (bind "APP" "playhead")
+                    :width 10
+                    :height 1.2)"#,
+            )
+            .expect("transport-clock should evaluate")
+            .expect("transport-clock should return a widget");
+
+        let Value::Map(map) = value else {
+            panic!("transport-clock should return a widget map, got {value:?}");
+        };
+        assert!(matches!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword(widget_type)) if widget_type == "transport-clock"
+        ));
     }
 
     #[test]

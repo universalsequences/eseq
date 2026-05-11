@@ -99,6 +99,10 @@ impl WidgetDefinition for KnobNumberWidget {
         &["width", "height", "font-size", "decimals", "step"]
     }
 
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["value"]
+    }
+
     fn measure(
         &self,
         node: &Value,

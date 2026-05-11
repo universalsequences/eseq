@@ -118,6 +118,10 @@ impl WidgetDefinition for WaveformWidget {
         &["width", "height", "header-height", "sidebar-width"]
     }
 
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["playhead-time"]
+    }
+
     fn measure(
         &self,
         node: &Value,
@@ -1139,6 +1143,7 @@ fn get_map(value: &Value) -> Option<HashMap<String, Value>> {
 fn as_number(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => Some(*n),
+        Value::ReactiveRef { slot, .. } => Some(crate::reactive::read_float_slot(slot)),
         _ => None,
     }
 }

@@ -19,6 +19,7 @@ pub mod text_input;
 pub mod time_view;
 pub mod timeline;
 pub mod toggle;
+pub mod transport_clock;
 pub mod tree;
 pub mod vslider;
 pub mod vstack;
@@ -661,6 +662,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,
+    &transport_clock::TRANSPORT_CLOCK_WIDGET,
     &waveform::WAVEFORM_WIDGET,
     &vstack::VSTACK_WIDGET,
     &hstack::HSTACK_WIDGET,
@@ -742,11 +744,13 @@ fn hash_value(value: &Value, hasher: &mut DefaultHasher) {
         Value::ReactiveRef {
             namespace,
             field,
+            index,
             kind,
             ..
         } => {
             namespace.hash(hasher);
             field.hash(hasher);
+            index.hash(hasher);
             kind.hash(hasher);
         }
         Value::NativeFunction(_) => {}

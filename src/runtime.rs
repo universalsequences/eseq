@@ -1366,6 +1366,7 @@ impl Runtime {
             "tabs",
             "response-curve-editor",
             "timeline",
+            "transport-clock",
             "waveform",
             "scroll",
             "tree",

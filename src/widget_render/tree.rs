@@ -335,12 +335,14 @@ fn hash_tree_item_value(value: &Value, state: &mut DefaultHasher) {
         Value::ReactiveRef {
             namespace,
             field,
+            index,
             kind,
             ..
         } => {
             10_u8.hash(state);
             namespace.hash(state);
             field.hash(state);
+            index.hash(state);
             kind.hash(state);
         }
         Value::NativeFunction(_) => {

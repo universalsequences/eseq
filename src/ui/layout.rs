@@ -790,16 +790,18 @@ fn value_eq(left: &Value, right: &Value) -> bool {
             Value::ReactiveRef {
                 namespace: a_ns,
                 field: a_field,
+                index: a_index,
                 kind: a_kind,
                 ..
             },
             Value::ReactiveRef {
                 namespace: b_ns,
                 field: b_field,
+                index: b_index,
                 kind: b_kind,
                 ..
             },
-        ) => a_ns == b_ns && a_field == b_field && a_kind == b_kind,
+        ) => a_ns == b_ns && a_field == b_field && a_index == b_index && a_kind == b_kind,
         _ => false,
     }
 }

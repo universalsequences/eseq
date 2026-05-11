@@ -50,6 +50,28 @@ impl ReactiveFieldKey {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ReactiveBindingKey {
+    pub field: ReactiveFieldKey,
+    pub index: Option<usize>,
+}
+
+impl ReactiveBindingKey {
+    pub fn field(namespace: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            field: ReactiveFieldKey::new(namespace, field),
+            index: None,
+        }
+    }
+
+    pub fn indexed(namespace: impl Into<String>, field: impl Into<String>, index: usize) -> Self {
+        Self {
+            field: ReactiveFieldKey::new(namespace, field),
+            index: Some(index),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BindingKind {
     Float,
@@ -70,6 +92,7 @@ pub enum Value {
     ReactiveRef {
         namespace: String,
         field: String,
+        index: Option<usize>,
         kind: BindingKind,
         slot: Arc<AtomicU64>,
     },
@@ -250,8 +273,11 @@ pub fn format_lisp_value(value: &Value) -> String {
         Value::Function(i) => format!("<fn:{i}>"),
         Value::NodeRef(id) => format!("<node:{id}>"),
         Value::ReactiveRef {
-            namespace, field, ..
-        } => format!("<bind:{namespace}.{field}>"),
+            namespace,
+            field,
+            index,
+            ..
+        } => format_binding_ref(namespace, field, *index),
         Value::NativeFunction(_) => "<native>".to_string(),
     }
 }
@@ -295,8 +321,11 @@ pub fn format_lisp_source(value: &Value) -> String {
         Value::Function(i) => format!("<fn:{i}>"),
         Value::NodeRef(id) => format!("<node:{id}>"),
         Value::ReactiveRef {
-            namespace, field, ..
-        } => format!("<bind:{namespace}.{field}>"),
+            namespace,
+            field,
+            index,
+            ..
+        } => format_binding_ref(namespace, field, *index),
         Value::NativeFunction(_) => "<native>".to_string(),
     }
 }
@@ -465,16 +494,18 @@ impl PartialEq for Value {
                 Self::ReactiveRef {
                     namespace: a_ns,
                     field: a_field,
+                    index: a_index,
                     kind: a_kind,
                     ..
                 },
                 Self::ReactiveRef {
                     namespace: b_ns,
                     field: b_field,
+                    index: b_index,
                     kind: b_kind,
                     ..
                 },
-            ) => a_ns == b_ns && a_field == b_field && a_kind == b_kind,
+            ) => a_ns == b_ns && a_field == b_field && a_index == b_index && a_kind == b_kind,
             _ => false,
         }
     }
@@ -497,11 +528,13 @@ impl Clone for Value {
             Self::ReactiveRef {
                 namespace,
                 field,
+                index,
                 kind,
                 slot,
             } => Self::ReactiveRef {
                 namespace: namespace.clone(),
                 field: field.clone(),
+                index: *index,
                 kind: *kind,
                 slot: slot.clone(),
             },
@@ -541,11 +574,13 @@ impl Value {
             Self::ReactiveRef {
                 namespace,
                 field,
+                index,
                 kind,
                 slot,
             } => Self::ReactiveRef {
                 namespace: namespace.clone(),
                 field: field.clone(),
+                index: *index,
                 kind: *kind,
                 slot: slot.clone(),
             },
@@ -893,6 +928,32 @@ pub fn register_core_natives(vm: &mut VM) {
             return Value::Nil;
         };
         reactive_float_ref("SEQ", field)
+    });
+
+    vm.register_native("bind-nth", |args| {
+        let (
+            Some(Value::String(namespace)),
+            Some(Value::String(field)),
+            Some(Value::Number(index)),
+        ) = (args.first(), args.get(1), args.get(2))
+        else {
+            return Value::Nil;
+        };
+        let Some(index) = binding_index(*index) else {
+            return Value::Nil;
+        };
+        reactive_indexed_float_ref(namespace, field, index)
+    });
+
+    vm.register_native("bind-seq-nth", |args| {
+        let (Some(Value::String(field)), Some(Value::Number(index))) = (args.first(), args.get(1))
+        else {
+            return Value::Nil;
+        };
+        let Some(index) = binding_index(*index) else {
+            return Value::Nil;
+        };
+        reactive_indexed_float_ref("SEQ", field, index)
     });
 
     vm.register_native_with_vm("subtree-owner", |args, vm| {
@@ -1315,8 +1376,34 @@ fn reactive_float_ref(namespace: &str, field: &str) -> Value {
     Value::ReactiveRef {
         namespace: namespace.to_string(),
         field: field.to_string(),
+        index: None,
         kind: BindingKind::Float,
         slot: crate::reactive::reactive_float_slot(namespace, field),
+    }
+}
+
+fn reactive_indexed_float_ref(namespace: &str, field: &str, index: usize) -> Value {
+    Value::ReactiveRef {
+        namespace: namespace.to_string(),
+        field: field.to_string(),
+        index: Some(index),
+        kind: BindingKind::Float,
+        slot: crate::reactive::reactive_indexed_float_slot(namespace, field, index),
+    }
+}
+
+fn binding_index(value: f64) -> Option<usize> {
+    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= usize::MAX as f64 {
+        Some(value as usize)
+    } else {
+        None
+    }
+}
+
+fn format_binding_ref(namespace: &str, field: &str, index: Option<usize>) -> String {
+    match index {
+        Some(index) => format!("<bind:{namespace}.{field}[{index}]>"),
+        None => format!("<bind:{namespace}.{field}>"),
     }
 }
 
