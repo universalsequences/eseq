@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::{
@@ -25,6 +26,8 @@ pub struct SdfWidgetDef {
 
 pub const MAX_SDF_STATE_UNIFORMS: usize = 8;
 pub const SHADER_TYPE_PROP: &str = "__shader_type";
+
+static SDF_WIDGET_REGISTRY_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 pub fn shader_state_prop_name(name: &str) -> String {
     format!("shader-state-{}", name)
@@ -476,6 +479,7 @@ pub fn sdf_handle_event(
 pub fn register_sdf_widget(def: SdfWidgetDef) {
     let name = def.name.clone();
     SDF_WIDGETS.with(|w| w.borrow_mut().insert(name, Rc::new(def)));
+    SDF_WIDGET_REGISTRY_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Register a compiled shader for use as a built-in widget's visual override.
@@ -499,10 +503,16 @@ pub fn register_inline_shader(
         paint_margin,
     };
     SDF_WIDGETS.with(|w| w.borrow_mut().insert(name, Rc::new(def)));
+    SDF_WIDGET_REGISTRY_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn sdf_widget_def(name: &str) -> Option<Rc<SdfWidgetDef>> {
     SDF_WIDGETS.with(|w| w.borrow().get(name).cloned())
+}
+
+#[cfg(target_os = "macos")]
+pub fn sdf_widget_registry_generation() -> u64 {
+    SDF_WIDGET_REGISTRY_GENERATION.load(Ordering::Relaxed)
 }
 
 /// Measure an SDF widget — returns the fixed size from defwidget :measure.

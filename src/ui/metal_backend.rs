@@ -804,6 +804,7 @@ fragment float4 waveform_frag(
         // Per-widget-type GPU pipelines (hslider, vslider, toggle)
         widget_pipelines: HashMap<String, Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         sdf_widget_pipeline_sources: HashMap<String, String>,
+        sdf_widget_pipeline_registry_generation: u64,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         image_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
@@ -877,6 +878,7 @@ fragment float4 waveform_frag(
                 prop_pipeline: None,
                 widget_pipelines: HashMap::new(),
                 sdf_widget_pipeline_sources: HashMap::new(),
+                sdf_widget_pipeline_registry_generation: 0,
                 waveform_pipeline: None,
                 image_pipeline: None,
                 waveform_buffers: HashMap::new(),
@@ -1310,6 +1312,10 @@ fragment float4 waveform_frag(
         /// since the last render. This enables lazy compilation of defwidget shaders.
         fn compile_pending_sdf_pipelines(&mut self) {
             use crate::widget_render::sdf_widget;
+            let generation = sdf_widget::sdf_widget_registry_generation();
+            if self.sdf_widget_pipeline_registry_generation == generation {
+                return;
+            }
             for (name, shader_src) in sdf_widget::sdf_widget_shader_sources() {
                 if self
                     .sdf_widget_pipeline_sources
@@ -1368,6 +1374,7 @@ fragment float4 waveform_frag(
                     self.widget_pipelines.insert(name, pipeline_state);
                 }
             }
+            self.sdf_widget_pipeline_registry_generation = generation;
         }
 
         fn draw_waveform_primitives(
