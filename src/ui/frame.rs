@@ -4,7 +4,7 @@ use crate::backend::{
 };
 use crate::buffer::{Buffer, BufferTextStyle};
 use crate::editor::{Editor, ViewMode};
-use crate::layout::Rect;
+use crate::layout::{Rect, layout_contains_widget_id};
 use crate::mode::{TokenClass, TokenSpan, highlight_lines};
 use crate::text::matching_paren;
 use crate::theme;
@@ -625,6 +625,36 @@ fn build_tiled_render_frame_impl(
     // Ensure cached rects are up to date, then reuse them.
     editor.update_tile_rects(total_width as u16, total_height as u16);
     editor.sync_reactive_bindings_for_visible_layouts();
+    let dirty_widget_ids = editor.take_dirty_widget_ids();
+    if !dirty_widget_ids.is_empty() {
+        let tile_ids = editor.tile_root.leaf_ids();
+        for tile_id in tile_ids {
+            let matching_dirty_ids = {
+                let Some(leaf) = editor.tile_root.find_leaf(tile_id) else {
+                    continue;
+                };
+                let Some(layout) = leaf.cached_layout.as_ref() else {
+                    continue;
+                };
+                dirty_widget_ids
+                    .iter()
+                    .copied()
+                    .filter(|widget_id| layout_contains_widget_id(layout.as_ref(), *widget_id))
+                    .collect::<Vec<_>>()
+            };
+            if matching_dirty_ids.is_empty() {
+                continue;
+            }
+            if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+                for widget_id in matching_dirty_ids {
+                    if !leaf.dirty_widget_ids.contains(&widget_id) {
+                        leaf.dirty_widget_ids.push(widget_id);
+                    }
+                }
+                leaf.cached_inactive_frame = None;
+            }
+        }
+    }
     let tile_rects: Vec<_> = editor.tile_rects().to_vec();
     let active_tile = editor.active_tile;
     let (cell_w, cell_h) = editor.layout_cell_dims();
@@ -774,6 +804,7 @@ fn build_tiled_render_frame_impl(
             // completion is rendered once globally by the tiled backend.
             let mut frame = build_render_frame(editor, inner_width, inner_height);
             frame.completion = None;
+            frame.dirty_widget_ids = dirty_widget_ids.clone();
             if Editor::trace_completion_enabled() {
                 eprintln!(
                     "{} render_kind=active-tile frame_show={} tile_id={} inner={}x{}",
@@ -783,6 +814,9 @@ fn build_tiled_render_frame_impl(
                     inner_width,
                     inner_height
                 );
+            }
+            if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+                leaf.dirty_widget_ids.clear();
             }
             tiles.push(TileFrame {
                 tile_id,
@@ -823,6 +857,9 @@ fn build_tiled_render_frame_impl(
                 }
                 frame
             };
+            if let Some(leaf) = editor.tile_root.find_leaf_mut(tile_id) {
+                leaf.dirty_widget_ids.clear();
+            }
             let frame = apply_view_mode(frame, editor.buffers[buffer_idx].view_mode);
             tiles.push(TileFrame {
                 tile_id,

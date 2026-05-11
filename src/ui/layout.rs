@@ -362,6 +362,14 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
     None
 }
 
+pub fn layout_contains_widget_id(node: &LayoutNode, widget_id: u64) -> bool {
+    node.widget_id == widget_id
+        || node
+            .children
+            .iter()
+            .any(|child| layout_contains_widget_id(child, widget_id))
+}
+
 fn reuse_layout_node_impl(
     existing: &LayoutNode,
     tree: &Value,
