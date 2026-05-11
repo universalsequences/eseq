@@ -203,21 +203,31 @@
           :on-click |x y r| (agent-close-panel)))
       (agent-message-list)
       (agent-draft-actions)
-      (h-stack :width :fill :gap 0.5 :align :center
+      (v-stack :key "agent-composer"
+               :width :fill
+               :gap 0.45
         (text-input
+          :key "agent-prompt-input"
           :value agent-prompt
           :placeholder "Describe an instrument..."
-          :flex 1
-          :height 1.4
+          :width :fill
+          :height 1.7
           :on-change (lambda (v) (set! agent-prompt v)))
-        (button "Send"
-          :variant :primary
-          :height 1.4
-          :on-click |x y r| (agent-send-current))
-        (button "Cancel"
-          :variant :danger
-          :height 1.4
-          :on-click |x y r| (if (> agent-current-conv 0) (agent/cancel agent-current-conv) nil))))))
+        (h-stack :key "agent-composer-actions"
+                 :width :fill
+                 :gap 0.5
+                 :align :center
+          (box :flex 1)
+          (button "Send"
+            :variant :primary
+            :width 4.8
+            :height 1.4
+            :on-click |x y r| (agent-send-current))
+          (button "Cancel"
+            :variant :danger
+            :width 5.6
+            :height 1.4
+            :on-click |x y r| (if (> agent-current-conv 0) (agent/cancel agent-current-conv) nil)))))))
 
 (effect-buffer "*agent-artifacts*"
   (let ((agent-generation AGENT.generation))

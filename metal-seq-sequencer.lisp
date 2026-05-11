@@ -96,29 +96,31 @@
   (let ((border (if (= selected 1)
           (rgba 1.0 0.86 0.22 1.0)
           (if (= plocked 1)
-            (rgba 0.95 0.22 0.72 1.0)
+            (rgba 0.45 0.42 0.62 1.0)
             (rgba 0.31 0.32 0.40 1.0)))))
     (sdf/layer
-      (sdf/fill (sdf/rounded-rect (* 1.0 width) (* 1.0 height) 0.01)
+      (sdf/fill
+        (sdf/translate 0 0.0 (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0)
+          )
         (material
-          :lighting (lighting :edge-min -0.3 :edge-max 1.3
-            :light (vec3 0.7 -0.8 2.5) :shininess 92.0)
+          :lighting (lighting :edge-min -0.5 :edge-max 0.3
+            :light (vec3 0.1 -1.8 2.5) :shininess 92.0)
           :color (if (= duration 1)
             (aqua-color  
-                 (rgba 0.24 0.34 0.84 0.60)
+              (rgba 0.14 0.14 0.84 0.5)
               (rgba 0 0 1 1))
             (rgba 0 0 0 0))))
-      (sdf/fill (sdf/rounded-rect (* 0.75 width) (* 0.75 height) 0.75)
+      (sdf/fill (sdf/rounded-rect (* 0.65 width) (* 0.65 height) 0.65)
         (material
           :lighting (lighting :edge-min -0.3 :edge-max 1.0
             :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
           :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
-      (sdf/fill (sdf/rounded-rect (* 0.63 width) (* 0.63 height) 0.62)
+      (sdf/fill (sdf/rounded-rect (* 0.53 width) (* 0.53 height) 0.52)
         (material
           :color (if (= active 1) (rgba 0.05 0.055 0.075 1.0) (rgba 0.015 0.016 0.025 1.0)))))))
 
 (defwidget seqv-step-dot
-  :width 2.7 :height 0.6
+  :width 1.0 :height 0.5
   :state (active plocked selected)
   :shader
   (if (= active 1)
@@ -255,8 +257,8 @@
       :selected (if visible (if selected? 1 0) 0)
       :duration (if visible (if duration? 1 0) 0)
       :background "seqv-step-shell"
-      :align :center :width 3.08 :height 1.01
-      (box :width 1.62 :height 0.98 :align :center
+      :align :center :width 3.08 :height 1.41
+      (box :width 1.62 :height 1.38 :align :center
         (seqv-step-dot :active (if visible (if active 1 0) 0)
           :plocked (if visible (if plocked? 1 0) 0)
           :selected (if visible (if selected? 1 0) 0))))))

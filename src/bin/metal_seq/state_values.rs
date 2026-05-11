@@ -3063,6 +3063,99 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_agent_composer_keeps_actions_below_full_width_input() {
+        use eseqlisp::layout::LayoutNode;
+
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        fn node_text(node: &LayoutNode) -> Option<&str> {
+            match node.props.get("text") {
+                Some(Value::String(text)) => Some(text.as_str()),
+                _ => None,
+            }
+        }
+
+        fn find_button_by_text<'a>(node: &'a LayoutNode, text: &str) -> Option<&'a LayoutNode> {
+            if node.widget_type == "button" && node_text(node) == Some(text) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_button_by_text(child, text))
+        }
+
+        let mut editor =
+            eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        editor.set_layout_viewport(92, 24);
+        editor.runtime_mut().register_reactive(
+            "AGENT",
+            vec![("generation", Value::Number(0.0))],
+            false,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "mac-osx-dark.lisp")"#)
+            .expect("load theme");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "metal-seq-agent.lisp")"#)
+            .expect("load agent lisp");
+        editor.refresh_runtime_side_effects();
+
+        let agent_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*agent*")
+            .expect("agent buffer")
+            .id;
+        editor.set_active_buffer(agent_id);
+        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("agent layout");
+
+        let input = find_layout_node_by_stable_key(&layout, "agent-prompt-input")
+            .expect("agent prompt input");
+        let actions = find_layout_node_by_stable_key(&layout, "agent-composer-actions")
+            .expect("agent action row");
+        let send = find_button_by_text(&layout, "Send").expect("Send button");
+        let cancel = find_button_by_text(&layout, "Cancel").expect("Cancel button");
+
+        assert!(
+            input.rect.row + input.rect.height <= actions.rect.row,
+            "agent composer actions should sit below prompt input; input={:?}, actions={:?}",
+            input.rect,
+            actions.rect
+        );
+        assert!(
+            input.rect.width > send.rect.width + cancel.rect.width,
+            "agent prompt should have the wide row instead of sharing width with buttons; input={:?}, send={:?}, cancel={:?}",
+            input.rect,
+            send.rect,
+            cancel.rect
+        );
+        assert!(
+            send.rect.col + send.rect.width <= cancel.rect.col,
+            "agent composer buttons should not overlap; send={:?}, cancel={:?}",
+            send.rect,
+            cancel.rect
+        );
+    }
+
+    #[test]
     fn metal_seq_builtin_fx_ui_lisp_loads() {
         let mut runtime = Runtime::new();
         let loaded = runtime
