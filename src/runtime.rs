@@ -1514,9 +1514,10 @@ impl Runtime {
                 self.dirty_widget_ids.push(widget_id);
             }
         }
-        if !self.dirty_widget_ids.is_empty() {
-            crate::widget_render::bump_widget_state_generation();
-        }
+        // Reactive bindings dirtied specific widgets, but they do not mutate
+        // widget-local state such as hover, scroll, focus, or animation state.
+        // Keep the global widget primitive cache generation stable so high-rate
+        // bindings do not invalidate unrelated static widget primitives.
         if self.sync_theme_to_global && namespace == "THEME" {
             self.sync_theme_from_registry();
         }
