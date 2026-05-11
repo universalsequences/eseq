@@ -2,12 +2,17 @@
 ;; Renders to *mixer* buffer. Loaded by metal-seq-grid.lisp.
 
 (def track-peak (i)
-  (reactive-get "SEQ" (str "track-peak-" i)))
+  (bind-seq (str "track-peak-" i)))
 
-(def bus-peak (i)
+(def bus-peak-l (i)
   (if (= (nth SEQ.bus-names i) "Mix")
-    (max SEQ.master-peak-l SEQ.master-peak-r)
-    (reactive-get "SEQ" (str "bus-peak-" i))))
+    (bind-seq "master-peak-l")
+    (bind-seq (str "bus-peak-" i))))
+
+(def bus-peak-r (i)
+  (if (= (nth SEQ.bus-names i) "Mix")
+    (bind-seq "master-peak-r")
+    (bind-seq (str "bus-peak-" i))))
 
 (def mixer-v2-muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
@@ -90,7 +95,7 @@
 
 (def mixer-v2-bus-meter (i)
   (subtree :key (str "mixer-v2-bus-meter-" i)
-    (mixer-v2-meter (bus-peak i) (bus-peak i))))
+    (mixer-v2-meter (bus-peak-l i) (bus-peak-r i))))
 
 (def mixer-v2-track-meter-control (i)
   (box :width 3.65 :height 4.24

@@ -699,6 +699,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             editor.set_layout_aspect(cell_h / cell_w);
         }
         editor.update_tile_rects(cols as u16, rows as u16);
+        editor.sync_reactive_bindings_for_visible_layouts();
         if log_voice_counts && last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL {
             log_active_voice_counts(&state, &track_names);
             last_voice_count_log_at = Instant::now();

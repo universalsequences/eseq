@@ -4729,43 +4729,17 @@ mod tests {
             value_contains_string(tree, "Bus A") && value_contains_string(tree, "Bus B"),
             "mixer widget tree should contain bus rows"
         );
-        fn stable_key_from_tree(tree: &Value) -> Option<String> {
-            let Value::Map(map) = tree else {
-                return None;
-            };
-            match map.get("__stable-key").map(|value| value.borrow().clone()) {
-                Some(Value::String(key)) => Some(key),
-                _ => None,
-            }
-        }
-
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
         editor
             .runtime_mut()
             .set_reactive("SEQ", "track-peak-0", Value::Number(0.5));
         editor.runtime_mut().run_reactive_cycle();
-        let peak_subtree_keys: Vec<String> = editor
-            .runtime_mut()
-            .take_pending_buffer_widget_trees()
-            .into_iter()
-            .filter_map(|update| match update {
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => {
-                    stable_key_from_tree(&tree)
-                }
-                eseqlisp::vm::PendingUiUpdate::FullTree(_) => Some("<full-tree>".to_string()),
-            })
-            .collect();
         assert!(
-            peak_subtree_keys
-                .iter()
-                .any(|key| key == "mixer-v2-track-meter-0"),
-            "track peak updates should target only the nested meter subtree: {peak_subtree_keys:?}"
-        );
-        assert!(
-            !peak_subtree_keys
-                .iter()
-                .any(|key| key == "mixer-v2-track-0"),
-            "track peak updates must not invalidate the whole track strip: {peak_subtree_keys:?}"
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "bound track peak updates must not enqueue mixer widget tree rebuilds"
         );
 
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
@@ -4773,28 +4747,12 @@ mod tests {
             .runtime_mut()
             .set_reactive("SEQ", "bus-peak-1", Value::Number(0.5));
         editor.runtime_mut().run_reactive_cycle();
-        let bus_peak_subtree_keys: Vec<String> = editor
-            .runtime_mut()
-            .take_pending_buffer_widget_trees()
-            .into_iter()
-            .filter_map(|update| match update {
-                eseqlisp::vm::PendingUiUpdate::ReplaceSubtree { tree, .. } => {
-                    stable_key_from_tree(&tree)
-                }
-                eseqlisp::vm::PendingUiUpdate::FullTree(_) => Some("<full-tree>".to_string()),
-            })
-            .collect();
         assert!(
-            bus_peak_subtree_keys
-                .iter()
-                .any(|key| key == "mixer-v2-bus-meter-1"),
-            "bus peak updates should target only the nested bus meter subtree: {bus_peak_subtree_keys:?}"
-        );
-        assert!(
-            !bus_peak_subtree_keys
-                .iter()
-                .any(|key| key == "mixer-v2-bus-1"),
-            "bus peak updates must not invalidate the whole bus strip: {bus_peak_subtree_keys:?}"
+            editor
+                .runtime_mut()
+                .take_pending_buffer_widget_trees()
+                .is_empty(),
+            "bound bus peak updates must not enqueue mixer widget tree rebuilds"
         );
     }
 
