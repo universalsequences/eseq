@@ -313,6 +313,11 @@ fn insert_string_prop(
     );
 }
 
+fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDescriptor) -> bool {
+    matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. })
+        || pdesc.name.eq_ignore_ascii_case("enabled")
+}
+
 pub(crate) fn sync_instrument_param_value_field(
     rt: &mut Runtime,
     app: &ui::App,
@@ -343,7 +348,12 @@ pub(crate) fn sync_instrument_param_value_field(
     }
 }
 
-pub(crate) fn sync_sampler_selection_time_fields(rt: &mut Runtime, app: &ui::App, track: usize) {
+pub(crate) fn sync_sampler_selection_time_fields(
+    rt: &mut Runtime,
+    app: &ui::App,
+    track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) {
     if !app.is_sampler_track(track) {
         return;
     }
@@ -357,8 +367,15 @@ pub(crate) fn sync_sampler_selection_time_fields(rt: &mut Runtime, app: &ui::App
     let Some(slot) = app.state.pattern.instrument_slots.get(track) else {
         return;
     };
-    let start = slot.defaults.get(2) as f64 * sample_duration;
-    let end = slot.defaults.get(3) as f64 * sample_duration;
+    let plock_step = selected_steps.lock().unwrap().iter().copied().min();
+    let start_raw = plock_step
+        .and_then(|step| slot.plocks.get(step, 2))
+        .unwrap_or_else(|| slot.defaults.get(2));
+    let end_raw = plock_step
+        .and_then(|step| slot.plocks.get(step, 3))
+        .unwrap_or_else(|| slot.defaults.get(3));
+    let start = start_raw as f64 * sample_duration;
+    let end = end_raw as f64 * sample_duration;
     rt.set_reactive(
         "SEQ",
         &sampler_selection_time_field(track, "start"),
@@ -492,13 +509,14 @@ pub(crate) fn sync_fx_param_binding_fields(
     app: &ui::App,
     state: &Arc<SequencerState>,
     track: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
     if track < app.tracks.len() {
         sync_instrument_base_note_value_field(rt, app, track);
-        sync_sampler_selection_time_fields(rt, app, track);
+        sync_sampler_selection_time_fields(rt, app, track, selected_steps);
         if let Some(desc) = app.graph.instrument_descriptors.get(track) {
             for (param_idx, pdesc) in desc.params.iter().enumerate() {
-                if matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
+                if param_supports_value_binding(pdesc) {
                     sync_instrument_param_value_field(rt, app, track, param_idx);
                 }
             }
@@ -506,7 +524,7 @@ pub(crate) fn sync_fx_param_binding_fields(
         if let Some(slots) = app.graph.effect_descriptors.get(track) {
             for (slot_idx, desc) in slots.iter().enumerate() {
                 for (param_idx, pdesc) in desc.params.iter().enumerate() {
-                    if matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
+                    if param_supports_value_binding(pdesc) {
                         sync_track_effect_param_value_field(
                             rt,
                             state,
@@ -526,7 +544,7 @@ pub(crate) fn sync_fx_param_binding_fields(
         {
             if let Some(desc) = sequencer::lisp_effect::load_midi_fx_descriptor(name) {
                 for (param_idx, pdesc) in desc.params.iter().enumerate() {
-                    if matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
+                    if param_supports_value_binding(pdesc) {
                         sync_midi_fx_param_value_field(rt, state, track, slot_idx, param_idx);
                     }
                 }
@@ -537,7 +555,7 @@ pub(crate) fn sync_fx_param_binding_fields(
     for (bus_idx, bus) in app.buses.iter().enumerate() {
         for (slot_idx, desc) in bus.effect_descriptors.iter().enumerate() {
             for (param_idx, pdesc) in desc.params.iter().enumerate() {
-                if matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
+                if param_supports_value_binding(pdesc) {
                     sync_bus_effect_param_value_field(rt, app, bus_idx, slot_idx, param_idx);
                 }
             }
@@ -1406,7 +1424,7 @@ pub(crate) fn sync_track_topology_state(
         "instrument-panel",
         build_instrument_panel_value(app, current_track_idx, selected_steps),
     );
-    sync_fx_param_binding_fields(rt, app, state, current_track_idx);
+    sync_fx_param_binding_fields(rt, app, state, current_track_idx, selected_steps);
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, app, state, current_track_idx, selected_steps);
     rt.set_reactive(
@@ -1537,6 +1555,18 @@ pub(crate) fn build_effects_value(
                                 "boolean".to_string(),
                                 Rc::new(RefCell::new(Value::Bool(true))),
                             );
+                            if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                                insert_string_prop(
+                                    &mut pmap,
+                                    "value-field",
+                                    track_effect_param_value_field(
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        &pdesc.name,
+                                    ),
+                                );
+                            }
                         }
                         ParamKind::Enum { labels } => {
                             let selected = labels
@@ -1714,6 +1744,18 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                         "boolean".to_string(),
                                         Rc::new(RefCell::new(Value::Bool(true))),
                                     );
+                                    if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                                        insert_string_prop(
+                                            &mut pmap,
+                                            "value-field",
+                                            bus_effect_param_value_field(
+                                                bus_idx,
+                                                slot_idx,
+                                                param_idx,
+                                                &pdesc.name,
+                                            ),
+                                        );
+                                    }
                                 }
                                 ParamKind::Enum { labels } => {
                                     let selected = labels
@@ -1856,6 +1898,18 @@ pub(crate) fn build_midi_effects_value(
                                 "boolean".to_string(),
                                 Rc::new(RefCell::new(Value::Bool(true))),
                             );
+                            if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                                insert_string_prop(
+                                    &mut pmap,
+                                    "value-field",
+                                    midi_fx_param_value_field(
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        &pdesc.name,
+                                    ),
+                                );
+                            }
                         }
                         ParamKind::Enum { labels } => {
                             let selected = labels
@@ -2016,6 +2070,13 @@ pub(crate) fn build_sampler_panel_value(
                     "boolean".to_string(),
                     Rc::new(RefCell::new(Value::Bool(true))),
                 );
+                if plock_step.is_none() && param_supports_value_binding(pdesc) {
+                    insert_string_prop(
+                        &mut pmap,
+                        "value-field",
+                        instrument_param_value_field(track, param_idx, &pdesc.name),
+                    );
+                }
             }
             sequencer::effects::ParamKind::Enum { labels } => {
                 let selected = labels
@@ -2276,7 +2337,7 @@ pub(crate) fn build_instrument_panel_value(
                 Rc::new(RefCell::new(Value::Bool(true))),
             );
         }
-        if options.is_none() && !is_boolean_name {
+        if options.is_none() {
             if let Some(value_field) = value_field {
                 insert_string_prop(&mut pmap, "value-field", value_field);
             }
@@ -2934,6 +2995,11 @@ pub(crate) fn sync_track_params(
     );
     rt.set_reactive("SEQ", "tp-gate", Value::Bool(tp.is_gate_on()));
     rt.set_reactive("SEQ", "tp-poly", Value::Bool(tp.is_polyphonic()));
+    rt.set_reactive(
+        "SEQ",
+        "tp-max-polyphony",
+        Value::Number(tp.get_max_polyphony() as f64),
+    );
     // Resolve timebase: show p-locked value from first selected step, otherwise track default
     let timebase_label = selected_step
         .and_then(|step| state.pattern.timebase_plocks[track].get(step))
@@ -3338,6 +3404,10 @@ pub(crate) fn build_track_params(state: &Arc<SequencerState>, track: usize) -> V
     map.insert(
         "poly".into(),
         Rc::new(RefCell::new(Value::Bool(tp.is_polyphonic()))),
+    );
+    map.insert(
+        "max-polyphony".into(),
+        Rc::new(RefCell::new(Value::Number(tp.get_max_polyphony() as f64))),
     );
     Value::Map(map)
 }
@@ -4779,6 +4849,7 @@ mod tests {
                 ("tp-swing-resolution", Value::Number(0.0)),
                 ("tp-gate", Value::Number(1.0)),
                 ("tp-poly", Value::Bool(false)),
+                ("tp-max-polyphony", Value::Number(6.0)),
                 ("tp-accumulator", Value::Number(0.0)),
                 ("tp-accum-mode", Value::Number(0.0)),
                 ("tp-accum-limit", Value::Number(0.0)),
@@ -6634,6 +6705,10 @@ mod tests {
                   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
                 (def inst-base-note-param (inst)
                   (nth (filter |p| (= (get p :control) "base-note") (get inst :synth)) 0))
+                (def fx-param-value (p)
+                  (if (get p :value-field)
+                    (bind-seq (get p :value-field))
+                    (get p :value)))
                 (def base-note ()
                   (label "base" :font-size 10 :color :gray :bg :transparent))
                 "#,
@@ -6647,6 +6722,7 @@ mod tests {
 
         for instrument_name in [
             "emulations/dx7-4op/",
+            "emulations/digitone/",
             "emulations/hammond-organ/",
             "emulations/minimoog/",
             "emulations/monomachine-digipro/",

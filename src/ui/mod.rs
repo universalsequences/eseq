@@ -145,7 +145,8 @@ const TP_TIMEBASE: usize = 8;
 const TP_SEND: usize = 9;
 const TP_MASTER: usize = 10;
 const TP_POLY: usize = 11;
-const TP_FTS: usize = 12;
+const TP_MAX_POLY: usize = 12;
+const TP_FTS: usize = 13;
 const TP_LAST: usize = TP_FTS;
 
 // Accumulator tab cursor indices
@@ -412,6 +413,7 @@ pub struct GraphState {
     pub reverb_bus_id: i32,
     pub reverb_node_id: i32,
     pub track_buffer_ids: Vec<i32>,
+    pub track_sample_rates: Vec<u32>,
     pub track_voice_lids: Vec<Vec<u64>>,
     pub track_instrument_types: Vec<InstrumentType>,
     pub track_engine_ids: Vec<Option<usize>>,
@@ -1115,6 +1117,7 @@ impl App {
                 reverb_bus_id: buses.reverb_bus_id,
                 reverb_node_id: buses.reverb_node_id,
                 track_buffer_ids: Vec::new(),
+                track_sample_rates: Vec::new(),
                 track_voice_lids: Vec::new(),
                 track_instrument_types: Vec::new(),
                 track_engine_ids: Vec::new(),

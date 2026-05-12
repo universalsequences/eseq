@@ -236,6 +236,8 @@ pub struct ProjectTrackParams {
     #[serde(default)]
     pub sends: Vec<ProjectTrackSend>,
     pub polyphonic: bool,
+    #[serde(default = "default_max_polyphony")]
+    pub max_polyphony: usize,
     pub timebase: u8,
     #[serde(default)]
     pub accumulator_idx: usize,
@@ -411,6 +413,7 @@ impl From<TrackParamsSnapshot> for ProjectTrackParams {
                 .map(ProjectTrackSend::from)
                 .collect(),
             polyphonic: value.polyphonic,
+            max_polyphony: value.max_polyphony,
             timebase: value.timebase as u8,
             accumulator_idx: value.accumulator_idx,
             script_accumulator_name: value.script_accumulator_name,
@@ -444,6 +447,7 @@ impl From<ProjectTrackParams> for TrackParamsSnapshot {
                 .map(TrackSendSnapshot::from)
                 .collect(),
             polyphonic: value.polyphonic,
+            max_polyphony: value.max_polyphony.clamp(1, crate::voice::MAX_VOICES),
             timebase: Timebase::from_index(value.timebase as u32),
             accumulator_idx: value.accumulator_idx,
             script_accumulator_name: value.script_accumulator_name,
@@ -800,6 +804,10 @@ fn default_accum_limit() -> f32 {
     48.0
 }
 
+fn default_max_polyphony() -> usize {
+    6
+}
+
 fn default_track_volume() -> f32 {
     crate::mixer_volume::default_fader()
 }
@@ -1083,6 +1091,7 @@ mod tests {
                             amount: 0.4,
                         }],
                         polyphonic: true,
+                        max_polyphony: 6,
                         timebase: Timebase::Sixteenth as u8,
                         accumulator_idx: 1,
                         script_accumulator_name: None,
@@ -1107,6 +1116,7 @@ mod tests {
                         output: ProjectTrackOutput::Mix,
                         sends: Vec::new(),
                         polyphonic: false,
+                        max_polyphony: 6,
                         timebase: Timebase::Eighth as u8,
                         accumulator_idx: 0,
                         script_accumulator_name: None,

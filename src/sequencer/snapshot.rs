@@ -91,6 +91,7 @@ impl SequencerSnapshot {
                 output: tp.output(),
                 sends: tp.sends(),
                 polyphonic: tp.is_polyphonic(),
+                max_polyphony: tp.get_max_polyphony(),
                 timebase: tp.get_timebase(),
                 accumulator_idx: tp.get_accumulator_idx(),
                 script_accumulator_name: tp.script_accumulator_name(),

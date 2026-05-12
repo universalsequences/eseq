@@ -157,4 +157,48 @@ pub(crate) fn log_active_voice_counts(state: &SequencerState, track_names: &[Str
         "[voice-counts] total={total} audio_cpu={cpu_load:.1}% {}",
         parts.join(" ")
     );
+
+    let engine_stats = sequencer::lisp_effect::take_dgen_engine_process_stats();
+    let mut engine_parts = Vec::new();
+    for stats in engine_stats {
+        let configured = state.runtime.engine_voice_counts[stats.engine_id].load(Ordering::Relaxed);
+        if configured == 0 {
+            continue;
+        }
+
+        let mut active = 0u32;
+        let mut bound_tracks = Vec::new();
+        for track in 0..num_tracks {
+            let engine_id = state.runtime.track_engine_ids[track].load(Ordering::Relaxed);
+            if engine_id == stats.engine_id as u32 {
+                active += state.transport.active_voice_counts[track].load(Ordering::Relaxed);
+                bound_tracks.push(track_names[track].as_str());
+            }
+        }
+
+        let avg_run = if stats.process_blocks == 0 {
+            0.0
+        } else {
+            stats.process_calls as f64 / stats.process_blocks as f64
+        };
+        let tracks = if bound_tracks.is_empty() {
+            "-".to_string()
+        } else {
+            bound_tracks.join(",")
+        };
+        engine_parts.push(format!(
+            "engine{} active={} enabled={} configured={} calls={} blocks={} avg_run={avg_run:.2} tracks={}",
+            stats.engine_id,
+            active,
+            stats.enabled_voices,
+            configured,
+            stats.process_calls,
+            stats.process_blocks,
+            tracks,
+        ));
+    }
+
+    if !engine_parts.is_empty() {
+        eprintln!("[dgen-voice-runs] {}", engine_parts.join(" | "));
+    }
 }

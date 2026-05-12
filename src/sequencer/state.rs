@@ -56,7 +56,7 @@ pub struct PatternSnapshot {
     pub instrument_slots: Vec<EffectSlotSnapshot>,
     pub instrument_base_note_offsets: Vec<f32>,
     pub track_sound_states: Vec<TrackSoundState>,
-    pub sample_ids: Vec<(i32, String)>,
+    pub sample_ids: Vec<(i32, String, u32)>,
     pub chord_snapshots: Vec<ChordSnapshot>,
     pub timebase_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub swing_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
@@ -155,7 +155,7 @@ impl PatternSnapshot {
             self.instrument_slots.push(Self::default_instrument_slot());
             self.instrument_base_note_offsets.push(0.0);
             self.track_sound_states.push(TrackSoundState::default());
-            self.sample_ids.push((-1, String::new()));
+            self.sample_ids.push((-1, String::new(), 44_100));
             self.chord_snapshots.push(ChordSnapshot::new_default());
             self.timebase_plock_snapshots.push([None; MAX_STEPS]);
             self.swing_plock_snapshots.push([None; MAX_STEPS]);
@@ -197,6 +197,7 @@ impl PatternSnapshot {
         state: &SequencerState,
         num_tracks: usize,
         track_buffer_ids: &[i32],
+        track_sample_rates: &[u32],
         track_names: &[String],
         instrument_types: &[InstrumentType],
     ) -> Self {
@@ -245,6 +246,7 @@ impl PatternSnapshot {
                 output: tp.output(),
                 sends: tp.sends(),
                 polyphonic: tp.is_polyphonic(),
+                max_polyphony: tp.get_max_polyphony(),
                 timebase: tp.get_timebase(),
                 accumulator_idx: tp.get_accumulator_idx(),
                 script_accumulator_name: tp.script_accumulator_name(),
@@ -291,7 +293,12 @@ impl PatternSnapshot {
             } else {
                 String::new()
             };
-            sample_ids.push((buf_id, name));
+            let sample_rate = if t < track_sample_rates.len() {
+                track_sample_rates[t]
+            } else {
+                44_100
+            };
+            sample_ids.push((buf_id, name, sample_rate));
             chord_snapshots.push(ChordSnapshot::capture(&state.pattern.chord_data[t]));
             timebase_plock_snapshots.push(state.pattern.timebase_plocks[t].snapshot());
             swing_plock_snapshots.push(state.pattern.swing_plocks[t].snapshot());
@@ -442,7 +449,7 @@ impl PatternSnapshot {
         self.instrument_slots[track] = Self::default_instrument_slot();
         self.instrument_base_note_offsets[track] = 0.0;
         self.track_sound_states[track] = TrackSoundState::default();
-        self.sample_ids[track] = (-1, String::new());
+        self.sample_ids[track] = (-1, String::new(), 44_100);
         self.chord_snapshots[track] = ChordSnapshot::new_default();
         self.timebase_plock_snapshots[track] = [None; MAX_STEPS];
         self.swing_plock_snapshots[track] = [None; MAX_STEPS];
@@ -496,7 +503,7 @@ impl PatternSnapshot {
         self.instrument_slots.push(Self::default_instrument_slot());
         self.instrument_base_note_offsets.push(0.0);
         self.track_sound_states.push(TrackSoundState::default());
-        self.sample_ids.push((-1, String::new()));
+        self.sample_ids.push((-1, String::new(), 44_100));
         self.chord_snapshots.push(ChordSnapshot::new_default());
         self.timebase_plock_snapshots.push([None; MAX_STEPS]);
         self.swing_plock_snapshots.push([None; MAX_STEPS]);
@@ -1039,6 +1046,7 @@ impl SequencerState {
         params
             .polyphonic
             .store(defaults.polyphonic, Ordering::Relaxed);
+        params.set_max_polyphony(defaults.max_polyphony);
         params.set_timebase(defaults.timebase);
         params.set_accumulator_idx(defaults.accumulator_idx);
         params.set_script_accumulator_name(defaults.script_accumulator_name);
@@ -1244,6 +1252,7 @@ impl SequencerState {
         &self,
         track_idx: usize,
         buffer_ids: &[i32],
+        sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
         effect_descriptors: &[Vec<EffectDescriptor>],
@@ -1254,8 +1263,14 @@ impl SequencerState {
         }
 
         let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mut current_snapshot =
-            PatternSnapshot::capture(self, old_count, buffer_ids, names, instrument_types);
+        let mut current_snapshot = PatternSnapshot::capture(
+            self,
+            old_count,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
         remap_snapshot_sidechain_references_after_track_delete(
             &mut current_snapshot,
             effect_descriptors,
@@ -1402,15 +1417,23 @@ impl SequencerState {
         new_idx: usize,
         num_tracks: usize,
         buffer_ids: &[i32],
+        sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
-    ) -> Option<Vec<(i32, String)>> {
+    ) -> Option<Vec<(i32, String, u32)>> {
         let mut bank = self.pattern.pattern_bank.lock().unwrap();
         let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
         if new_idx == cur || new_idx >= bank.len() {
             return None;
         }
-        bank[cur] = PatternSnapshot::capture(self, num_tracks, buffer_ids, names, instrument_types);
+        bank[cur] = PatternSnapshot::capture(
+            self,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
         bank[new_idx].restore(self);
         self.pattern
             .current_pattern
@@ -1425,12 +1448,20 @@ impl SequencerState {
         &self,
         num_tracks: usize,
         buffer_ids: &[i32],
+        sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> usize {
         let mut bank = self.pattern.pattern_bank.lock().unwrap();
         let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        bank[cur] = PatternSnapshot::capture(self, num_tracks, buffer_ids, names, instrument_types);
+        bank[cur] = PatternSnapshot::capture(
+            self,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
         let cloned = bank[cur].clone();
         bank.push(cloned);
         let new_idx = bank.len() - 1;
@@ -1449,15 +1480,23 @@ impl SequencerState {
         &self,
         num_tracks: usize,
         buffer_ids: &[i32],
+        sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
-    ) -> Option<Vec<(i32, String)>> {
+    ) -> Option<Vec<(i32, String, u32)>> {
         let mut bank = self.pattern.pattern_bank.lock().unwrap();
         if bank.len() <= 1 {
             return None;
         }
         let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        bank[cur] = PatternSnapshot::capture(self, num_tracks, buffer_ids, names, instrument_types);
+        bank[cur] = PatternSnapshot::capture(
+            self,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
         bank.remove(cur);
         let new_idx = cur.min(bank.len() - 1);
         bank[new_idx].restore(self);
@@ -1478,6 +1517,7 @@ impl SequencerState {
         track: usize,
         num_tracks: usize,
         buffer_ids: &[i32],
+        sample_rates: &[u32],
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> bool {
@@ -1486,7 +1526,14 @@ impl SequencerState {
         if cur >= bank.len() || track >= num_tracks {
             return false;
         }
-        bank[cur] = PatternSnapshot::capture(self, num_tracks, buffer_ids, names, instrument_types);
+        bank[cur] = PatternSnapshot::capture(
+            self,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+        );
         let source = bank[cur].clone();
         for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
             if pattern_idx != cur {
@@ -1841,6 +1888,7 @@ mod tests {
                 amount: 0.1 * id as f32,
             }],
             polyphonic: id % 2 == 1,
+            max_polyphony: 1 + (id % 12),
             timebase: Timebase::Quarter,
             accumulator_idx: id,
             script_accumulator_name: Some(format!("acc-{id}")),
@@ -1910,7 +1958,7 @@ mod tests {
                 })
                 .collect(),
             sample_ids: (0..num_tracks)
-                .map(|track| (track as i32, format!("track-{track}")))
+                .map(|track| (track as i32, format!("track-{track}"), 44_100))
                 .collect(),
             chord_snapshots: (0..num_tracks)
                 .map(|track| {
@@ -2016,8 +2064,8 @@ mod tests {
             snapshot.track_sound_states[1].loaded_preset.as_deref(),
             Some("preset-2")
         );
-        assert_eq!(snapshot.sample_ids[0], (0, "track-0".to_string()));
-        assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string()));
+        assert_eq!(snapshot.sample_ids[0], (0, "track-0".to_string(), 44_100));
+        assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string(), 44_100));
         assert_eq!(snapshot.chord_snapshots[0].steps[0], vec![0.0, 7.0]);
         assert_eq!(snapshot.chord_snapshots[1].steps[0], vec![2.0, 9.0]);
         assert_eq!(snapshot.timebase_plock_snapshots[0][0], Some(0));
@@ -2039,8 +2087,8 @@ mod tests {
         assert_eq!(snapshot.track_bits.len(), 2);
         assert_eq!(snapshot.track_bits[0][0], 2);
         assert_eq!(snapshot.track_bits[1][0], 3);
-        assert_eq!(snapshot.sample_ids[0], (1, "track-1".to_string()));
-        assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string()));
+        assert_eq!(snapshot.sample_ids[0], (1, "track-1".to_string(), 44_100));
+        assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string(), 44_100));
     }
 
     #[test]
@@ -2063,7 +2111,7 @@ mod tests {
             snapshot.track_params[1].num_steps,
             TrackParamsSnapshot::default().num_steps
         );
-        assert_eq!(snapshot.sample_ids[2], (-1, String::new()));
+        assert_eq!(snapshot.sample_ids[2], (-1, String::new(), 44_100));
         assert_eq!(snapshot.instrument_types[1], InstrumentType::Sampler);
     }
 
@@ -2078,7 +2126,10 @@ mod tests {
         assert_eq!(snapshot.track_bits[1][0], 2);
         assert_eq!(
             snapshot.sample_ids,
-            vec![(0, "track-0".to_string()), (1, "track-1".to_string())]
+            vec![
+                (0, "track-0".to_string(), 44_100),
+                (1, "track-1".to_string(), 44_100)
+            ]
         );
     }
 
@@ -2178,7 +2229,7 @@ mod tests {
             instrument_slots: vec![EffectSlotSnapshot::new_empty(); 4],
             instrument_base_note_offsets: vec![0.0; 4],
             track_sound_states: vec![TrackSoundState::default(); 4],
-            sample_ids: vec![(-1, String::new()); 4],
+            sample_ids: vec![(-1, String::new(), 44_100); 4],
             chord_snapshots: (0..4).map(|_| ChordSnapshot::new_default()).collect(),
             timebase_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             swing_plock_snapshots: vec![[None; MAX_STEPS]; 4],
@@ -2439,6 +2490,7 @@ mod tests {
         assert!(state.remove_track(
             1,
             &buffer_ids,
+            &[44_100, 44_100, 44_100],
             &names,
             &instrument_types,
             &effect_descriptors
@@ -2560,6 +2612,7 @@ mod tests {
         assert!(state.remove_track(
             1,
             &buffer_ids,
+            &[44_100, 44_100, 44_100],
             &names,
             &instrument_types,
             &effect_descriptors
@@ -2613,6 +2666,7 @@ mod tests {
             &state,
             1,
             &[0],
+            &[44_100],
             &[String::from("track")],
             &[InstrumentType::Custom],
         );

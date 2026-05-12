@@ -173,6 +173,18 @@
             :bg (if SEQ.tp-poly :blue :dark-gray)
             :on-click |x y r| (do (cool-off-follow) (seq-set-track-param :poly (if SEQ.tp-poly 0 1)))
             (label (if SEQ.tp-poly "ON" "OFF") :font-size 9 :color :white :bg :transparent)))
+        (v-stack :align :center :gap 0.22
+          (h-stack :gap 0.2 :align :baseline
+            (label "voices" :font-size 8 :color :dim :bg :transparent)
+            (number-picker :value SEQ.tp-max-polyphony :min 1 :max 12 :decimals 0
+              :noui true :font-size 8 :text-color :dim
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :voices v)))
+              :width 2.4 :height 0.85))
+          (box :width 4.8 :height 1.2
+            (hslider :min 1 :max 12
+              :value SEQ.tp-max-polyphony
+              :material (aqua-slider-material)
+              :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :voices v))))))
         (v-stack :align :center :gap 0.30
           (label "fts" :font-size 8 :color :dim :bg :transparent)
           (dropdown :value SEQ.tp-fts
@@ -321,6 +333,22 @@
         (host-command "set-effect-param"
           (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v)))))))
 
+(def fx-toggle-instrument-value (p)
+  (do
+    (fx-clear-selected-effect)
+    (host-command "toggle-instrument-param"
+      (dict :param-idx (get p :idx)))))
+
+(def fx-toggle-effect-value (fx p)
+  (do
+    (fx-clear-selected-effect)
+    (host-command "toggle-effect-param"
+      (dict :bus (get fx :bus-idx)
+            :bus-fx (get fx :bus-fx)
+            :midi-fx (get fx :midi-fx)
+            :slot-idx (get fx :slot-idx)
+            :param-idx (get p :idx)))))
+
 (def fx-param-value (p)
   (if (get p :value-field)
     (bind-seq (get p :value-field))
@@ -339,8 +367,8 @@
                    :bg :transparent
                    :on-click |x y r|
                      (if fx
-                       (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))
-                       (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1)))
+                       (fx-toggle-effect-value fx p)
+                       (fx-toggle-instrument-value p))
                 (label (if (> (get p :value) 0.5) "ON" "OFF")
                        :font-size 11 :width 5.5
                        :color :white :bg :transparent))
@@ -475,6 +503,7 @@
   :width 1.55 :height 1.0
   :paint-margin 0.1
   :state (active)
+  :bindable (active)
   :shader
   (sdf/fill (sdf/circle 0.86)
     (material :color (if (> active 0.5) (rgba 1.0 0.8 0.12 1.0) (rgba 0 0 0 1)))))
@@ -486,11 +515,11 @@
         (box :width 1.55 :height 0.14)
         (if p
           (fx-enabled-dot
-            :active (get p :value)
+            :active (fx-param-value p)
             :on-click |x y r|
               (if fx
-                (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))
-                (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1))))
+                (fx-toggle-effect-value fx p)
+                (fx-toggle-instrument-value p)))
           (box :width 1.55 :height 1.0))))))
 
 (defwidget fx-mini-save-icon

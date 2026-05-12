@@ -447,7 +447,7 @@ pub(crate) fn init_runtime(
     );
     runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
     if track_count > 0 {
-        sync_fx_param_binding_fields(&mut runtime, app, &state, 0);
+        sync_fx_param_binding_fields(&mut runtime, app, &state, 0, &selected_steps);
     }
 
     // ── Native functions ──
@@ -919,6 +919,18 @@ pub(crate) fn init_runtime(
                     }
                 }
             }
+            if let Some(name) = descs
+                .get(track)
+                .and_then(|d| d.get(slot_idx))
+                .and_then(|d| d.params.get(param_idx))
+                .map(|p| p.name.as_str())
+            {
+                eseqlisp::reactive::write_float_slot(
+                    "SEQ",
+                    &track_effect_param_value_field(track, slot_idx, param_idx, name),
+                    clamped as f64,
+                );
+            }
             clamped_values.push(Value::Number(clamped as f64));
         }
 
@@ -1006,6 +1018,18 @@ pub(crate) fn init_runtime(
                         );
                     }
                 }
+            }
+            if let Some(name) = descs
+                .get(track)
+                .and_then(|d| d.get(slot_idx))
+                .and_then(|d| d.params.get(param_idx))
+                .map(|p| p.name.as_str())
+            {
+                eseqlisp::reactive::write_float_slot(
+                    "SEQ",
+                    &track_effect_param_value_field(track, slot_idx, param_idx, name),
+                    clamped as f64,
+                );
             }
             clamped_values.push(Value::Number(clamped as f64));
         }
@@ -1464,6 +1488,10 @@ pub(crate) fn init_runtime(
                     tp.toggle_polyphonic();
                 }
                 Ok(Value::Bool(tp.is_polyphonic()))
+            }
+            "max-poly" | "max-polyphony" | "voices" => {
+                tp.set_max_polyphony((*val).round().max(1.0) as usize);
+                Ok(Value::Number(tp.get_max_polyphony() as f64))
             }
             other => return Err(format!("seq-set-track-param: unknown param :{other}").into()),
         }

@@ -555,6 +555,7 @@ pub struct TrackParams {
     pub output: Mutex<TrackOutput>,
     pub sends: Mutex<Vec<TrackSendSnapshot>>,
     pub polyphonic: AtomicBool,
+    pub max_polyphony: AtomicU32,
     pub timebase: AtomicU32,
     pub accumulator_idx: AtomicU32,
     pub script_accumulator_name: Mutex<Option<String>>,
@@ -582,6 +583,7 @@ impl TrackParams {
             output: Mutex::new(TrackOutput::Mix),
             sends: Mutex::new(Vec::new()),
             polyphonic: AtomicBool::new(true),
+            max_polyphony: AtomicU32::new(6),
             timebase: AtomicU32::new(Timebase::Sixteenth as u32),
             accumulator_idx: AtomicU32::new(0),
             script_accumulator_name: Mutex::new(None),
@@ -703,6 +705,13 @@ impl TrackParams {
     pub fn toggle_polyphonic(&self) {
         self.polyphonic.fetch_xor(true, Ordering::Relaxed);
     }
+    pub fn get_max_polyphony(&self) -> usize {
+        self.max_polyphony.load(Ordering::Relaxed) as usize
+    }
+    pub fn set_max_polyphony(&self, val: usize) {
+        self.max_polyphony
+            .store(val.clamp(1, MAX_VOICES) as u32, Ordering::Relaxed);
+    }
     pub fn get_timebase(&self) -> Timebase {
         Timebase::from_index(self.timebase.load(Ordering::Relaxed))
     }
@@ -800,6 +809,7 @@ pub struct TrackParamsSnapshot {
     pub output: TrackOutput,
     pub sends: Vec<TrackSendSnapshot>,
     pub polyphonic: bool,
+    pub max_polyphony: usize,
     pub timebase: Timebase,
     pub accumulator_idx: usize,
     pub script_accumulator_name: Option<String>,
@@ -827,6 +837,7 @@ impl Default for TrackParamsSnapshot {
             output: TrackOutput::Mix,
             sends: Vec::new(),
             polyphonic: false,
+            max_polyphony: 6,
             timebase: Timebase::Sixteenth,
             accumulator_idx: 0,
             script_accumulator_name: None,

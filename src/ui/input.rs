@@ -815,6 +815,7 @@ impl App {
                                 *idx,
                                 num_tracks,
                                 &self.graph.track_buffer_ids,
+                                &self.graph.track_sample_rates,
                                 &self.tracks,
                                 &self.graph.track_instrument_types,
                             ) {
@@ -828,6 +829,7 @@ impl App {
                             let new_idx = self.state.clone_pattern(
                                 num_tracks,
                                 &self.graph.track_buffer_ids,
+                                &self.graph.track_sample_rates,
                                 &self.tracks,
                                 &self.graph.track_instrument_types,
                             );
@@ -839,6 +841,7 @@ impl App {
                             if let Some(sample_ids) = self.state.delete_pattern(
                                 num_tracks,
                                 &self.graph.track_buffer_ids,
+                                &self.graph.track_sample_rates,
                                 &self.tracks,
                                 &self.graph.track_instrument_types,
                             ) {
@@ -1609,6 +1612,21 @@ impl App {
                                 },
                             );
                         }
+                        super::params::ToolRow::Track(super::TP_MAX_POLY) => {
+                            let tracks = self.selected_tracks();
+                            for track in tracks {
+                                let tp = &self.state.pattern.track_params[track];
+                                let cur = tp.get_max_polyphony() as isize;
+                                let target = val.round().max(1.0) as isize;
+                                apply_command(
+                                    self,
+                                    AppCommand::AdjustTrackMaxPolyphony {
+                                        track,
+                                        delta: target - cur,
+                                    },
+                                );
+                            }
+                        }
                         _ => {}
                     }
                     self.state.publish_scheduler_snapshot();
@@ -1792,6 +1810,7 @@ impl App {
                 if let Some(sample_ids) = self.state.delete_pattern(
                     num_tracks,
                     &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
                     &self.tracks,
                     &self.graph.track_instrument_types,
                 ) {
@@ -1809,6 +1828,7 @@ impl App {
                     self.state.clone_pattern(
                         num_tracks,
                         &self.graph.track_buffer_ids,
+                        &self.graph.track_sample_rates,
                         &self.tracks,
                         &self.graph.track_instrument_types,
                     );
@@ -1823,6 +1843,7 @@ impl App {
                                 idx,
                                 num_tracks,
                                 &self.graph.track_buffer_ids,
+                                &self.graph.track_sample_rates,
                                 &self.tracks,
                                 &self.graph.track_instrument_types,
                             ) {

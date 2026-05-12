@@ -29,6 +29,74 @@ use crate::sequencer::{
 use crate::ui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
 
+pub const HOST_SAMPLE_RATE: u32 = 44_100;
+const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OutputDeviceConfig {
+    sample_rate: u32,
+    channels: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OutputFormatRange {
+    channels: u16,
+    min_sample_rate: u32,
+    max_sample_rate: u32,
+    supports_f32: bool,
+}
+
+impl OutputFormatRange {
+    fn supports_sample_rate(self, sample_rate: u32) -> bool {
+        self.min_sample_rate <= sample_rate && sample_rate <= self.max_sample_rate
+    }
+}
+
+fn select_output_channels(
+    sample_rate: u32,
+    default_channels: u16,
+    ranges: impl IntoIterator<Item = OutputFormatRange>,
+) -> Option<u16> {
+    ranges
+        .into_iter()
+        .filter(|range| range.supports_sample_rate(sample_rate))
+        .filter(|range| range.supports_f32)
+        .map(|range| range.channels)
+        .min_by_key(|&channels| {
+            let preference = if channels == default_channels {
+                0
+            } else if channels == 2 {
+                1
+            } else {
+                2
+            };
+            (preference, channels)
+        })
+}
+
+fn select_output_config(
+    default_sample_rate: u32,
+    default_channels: u16,
+    ranges: impl IntoIterator<Item = OutputFormatRange>,
+) -> Option<OutputDeviceConfig> {
+    let ranges: Vec<OutputFormatRange> = ranges.into_iter().collect();
+    if let Some(channels) =
+        select_output_channels(HOST_SAMPLE_RATE, default_channels, ranges.clone())
+    {
+        return Some(OutputDeviceConfig {
+            sample_rate: HOST_SAMPLE_RATE,
+            channels,
+        });
+    }
+
+    select_output_channels(default_sample_rate, default_channels, ranges).map(|channels| {
+        OutputDeviceConfig {
+            sample_rate: default_sample_rate,
+            channels,
+        }
+    })
+}
+
 fn env_flag(name: &str, default: bool) -> bool {
     match std::env::var(name) {
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
@@ -179,6 +247,7 @@ struct CustomVoiceSlot {
     logical_id: u64,
     age: u64,
     active: bool,
+    release_started_sample: Option<u64>,
     note: f32,
     assigned_track: Option<usize>,
     fingerprint: u64,
@@ -206,6 +275,7 @@ impl CustomEnginePool {
                 logical_id: 0,
                 age: 0,
                 active: false,
+                release_started_sample: None,
                 note: 0.0,
                 assigned_track: None,
                 fingerprint: 0,
@@ -222,6 +292,7 @@ impl CustomEnginePool {
                 logical_id,
                 age: 0,
                 active: false,
+                release_started_sample: None,
                 note: 0.0,
                 assigned_track: None,
                 fingerprint: 0,
@@ -239,6 +310,7 @@ impl CustomEnginePool {
                 logical_id: 0,
                 age: 0,
                 active: false,
+                release_started_sample: None,
                 note: 0.0,
                 assigned_track: None,
                 fingerprint: 0,
@@ -251,8 +323,10 @@ impl CustomEnginePool {
         track: usize,
         note: f32,
         polyphonic: bool,
+        max_polyphony: usize,
     ) -> CustomVoiceAllocation {
         self.age_counter += 1;
+        let max_polyphony = max_polyphony.clamp(1, MAX_VOICES);
         if !polyphonic {
             if let Some(idx) =
                 (0..self.num_voices).find(|&i| self.voices[i].assigned_track == Some(track))
@@ -262,6 +336,7 @@ impl CustomEnginePool {
                 let stole_active_voice = slot.active;
                 slot.age = self.age_counter;
                 slot.active = true;
+                slot.release_started_sample = None;
                 slot.note = note;
                 slot.assigned_track = Some(track);
                 return CustomVoiceAllocation {
@@ -273,22 +348,70 @@ impl CustomEnginePool {
             }
         }
 
-        let mut free_idx = None;
-        let mut free_age = u64::MAX;
+        let mut active_same_note_idx = None;
+        let mut idle_same_track_idx = None;
+        let mut idle_same_track_age = u64::MAX;
+        let mut releasing_same_track_idx = None;
+        let mut releasing_same_track_age = u64::MAX;
+        let mut unassigned_idle_idx = None;
+        let mut unassigned_idle_age = u64::MAX;
         let mut oldest_same_track = None;
         let mut oldest_same_track_age = u64::MAX;
+        let mut assigned_same_track_count = 0usize;
+        let mut idle_other_track_idx = None;
+        let mut idle_other_track_age = u64::MAX;
+        let mut releasing_other_track_idx = None;
+        let mut releasing_other_track_age = u64::MAX;
         let mut oldest_idx = 0;
         let mut oldest_age = u64::MAX;
 
         for i in 0..self.num_voices {
             let voice = &self.voices[i];
-            if !voice.active && voice.age < free_age {
-                free_idx = Some(i);
-                free_age = voice.age;
+            if !voice.active {
+                let is_releasing = voice.release_started_sample.is_some();
+                match voice.assigned_track {
+                    Some(assigned) if assigned == track => {
+                        if is_releasing {
+                            if voice.age < releasing_same_track_age {
+                                releasing_same_track_idx = Some(i);
+                                releasing_same_track_age = voice.age;
+                            }
+                        } else if voice.age < idle_same_track_age {
+                            idle_same_track_idx = Some(i);
+                            idle_same_track_age = voice.age;
+                        }
+                    }
+                    Some(_) => {
+                        if is_releasing {
+                            if voice.age < releasing_other_track_age {
+                                releasing_other_track_idx = Some(i);
+                                releasing_other_track_age = voice.age;
+                            }
+                        } else if voice.age < idle_other_track_age {
+                            idle_other_track_idx = Some(i);
+                            idle_other_track_age = voice.age;
+                        }
+                    }
+                    None => {
+                        if !is_releasing && voice.age < unassigned_idle_age {
+                            unassigned_idle_idx = Some(i);
+                            unassigned_idle_age = voice.age;
+                        }
+                    }
+                }
             }
-            if voice.assigned_track == Some(track) && voice.age < oldest_same_track_age {
-                oldest_same_track = Some(i);
-                oldest_same_track_age = voice.age;
+            if voice.active
+                && voice.assigned_track == Some(track)
+                && (voice.note - note).abs() < 0.01
+            {
+                active_same_note_idx = Some(i);
+            }
+            if voice.assigned_track == Some(track) {
+                assigned_same_track_count += 1;
+                if voice.age < oldest_same_track_age {
+                    oldest_same_track = Some(i);
+                    oldest_same_track_age = voice.age;
+                }
             }
             if voice.age < oldest_age {
                 oldest_idx = i;
@@ -296,12 +419,28 @@ impl CustomEnginePool {
             }
         }
 
-        let idx = free_idx.or(oldest_same_track).unwrap_or(oldest_idx);
+        let idx = if assigned_same_track_count >= max_polyphony {
+            active_same_note_idx
+                .or(idle_same_track_idx)
+                .or(releasing_same_track_idx)
+                .or(oldest_same_track)
+                .unwrap_or(oldest_idx)
+        } else {
+            active_same_note_idx
+                .or(idle_same_track_idx)
+                .or(unassigned_idle_idx)
+                .or(idle_other_track_idx)
+                .or(releasing_same_track_idx)
+                .or(oldest_same_track)
+                .or(releasing_other_track_idx)
+                .unwrap_or(oldest_idx)
+        };
         let slot = &mut self.voices[idx];
         let previous_track = slot.assigned_track;
         let stole_active_voice = slot.active;
         slot.age = self.age_counter;
         slot.active = true;
+        slot.release_started_sample = None;
         slot.note = note;
         slot.assigned_track = Some(track);
         CustomVoiceAllocation {
@@ -312,10 +451,11 @@ impl CustomEnginePool {
         }
     }
 
-    fn release_voice_by_logical_id(&mut self, logical_id: u64) {
+    fn release_voice_by_logical_id(&mut self, logical_id: u64, release_sample: u64) {
         for i in 0..self.num_voices {
             if self.voices[i].logical_id == logical_id {
                 self.voices[i].active = false;
+                self.voices[i].release_started_sample = Some(release_sample);
                 return;
             }
         }
@@ -331,6 +471,32 @@ impl CustomEnginePool {
 
     fn sync_enabled_voice_count(&mut self, engine_id: usize) {
         self.enabled_voice_count = crate::lisp_effect::get_dgen_engine_enabled_voices(engine_id);
+    }
+
+    fn shrink_released_voices(
+        &mut self,
+        engine_id: usize,
+        current_sample: u64,
+        release_tail_samples: u64,
+    ) {
+        let mut highest_retained_idx = 0usize;
+        for i in 0..self.num_voices {
+            let voice = &mut self.voices[i];
+            if let Some(release_started_sample) = voice.release_started_sample {
+                if current_sample.saturating_sub(release_started_sample) >= release_tail_samples {
+                    voice.release_started_sample = None;
+                }
+            }
+            if voice.active || voice.release_started_sample.is_some() {
+                highest_retained_idx = highest_retained_idx.max(i);
+            }
+        }
+
+        let needed = (highest_retained_idx + 1).clamp(1, MAX_VOICES);
+        if needed < self.enabled_voice_count {
+            self.enabled_voice_count = needed;
+            crate::lisp_effect::set_dgen_engine_enabled_voices(engine_id, needed);
+        }
     }
 
     fn invalidate_sound_cache(&mut self) {
@@ -1629,6 +1795,7 @@ fn fire_resolved(
 
     // Sync polyphonic setting from track params
     let track_polyphonic = tp.is_polyphonic();
+    let track_max_polyphony = tp.get_max_polyphony();
     data.voice_pools[track_idx].polyphonic = track_polyphonic;
     let engine_id = if is_custom {
         track_engine_id(&data.state, track_idx)
@@ -1662,6 +1829,7 @@ fn fire_resolved(
                     track_idx,
                     transpose,
                     track_polyphonic,
+                    track_max_polyphony,
                 );
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
@@ -1783,6 +1951,7 @@ fn fire_resolved(
                 track_idx,
                 transpose,
                 track_polyphonic,
+                track_max_polyphony,
             );
             let voice_idx = allocation.voice_idx;
             data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
@@ -1975,6 +2144,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         let is_custom =
             data.state.runtime.instrument_type_flags[kt.track].load(Ordering::Relaxed) == 1;
         let track_polyphonic = data.state.pattern.track_params[kt.track].is_polyphonic();
+        let track_max_polyphony = data.state.pattern.track_params[kt.track].get_max_polyphony();
         data.voice_pools[kt.track].polyphonic = track_polyphonic;
         let base_note_offset = f32::from_bits(
             data.state.pattern.instrument_base_note_offsets[kt.track].load(Ordering::Relaxed),
@@ -1994,7 +2164,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     continue;
                 };
                 let pool = &mut data.custom_engine_pools[engine_id];
-                pool.release_voice_by_logical_id(active_note.logical_id);
+                pool.release_voice_by_logical_id(active_note.logical_id, block_end_sample);
                 if active_note.logical_id != 0 {
                     unsafe {
                         send_custom_note_off(data.lg.0, active_note.logical_id);
@@ -2038,6 +2208,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     kt.track,
                     resolved_transpose,
                     track_polyphonic,
+                    track_max_polyphony,
                 );
                 let voice_idx = allocation.voice_idx;
                 data.custom_engine_pools[engine_id].note_voice_allocated(engine_id, voice_idx);
@@ -2390,7 +2561,8 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         let expired = data.gate_off_state[track_idx].process(nframes);
         for lid in expired {
             if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
-                data.custom_engine_pools[engine_id].release_voice_by_logical_id(lid);
+                data.custom_engine_pools[engine_id]
+                    .release_voice_by_logical_id(lid, block_end_sample);
             } else {
                 data.voice_pools[track_idx].release_voice_by_logical_id(lid);
             }
@@ -2398,6 +2570,18 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 send_custom_note_off(data.lg.0, lid);
             }
         }
+    }
+    let custom_release_tail_samples =
+        (CUSTOM_ENGINE_RELEASE_TAIL_SECONDS * data.sample_rate).round() as u64;
+    for engine_id in 0..MAX_TRACKS {
+        if data.state.runtime.engine_voice_counts[engine_id].load(Ordering::Acquire) == 0 {
+            continue;
+        }
+        data.custom_engine_pools[engine_id].shrink_released_voices(
+            engine_id,
+            block_end_sample,
+            custom_release_tail_samples,
+        );
     }
 
     let mut rendered_frames = 0usize;
@@ -2742,16 +2926,42 @@ pub fn build_output_stream(
     Ok(stream)
 }
 
-/// Query the default output device for sample rate and channel count.
+/// Query the default output device, preferring 44.1 kHz when supported.
 pub fn query_device_config() -> Result<(u32, u16), String> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
         .ok_or("No output device available")?;
-    let config = device
+    let default_config = device
         .default_output_config()
         .map_err(|e| format!("Failed to get default config: {e}"))?;
-    Ok((config.sample_rate().0, config.channels()))
+    let ranges: Vec<OutputFormatRange> = device
+        .supported_output_configs()
+        .map_err(|e| format!("Failed to query supported output configs: {e}"))?
+        .map(|range| OutputFormatRange {
+            channels: range.channels(),
+            min_sample_rate: range.min_sample_rate().0,
+            max_sample_rate: range.max_sample_rate().0,
+            supports_f32: range.sample_format() == cpal::SampleFormat::F32,
+        })
+        .collect();
+    let selected = select_output_config(
+        default_config.sample_rate().0,
+        default_config.channels(),
+        ranges,
+    )
+    .ok_or_else(|| {
+        let device_name = device
+            .name()
+            .unwrap_or_else(|_| "default output device".to_string());
+        format!(
+            "{device_name} does not support f32 output at either {} Hz or its default {} Hz rate",
+            HOST_SAMPLE_RATE,
+            default_config.sample_rate().0
+        )
+    })?;
+
+    Ok((selected.sample_rate, selected.channels))
 }
 
 #[cfg(test)]
@@ -2761,12 +2971,137 @@ mod tests {
 
     use super::{
         bus_gate_target_at, instrument_sound_fingerprint, resolve_live_keyboard_transpose,
-        resolved_chord_transpose, sampler_warp_runtime, swing_delay_samples, CustomEnginePool,
-        GateOffTracker,
+        resolved_chord_transpose, sampler_warp_runtime, select_output_channels,
+        select_output_config, swing_delay_samples, CustomEnginePool, GateOffTracker,
+        OutputDeviceConfig, OutputFormatRange, HOST_SAMPLE_RATE,
     };
     use crate::accumulator::AccumulatorRuntimeState;
     use crate::analysis::{pack_ptr, OnsetTableShared};
     use crate::sequencer::{SequencerState, SwingResolution};
+
+    #[test]
+    fn output_config_keeps_default_channels_at_44100() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 4,
+                min_sample_rate: 44_100,
+                max_sample_rate: 96_000,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 44_100,
+                max_sample_rate: 44_100,
+                supports_f32: true,
+            },
+        ];
+
+        assert_eq!(select_output_channels(HOST_SAMPLE_RATE, 4, ranges), Some(4));
+    }
+
+    #[test]
+    fn output_config_prefers_stereo_when_default_channels_do_not_support_44100() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 6,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 1,
+                min_sample_rate: 44_100,
+                max_sample_rate: 44_100,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 44_100,
+                max_sample_rate: 96_000,
+                supports_f32: true,
+            },
+        ];
+
+        assert_eq!(select_output_channels(HOST_SAMPLE_RATE, 6, ranges), Some(2));
+    }
+
+    #[test]
+    fn output_config_falls_back_to_default_sample_rate_without_44100() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: true,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 88_200,
+                max_sample_rate: 96_000,
+                supports_f32: true,
+            },
+        ];
+
+        assert_eq!(
+            select_output_config(48_000, 2, ranges),
+            Some(OutputDeviceConfig {
+                sample_rate: 48_000,
+                channels: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn output_config_falls_back_to_default_sample_rate_without_f32_at_44100() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 44_100,
+                max_sample_rate: 44_100,
+                supports_f32: false,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: true,
+            },
+        ];
+
+        assert_eq!(
+            select_output_config(48_000, 2, ranges),
+            Some(OutputDeviceConfig {
+                sample_rate: 48_000,
+                channels: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn output_config_rejects_when_preferred_and_default_rates_lack_f32_support() {
+        let ranges = [
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 44_100,
+                max_sample_rate: 44_100,
+                supports_f32: false,
+            },
+            OutputFormatRange {
+                channels: 2,
+                min_sample_rate: 48_000,
+                max_sample_rate: 48_000,
+                supports_f32: false,
+            },
+        ];
+
+        assert_eq!(select_output_config(48_000, 2, ranges), None);
+    }
 
     #[test]
     fn sampler_warp_ratio_speeds_source_when_project_bpm_is_higher() {
@@ -2790,28 +3125,119 @@ mod tests {
     }
 
     #[test]
-    fn custom_engine_pool_prefers_inactive_voices_before_stealing() {
+    fn custom_engine_pool_reuses_inactive_same_track_voices_before_expanding() {
         let mut pool = CustomEnginePool::new();
         for lid in 1..=4 {
             pool.add_voice(lid);
         }
 
-        let a = pool.allocate_voice(0, 0.0, true);
-        let b = pool.allocate_voice(0, 4.0, true);
+        let a = pool.allocate_voice(0, 0.0, true, 6);
+        let b = pool.allocate_voice(0, 4.0, true, 6);
         assert_eq!(a.logical_id, 1);
         assert_eq!(b.logical_id, 2);
         assert!(!a.stole_active_voice);
         assert!(!b.stole_active_voice);
 
-        pool.release_voice_by_logical_id(a.logical_id);
-        pool.release_voice_by_logical_id(b.logical_id);
+        pool.release_voice_by_logical_id(a.logical_id, 0);
+        pool.release_voice_by_logical_id(b.logical_id, 0);
+        pool.shrink_released_voices(0, 1_000, 1_000);
 
-        let c = pool.allocate_voice(0, 7.0, true);
-        let d = pool.allocate_voice(0, 11.0, true);
-        assert_eq!(c.logical_id, 3);
-        assert_eq!(d.logical_id, 4);
+        let c = pool.allocate_voice(0, 7.0, true, 6);
+        let d = pool.allocate_voice(0, 11.0, true, 6);
+        assert_eq!(c.logical_id, 1);
+        assert_eq!(d.logical_id, 2);
         assert!(!c.stole_active_voice);
         assert!(!d.stole_active_voice);
+    }
+
+    #[test]
+    fn custom_engine_pool_uses_unassigned_voice_for_new_same_track_overlap() {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=4 {
+            pool.add_voice(lid);
+        }
+
+        let a = pool.allocate_voice(0, 0.0, true, 6);
+        let b = pool.allocate_voice(0, 4.0, true, 6);
+
+        assert_eq!(a.logical_id, 1);
+        assert_eq!(b.logical_id, 2);
+        assert!(!a.stole_active_voice);
+        assert!(!b.stole_active_voice);
+    }
+
+    #[test]
+    fn custom_engine_pool_enforces_track_polyphony_cap_as_segment() {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=6 {
+            pool.add_voice(lid);
+        }
+
+        let a0 = pool.allocate_voice(0, 0.0, true, 2);
+        let a1 = pool.allocate_voice(0, 4.0, true, 2);
+        let b0 = pool.allocate_voice(1, 0.0, true, 2);
+        let b1 = pool.allocate_voice(1, 4.0, true, 2);
+
+        assert_eq!(a0.logical_id, 1);
+        assert_eq!(a1.logical_id, 2);
+        assert_eq!(b0.logical_id, 3);
+        assert_eq!(b1.logical_id, 4);
+
+        let capped = pool.allocate_voice(0, 7.0, true, 2);
+        assert!(capped.stole_active_voice);
+        assert_eq!(capped.previous_track, Some(0));
+        assert!(matches!(capped.logical_id, 1 | 2));
+
+        let track_one_count = pool.voices[..pool.num_voices]
+            .iter()
+            .filter(|voice| voice.assigned_track == Some(1))
+            .count();
+        assert_eq!(track_one_count, 2);
+    }
+
+    #[test]
+    fn custom_engine_pool_does_not_reuse_releasing_voice_before_cap() {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=6 {
+            pool.add_voice(lid);
+        }
+
+        let low = pool.allocate_voice(0, -24.0, true, 6);
+        let low_lid = low.logical_id;
+        pool.release_voice_by_logical_id(low_lid, 1_000);
+
+        let mid = pool.allocate_voice(0, 0.0, true, 6);
+        let high = pool.allocate_voice(0, 7.0, true, 6);
+
+        assert_eq!(low_lid, 1);
+        assert_eq!(mid.logical_id, 2);
+        assert_eq!(high.logical_id, 3);
+        assert!(!mid.stole_active_voice);
+        assert!(!high.stole_active_voice);
+        assert_eq!(pool.voices[0].release_started_sample, Some(1_000));
+    }
+
+    #[test]
+    fn custom_engine_pool_shrinks_only_after_release_tail_expires() {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=4 {
+            pool.add_voice(lid);
+        }
+
+        let low = pool.allocate_voice(0, 0.0, true, 6);
+        let high = pool.allocate_voice(0, 7.0, true, 6);
+        let low_lid = low.logical_id;
+        let high_lid = high.logical_id;
+        pool.enabled_voice_count = 2;
+
+        pool.release_voice_by_logical_id(high_lid, 1_000);
+        pool.shrink_released_voices(0, 1_999, 1_000);
+        assert_eq!(pool.enabled_voice_count, 2);
+
+        pool.shrink_released_voices(0, 2_000, 1_000);
+        assert_eq!(pool.enabled_voice_count, 1);
+        assert!(pool.voices[0].active);
+        assert_eq!(pool.voices[0].logical_id, low_lid);
     }
 
     #[test]
@@ -2821,12 +3247,12 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let first = pool.allocate_voice(0, 0.0, true);
-        let second = pool.allocate_voice(1, 4.0, true);
+        let first = pool.allocate_voice(0, 0.0, true, 6);
+        let second = pool.allocate_voice(1, 4.0, true, 6);
         assert_eq!(first.logical_id, 1);
         assert_eq!(second.logical_id, 2);
 
-        let stolen = pool.allocate_voice(1, 7.0, true);
+        let stolen = pool.allocate_voice(1, 7.0, true, 6);
         assert!(stolen.stole_active_voice);
         assert_eq!(stolen.previous_track, Some(1));
         assert_eq!(stolen.logical_id, 2);
@@ -2839,8 +3265,8 @@ mod tests {
             pool.add_voice(lid);
         }
 
-        let first = pool.allocate_voice(3, 0.0, false);
-        let reused = pool.allocate_voice(3, 12.0, false);
+        let first = pool.allocate_voice(3, 0.0, false, 6);
+        let reused = pool.allocate_voice(3, 12.0, false, 6);
 
         assert_eq!(reused.logical_id, first.logical_id);
         assert!(reused.stole_active_voice);

@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -1325,9 +1325,25 @@ static DGEN_INSTRUMENT_OUTPUT_COUNTS: [AtomicUsize; INSTRUMENT_REGISTRY_SIZE] = 
     [INIT; INSTRUMENT_REGISTRY_SIZE]
 };
 static DGEN_ENGINE_ENABLED_VOICES: [AtomicUsize; MAX_TRACKS] = {
-    const INIT: AtomicUsize = AtomicUsize::new(MAX_VOICES);
+    const INIT: AtomicUsize = AtomicUsize::new(1);
     [INIT; MAX_TRACKS]
 };
+static DGEN_ENGINE_PROCESS_CALLS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+static DGEN_ENGINE_PROCESS_BLOCKS: [AtomicU64; MAX_TRACKS] = {
+    const INIT: AtomicU64 = AtomicU64::new(0);
+    [INIT; MAX_TRACKS]
+};
+
+#[derive(Clone, Copy, Debug)]
+pub struct DGenEngineProcessStats {
+    pub engine_id: usize,
+    pub enabled_voices: usize,
+    pub process_calls: u64,
+    pub process_blocks: u64,
+}
 
 pub fn set_dgen_instrument_fn(slot_id: usize, f: DGenProcessFn) {
     DGEN_INSTRUMENT_FNS[slot_id % INSTRUMENT_REGISTRY_SIZE].store(f as usize, Ordering::Release);
@@ -1350,12 +1366,23 @@ pub fn get_dgen_engine_enabled_voices(engine_id: usize) -> usize {
             .load(Ordering::Acquire)
             .clamp(1, MAX_VOICES)
     } else {
-        MAX_VOICES
+        1
     }
 }
 
 pub fn reset_dgen_engine_enabled_voices(engine_id: usize) {
     set_dgen_engine_enabled_voices(engine_id, 1);
+}
+
+pub fn take_dgen_engine_process_stats() -> Vec<DGenEngineProcessStats> {
+    (0..MAX_TRACKS)
+        .map(|engine_id| DGenEngineProcessStats {
+            engine_id,
+            enabled_voices: get_dgen_engine_enabled_voices(engine_id),
+            process_calls: DGEN_ENGINE_PROCESS_CALLS[engine_id].swap(0, Ordering::AcqRel),
+            process_blocks: DGEN_ENGINE_PROCESS_BLOCKS[engine_id].swap(0, Ordering::AcqRel),
+        })
+        .collect()
 }
 
 /// Wrapper process function for instrument nodes — reads from DGEN_INSTRUMENT_FNS.
@@ -1429,6 +1456,12 @@ unsafe extern "C" fn dgenlisp_instrument_wrapper_process(
         }
         if (*out.add(0)).is_null() {
             return;
+        }
+        if engine_id < MAX_TRACKS {
+            DGEN_ENGINE_PROCESS_CALLS[engine_id].fetch_add(1, Ordering::Relaxed);
+            if voice_idx == 0 {
+                DGEN_ENGINE_PROCESS_BLOCKS[engine_id].fetch_add(1, Ordering::Relaxed);
+            }
         }
         process_fn(inp, out, nframes, memory_read, memory_write);
     } else {
@@ -1740,7 +1773,7 @@ const INSTRUMENT_PREAMBLE: &str = r#"; Shared instrument helpers injected at com
   (def y4 (+ v4 hz4))
   (write-history z4 (+ y4 v4))
 
-  (+ y4 (* res 0.3 input)))
+  (+ y4 (* res 0.0013 input)))
 
 (defmacro adsr (gate_sig trigger_sig attack_ms decay_ms sustain release_ms)
   (make-history env)

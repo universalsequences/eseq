@@ -4,6 +4,7 @@ use ratatui::widgets::Paragraph;
 use std::sync::atomic::Ordering;
 
 use crate::sequencer::{BusId, SwingResolution, Timebase, MAX_STEPS};
+use crate::voice::MAX_VOICES;
 
 use super::command::{apply_command, AppCommand};
 use super::effects_draw::draw_effects_column;
@@ -11,8 +12,8 @@ use crate::accumulator::{AccumMode, ACCUMULATOR_REGISTRY};
 
 use super::{
     App, EffectTab, InputMode, Region, AC_FN, AC_LAST, AC_LIMIT, AC_MODE, TP_ATTACK, TP_FTS,
-    TP_GATE, TP_LAST, TP_MASTER, TP_PAN, TP_POLY, TP_RELEASE, TP_SEND, TP_STEPS, TP_SWING,
-    TP_SWING_RESOLUTION, TP_TIMEBASE, TP_VOLUME,
+    TP_GATE, TP_LAST, TP_MASTER, TP_MAX_POLY, TP_PAN, TP_POLY, TP_RELEASE, TP_SEND, TP_STEPS,
+    TP_SWING, TP_SWING_RESOLUTION, TP_TIMEBASE, TP_VOLUME,
 };
 
 /// Static labels for the timebase dropdown (derived from Timebase::LABELS).
@@ -277,6 +278,15 @@ impl App {
                 ToolRow::Track(TP_MASTER) => {
                     apply_command(self, AppCommand::AdjustMasterVolume { delta: 0.05 });
                 }
+                ToolRow::Track(TP_MAX_POLY) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(
+                            self,
+                            AppCommand::AdjustTrackMaxPolyphony { track, delta: 1 },
+                        );
+                    }
+                }
                 ToolRow::Track(TP_FTS) => {
                     let track = self.ui.cursor_track;
                     let new_scale = (tp.get_fts_scale() + 1).min(crate::scale::SCALES.len() - 1);
@@ -369,6 +379,15 @@ impl App {
                 }
                 ToolRow::Track(TP_MASTER) => {
                     apply_command(self, AppCommand::AdjustMasterVolume { delta: -0.05 });
+                }
+                ToolRow::Track(TP_MAX_POLY) => {
+                    let tracks = self.selected_tracks();
+                    for track in tracks {
+                        apply_command(
+                            self,
+                            AppCommand::AdjustTrackMaxPolyphony { track, delta: -1 },
+                        );
+                    }
                 }
                 ToolRow::Track(TP_FTS) => {
                     let track = self.ui.cursor_track;
@@ -1027,6 +1046,11 @@ fn draw_tools_list(frame: &mut Frame, app: &App, area: Rect, col_focused: bool) 
                 "OFF".into()
             },
             None,
+        ),
+        (
+            "voices",
+            format!("{}", tp.get_max_polyphony()),
+            Some(tp.get_max_polyphony() as f32 / MAX_VOICES as f32),
         ),
         (
             "fts",

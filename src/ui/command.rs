@@ -152,6 +152,11 @@ pub enum AppCommand {
         track: usize,
     },
 
+    AdjustTrackMaxPolyphony {
+        track: usize,
+        delta: isize,
+    },
+
     SetTrackAttack {
         track: usize,
         ms: f32,
@@ -604,6 +609,12 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
 
         AppCommand::ToggleTrackPolyphonic { track } => {
             app.state.pattern.track_params[track].toggle_polyphonic();
+        }
+
+        AppCommand::AdjustTrackMaxPolyphony { track, delta } => {
+            let tp = &app.state.pattern.track_params[track];
+            let cur = tp.get_max_polyphony() as isize;
+            tp.set_max_polyphony((cur + delta).max(1) as usize);
         }
 
         AppCommand::SetTrackAttack { track, ms } => {
