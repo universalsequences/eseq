@@ -6,8 +6,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use eseqlisp::frame as eseq_frame;
@@ -27,6 +26,13 @@ use crate::sequencer::{StepParam, StepSnapshot, Timebase};
 /// Monotonic counter so each compile produces a unique dylib filename,
 /// preventing dlopen from returning a stale cached handle.
 static COMPILE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+struct MidiFxDescriptorCache {
+    source: String,
+    descriptors: Vec<EffectDescriptor>,
+}
+
+static MIDI_FX_DESCRIPTOR_CACHE: OnceLock<Mutex<Option<MidiFxDescriptorCache>>> = OnceLock::new();
 
 // ── dlopen FFI (macOS) ──
 
@@ -6591,6 +6597,14 @@ pub fn load_midi_fx_descriptors() -> Vec<EffectDescriptor> {
         return Vec::new();
     }
 
+    let cache = MIDI_FX_DESCRIPTOR_CACHE.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cache.lock().expect("midi fx descriptor cache poisoned");
+        if let Some(cached) = guard.as_ref().filter(|cached| cached.source == source) {
+            return cached.descriptors.clone();
+        }
+    }
+
     let state = Arc::new(crate::sequencer::SequencerState::new(
         1,
         vec![crate::sequencer::default_empty_effect_chain()],
@@ -6602,10 +6616,16 @@ pub fn load_midi_fx_descriptors() -> Vec<EffectDescriptor> {
         0,
         0,
     );
-    if runtime.eval(&source).is_err() {
-        return Vec::new();
-    }
-    runtime.midi_fx_descriptors()
+    let descriptors = if runtime.eval(&source).is_err() {
+        Vec::new()
+    } else {
+        runtime.midi_fx_descriptors()
+    };
+    *cache.lock().expect("midi fx descriptor cache poisoned") = Some(MidiFxDescriptorCache {
+        source,
+        descriptors: descriptors.clone(),
+    });
+    descriptors
 }
 
 pub fn load_midi_fx_descriptor(name: &str) -> Option<EffectDescriptor> {

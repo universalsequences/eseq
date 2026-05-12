@@ -318,7 +318,13 @@
         (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v))
       (if (seq-has-selection?)
         (seq-set-effect-plock (get fx :slot-idx) (get p :idx) v)
-        (seq-set-effect-param (get fx :slot-idx) (get p :idx) v))))))
+        (host-command "set-effect-param"
+          (dict :slot-idx (get fx :slot-idx) :param-idx (get p :idx) :value v)))))))
+
+(def fx-param-value (p)
+  (if (get p :value-field)
+    (bind-seq (get p :value-field))
+    (get p :value)))
 
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
@@ -354,7 +360,7 @@
                             :param-idx (get p :idx) :label v))
                     (fx-set-instrument-option p v)))
                 :width 5.8 :height 1.2 :font-size 11)
-              (number-picker :value (get p :value)
+              (number-picker :value (fx-param-value p)
                 :min (get p :min) :max (get p :max) :decimals 2
                 :noui true :font-size 12 :text-color :dim
                 :on-change (lambda (v)
@@ -365,7 +371,7 @@
         (if (or (get p :options) (get p :boolean))
           (label "" :width 7.8 :bg :transparent)
           (hslider :width 7.8 :min (get p :min) :max (get p :max)
-                   :value (get p :value)
+                   :value (fx-param-value p)
                    :material (aqua-slider-material)
                    :on-change (lambda (v)
                      (if fx
@@ -416,7 +422,7 @@
               :width 4.8 :height 1.15 :font-size 10)
             (box :width 5.3 :height 1.15))
           (knob-number :label (substring base 0 12)
-            :value (get amount-p :value)
+            :value (fx-param-value amount-p)
             :min (get amount-p :min) :max (get amount-p :max) :decimals 2
             :font-size 10.5 :label-font-size 9
             :text-color :dim :label-color :dim
@@ -655,7 +661,7 @@
     (if p
       (subtree :key (str "custom-ui-knob-" synth-ui-current-name "-" name)
         (knob-number :label title
-          :value (get p :value)
+          :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals 2
           :font-size 10.5 :label-font-size 10
           :text-color :dim :label-color :dim
@@ -667,6 +673,10 @@
   (let ((p (inst-param synth-ui-current-inst name)))
     (if p (get p :value) fallback)))
 
+(def ui-param-bound-value (name fallback)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p (fx-param-value p) fallback)))
+
 (def ui-set-param (name value)
   (let ((p (inst-param synth-ui-current-inst name)))
     (if p (fx-set-instrument-value p value) false)))
@@ -677,7 +687,7 @@
       (subtree :key (str "custom-ui-adsr-number-" synth-ui-current-name "-" name)
         (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
           (label title :font-size 10 :color :dim :bg :transparent)
-          (number-picker :value (get p :value)
+          (number-picker :value (fx-param-value p)
             :min (get p :min) :max (get p :max) :decimals decimals
             :unit unit
             :noui true :font-size 10.5
@@ -693,10 +703,10 @@
        :border-width 1 :corner-radius 16 :padding 0.15
     (v-stack :width :fill :gap 0.10
       (adsr-editor
-        :attack (ui-param-value attack 5)
-        :decay (ui-param-value decay 120)
-        :sustain (ui-param-value sustain 0.7)
-        :release (ui-param-value release 120)
+        :attack (ui-param-bound-value attack 5)
+        :decay (ui-param-bound-value decay 120)
+        :sustain (ui-param-bound-value sustain 0.7)
+        :release (ui-param-bound-value release 120)
         :width 22.0 :height 3.55
         :background-color :instrument-control-bg
         :on-change (lambda (env)
@@ -804,7 +814,7 @@
 (def sampler-param-knob (p key)
   (subtree :key key
     (knob-number :label (substring (get p :name) 0 12)
-      :value (get p :value)
+      :value (fx-param-value p)
       :min (get p :min) :max (get p :max) :decimals 1
       :font-size 10.5 :label-font-size 10
       :text-color :dim :label-color :dim
@@ -865,7 +875,7 @@
   (h-stack :gap 0.65 :align :end
     (subtree :key "sampler-param-bpm"
       (knob-number :label "bpm"
-        :value (get p :value)
+        :value (fx-param-value p)
         :min (get p :min) :max (get p :max) :decimals 1
         :font-size 10.5 :label-font-size 10
         :text-color :dim :label-color :dim
@@ -930,8 +940,8 @@
                       :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
                       :cursor-time sampler-cursor-time
                       :playhead-time (bind-seq "sampler-playhead")
-                      :selection-start (get inst :start-time)
-                      :selection-end (get inst :end-time)
+                      :selection-start (bind-seq (get inst :start-time-field))
+                      :selection-end (bind-seq (get inst :end-time-field))
                       :time-ruler (dict :mode :seconds)
                       :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
                 (box :width 70 :height 4.85 :h-align :center :v-align :center

@@ -132,6 +132,14 @@ pub(crate) fn avg_ms(total: Duration, count: u64) -> f64 {
     }
 }
 
+pub(crate) fn pattern_switch_profile_enabled() -> bool {
+    std::env::var_os("METAL_SEQ_PROFILE_PATTERN_SWITCH").is_some()
+}
+
+pub(crate) fn duration_ms(elapsed: Duration) -> f64 {
+    elapsed.as_secs_f64() * 1000.0
+}
+
 pub(crate) fn log_active_voice_counts(state: &SequencerState, track_names: &[String]) {
     let num_tracks = state.active_track_count().min(track_names.len());
     if num_tracks == 0 {

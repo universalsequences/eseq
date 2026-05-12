@@ -57,6 +57,10 @@ pub(crate) fn init_runtime(
                 ("track-ids", build_track_ids(&app)),
                 ("track-names", build_track_names(&track_names)),
                 (
+                    "track-num-steps",
+                    build_all_track_num_steps_value(&state, app),
+                ),
+                (
                     "track-duration-spans",
                     build_all_track_duration_spans_value(&state, app),
                 ),
@@ -417,11 +421,34 @@ pub(crate) fn init_runtime(
                     Value::Bool(idx == 0),
                 ));
             }
+            for track in 0..track_count {
+                for step in 0..MAX_STEPS {
+                    fields.push((
+                        Box::leak(track_step_active_field(track, step).into_boxed_str()),
+                        Value::Bool(state.pattern.patterns[track].is_active(step)),
+                    ));
+                    fields.push((
+                        Box::leak(track_step_duration_field(track, step).into_boxed_str()),
+                        Value::Bool(track_step_duration_covered(&state, track, step)),
+                    ));
+                    fields.push((
+                        Box::leak(track_step_plocked_field(track, step).into_boxed_str()),
+                        Value::Bool(false),
+                    ));
+                    fields.push((
+                        Box::leak(track_step_selected_field(track, step).into_boxed_str()),
+                        Value::Bool(false),
+                    ));
+                }
+            }
             fields
         },
         false,
     );
     runtime.register_reactive("AGENT", vec![("generation", Value::Number(0.0))], false);
+    if track_count > 0 {
+        sync_fx_param_binding_fields(&mut runtime, app, &state, 0);
+    }
 
     // ── Native functions ──
 
@@ -465,6 +492,20 @@ pub(crate) fn init_runtime(
         st.toggle_step_and_clear_plocks(track, step);
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
+        Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
+    });
+
+    let st = state.clone();
+    runtime.register_native("seq-track-step-active?", move |args, _ctx| {
+        let (Some(Value::Number(track)), Some(Value::Number(step))) = (args.first(), args.get(1))
+        else {
+            return Err("seq-track-step-active?: expected (track step)".into());
+        };
+        let track = *track as usize;
+        let step = *step as usize;
+        if track >= st.active_track_count() || step >= MAX_STEPS {
+            return Ok(Value::Bool(false));
+        }
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
     });
 

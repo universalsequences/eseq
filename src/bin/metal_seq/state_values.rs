@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 /// Build a Lisp Value::List of bools from the step pattern for a given track.
 pub(crate) fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Value {
@@ -60,6 +61,83 @@ fn build_track_duration_spans_value(state: &Arc<SequencerState>, track: usize) -
         })
         .collect();
     Value::List(spans)
+}
+
+pub(crate) fn track_step_duration_covered(
+    state: &Arc<SequencerState>,
+    track: usize,
+    target_step: usize,
+) -> bool {
+    let num_steps = state.pattern.track_params[track]
+        .get_num_steps()
+        .min(MAX_STEPS);
+    target_step < num_steps
+        && (0..=target_step).any(|source_step| {
+            if !state.pattern.patterns[track].is_active(source_step) {
+                return false;
+            }
+            let duration = state.pattern.step_data[track]
+                .get(source_step, StepParam::Duration)
+                .max(0.0);
+            duration > (target_step - source_step) as f32
+        })
+}
+
+pub(crate) fn track_step_active_field(track: usize, step: usize) -> String {
+    format!("seq-track-step-active-{track}-{step}")
+}
+
+pub(crate) fn track_step_duration_field(track: usize, step: usize) -> String {
+    format!("seq-track-step-duration-{track}-{step}")
+}
+
+pub(crate) fn track_step_plocked_field(track: usize, step: usize) -> String {
+    format!("seq-track-step-plocked-{track}-{step}")
+}
+
+pub(crate) fn track_step_selected_field(track: usize, step: usize) -> String {
+    format!("seq-track-step-selected-{track}-{step}")
+}
+
+pub(crate) fn sync_all_track_step_binding_fields(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    app: &ui::App,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+) {
+    let selected = selected_steps.lock().unwrap();
+    for track in 0..app.tracks.len() {
+        let num_steps = state.pattern.track_params[track]
+            .get_num_steps()
+            .min(MAX_STEPS);
+        for step in 0..MAX_STEPS {
+            let visible = step < num_steps;
+            rt.set_reactive(
+                "SEQ",
+                &track_step_active_field(track, step),
+                Value::Bool(visible && state.pattern.patterns[track].is_active(step)),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &track_step_duration_field(track, step),
+                Value::Bool(visible && track_step_duration_covered(state, track, step)),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &track_step_plocked_field(track, step),
+                Value::Bool(
+                    visible
+                        && track_step_has_plock(state, track, &app.graph.effect_descriptors, step),
+                ),
+            );
+            rt.set_reactive(
+                "SEQ",
+                &track_step_selected_field(track, step),
+                Value::Bool(visible && track == current_track_idx && selected.contains(&step)),
+            );
+        }
+    }
 }
 
 pub(crate) fn build_all_track_duration_spans_value(
@@ -148,6 +226,325 @@ pub(crate) fn sync_all_track_playhead_fields(
     }
 }
 
+pub(crate) fn clear_all_track_playhead_fields(rt: &mut Runtime, app: &ui::App) {
+    let max_rows = (MAX_STEPS + PAGE_SIZE - 1) / PAGE_SIZE;
+    for track in 0..app.tracks.len() {
+        for row in 0..max_rows {
+            rt.set_reactive(
+                "SEQ",
+                &track_playhead_row_field(track, row),
+                Value::Number(-1.0),
+            );
+        }
+    }
+}
+
+fn field_safe_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn instrument_param_value_field(track: usize, param_idx: usize, name: &str) -> String {
+    format!(
+        "track-{track}-instrument-param-{param_idx}-{}",
+        field_safe_name(name)
+    )
+}
+
+pub(crate) fn sampler_selection_time_field(track: usize, marker: &str) -> String {
+    format!("track-{track}-sampler-selection-{marker}-time")
+}
+
+pub(crate) fn instrument_base_note_value_field(track: usize) -> String {
+    format!("track-{track}-instrument-base-note")
+}
+
+pub(crate) fn track_effect_param_value_field(
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    name: &str,
+) -> String {
+    format!(
+        "track-{track}-fx-{slot_idx}-param-{param_idx}-{}",
+        field_safe_name(name)
+    )
+}
+
+pub(crate) fn midi_fx_param_value_field(
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    name: &str,
+) -> String {
+    format!(
+        "track-{track}-midi-fx-{slot_idx}-param-{param_idx}-{}",
+        field_safe_name(name)
+    )
+}
+
+pub(crate) fn bus_effect_param_value_field(
+    bus_idx: usize,
+    slot_idx: usize,
+    param_idx: usize,
+    name: &str,
+) -> String {
+    format!(
+        "bus-{bus_idx}-fx-{slot_idx}-param-{param_idx}-{}",
+        field_safe_name(name)
+    )
+}
+
+fn insert_string_prop(
+    map: &mut HashMap<String, Rc<RefCell<Value>>>,
+    key: &str,
+    value: impl Into<String>,
+) {
+    map.insert(
+        key.to_string(),
+        Rc::new(RefCell::new(Value::String(value.into()))),
+    );
+}
+
+pub(crate) fn sync_instrument_param_value_field(
+    rt: &mut Runtime,
+    app: &ui::App,
+    track: usize,
+    param_idx: usize,
+) {
+    if let Some((name, value)) = app
+        .graph
+        .instrument_descriptors
+        .get(track)
+        .and_then(|desc| desc.params.get(param_idx))
+        .and_then(|pdesc| {
+            app.state.pattern.instrument_slots.get(track).map(|slot| {
+                let stored = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(param_idx)
+                } else {
+                    pdesc.default
+                };
+                (pdesc.name.clone(), pdesc.stored_to_user(stored))
+            })
+        })
+    {
+        rt.set_reactive(
+            "SEQ",
+            &instrument_param_value_field(track, param_idx, &name),
+            Value::Number(value as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_sampler_selection_time_fields(rt: &mut Runtime, app: &ui::App, track: usize) {
+    if !app.is_sampler_track(track) {
+        return;
+    }
+    let sample_duration = app
+        .sampler_paths
+        .get(track)
+        .and_then(|p| p.as_ref())
+        .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()))
+        .map(|sample| sample.duration_seconds)
+        .unwrap_or(1.0);
+    let Some(slot) = app.state.pattern.instrument_slots.get(track) else {
+        return;
+    };
+    let start = slot.defaults.get(2) as f64 * sample_duration;
+    let end = slot.defaults.get(3) as f64 * sample_duration;
+    rt.set_reactive(
+        "SEQ",
+        &sampler_selection_time_field(track, "start"),
+        Value::Number(start),
+    );
+    rt.set_reactive(
+        "SEQ",
+        &sampler_selection_time_field(track, "end"),
+        Value::Number(end),
+    );
+}
+
+pub(crate) fn sync_instrument_base_note_value_field(rt: &mut Runtime, app: &ui::App, track: usize) {
+    if track < app.tracks.len() {
+        let value = f32::from_bits(
+            app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+        );
+        rt.set_reactive(
+            "SEQ",
+            &instrument_base_note_value_field(track),
+            Value::Number(value as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_track_effect_param_value_field(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+) {
+    if let Some((name, value)) = descriptors
+        .get(track)
+        .and_then(|slots| slots.get(slot_idx))
+        .and_then(|desc| desc.params.get(param_idx).map(|p| (&desc.name, p)))
+        .and_then(|(_, pdesc)| {
+            state
+                .pattern
+                .effect_chains
+                .get(track)
+                .and_then(|chain| chain.get(slot_idx))
+                .map(|slot| {
+                    let stored = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                        slot.defaults.get(param_idx)
+                    } else {
+                        pdesc.default
+                    };
+                    (pdesc.name.clone(), stored)
+                })
+        })
+    {
+        rt.set_reactive(
+            "SEQ",
+            &track_effect_param_value_field(track, slot_idx, param_idx, &name),
+            Value::Number(value as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_midi_fx_param_value_field(
+    rt: &mut Runtime,
+    state: &Arc<SequencerState>,
+    track: usize,
+    slot_idx: usize,
+    param_idx: usize,
+) {
+    let chain = state.pattern.track_params[track].midi_fx_chain();
+    if let Some((name, value)) = chain
+        .get(slot_idx)
+        .and_then(|fx_name| sequencer::lisp_effect::load_midi_fx_descriptor(fx_name))
+        .and_then(|desc| desc.params.get(param_idx).cloned())
+        .and_then(|pdesc| {
+            state
+                .pattern
+                .midi_fx_slots
+                .get(track)
+                .and_then(|slots| slots.get(slot_idx))
+                .map(|slot| {
+                    let stored = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                        slot.defaults.get(param_idx)
+                    } else {
+                        pdesc.default
+                    };
+                    (pdesc.name, stored)
+                })
+        })
+    {
+        rt.set_reactive(
+            "SEQ",
+            &midi_fx_param_value_field(track, slot_idx, param_idx, &name),
+            Value::Number(value as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_bus_effect_param_value_field(
+    rt: &mut Runtime,
+    app: &ui::App,
+    bus_idx: usize,
+    slot_idx: usize,
+    param_idx: usize,
+) {
+    if let Some((name, value)) = app.buses.get(bus_idx).and_then(|bus| {
+        bus.effect_descriptors
+            .get(slot_idx)
+            .and_then(|desc| desc.params.get(param_idx))
+            .and_then(|pdesc| {
+                bus.effect_slots.get(slot_idx).map(|slot| {
+                    (
+                        pdesc.name.clone(),
+                        slot.defaults
+                            .get(param_idx)
+                            .copied()
+                            .unwrap_or(pdesc.default),
+                    )
+                })
+            })
+    }) {
+        rt.set_reactive(
+            "SEQ",
+            &bus_effect_param_value_field(bus_idx, slot_idx, param_idx, &name),
+            Value::Number(value as f64),
+        );
+    }
+}
+
+pub(crate) fn sync_fx_param_binding_fields(
+    rt: &mut Runtime,
+    app: &ui::App,
+    state: &Arc<SequencerState>,
+    track: usize,
+) {
+    if track < app.tracks.len() {
+        sync_instrument_base_note_value_field(rt, app, track);
+        sync_sampler_selection_time_fields(rt, app, track);
+        if let Some(desc) = app.graph.instrument_descriptors.get(track) {
+            for (param_idx, pdesc) in desc.params.iter().enumerate() {
+                if matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
+                    sync_instrument_param_value_field(rt, app, track, param_idx);
+                }
+            }
+        }
+        if let Some(slots) = app.graph.effect_descriptors.get(track) {
+            for (slot_idx, desc) in slots.iter().enumerate() {
+                for (param_idx, pdesc) in desc.params.iter().enumerate() {
+                    if matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
+                        sync_track_effect_param_value_field(
+                            rt,
+                            state,
+                            &app.graph.effect_descriptors,
+                            track,
+                            slot_idx,
+                            param_idx,
+                        );
+                    }
+                }
+            }
+        }
+        for (slot_idx, name) in state.pattern.track_params[track]
+            .midi_fx_chain()
+            .iter()
+            .enumerate()
+        {
+            if let Some(desc) = sequencer::lisp_effect::load_midi_fx_descriptor(name) {
+                for (param_idx, pdesc) in desc.params.iter().enumerate() {
+                    if matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
+                        sync_midi_fx_param_value_field(rt, state, track, slot_idx, param_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    for (bus_idx, bus) in app.buses.iter().enumerate() {
+        for (slot_idx, desc) in bus.effect_descriptors.iter().enumerate() {
+            for (param_idx, pdesc) in desc.params.iter().enumerate() {
+                if matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. }) {
+                    sync_bus_effect_param_value_field(rt, app, bus_idx, slot_idx, param_idx);
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn sync_track_playhead_field_delta(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
@@ -156,7 +553,7 @@ pub(crate) fn sync_track_playhead_field_delta(
 ) -> bool {
     let track_count = app.tracks.len();
     let mut current = Vec::with_capacity(track_count);
-    let mut ui_changed = previous.len() != track_count;
+    let mut effects_dirty = false;
     let mut snapshot_changed = previous.len() != track_count;
 
     for t in 0..track_count {
@@ -174,28 +571,32 @@ pub(crate) fn sync_track_playhead_field_delta(
                 let prev_active_step = (prev_playhead as usize).min(num_steps.saturating_sub(1));
                 let prev_active_row = prev_active_step / PAGE_SIZE;
                 if prev_active_row != active_row {
-                    rt.set_reactive(
-                        "SEQ",
-                        &track_playhead_row_field(t, prev_active_row),
-                        Value::Number(-1.0),
-                    );
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_playhead_row_field(t, prev_active_row),
+                            Value::Number(-1.0),
+                        )
+                        .effects_dirty;
                 }
                 if prev_active_step != active_step {
-                    rt.set_reactive(
-                        "SEQ",
-                        &track_playhead_row_field(t, active_row),
-                        Value::Number(active_col as f64),
-                    );
-                    ui_changed = true;
+                    effects_dirty |= rt
+                        .set_reactive(
+                            "SEQ",
+                            &track_playhead_row_field(t, active_row),
+                            Value::Number(active_col as f64),
+                        )
+                        .effects_dirty;
                 }
             }
         } else {
-            rt.set_reactive(
-                "SEQ",
-                &track_playhead_row_field(t, active_row),
-                Value::Number(active_col as f64),
-            );
-            ui_changed = true;
+            effects_dirty |= rt
+                .set_reactive(
+                    "SEQ",
+                    &track_playhead_row_field(t, active_row),
+                    Value::Number(active_col as f64),
+                )
+                .effects_dirty;
         }
         current.push(playhead);
     }
@@ -204,43 +605,22 @@ pub(crate) fn sync_track_playhead_field_delta(
         *previous = current;
     }
 
-    if !ui_changed {
-        return false;
-    }
-
-    true
+    effects_dirty
 }
 
 pub(crate) fn sync_all_track_sequencer_state(
     rt: &mut Runtime,
     state: &Arc<SequencerState>,
     app: &ui::App,
+    current_track_idx: usize,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
 ) {
-    rt.set_reactive(
-        "SEQ",
-        "track-steps",
-        build_all_track_steps_value(state, app),
-    );
     rt.set_reactive(
         "SEQ",
         "track-num-steps",
         build_all_track_num_steps_value(state, app),
     );
-    rt.set_reactive(
-        "SEQ",
-        "track-duration-spans",
-        build_all_track_duration_spans_value(state, app),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-playheads",
-        build_all_track_playheads_value(state, app),
-    );
-    rt.set_reactive(
-        "SEQ",
-        "track-step-has-plocks",
-        build_all_track_step_has_plocks(state, app),
-    );
+    sync_all_track_step_binding_fields(rt, state, app, current_track_idx, selected_steps);
     sync_all_track_playhead_fields(rt, state, app);
 }
 
@@ -993,7 +1373,7 @@ pub(crate) fn sync_track_topology_state(
         return;
     }
 
-    sync_all_track_sequencer_state(rt, state, app);
+    sync_all_track_sequencer_state(rt, state, app, current_track_idx, selected_steps);
 
     sync_playhead_fields(
         rt,
@@ -1026,6 +1406,7 @@ pub(crate) fn sync_track_topology_state(
         "instrument-panel",
         build_instrument_panel_value(app, current_track_idx, selected_steps),
     );
+    sync_fx_param_binding_fields(rt, app, state, current_track_idx);
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, app, state, current_track_idx, selected_steps);
     rt.set_reactive(
@@ -1208,6 +1589,17 @@ pub(crate) fn build_effects_value(
                                         (SyncDivision::ALL.len() - 1) as f64,
                                     ))),
                                 );
+                            } else if plock_step.is_none() {
+                                insert_string_prop(
+                                    &mut pmap,
+                                    "value-field",
+                                    track_effect_param_value_field(
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        &pdesc.name,
+                                    ),
+                                );
                             }
                         }
                     }
@@ -1342,7 +1734,20 @@ pub(crate) fn build_bus_effects_value_for_selection(
                                         Rc::new(RefCell::new(Value::List(option_values))),
                                     );
                                 }
-                                ParamKind::Continuous { .. } => {}
+                                ParamKind::Continuous { .. } => {
+                                    if plock_step.is_none() {
+                                        insert_string_prop(
+                                            &mut pmap,
+                                            "value-field",
+                                            bus_effect_param_value_field(
+                                                bus_idx,
+                                                slot_idx,
+                                                param_idx,
+                                                &pdesc.name,
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                             Rc::new(RefCell::new(Value::Map(pmap)))
                         })
@@ -1471,7 +1876,20 @@ pub(crate) fn build_midi_effects_value(
                                 Rc::new(RefCell::new(Value::List(option_values))),
                             );
                         }
-                        ParamKind::Continuous { .. } => {}
+                        ParamKind::Continuous { .. } => {
+                            if plock_step.is_none() {
+                                insert_string_prop(
+                                    &mut pmap,
+                                    "value-field",
+                                    midi_fx_param_value_field(
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        &pdesc.name,
+                                    ),
+                                );
+                            }
+                        }
                     }
                     Rc::new(RefCell::new(Value::Map(pmap)))
                 })
@@ -1545,6 +1963,11 @@ pub(crate) fn build_sampler_panel_value(
             "max".to_string(),
             Rc::new(RefCell::new(Value::Number(48.0))),
         );
+        insert_string_prop(
+            &mut pmap,
+            "value-field",
+            instrument_base_note_value_field(track),
+        );
         params.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
@@ -1613,7 +2036,15 @@ pub(crate) fn build_sampler_panel_value(
                     Rc::new(RefCell::new(Value::List(option_values))),
                 );
             }
-            sequencer::effects::ParamKind::Continuous { .. } => {}
+            sequencer::effects::ParamKind::Continuous { .. } => {
+                if plock_step.is_none() {
+                    insert_string_prop(
+                        &mut pmap,
+                        "value-field",
+                        instrument_param_value_field(track, param_idx, &pdesc.name),
+                    );
+                }
+            }
         }
         params.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
@@ -1701,11 +2132,21 @@ pub(crate) fn build_sampler_panel_value(
             (start_raw as f64) * sample_duration,
         ))),
     );
+    insert_string_prop(
+        &mut panel_map,
+        "start-time-field",
+        sampler_selection_time_field(track, "start"),
+    );
     panel_map.insert(
         "end-time".to_string(),
         Rc::new(RefCell::new(Value::Number(
             (end_raw as f64) * sample_duration,
         ))),
+    );
+    insert_string_prop(
+        &mut panel_map,
+        "end-time-field",
+        sampler_selection_time_field(track, "end"),
     );
     panel_map.insert(
         "duration".to_string(),
@@ -1780,6 +2221,7 @@ pub(crate) fn build_instrument_panel_value(
         min: f32,
         max: f32,
         options: Option<&Vec<String>>,
+        value_field: Option<String>,
     ) {
         let is_boolean_name = name == "enabled" || name == "sync";
         let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -1833,6 +2275,11 @@ pub(crate) fn build_instrument_panel_value(
                 "boolean".to_string(),
                 Rc::new(RefCell::new(Value::Bool(true))),
             );
+        }
+        if options.is_none() && !is_boolean_name {
+            if let Some(value_field) = value_field {
+                insert_string_prop(&mut pmap, "value-field", value_field);
+            }
         }
         out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
@@ -2037,6 +2484,7 @@ pub(crate) fn build_instrument_panel_value(
         -48.0,
         48.0,
         None,
+        Some(instrument_base_note_value_field(track)),
     );
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
@@ -2070,6 +2518,9 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
+                plock_step
+                    .is_none()
+                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
             );
         } else {
             push_param(
@@ -2081,6 +2532,9 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
+                plock_step
+                    .is_none()
+                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
             );
         }
     }
@@ -2117,6 +2571,9 @@ pub(crate) fn build_instrument_panel_value(
                 pdesc.stored_to_user(pdesc.min),
                 pdesc.stored_to_user(pdesc.max),
                 options,
+                plock_step
+                    .is_none()
+                    .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
             );
         }
         if params.is_empty() {
@@ -2891,6 +3348,25 @@ pub(crate) fn build_step_has_plocks(
     track: usize,
     descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
 ) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
+        .map(|step| {
+            Rc::new(RefCell::new(Value::Bool(track_step_has_plock(
+                state,
+                track,
+                descriptors,
+                step,
+            ))))
+        })
+        .collect();
+    Value::List(items)
+}
+
+pub(crate) fn track_step_has_plock(
+    state: &Arc<SequencerState>,
+    track: usize,
+    descriptors: &[Vec<sequencer::effects::EffectDescriptor>],
+    step: usize,
+) -> bool {
     let chain = &state.pattern.effect_chains[track];
     let midi_fx_slots = &state.pattern.midi_fx_slots[track];
     let num_slots = descriptors.get(track).map(|d| d.len()).unwrap_or(0);
@@ -2899,31 +3375,26 @@ pub(crate) fn build_step_has_plocks(
     let timebase_plocks = &state.pattern.timebase_plocks[track];
     let swing_plocks = &state.pattern.swing_plocks[track];
     let swing_resolution_plocks = &state.pattern.swing_resolution_plocks[track];
-    let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
-        .map(|step| {
-            let effect_has_plock = (0..num_slots).any(|slot_idx| {
-                let Some(slot) = chain.get(slot_idx) else {
-                    return false;
-                };
-                let np = slot.num_params.load(Ordering::Relaxed) as usize;
-                (0..np).any(|p| slot.plocks.get(step, p).is_some())
-            });
-            let instrument_has_plock =
-                (0..instrument_num_params).any(|p| instrument_slot.plocks.get(step, p).is_some());
-            let midi_fx_has_plock = midi_fx_slots.iter().any(|slot| {
-                let np = slot.num_params.load(Ordering::Relaxed) as usize;
-                (0..np).any(|p| slot.plocks.get(step, p).is_some())
-            });
-            let has_plock = effect_has_plock
-                || midi_fx_has_plock
-                || instrument_has_plock
-                || timebase_plocks.has_plock(step)
-                || swing_plocks.has_plock(step)
-                || swing_resolution_plocks.has_plock(step);
-            Rc::new(RefCell::new(Value::Bool(has_plock)))
-        })
-        .collect();
-    Value::List(items)
+    let effect_has_plock = (0..num_slots).any(|slot_idx| {
+        let Some(slot) = chain.get(slot_idx) else {
+            return false;
+        };
+        let np = slot.num_params.load(Ordering::Relaxed) as usize;
+        (0..np).any(|p| slot.plocks.get(step, p).is_some())
+    });
+    let instrument_has_plock =
+        (0..instrument_num_params).any(|p| instrument_slot.plocks.get(step, p).is_some());
+    let midi_fx_has_plock = midi_fx_slots.iter().any(|slot| {
+        let np = slot.num_params.load(Ordering::Relaxed) as usize;
+        (0..np).any(|p| slot.plocks.get(step, p).is_some())
+    });
+
+    effect_has_plock
+        || midi_fx_has_plock
+        || instrument_has_plock
+        || timebase_plocks.has_plock(step)
+        || swing_plocks.has_plock(step)
+        || swing_resolution_plocks.has_plock(step)
 }
 
 #[cfg(test)]

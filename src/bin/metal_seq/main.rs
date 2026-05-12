@@ -174,7 +174,7 @@ fn sync_after_agent_instrument_apply(
     rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
     rt.set_reactive("SEQ", "current-track", Value::Number(track_index as f64));
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
-    sync_all_track_sequencer_state(rt, state, app);
+    sync_all_track_sequencer_state(rt, state, app, track_index, selected_steps);
     rt.set_reactive("SEQ", "steps", build_steps_value(state, track_index));
     sync_step_param_lists(rt, state, track_index);
     sync_track_mixer_state(rt, app, state);
@@ -203,6 +203,7 @@ fn sync_after_agent_instrument_apply(
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, app, state, track_index, selected_steps);
+    sync_fx_param_binding_fields(rt, app, state, track_index);
     rt.set_reactive(
         "SEQ",
         "step-has-plocks",
@@ -288,6 +289,12 @@ fn apply_agent_draft_to_owned_instrument(
             .map_err(|error| format!("Failed to accept agent draft: {error}"))?;
         (idx, true)
     };
+    if app.force_instrument_enabled(idx) {
+        eprintln!(
+            "[agent-ui] forced instrument enabled conv={conv_id} track={}",
+            idx + 1
+        );
+    }
     reload_custom_instrument_ui(editor);
     editor.refresh_visible_layouts_for_buffer_named("*fx*");
     let track_name = app.tracks[idx].clone();
@@ -812,7 +819,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let ct = current_track.load(Ordering::Relaxed);
                         let rt = editor.runtime_mut();
                         rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                        sync_all_track_sequencer_state(rt, &state, &app);
+                        sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                         editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
@@ -1005,7 +1012,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "track-ids", build_track_ids(&app));
                             rt.set_reactive("SEQ", "current-track", Value::Number(idx as f64));
                             rt.set_reactive("SEQ", "track-names", build_track_names(&track_names));
-                            sync_all_track_sequencer_state(rt, &state, &app);
+                            sync_all_track_sequencer_state(rt, &state, &app, idx, &selected_steps);
                             rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
                             sync_step_param_lists(rt, &state, idx);
                             sync_track_mixer_state(rt, &app, &state);
@@ -1034,6 +1041,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                             sync_track_params(rt, &app, &state, idx, &selected_steps);
+                            sync_fx_param_binding_fields(rt, &app, &state, idx);
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -1129,7 +1137,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "track-names",
                                         build_track_names(&track_names),
                                     );
-                                    sync_all_track_sequencer_state(rt, &state, &app);
+                                    sync_all_track_sequencer_state(
+                                        rt,
+                                        &state,
+                                        &app,
+                                        idx,
+                                        &selected_steps,
+                                    );
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, idx));
                                     sync_step_param_lists(rt, &state, idx);
                                     sync_track_mixer_state(rt, &app, &state);
@@ -1159,6 +1173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     *accumulator_names.lock().unwrap() =
                                         build_accumulator_names(&app);
                                     sync_track_params(rt, &app, &state, idx, &selected_steps);
+                                    sync_fx_param_binding_fields(rt, &app, &state, idx);
                                     rt.set_reactive(
                                         "SEQ",
                                         "step-has-plocks",
@@ -1477,9 +1492,68 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             value: stored,
                                         },
                                     );
-                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    sync_instrument_param_value_field(
+                                        editor.runtime_mut(),
+                                        &app,
+                                        track,
+                                        param_idx,
+                                    );
+                                    if param_idx == 2 || param_idx == 3 {
+                                        sync_sampler_selection_time_fields(
+                                            editor.runtime_mut(),
+                                            &app,
+                                            track,
+                                        );
+                                    }
                                 }
+                            }
+                        }
+                    }
+                    "set-effect-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let value = map.get("value").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as f32),
+                                _ => None,
+                            });
+                            if let (Some(slot_idx), Some(param_idx), Some(value)) =
+                                (slot_idx, param_idx, value)
+                            {
+                                let track = current_track.load(Ordering::Relaxed);
+                                let clamped = app
+                                    .graph
+                                    .effect_descriptors
+                                    .get(track)
+                                    .and_then(|slots| slots.get(slot_idx))
+                                    .and_then(|desc| desc.params.get(param_idx))
+                                    .map(|p| value.clamp(p.min, p.max))
+                                    .unwrap_or(value);
+                                ui::apply_command(
+                                    &mut app,
+                                    ui::AppCommand::SetEffectParam {
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                        value: clamped,
+                                    },
+                                );
+                                sync_track_effect_param_value_field(
+                                    editor.runtime_mut(),
+                                    &state,
+                                    &app.graph.effect_descriptors,
+                                    track,
+                                    slot_idx,
+                                    param_idx,
+                                );
                             }
                         }
                     }
@@ -1729,6 +1803,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_track_mixer_state(rt, &app, &state);
                                     if track == current_track.load(Ordering::Relaxed) {
                                         sync_track_params(rt, &app, &state, track, &selected_steps);
+                                        sync_fx_param_binding_fields(rt, &app, &state, track);
                                     }
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
@@ -1778,6 +1853,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 sync_track_mixer_state(rt, &app, &state);
                                 if track == current_track.load(Ordering::Relaxed) {
                                     sync_track_params(rt, &app, &state, track, &selected_steps);
+                                    sync_fx_param_binding_fields(rt, &app, &state, track);
                                 }
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
@@ -2376,20 +2452,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Ok(()) => {
                                         app.publish_bus_gate_runtime();
                                         *bus_state.lock().unwrap() = app.buses.clone();
-                                        let rt = editor.runtime_mut();
-                                        sync_bus_mixer_state(rt, &app);
-                                        rt.set_reactive(
-                                            "SEQ",
-                                            "bus-effects",
-                                            build_bus_effects_value_for_selection(
-                                                &app,
-                                                Some(&selected_steps),
-                                            ),
+                                        sync_bus_effect_param_value_field(
+                                            editor.runtime_mut(),
+                                            &app,
+                                            bus_idx,
+                                            slot_idx,
+                                            param_idx,
                                         );
-                                        rt.run_reactive_cycle();
-                                        editor.refresh_runtime_side_effects();
-                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
                                     }
                                     Err(error) => editor.handle_host_event(HostEvent::Status(
                                         format!("Error setting bus effect param: {error}"),
@@ -2714,8 +2783,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 {
                                     slot.defaults.set(param_idx, clamped);
                                     state.publish_scheduler_snapshot();
-                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    sync_midi_fx_param_value_field(
+                                        editor.runtime_mut(),
+                                        &state,
+                                        track,
+                                        slot_idx,
+                                        param_idx,
+                                    );
                                 }
                             }
                         }
@@ -2871,8 +2945,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         value: clamped,
                                     },
                                 );
-                                fx_epoch.fetch_add(1, Ordering::Relaxed);
-                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                sync_instrument_base_note_value_field(
+                                    editor.runtime_mut(),
+                                    &app,
+                                    track,
+                                );
                             }
                         }
                     }
@@ -3602,12 +3679,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     "switch-pattern" => {
+                        let profile_switch = pattern_switch_profile_enabled();
+                        let profile_total_started = Instant::now();
                         if let Value::Map(ref map) = payload {
                             let idx = map.get("idx").and_then(|cell| match &*cell.borrow() {
                                 Value::Number(n) => Some(*n as usize),
                                 _ => None,
                             });
                             if let Some(idx) = idx {
+                                let mut switch_bus_elapsed = Duration::ZERO;
+                                let state_switch_elapsed;
+                                let mut apply_samples_elapsed = Duration::ZERO;
+                                let mut restored_defaults_elapsed = Duration::ZERO;
+                                let mut sync_names_pattern_elapsed = Duration::ZERO;
+                                let mut sync_current_steps_elapsed = Duration::ZERO;
+                                let mut sync_sequencer_elapsed = Duration::ZERO;
+                                let mut sync_step_params_elapsed = Duration::ZERO;
+                                let mut sync_mixer_elapsed = Duration::ZERO;
+                                let mut sync_fx_lists_elapsed = Duration::ZERO;
+                                let mut sync_effects_elapsed = Duration::ZERO;
+                                let mut sync_midi_effects_elapsed = Duration::ZERO;
+                                let mut sync_instrument_panel_elapsed = Duration::ZERO;
+                                let mut sync_accumulators_elapsed = Duration::ZERO;
+                                let mut sync_track_params_elapsed = Duration::ZERO;
+                                let mut sync_fx_bindings_elapsed = Duration::ZERO;
+                                let mut sync_plocks_sidebar_elapsed = Duration::ZERO;
+                                let mut reactive_elapsed = Duration::ZERO;
+                                let mut side_effects_elapsed = Duration::ZERO;
                                 let num_tracks = app.tracks.len();
                                 let current_pattern =
                                     app.state.pattern.current_pattern.load(Ordering::Relaxed)
@@ -3615,51 +3713,101 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let num_patterns =
                                     app.state.pattern.num_patterns.load(Ordering::Relaxed) as usize;
                                 if idx != current_pattern && idx < num_patterns {
+                                    let started = Instant::now();
                                     app.switch_bus_pattern(idx);
+                                    switch_bus_elapsed = started.elapsed();
                                 }
-                                if let Some(sample_ids) = app.state.switch_pattern(
+                                let started = Instant::now();
+                                let switched = app.state.switch_pattern(
                                     idx,
                                     num_tracks,
                                     &app.graph.track_buffer_ids,
                                     &app.tracks,
                                     &app.graph.track_instrument_types,
-                                ) {
+                                );
+                                state_switch_elapsed = started.elapsed();
+                                let pattern_changed = switched.is_some();
+                                if let Some(sample_ids) = switched {
+                                    let started = Instant::now();
                                     app.graph_controller().apply_sample_ids(&sample_ids);
+                                    apply_samples_elapsed = started.elapsed();
+                                    let started = Instant::now();
                                     app.push_all_restored_defaults();
+                                    restored_defaults_elapsed = started.elapsed();
                                     let ct = current_track.load(Ordering::Relaxed);
+                                    let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
                                     let rt = editor.runtime_mut();
+                                    let started = Instant::now();
                                     sync_track_name_state(rt, &mut track_names, &app);
                                     sync_pattern_state(rt, &state);
+                                    sync_names_pattern_elapsed = started.elapsed();
+                                    let started = Instant::now();
                                     rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                                    sync_all_track_sequencer_state(rt, &state, &app);
+                                    sync_current_steps_elapsed = started.elapsed();
+                                    let started = Instant::now();
+                                    sync_all_track_sequencer_state(
+                                        rt,
+                                        &state,
+                                        &app,
+                                        ct,
+                                        &selected_steps,
+                                    );
+                                    sync_sequencer_elapsed = started.elapsed();
+                                    let started = Instant::now();
                                     sync_step_param_lists(rt, &state, ct);
+                                    sync_step_params_elapsed = started.elapsed();
+                                    let started = Instant::now();
                                     sync_track_mixer_state(rt, &app, &state);
                                     sync_bus_mixer_state(rt, &app);
                                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "effects",
-                                        build_effects_value(
-                                            &state,
-                                            ct,
-                                            &app.graph.effect_descriptors,
-                                            &selected_steps,
-                                        ),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "midi-effects",
-                                        build_midi_effects_value(&state, ct, &selected_steps),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "instrument-panel",
-                                        build_instrument_panel_value(&app, ct, &selected_steps),
-                                    );
-                                    *accumulator_names.lock().unwrap() =
-                                        build_accumulator_names(&app);
+                                    sync_mixer_elapsed = started.elapsed();
+                                    let started = Instant::now();
+                                    if fx_visible {
+                                        let sub_started = Instant::now();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "effects",
+                                            build_effects_value(
+                                                &state,
+                                                ct,
+                                                &app.graph.effect_descriptors,
+                                                &selected_steps,
+                                            ),
+                                        );
+                                        sync_effects_elapsed = sub_started.elapsed();
+
+                                        let sub_started = Instant::now();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "midi-effects",
+                                            build_midi_effects_value(&state, ct, &selected_steps),
+                                        );
+                                        sync_midi_effects_elapsed = sub_started.elapsed();
+
+                                        let sub_started = Instant::now();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "instrument-panel",
+                                            build_instrument_panel_value(&app, ct, &selected_steps),
+                                        );
+                                        sync_instrument_panel_elapsed = sub_started.elapsed();
+
+                                        let sub_started = Instant::now();
+                                        *accumulator_names.lock().unwrap() =
+                                            build_accumulator_names(&app);
+                                        sync_accumulators_elapsed = sub_started.elapsed();
+                                    } else {
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    sync_fx_lists_elapsed = started.elapsed();
+                                    let started = Instant::now();
                                     sync_track_params(rt, &app, &state, ct, &selected_steps);
+                                    sync_track_params_elapsed = started.elapsed();
+                                    let started = Instant::now();
+                                    sync_fx_param_binding_fields(rt, &app, &state, ct);
+                                    sync_fx_bindings_elapsed = started.elapsed();
+                                    let started = Instant::now();
                                     rt.set_reactive(
                                         "SEQ",
                                         "step-has-plocks",
@@ -3670,9 +3818,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         ),
                                     );
                                     sync_sidebar_browser(rt, &app, ct);
+                                    sync_plocks_sidebar_elapsed = started.elapsed();
+                                    let started = Instant::now();
                                     rt.run_reactive_cycle();
+                                    reactive_elapsed = started.elapsed();
+                                    let started = Instant::now();
                                     editor.refresh_runtime_side_effects();
-                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    side_effects_elapsed = started.elapsed();
+                                    prev_pattern_epoch =
+                                        state.transport.pattern_epoch.load(Ordering::Relaxed);
+                                    prev_snapshot_version = state.scheduler_snapshot_version();
+                                    prev_track_button_states = track_button_state_snapshot(&state);
+                                    prev_track_playheads = track_playheads_snapshot(&state, &app);
+                                }
+                                if profile_switch {
+                                    eprintln!(
+                                        "[pattern-switch-profile][host] idx={} changed={} total={:.2}ms switch_bus={:.2}ms state_switch={:.2}ms apply_samples={:.2}ms defaults={:.2}ms names_pattern={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms step_params={:.2}ms mixer={:.2}ms fx_lists={:.2}ms effects={:.2}ms midi_effects={:.2}ms instrument_panel={:.2}ms accumulators={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms reactive={:.2}ms side_effects={:.2}ms",
+                                        idx,
+                                        pattern_changed,
+                                        duration_ms(profile_total_started.elapsed()),
+                                        duration_ms(switch_bus_elapsed),
+                                        duration_ms(state_switch_elapsed),
+                                        duration_ms(apply_samples_elapsed),
+                                        duration_ms(restored_defaults_elapsed),
+                                        duration_ms(sync_names_pattern_elapsed),
+                                        duration_ms(sync_current_steps_elapsed),
+                                        duration_ms(sync_sequencer_elapsed),
+                                        duration_ms(sync_step_params_elapsed),
+                                        duration_ms(sync_mixer_elapsed),
+                                        duration_ms(sync_fx_lists_elapsed),
+                                        duration_ms(sync_effects_elapsed),
+                                        duration_ms(sync_midi_effects_elapsed),
+                                        duration_ms(sync_instrument_panel_elapsed),
+                                        duration_ms(sync_accumulators_elapsed),
+                                        duration_ms(sync_track_params_elapsed),
+                                        duration_ms(sync_fx_bindings_elapsed),
+                                        duration_ms(sync_plocks_sidebar_elapsed),
+                                        duration_ms(reactive_elapsed),
+                                        duration_ms(side_effects_elapsed),
+                                    );
                                 }
                             }
                         }
@@ -3783,6 +3967,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                             sync_track_params(rt, &app, &state, ct, &selected_steps);
+                            sync_fx_param_binding_fields(rt, &app, &state, ct);
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -4644,11 +4829,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        let mut project_load_still_pending = false;
         if app.has_pending_project_load() {
             let was_pending = true;
             match app.advance_pending_project_load() {
                 Ok(()) => {
-                    if was_pending && !app.has_pending_project_load() {
+                    if app.has_pending_project_load() {
+                        project_load_still_pending = true;
+                    } else if was_pending {
                         push_project_scratch_to_named_buffer(&mut editor, &app);
                         eprintln!(
                             "metal_seq: project load completed tracks={} current_project={:?}",
@@ -4760,7 +4948,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
                             rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
                         } else {
-                            sync_all_track_sequencer_state(rt, &state, &app);
+                            sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
                             sync_playhead_fields(
                                 rt,
                                 playhead as usize,
@@ -4798,6 +4986,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                             sync_track_params(rt, &app, &state, ct, &selected_steps);
+                            sync_fx_param_binding_fields(rt, &app, &state, ct);
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -4842,6 +5031,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
+        if project_load_still_pending {
+            continue;
+        }
 
         poll_pending_compile_status(
             &mut app,
@@ -4877,6 +5069,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let metal_visible = editor_has_visible_buffer(&editor, "*metal*");
             let mixer_visible = editor_has_visible_buffer(&editor, "*mixer*");
             let sequencer_visible = editor_has_visible_buffer(&editor, "*sequencer*");
+            let fx_visible = editor_has_visible_buffer(&editor, "*fx*");
             let transport_visible = editor_has_visible_buffer(&editor, "*transport*");
             let master_meter_visible = transport_visible || mixer_visible;
             let current_track_playhead_visible = editor_has_visible_buffer(&editor, "*metal*")
@@ -4944,6 +5137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
+                sync_fx_param_binding_fields(rt, &app, &state, ct);
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
@@ -4959,9 +5153,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if playing != prev_playing {
-                editor
-                    .runtime_mut()
-                    .set_reactive("SEQ", "playing", Value::Bool(playing));
+                let rt = editor.runtime_mut();
+                rt.set_reactive("SEQ", "playing", Value::Bool(playing));
+                if sequencer_visible {
+                    if playing {
+                        sync_all_track_playhead_fields(rt, &state, &app);
+                    } else {
+                        clear_all_track_playhead_fields(rt, &app);
+                    }
+                }
                 prev_playing = playing;
                 needs_reactive_cycle = true;
             }
@@ -5074,41 +5274,98 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_playhead = playhead;
             }
             prev_current_track_playhead_visible = current_track_playhead_visible;
+            let mut profile_pattern_reactive_cycle = false;
             if (epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version)
                 && !app.tracks.is_empty()
             {
+                let profile_switch = pattern_switch_profile_enabled();
+                let profile_total_started = Instant::now();
+                let sync_names_pattern_elapsed;
+                let mut sync_playhead_elapsed = Duration::ZERO;
+                let sync_current_steps_elapsed;
+                let sync_sequencer_elapsed;
+                let sync_piano_elapsed;
+                let sync_step_params_elapsed;
+                let sync_mixer_elapsed;
+                let sync_track_params_elapsed;
+                let sync_fx_bindings_elapsed;
+                let sync_plocks_sidebar_elapsed;
+                let old_pattern_epoch = prev_pattern_epoch;
+                let old_snapshot_version = prev_snapshot_version;
                 let rt = editor.runtime_mut();
+                let started = Instant::now();
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);
+                sync_names_pattern_elapsed = started.elapsed();
                 if current_track_playhead_visible {
+                    let started = Instant::now();
                     sync_playhead_fields(
                         rt,
                         playhead as usize,
                         state.pattern.track_params[ct].get_num_steps(),
                     );
+                    sync_playhead_elapsed = started.elapsed();
                 }
+                let started = Instant::now();
                 rt.set_reactive("SEQ", "steps", build_steps_value(&state, ct));
-                sync_all_track_sequencer_state(rt, &state, &app);
+                sync_current_steps_elapsed = started.elapsed();
+                let started = Instant::now();
+                sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
+                sync_sequencer_elapsed = started.elapsed();
+                let started = Instant::now();
                 sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
+                sync_piano_elapsed = started.elapsed();
+                let started = Instant::now();
                 sync_step_param_lists(rt, &state, ct);
+                sync_step_params_elapsed = started.elapsed();
+                let started = Instant::now();
                 sync_track_mixer_state(rt, &app, &state);
                 sync_bus_mixer_state(rt, &app);
                 if mixer_visible {
                     sync_track_peak_fields(rt, &cached_track_peak_levels);
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                 }
+                sync_mixer_elapsed = started.elapsed();
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                let started = Instant::now();
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
+                sync_track_params_elapsed = started.elapsed();
+                let started = Instant::now();
+                sync_fx_param_binding_fields(rt, &app, &state, ct);
+                sync_fx_bindings_elapsed = started.elapsed();
+                let started = Instant::now();
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
                     build_step_has_plocks(&state, ct, &app.graph.effect_descriptors),
                 );
                 sync_sidebar_browser(rt, &app, ct);
+                sync_plocks_sidebar_elapsed = started.elapsed();
+                if profile_switch {
+                    eprintln!(
+                        "[pattern-switch-profile][epoch-sync] total={:.2}ms epoch {}->{} snapshot {}->{} names_pattern={:.2}ms playhead={:.2}ms current_steps={:.2}ms sequencer_bindings={:.2}ms piano={:.2}ms step_params={:.2}ms mixer={:.2}ms track_params={:.2}ms fx_bindings={:.2}ms plocks_sidebar={:.2}ms",
+                        duration_ms(profile_total_started.elapsed()),
+                        old_pattern_epoch,
+                        epoch,
+                        old_snapshot_version,
+                        snap_ver,
+                        duration_ms(sync_names_pattern_elapsed),
+                        duration_ms(sync_playhead_elapsed),
+                        duration_ms(sync_current_steps_elapsed),
+                        duration_ms(sync_sequencer_elapsed),
+                        duration_ms(sync_piano_elapsed),
+                        duration_ms(sync_step_params_elapsed),
+                        duration_ms(sync_mixer_elapsed),
+                        duration_ms(sync_track_params_elapsed),
+                        duration_ms(sync_fx_bindings_elapsed),
+                        duration_ms(sync_plocks_sidebar_elapsed),
+                    );
+                }
                 prev_pattern_epoch = epoch;
                 prev_snapshot_version = snap_ver;
                 prev_track_button_states = track_button_state_snapshot(&state);
                 needs_reactive_cycle = true;
+                profile_pattern_reactive_cycle = profile_switch;
             }
             let mut refresh_visible_sequencer_after_cycle = false;
             let mut refresh_visible_mixer_after_cycle = false;
@@ -5140,6 +5397,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                     sync_track_params(rt, &app, &state, ct, &selected_steps);
+                    sync_fx_param_binding_fields(rt, &app, &state, ct);
                     rt.set_reactive(
                         "SEQ",
                         "selected-steps",
@@ -5147,7 +5405,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     sync_piano_roll_state(rt, &state, ct, &piano_roll_selection);
                     if sequencer_visible {
-                        sync_all_track_sequencer_state(rt, &state, &app);
+                        sync_all_track_sequencer_state(rt, &state, &app, ct, &selected_steps);
                     }
                     rt.set_reactive(
                         "SEQ",
@@ -5180,7 +5438,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 needs_reactive_cycle = true;
             }
             let fx_ep = fx_epoch.load(Ordering::Relaxed);
-            if fx_ep != prev_fx_epoch {
+            if fx_visible && fx_ep != prev_fx_epoch {
                 let rt = editor.runtime_mut();
                 rt.set_reactive(
                     "SEQ",
@@ -5300,15 +5558,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if needs_reactive_cycle {
+                let profile_cycle = profile_pattern_reactive_cycle;
+                let cycle_total_started = Instant::now();
+                let started = Instant::now();
                 editor.runtime_mut().run_reactive_cycle();
+                let reactive_elapsed = started.elapsed();
+                let started = Instant::now();
                 editor.refresh_runtime_side_effects();
+                let side_effects_elapsed = started.elapsed();
+                let mut refresh_seq_elapsed = Duration::ZERO;
+                let mut refresh_mixer_elapsed = Duration::ZERO;
                 if refresh_visible_sequencer_after_cycle {
+                    let started = Instant::now();
                     editor.refresh_visible_layouts_for_buffer_named("*sequencer*");
+                    refresh_seq_elapsed = started.elapsed();
                 }
                 if refresh_visible_mixer_after_cycle {
+                    let started = Instant::now();
                     editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+                    refresh_mixer_elapsed = started.elapsed();
                 }
                 editor.mark_needs_redraw();
+                if profile_cycle {
+                    eprintln!(
+                        "[pattern-switch-profile][reactive-cycle] total={:.2}ms reactive={:.2}ms side_effects={:.2}ms refresh_seq={:.2}ms refresh_mixer={:.2}ms refresh_seq_flag={} refresh_mixer_flag={}",
+                        duration_ms(cycle_total_started.elapsed()),
+                        duration_ms(reactive_elapsed),
+                        duration_ms(side_effects_elapsed),
+                        duration_ms(refresh_seq_elapsed),
+                        duration_ms(refresh_mixer_elapsed),
+                        refresh_visible_sequencer_after_cycle,
+                        refresh_visible_mixer_after_cycle,
+                    );
+                }
             }
         }
         ui_loop_stats.note_sync(reactive_sync_started.elapsed());
