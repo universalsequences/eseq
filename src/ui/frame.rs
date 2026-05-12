@@ -271,8 +271,49 @@ pub fn build_render_frame(
     } else {
         editor.active_leaf_mut().widget_scroll_left = 0.0;
     }
+    let view_mode = editor.active_buffer().view_mode;
+    if view_mode == ViewMode::UiOnly {
+        let (cursor_row, cursor_col) = editor.active_buffer().cursor;
+        let (status_cells, status_indicator, status_signature) =
+            build_active_status_row(editor, cursor_row, cursor_col, viewport_width);
+
+        let text_cache_key = {
+            let mut hasher = DefaultHasher::new();
+            editor.active_buffer().id.hash(&mut hasher);
+            editor.active_buffer().revision.hash(&mut hasher);
+            editor.active_buffer().mode.hash(&mut hasher);
+            view_mode.hash(&mut hasher);
+            viewport_width.hash(&mut hasher);
+            viewport_height.hash(&mut hasher);
+            status_signature.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        let dirty_widget_ids = editor.take_dirty_widget_ids();
+        let buf = editor.active_buffer();
+
+        return RenderFrame {
+            lines: Vec::new(),
+            cursor: None,
+            buffer_name: buf.name.clone(),
+            dirty: buf.dirty,
+            status_cells,
+            status_indicator,
+            completion: None,
+            text_cache_key,
+            widget_layout_cache_key: editor.widget_layout_revision(),
+            widget_content_cache_key: buf.widget_tree_revision,
+            dirty_widget_ids,
+            widget_layout: editor.widget_layout(),
+            focused_widget_id: editor.focused_widget_id(),
+            widget_scroll_top: editor.widget_scroll_top(),
+            widget_scroll_left: editor.widget_scroll_left(),
+            text_scroll_top: 0,
+        };
+    }
+
     editor.sync_text_horizontal_scroll(viewport_width as u16);
-    if editor.active_buffer().view_mode != ViewMode::UiOnly {
+    if view_mode != ViewMode::UiOnly {
         editor.active_buffer_mut().clamp_scroll(viewport_height);
     }
 
@@ -364,24 +405,8 @@ pub fn build_render_frame(
     };
 
     // Status bar
-    let buf = editor.active_buffer();
     let (status_cells, status_indicator, status_signature) =
-        if let Some(prompt) = editor.minibuffer_prompt() {
-            build_message_status_row(&format!(" {prompt}"), viewport_width)
-        } else if let Some(prompt) = editor.prompt_text() {
-            build_message_status_row(&prompt, viewport_width)
-        } else if let Some(msg) = &editor.minibuffer {
-            build_message_status_row(&format!(" {msg}"), viewport_width)
-        } else {
-            build_buffer_status_row(
-                buf,
-                editor.active_buffer_has_ui(),
-                editor.vim_status_label(),
-                cursor_row,
-                cursor_col,
-                viewport_width,
-            )
-        };
+        build_active_status_row(editor, cursor_row, cursor_col, viewport_width);
 
     let completion = build_completion(editor, cursor_row, cursor_col, scroll_top);
     if Editor::trace_completion_enabled() {
@@ -465,6 +490,30 @@ pub fn build_render_frame(
         widget_scroll_top: editor.widget_scroll_top(),
         widget_scroll_left: editor.widget_scroll_left(),
         text_scroll_top: frame_text_scroll_top,
+    }
+}
+
+fn build_active_status_row(
+    editor: &Editor,
+    cursor_row: usize,
+    cursor_col: usize,
+    viewport_width: usize,
+) -> (Vec<Cell>, StatusIndicator, String) {
+    if let Some(prompt) = editor.minibuffer_prompt() {
+        build_message_status_row(&format!(" {prompt}"), viewport_width)
+    } else if let Some(prompt) = editor.prompt_text() {
+        build_message_status_row(&prompt, viewport_width)
+    } else if let Some(msg) = &editor.minibuffer {
+        build_message_status_row(&format!(" {msg}"), viewport_width)
+    } else {
+        build_buffer_status_row(
+            editor.active_buffer(),
+            editor.active_buffer_has_ui(),
+            editor.vim_status_label(),
+            cursor_row,
+            cursor_col,
+            viewport_width,
+        )
     }
 }
 
@@ -662,7 +711,12 @@ fn build_tiled_render_frame_impl(
     let buf = editor.active_buffer();
     let (cursor_row, cursor_col) = buf.cursor;
     let scroll_top = buf.scroll_top;
-    let completion = build_completion(editor, cursor_row, cursor_col, scroll_top);
+    let text_visible = buf.view_mode != ViewMode::UiOnly;
+    let completion = if text_visible {
+        build_completion(editor, cursor_row, cursor_col, scroll_top)
+    } else {
+        None
+    };
     if Editor::trace_completion_enabled() {
         let show = completion.is_some();
         eprintln!(
@@ -835,7 +889,15 @@ fn build_tiled_render_frame_impl(
             let frame = if let Some(frame) = cached {
                 frame
             } else {
-                let syms = symbols.get_or_insert_with(|| editor.runtime_mut().completion_symbols());
+                let syms = if view_mode == ViewMode::UiOnly {
+                    None
+                } else {
+                    Some(
+                        symbols
+                            .get_or_insert_with(|| editor.runtime_mut().completion_symbols())
+                            .as_slice(),
+                    )
+                };
                 let frame = build_inactive_tile_frame_from_parts(
                     &editor.buffers[buffer_idx],
                     focused_widget_id,
@@ -888,13 +950,58 @@ fn build_inactive_tile_frame_from_parts(
     layout_revision: u64,
     cached_layout: Option<std::sync::Arc<crate::layout::LayoutNode>>,
     dirty_widget_ids: Vec<u64>,
-    symbols: &[String],
+    symbols: Option<&[String]>,
     viewport_width: usize,
     viewport_height: usize,
 ) -> RenderFrame {
     let scroll_top = buffer.scroll_top.min(buffer.lines.len());
     let (cursor_row, cursor_col) = buffer.cursor;
+
+    let (status_cells, status_indicator, status_signature) = build_buffer_status_row(
+        buffer,
+        buffer.widget_tree.is_some() || cached_layout.is_some(),
+        None,
+        cursor_row,
+        cursor_col,
+        viewport_width,
+    );
+
+    let text_cache_key = {
+        let mut hasher = DefaultHasher::new();
+        buffer.id.hash(&mut hasher);
+        buffer.revision.hash(&mut hasher);
+        buffer.mode.hash(&mut hasher);
+        buffer.view_mode.hash(&mut hasher);
+        viewport_width.hash(&mut hasher);
+        viewport_height.hash(&mut hasher);
+        scroll_top.hash(&mut hasher);
+        status_signature.hash(&mut hasher);
+        hasher.finish()
+    };
+
+    if buffer.view_mode == ViewMode::UiOnly {
+        return RenderFrame {
+            lines: Vec::new(),
+            cursor: None,
+            buffer_name: buffer.name.clone(),
+            dirty: buffer.dirty,
+            status_cells,
+            status_indicator,
+            completion: None,
+            text_cache_key,
+            widget_layout_cache_key: layout_revision,
+            widget_content_cache_key: buffer.widget_tree_revision,
+            dirty_widget_ids,
+            widget_layout: cached_layout,
+            focused_widget_id,
+            widget_scroll_top,
+            widget_scroll_left,
+            text_scroll_top: 0,
+        };
+    }
+
     let visible = scroll_top..(scroll_top + viewport_height).min(buffer.lines.len());
+    let symbols = symbols.expect("inactive text frame requires completion symbols");
 
     // Only highlight visible lines — not the entire buffer.
     let visible_lines = &buffer.lines[visible];
@@ -930,26 +1037,6 @@ fn build_inactive_tile_frame_from_parts(
         Some((cursor_row - scroll_top, cursor_col))
     } else {
         None
-    };
-
-    let (status_cells, status_indicator, status_signature) = build_buffer_status_row(
-        buffer,
-        buffer.widget_tree.is_some() || cached_layout.is_some(),
-        None,
-        cursor_row,
-        cursor_col,
-        viewport_width,
-    );
-
-    let text_cache_key = {
-        let mut hasher = DefaultHasher::new();
-        buffer.id.hash(&mut hasher);
-        buffer.revision.hash(&mut hasher);
-        viewport_width.hash(&mut hasher);
-        viewport_height.hash(&mut hasher);
-        scroll_top.hash(&mut hasher);
-        status_signature.hash(&mut hasher);
-        hasher.finish()
     };
 
     RenderFrame {
