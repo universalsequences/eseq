@@ -1136,7 +1136,11 @@ impl Runtime {
                     let mut widget = crate::widgets::build_widget(&widget_type, args);
                     if let Value::Map(map) = &mut widget {
                         for state_name in &state_uniforms {
-                            if let Some(value) = vm.read_tracked_state_value(state_name) {
+                            let explicit_value =
+                                map.get(state_name).map(|cell| cell.borrow().clone());
+                            if let Some(value) =
+                                explicit_value.or_else(|| vm.read_tracked_state_value(state_name))
+                            {
                                 map.insert(
                                     crate::widget_render::sdf_widget::shader_state_prop_name(
                                         state_name,

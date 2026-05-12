@@ -1507,6 +1507,34 @@ mod tests {
     }
 
     #[test]
+    fn box_background_sdf_accepts_background_widget_bindable_props() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("active", Value::Bool(true))], true);
+
+        let value = runtime
+            .eval_str(
+                r#"
+                (defwidget bindable-bg
+                  :width 1 :height 1
+                  :state (active)
+                  :bindable (active)
+                  :shader (if (= active 1) (rgba 1 1 1 1) (rgba 0 0 0 0)))
+                (box :background "bindable-bg" :active (bind "APP" "active"))
+                "#,
+            )
+            .expect("evaluate box background binding")
+            .expect("box should return a widget");
+
+        let Value::Map(map) = value else {
+            panic!("box should return a widget map, got {value:?}");
+        };
+        assert!(matches!(
+            map.get("active").map(|value| value.borrow().clone()),
+            Some(Value::ReactiveRef { .. })
+        ));
+    }
+
+    #[test]
     fn removed_bound_subtree_stops_receiving_binding_dirty_marks() {
         let mut runtime = Runtime::new();
         runtime.set_layout_viewport(40, 10);

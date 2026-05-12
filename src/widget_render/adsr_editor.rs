@@ -160,6 +160,10 @@ impl WidgetDefinition for AdsrEditorWidget {
         &["width", "height"]
     }
 
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["attack", "decay", "sustain", "release"]
+    }
+
     fn measure(
         &self,
         node: &Value,

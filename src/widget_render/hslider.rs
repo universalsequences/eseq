@@ -21,6 +21,17 @@ fn fill_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "fill", theme::WIDGET_SLIDER_FILLED())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_is_bindable_but_not_size_affecting() {
+        assert_eq!(HSLIDER_WIDGET.bindable_props(), &["value"]);
+        assert!(!HSLIDER_WIDGET.size_affecting_props().contains(&"value"));
+    }
+}
+
 fn dot_color(props: &HashMap<String, Value>) -> crate::backend::Color {
     resolve_named_color(props, "dot-color", theme::WIDGET_SLIDER_DOT())
 }
@@ -107,6 +118,10 @@ impl WidgetDefinition for HorizontalSliderWidget {
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width"]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["value"]
     }
 
     fn measure(

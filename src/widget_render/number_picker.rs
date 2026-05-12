@@ -39,6 +39,21 @@ pub struct NumberPickerEditState {
     pub cursor_pos: usize,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_is_bindable_but_not_size_affecting() {
+        assert_eq!(NUMBER_PICKER_WIDGET.bindable_props(), &["value"]);
+        assert!(
+            !NUMBER_PICKER_WIDGET
+                .size_affecting_props()
+                .contains(&"value")
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NumberPickerEditOutcome {
     StateChanged,
@@ -194,6 +209,10 @@ impl WidgetDefinition for NumberPickerWidget {
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height", "font-size", "decimals", "noui", "unit"]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["value"]
     }
 
     fn measure(

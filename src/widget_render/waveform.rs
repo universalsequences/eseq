@@ -119,7 +119,7 @@ impl WidgetDefinition for WaveformWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["playhead-time"]
+        &["playhead-time", "selection-start", "selection-end"]
     }
 
     fn measure(
@@ -1268,6 +1268,14 @@ mod tests {
 
     fn keyword_value(name: &str) -> Value {
         Value::Keyword(name.to_string())
+    }
+
+    #[test]
+    fn marker_and_playhead_times_are_bindable() {
+        assert_eq!(
+            WAVEFORM_WIDGET.bindable_props(),
+            &["playhead-time", "selection-start", "selection-end"]
+        );
     }
 
     fn map_value_raw(entries: Vec<(&str, Value)>) -> Value {
