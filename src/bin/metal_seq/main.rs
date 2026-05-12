@@ -1028,7 +1028,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     app.graph.track_buffer_ids[track] = new_buffer_id;
                                     app.graph.track_sample_rates[track] = sample_rate;
                                     app.tracks[track] = new_name.clone();
-                                    app.register_sample_path(&new_name, path.to_path_buf());
+                                    app.register_loaded_sample_path(
+                                        &new_name,
+                                        new_buffer_id,
+                                        path.to_path_buf(),
+                                    );
                                     if track < app.sampler_paths.len() {
                                         app.sampler_paths[track] = Some(path.to_path_buf());
                                     }
@@ -1160,6 +1164,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 app.graph.track_buffer_ids[track] = new_buffer_id;
                                 app.graph.track_sample_rates[track] = sample_rate;
+                                let sample_name = app.tracks[track].clone();
+                                app.register_loaded_sample_path(
+                                    &sample_name,
+                                    new_buffer_id,
+                                    path.clone(),
+                                );
                                 app.publish_sampler_analysis_runtime(track);
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(

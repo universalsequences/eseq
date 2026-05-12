@@ -45,9 +45,8 @@ pub(crate) fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 
         }
 
         let sample_frames = app
-            .sampler_paths
-            .get(track)
-            .and_then(|p| p.as_ref())
+            .sampler_path_for_track(track)
+            .as_ref()
             .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()))
             .map(|s| s.frames as f32)
             .filter(|frames| *frames > 0.0)
@@ -74,9 +73,8 @@ pub(crate) fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 
 
     // Convert frame index to seconds using the registered sample's metadata.
     let sample = app
-        .sampler_paths
-        .get(track)
-        .and_then(|p| p.as_ref())
+        .sampler_path_for_track(track)
+        .as_ref()
         .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()));
     match sample {
         Some(s) if s.frames > 0 => {

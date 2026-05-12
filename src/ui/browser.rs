@@ -833,13 +833,22 @@ impl App {
                     Ok(loaded) => {
                         self.submit_sample_analysis(&loaded);
                         let new_buffer_id = loaded.buffer_id;
+                        let sample_rate = loaded.sample_rate;
                         let new_name = loaded.name;
                         let track = self.ui.cursor_track;
-                        self.graph_controller()
-                            .send_buffer_to_all_voices(track, new_buffer_id);
+                        self.graph_controller().send_sample_to_all_voices(
+                            track,
+                            new_buffer_id,
+                            sample_rate,
+                        );
                         self.graph.track_buffer_ids[track] = new_buffer_id;
+                        self.graph.track_sample_rates[track] = sample_rate;
                         self.tracks[track] = new_name.clone();
-                        self.register_sample_path(&new_name, path.to_path_buf());
+                        self.register_loaded_sample_path(
+                            &new_name,
+                            new_buffer_id,
+                            path.to_path_buf(),
+                        );
                         if track < self.sampler_paths.len() {
                             self.sampler_paths[track] = Some(path.to_path_buf());
                         }
