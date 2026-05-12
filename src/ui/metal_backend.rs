@@ -824,6 +824,7 @@ fragment float4 waveform_frag(
         cached_text_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
         cached_text_vertex_count: usize,
         cached_widget_scenes: HashMap<u64, CachedWidgetScene>,
+        widget_scene_last_keys: HashMap<usize, WidgetSceneCacheKey>,
         image_rotation_states: HashMap<u64, ImageRotationState>,
         stats: RenderStats,
         // Winit
@@ -897,6 +898,7 @@ fragment float4 waveform_frag(
                 cached_text_buffer: None,
                 cached_text_vertex_count: 0,
                 cached_widget_scenes: HashMap::new(),
+                widget_scene_last_keys: HashMap::new(),
                 image_rotation_states: HashMap::new(),
                 stats: RenderStats::new(),
                 event_loop: None,
@@ -926,7 +928,7 @@ fragment float4 waveform_frag(
             self.elapsed_time_seconds()
         }
 
-        fn widget_scene_cache_key(
+        fn widget_scene_cache_parts(
             &self,
             owner_frame_key: u64,
             layout: &crate::layout::LayoutNode,
@@ -934,8 +936,8 @@ fragment float4 waveform_frag(
             viewport: WidgetViewport,
             scroll_top: f32,
             max_rows: u16,
-        ) -> u64 {
-            let key = WidgetSceneCacheKey {
+        ) -> WidgetSceneCacheKey {
+            WidgetSceneCacheKey {
                 owner_frame_key,
                 layout_identity: layout as *const crate::layout::LayoutNode as usize,
                 layout_cache_key,
@@ -949,7 +951,10 @@ fragment float4 waveform_frag(
                 vp_w_bits: viewport.vp_w.to_bits(),
                 vp_h_bits: viewport.vp_h.to_bits(),
                 tile_content_rows_bits: viewport.tile_content_rows.to_bits(),
-            };
+            }
+        }
+
+        fn widget_scene_cache_key(&self, key: WidgetSceneCacheKey) -> u64 {
             let mut hasher = DefaultHasher::new();
             key.hash(&mut hasher);
             hasher.finish()
@@ -1024,13 +1029,14 @@ fragment float4 waveform_frag(
             max_rows: u16,
         ) -> Vec<widget_render::MetalPrimitive> {
             if widget_render::overlay_widget_id().is_some() {
+                self.stats.note_widget_scene_overlay_bypass();
                 let (mut primitives, _overlay) =
                     widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 return primitives;
             }
 
-            let cache_key = self.widget_scene_cache_key(
+            let cache_parts = self.widget_scene_cache_parts(
                 owner_frame_key,
                 layout,
                 layout_cache_key,
@@ -1038,18 +1044,36 @@ fragment float4 waveform_frag(
                 scroll_top,
                 max_rows,
             );
+            let layout_identity = cache_parts.layout_identity;
+            let cache_key = self.widget_scene_cache_key(cache_parts);
             if dirty_widget_ids.is_empty()
                 && let Some(scene) = self.cached_widget_scenes.get(&cache_key)
             {
+                self.stats.note_widget_scene_cache_hit();
                 let mut primitives = scene.primitives.clone();
                 Self::refresh_widget_scene_time(&mut primitives, viewport.time_seconds);
                 return primitives;
+            }
+
+            if dirty_widget_ids.is_empty() {
+                let previous = self
+                    .widget_scene_last_keys
+                    .insert(layout_identity, cache_parts);
+                self.stats
+                    .note_widget_scene_cache_miss(previous, cache_parts);
+            } else {
+                self.widget_scene_last_keys
+                    .insert(layout_identity, cache_parts);
+                self.stats
+                    .note_widget_scene_dirty_bypass(dirty_widget_ids.len());
             }
 
             let (mut primitives, _overlay) =
                 widget_render::collect_metal_primitives(layout, viewport, scroll_top, max_rows);
             if self.cached_widget_scenes.len() >= 128 {
                 self.cached_widget_scenes.clear();
+                self.widget_scene_last_keys.clear();
+                self.stats.note_widget_scene_cache_clear();
             }
             self.cached_widget_scenes.insert(
                 cache_key,
@@ -3186,6 +3210,20 @@ fragment float4 waveform_frag(
         widget_bytes: usize,
         widget_scene_build: Duration,
         metal_prep: Duration,
+        widget_scene_cache_hits: u64,
+        widget_scene_cache_misses: u64,
+        widget_scene_cache_dirty_bypasses: u64,
+        widget_scene_cache_overlay_bypasses: u64,
+        widget_scene_cache_clears: u64,
+        widget_scene_dirty_widget_ids: u64,
+        widget_scene_miss_cold: u64,
+        widget_scene_miss_content: u64,
+        widget_scene_miss_layout: u64,
+        widget_scene_miss_widget_state: u64,
+        widget_scene_miss_theme: u64,
+        widget_scene_miss_focus: u64,
+        widget_scene_miss_scroll: u64,
+        widget_scene_miss_viewport: u64,
     }
 
     impl RenderStats {
@@ -3199,7 +3237,74 @@ fragment float4 waveform_frag(
                 widget_bytes: 0,
                 widget_scene_build: Duration::ZERO,
                 metal_prep: Duration::ZERO,
+                widget_scene_cache_hits: 0,
+                widget_scene_cache_misses: 0,
+                widget_scene_cache_dirty_bypasses: 0,
+                widget_scene_cache_overlay_bypasses: 0,
+                widget_scene_cache_clears: 0,
+                widget_scene_dirty_widget_ids: 0,
+                widget_scene_miss_cold: 0,
+                widget_scene_miss_content: 0,
+                widget_scene_miss_layout: 0,
+                widget_scene_miss_widget_state: 0,
+                widget_scene_miss_theme: 0,
+                widget_scene_miss_focus: 0,
+                widget_scene_miss_scroll: 0,
+                widget_scene_miss_viewport: 0,
             }
+        }
+
+        fn note_widget_scene_cache_hit(&mut self) {
+            self.widget_scene_cache_hits += 1;
+        }
+
+        fn note_widget_scene_cache_miss(
+            &mut self,
+            previous: Option<WidgetSceneCacheKey>,
+            current: WidgetSceneCacheKey,
+        ) {
+            self.widget_scene_cache_misses += 1;
+            let Some(previous) = previous else {
+                self.widget_scene_miss_cold += 1;
+                return;
+            };
+
+            if previous.owner_frame_key != current.owner_frame_key {
+                self.widget_scene_miss_content += 1;
+            } else if previous.layout_cache_key != current.layout_cache_key
+                || previous.layout_identity != current.layout_identity
+            {
+                self.widget_scene_miss_layout += 1;
+            } else if previous.widget_state_generation != current.widget_state_generation {
+                self.widget_scene_miss_widget_state += 1;
+            } else if previous.theme_generation != current.theme_generation {
+                self.widget_scene_miss_theme += 1;
+            } else if previous.focused_widget_id != current.focused_widget_id {
+                self.widget_scene_miss_focus += 1;
+            } else if previous.scroll_top_bits != current.scroll_top_bits {
+                self.widget_scene_miss_scroll += 1;
+            } else if previous.max_rows != current.max_rows
+                || previous.cell_w_bits != current.cell_w_bits
+                || previous.cell_h_bits != current.cell_h_bits
+                || previous.vp_w_bits != current.vp_w_bits
+                || previous.vp_h_bits != current.vp_h_bits
+                || previous.tile_content_rows_bits != current.tile_content_rows_bits
+            {
+                self.widget_scene_miss_viewport += 1;
+            }
+        }
+
+        fn note_widget_scene_dirty_bypass(&mut self, dirty_widget_id_count: usize) {
+            self.widget_scene_cache_dirty_bypasses += 1;
+            self.widget_scene_dirty_widget_ids += dirty_widget_id_count as u64;
+        }
+
+        fn note_widget_scene_overlay_bypass(&mut self) {
+            self.widget_scene_cache_overlay_bypasses += 1;
+        }
+
+        fn note_widget_scene_cache_clear(&mut self) {
+            self.widget_scene_cache_clears += 1;
         }
 
         fn note_frame(
@@ -3228,13 +3333,34 @@ fragment float4 waveform_frag(
                 (self.text_bytes + self.label_bytes + self.widget_bytes) as f64 / (1024.0 * 1024.0);
             let mbps = total_mb / secs;
             if self.enabled {
+                let scene_cache_attempts =
+                    self.widget_scene_cache_hits + self.widget_scene_cache_misses;
+                let scene_cache_hit_pct = if scene_cache_attempts == 0 {
+                    0.0
+                } else {
+                    self.widget_scene_cache_hits as f64 * 100.0 / scene_cache_attempts as f64
+                };
                 eprintln!(
-                    "[ui-profile][metal] fps={fps:.1} scene_avg={:.2}ms prep_avg={:.2}ms upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s",
+                    "[ui-profile][metal] fps={fps:.1} scene_avg={:.2}ms prep_avg={:.2}ms upload={mbps:.2}MB/s text={:.2}MB/s labels={:.2}MB/s widgets={:.2}MB/s scene_cache=hit:{}/miss:{}({scene_cache_hit_pct:.1}%) dirty:{} dirty_ids:{} overlay:{} clear:{} miss_reason=cold:{} content:{} layout:{} widget_state:{} theme:{} focus:{} scroll:{} viewport:{}",
                     self.widget_scene_build.as_secs_f64() * 1000.0 / self.frames as f64,
                     self.metal_prep.as_secs_f64() * 1000.0 / self.frames as f64,
                     self.text_bytes as f64 / (1024.0 * 1024.0) / secs,
                     self.label_bytes as f64 / (1024.0 * 1024.0) / secs,
                     self.widget_bytes as f64 / (1024.0 * 1024.0) / secs,
+                    self.widget_scene_cache_hits,
+                    self.widget_scene_cache_misses,
+                    self.widget_scene_cache_dirty_bypasses,
+                    self.widget_scene_dirty_widget_ids,
+                    self.widget_scene_cache_overlay_bypasses,
+                    self.widget_scene_cache_clears,
+                    self.widget_scene_miss_cold,
+                    self.widget_scene_miss_content,
+                    self.widget_scene_miss_layout,
+                    self.widget_scene_miss_widget_state,
+                    self.widget_scene_miss_theme,
+                    self.widget_scene_miss_focus,
+                    self.widget_scene_miss_scroll,
+                    self.widget_scene_miss_viewport,
                 );
             }
 
@@ -3245,6 +3371,20 @@ fragment float4 waveform_frag(
             self.widget_bytes = 0;
             self.widget_scene_build = Duration::ZERO;
             self.metal_prep = Duration::ZERO;
+            self.widget_scene_cache_hits = 0;
+            self.widget_scene_cache_misses = 0;
+            self.widget_scene_cache_dirty_bypasses = 0;
+            self.widget_scene_cache_overlay_bypasses = 0;
+            self.widget_scene_cache_clears = 0;
+            self.widget_scene_dirty_widget_ids = 0;
+            self.widget_scene_miss_cold = 0;
+            self.widget_scene_miss_content = 0;
+            self.widget_scene_miss_layout = 0;
+            self.widget_scene_miss_widget_state = 0;
+            self.widget_scene_miss_theme = 0;
+            self.widget_scene_miss_focus = 0;
+            self.widget_scene_miss_scroll = 0;
+            self.widget_scene_miss_viewport = 0;
         }
     }
 

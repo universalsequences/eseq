@@ -50,6 +50,10 @@ fn store_float_slot(slot: &AtomicU64, value: f64) {
     slot.store(value.to_bits(), Ordering::Relaxed);
 }
 
+pub fn write_float_slot(namespace: &str, field: &str, value: f64) {
+    store_float_slot(&reactive_float_slot(namespace, field), value);
+}
+
 fn store_float_slots(namespace: &str, field: &str, value: &Value) {
     let Some(number) = numeric_value(value) else {
         if let Value::List(items) = value {
@@ -250,13 +254,21 @@ impl ReactiveRegistry {
 
     fn collect_widget_bindings(&mut self, node: &LayoutNode) {
         for value in node.props.values() {
-            if let Value::ReactiveRef {
+            self.collect_widget_bindings_from_value(node.widget_id, value);
+        }
+        for child in &node.children {
+            self.collect_widget_bindings(child);
+        }
+    }
+
+    fn collect_widget_bindings_from_value(&mut self, widget_id: u64, value: &Value) {
+        match value {
+            Value::ReactiveRef {
                 namespace,
                 field,
                 index,
                 ..
-            } = value
-            {
+            } => {
                 let key = match index {
                     Some(index) => {
                         ReactiveBindingKey::indexed(namespace.clone(), field.clone(), *index)
@@ -266,11 +278,19 @@ impl ReactiveRegistry {
                 self.field_to_widgets
                     .entry(key)
                     .or_default()
-                    .insert(node.widget_id);
+                    .insert(widget_id);
             }
-        }
-        for child in &node.children {
-            self.collect_widget_bindings(child);
+            Value::List(items) => {
+                for item in items {
+                    self.collect_widget_bindings_from_value(widget_id, &item.borrow());
+                }
+            }
+            Value::Map(map) => {
+                for item in map.values() {
+                    self.collect_widget_bindings_from_value(widget_id, &item.borrow());
+                }
+            }
+            _ => {}
         }
     }
 

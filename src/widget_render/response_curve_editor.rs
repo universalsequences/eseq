@@ -84,6 +84,7 @@ fn prop_string(props: &HashMap<String, Value>, key: &str, default: &str) -> Stri
 fn map_num(map: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     match map.get(key) {
         Some(Value::Number(n)) => *n as f32,
+        Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot) as f32,
         _ => default,
     }
 }
@@ -344,6 +345,10 @@ impl WidgetDefinition for ResponseCurveEditorWidget {
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
         &["width", "height"]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["bands"]
     }
 
     fn measure(

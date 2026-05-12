@@ -89,6 +89,18 @@ fn format_value(value: f64, decimals: u32) -> String {
     format!("{:.*}", decimals as usize, value)
 }
 
+fn value_scale(props: &HashMap<String, Value>) -> f32 {
+    get_f32_prop(props, "value-scale", 1.0).max(0.000001)
+}
+
+fn display_value(props: &HashMap<String, Value>, value: f32) -> f32 {
+    value * value_scale(props)
+}
+
+fn model_value_from_display(props: &HashMap<String, Value>, value: f32) -> f32 {
+    value / value_scale(props)
+}
+
 pub fn number_picker_display_text(state: &NumberPickerEditState) -> String {
     match state.edit_text.as_str() {
         "." => "0.".to_string(),
@@ -338,13 +350,24 @@ impl WidgetDefinition for NumberPickerWidget {
         let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
         let min = get_f32_prop(&node.props, "min", 0.0) as f64;
         let max = get_f32_prop(&node.props, "max", 1.0) as f64;
+        let displayed_value = display_value(&node.props, value as f32) as f64;
+        let displayed_min = display_value(&node.props, min as f32) as f64;
+        let displayed_max = display_value(&node.props, max as f32) as f64;
 
-        match handle_number_picker_edit_key(&mut state, key, value, min, max, decimals)? {
+        match handle_number_picker_edit_key(
+            &mut state,
+            key,
+            displayed_value,
+            displayed_min,
+            displayed_max,
+            decimals,
+        )? {
             NumberPickerEditOutcome::StateChanged => {
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             NumberPickerEditOutcome::Commit(value) => {
+                let value = model_value_from_display(&node.props, value as f32) as f64;
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Number(value)))
             }
@@ -386,7 +409,7 @@ impl WidgetDefinition for NumberPickerWidget {
             Some(Value::String(unit)) => unit.as_str(),
             _ => "",
         };
-        let value_text = format_value(value as f64, decimals);
+        let value_text = format_value(display_value(props, value) as f64, decimals);
         let display_value = if unit.is_empty() {
             value_text
         } else {
@@ -583,7 +606,7 @@ impl WidgetDefinition for NumberPickerWidget {
             a: 0.0,
         };
 
-        let value_text = format_value(value as f64, decimals);
+        let value_text = format_value(display_value(&node.props, value) as f64, decimals);
         let display_value = if unit.is_empty() {
             value_text
         } else {

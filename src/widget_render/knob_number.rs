@@ -58,6 +58,18 @@ fn quantized_value(props: &HashMap<String, Value>, value: f32) -> f32 {
     }
 }
 
+fn value_scale(props: &HashMap<String, Value>) -> f32 {
+    get_f32_prop(props, "value-scale", 1.0).max(0.000001)
+}
+
+fn display_value(props: &HashMap<String, Value>, value: f32) -> f32 {
+    value * value_scale(props)
+}
+
+fn model_value_from_display(props: &HashMap<String, Value>, value: f32) -> f32 {
+    value / value_scale(props)
+}
+
 fn normalized_value(props: &HashMap<String, Value>) -> f32 {
     let value = quantized_value(props, get_f32_prop(props, "value", 0.0));
     let min = get_f32_prop(props, "min", 0.0);
@@ -254,6 +266,7 @@ impl WidgetDefinition for KnobNumberWidget {
                     let parsed = state
                         .edit_text
                         .parse::<f64>()
+                        .map(|value| model_value_from_display(&node.props, value as f32) as f64)
                         .unwrap_or(value as f64)
                         .clamp(min as f64, max as f64);
                     let parsed = quantized_value(&node.props, parsed as f32) as f64;
@@ -264,7 +277,8 @@ impl WidgetDefinition for KnobNumberWidget {
                     Some(WidgetEvent::Custom(Value::Number(parsed)))
                 } else {
                     state.editing = true;
-                    state.edit_text = format_value(value as f64, decimals);
+                    state.edit_text =
+                        format_value(display_value(&node.props, value) as f64, decimals);
                     state.cursor_pos = state.edit_text.len();
                     set_state(node.widget_id, state);
                     Some(WidgetEvent::Custom(Value::Nil))
@@ -316,7 +330,11 @@ impl WidgetDefinition for KnobNumberWidget {
             .unwrap_or("");
         let value = quantized_value(props, get_f32_prop(props, "value", 0.0));
         let decimals = get_f32_prop(props, "decimals", 2.0) as u32;
-        let text = format!("{} {}", label, format_value(value as f64, decimals));
+        let text = format!(
+            "{} {}",
+            label,
+            format_value(display_value(props, value) as f64, decimals)
+        );
         let fg = Color {
             r: 0.9,
             g: 0.9,
@@ -467,9 +485,15 @@ impl WidgetDefinition for KnobNumberWidget {
         let (display_text, fg) = if state.editing {
             (state.edit_text.clone(), edit_color)
         } else if is_focused {
-            (format_value(value as f64, decimals), edit_color)
+            (
+                format_value(display_value(&node.props, value) as f64, decimals),
+                edit_color,
+            )
         } else {
-            (format_value(value as f64, decimals), text_color)
+            (
+                format_value(display_value(&node.props, value) as f64, decimals),
+                text_color,
+            )
         };
         let text_col = knob_rect.col + knob_width * 0.55;
         let text_row = value_row;
