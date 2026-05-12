@@ -658,6 +658,7 @@ impl App {
                     &self.state,
                     num_tracks,
                     &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
                     &self.tracks,
                     &self.graph.track_instrument_types,
                 );
@@ -677,11 +678,11 @@ impl App {
                 let mut sample_paths = Vec::with_capacity(num_tracks);
                 let mut sample_names = Vec::with_capacity(num_tracks);
                 for track_idx in 0..num_tracks {
-                    let sample_name = snapshot
+                    let (sample_buffer_id, sample_name) = snapshot
                         .sample_ids
                         .get(track_idx)
-                        .map(|(_, name)| name.clone())
-                        .unwrap_or_default();
+                        .map(|(buffer_id, name, _)| (*buffer_id, name.clone()))
+                        .unwrap_or((-1, String::new()));
                     let sample_path = if snapshot
                         .instrument_types
                         .get(track_idx)
@@ -690,8 +691,13 @@ impl App {
                         == InstrumentType::Sampler
                         && !sample_name.is_empty()
                     {
-                        self.resolve_sample_path_for_snapshot(pattern_idx, track_idx, &sample_name)?
-                            .map(|path| path.to_string_lossy().to_string())
+                        self.resolve_sample_path_for_snapshot(
+                            pattern_idx,
+                            track_idx,
+                            sample_buffer_id,
+                            &sample_name,
+                        )?
+                        .map(|path| path.to_string_lossy().to_string())
                     } else {
                         None
                     };
@@ -748,18 +754,17 @@ impl App {
             .iter()
             .enumerate()
             .map(|(track_idx, name)| {
+                let color = self.track_colors.get(track_idx).copied();
                 if self.is_sampler_track(track_idx) {
                     let path = self
-                        .sampler_paths
-                        .get(track_idx)
-                        .and_then(|path| path.clone())
-                        .or_else(|| self.sample_path_registry.get(name).cloned())
+                        .sampler_path_for_track(track_idx)
                         .or_else(|| self.resolve_sample_path_by_name(name));
                     let Some(path) = path else {
                         return Err(format!("Couldn't resolve sample path for '{}'", name));
                     };
                     Ok(ProjectTrack::Sampler {
                         sample_path: path.to_string_lossy().to_string(),
+                        color,
                     })
                 } else {
                     let instrument_name = self
@@ -770,7 +775,10 @@ impl App {
                         .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
                         .map(|engine| engine.name.clone())
                         .unwrap_or_else(|| name.clone());
-                    Ok(ProjectTrack::Custom { instrument_name })
+                    Ok(ProjectTrack::Custom {
+                        instrument_name,
+                        color,
+                    })
                 }
             })
             .collect()
@@ -811,16 +819,16 @@ impl App {
         &self,
         pattern_idx: usize,
         track_idx: usize,
+        buffer_id: i32,
         sample_name: &str,
     ) -> Result<Option<PathBuf>, String> {
         if self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize == pattern_idx {
-            if let Some(path) = self
-                .sampler_paths
-                .get(track_idx)
-                .and_then(|path| path.clone())
-            {
+            if let Some(path) = self.sampler_path_for_track(track_idx) {
                 return Ok(Some(path));
             }
+        }
+        if let Some(path) = self.sample_buffer_path_registry.get(&buffer_id) {
+            return Ok(Some(path.clone()));
         }
         if let Some(path) = self.sample_path_registry.get(sample_name) {
             return Ok(Some(path.clone()));
@@ -887,8 +895,9 @@ impl App {
                         offset: 0,
                     };
                 } else {
+                    let saved_color = pending.project.tracks[track_idx].color();
                     match &pending.project.tracks[track_idx] {
-                        ProjectTrack::Sampler { sample_path } => {
+                        ProjectTrack::Sampler { sample_path, .. } => {
                             eprintln!(
                                 "project-load: add sampler track index={} path={}",
                                 track_idx, sample_path
@@ -899,13 +908,18 @@ impl App {
                                     format!("Failed to load sample '{}': {error}", sample_path)
                                 })?;
                         }
-                        ProjectTrack::Custom { instrument_name } => {
+                        ProjectTrack::Custom {
+                            instrument_name, ..
+                        } => {
                             eprintln!(
                                 "project-load: add custom track index={} instrument={}",
                                 track_idx, instrument_name
                             );
                             self.add_saved_instrument_track_sync(instrument_name)?;
                         }
+                    }
+                    if let Some(color) = saved_color {
+                        self.set_track_color(track_idx, color);
                     }
                     pending.phase = super::PendingProjectLoadPhase::AddTrack(track_idx + 1);
                 }
@@ -1018,6 +1032,7 @@ impl App {
         let bank = pending.built_patterns;
         let mut bus_pattern_bank = pending.built_bus_patterns;
         let current_pattern = saved_current_pattern.min(bank.len().saturating_sub(1));
+        self.normalize_track_colors();
 
         {
             let mut pattern_bank = self.state.pattern.pattern_bank.lock().unwrap();
@@ -1288,14 +1303,15 @@ impl App {
                 )?;
                 self.submit_sample_analysis(&loaded);
                 let buffer_id = loaded.buffer_id;
+                let sample_rate = loaded.sample_rate;
                 let sample_name = loaded.name;
                 if saved_path.as_ref() != Some(&path_buf) {
                     fallback_count += 1;
                 }
-                self.register_sample_path(&sample_name, path_buf);
-                sample_ids.push((buffer_id, sample_name));
+                self.register_loaded_sample_path(&sample_name, buffer_id, path_buf);
+                sample_ids.push((buffer_id, sample_name, sample_rate));
             } else {
-                sample_ids.push((-1, String::new()));
+                sample_ids.push((-1, String::new(), self.graph.sample_rate));
             }
         }
 
@@ -1605,6 +1621,7 @@ mod tests {
             buses: Vec::new(),
             tracks: vec![ProjectTrack::Sampler {
                 sample_path: "samples/kick.wav".to_string(),
+                color: None,
             }],
             custom_effects: vec![custom_effects],
             scratch: ProjectScratchState::default(),

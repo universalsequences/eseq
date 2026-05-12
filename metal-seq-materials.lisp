@@ -40,6 +40,33 @@
             (rgba 0.10 0.10 0.22 0.85)
             (rgba 0.08 0.08 0.30 0.85)))))
 
+(defmacro aqua-slider-track-material ()
+  `(material
+     :lighting (lighting :edge-min -0.215 :edge-max 0.8413
+       :light (vec3 -0.1 -0.61 3.5) :shininess 81.0)
+     :color
+       (aqua-color
+         (rgba (* metal-track-r 0.55) (* metal-track-g 0.55) (* metal-track-b 0.55) 1.0)
+         (rgba metal-track-r metal-track-g metal-track-b 1.0))))
+
+(defmacro aqua-slider-track-muted-material ()
+  `(material
+     :lighting (lighting :edge-min -0.215 :edge-max 0.8413
+       :light (vec3 -0.1 -0.61 2.4) :shininess 38.0)
+     :color
+       (* 0.42
+          (aqua-color
+            (rgba
+              (+ (* metal-track-r 0.36) 0.06)
+              (+ (* metal-track-g 0.36) 0.06)
+              (+ (* metal-track-b 0.36) 0.08)
+              0.85)
+            (rgba
+              (+ (* metal-track-r 0.30) 0.04)
+              (+ (* metal-track-g 0.30) 0.04)
+              (+ (* metal-track-b 0.30) 0.08)
+              0.85)))))
+
      
 
 ;; ── Aqua widgets ──
@@ -100,7 +127,14 @@
             :shadow (shadow
               :color (rgba 0 0 0 0.3)
               :blur 0.15
-              :offset (vec2 0 0.05))))))))
+              :offset (vec2 0 0.05))))
+        (sdf/fill
+          (sdf/translate 0 0.58
+            (sdf/circle 0.17))
+          (material
+            :color (if (= plocked 1)
+              (rgba 0.82 0.84 0.88 0.95)
+              (rgba 0 0 0 0))))))))
 
 (defwidget tick
   :width 1.5 :height 1.5
@@ -116,8 +150,8 @@
             :color
             (* (if (= active 1) 1 0.3)
                (aqua-color
-                 (if (= plocked 1) (rgba 0.75 0.15 0.5 1.0) (rgba 0.3 0.3 0.85 1.0))
-                 (if (= plocked 1) (rgba 0.4 0.135 0.95 1.0) (rgba 0.90 0.50 0.82 1.0))))))))))
+                 (rgba 0.3 0.3 0.85 1.0)
+                 (rgba 0.90 0.50 0.82 1.0)))))))))
 
 (defwidget page-playhead-dot
   :width 0.7 :height 0.7

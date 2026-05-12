@@ -8,6 +8,7 @@ use crate::sequencer::{
     Timebase, TrackOutput, TrackParamsSnapshot, TrackSendSnapshot, TrackSoundState, MAX_STEPS,
     NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
+use crate::track_color::TrackColor;
 
 const PROJECTS_DIR: &str = "projects";
 const PROJECT_FILE_VERSION: u32 = 1;
@@ -159,8 +160,26 @@ pub fn default_project_buses() -> Vec<ProjectBusChannel> {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProjectTrack {
-    Sampler { sample_path: String },
-    Custom { instrument_name: String },
+    Sampler {
+        sample_path: String,
+        #[serde(default)]
+        color: Option<TrackColor>,
+    },
+    Custom {
+        instrument_name: String,
+        #[serde(default)]
+        color: Option<TrackColor>,
+    },
+}
+
+impl ProjectTrack {
+    pub fn color(&self) -> Option<TrackColor> {
+        match self {
+            Self::Sampler { color, .. } | Self::Custom { color, .. } => {
+                color.map(TrackColor::clamped)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -1056,9 +1075,11 @@ mod tests {
             tracks: vec![
                 ProjectTrack::Custom {
                     instrument_name: "prophet-5".to_string(),
+                    color: Some(TrackColor::new(0.96, 0.28, 0.52)),
                 },
                 ProjectTrack::Sampler {
                     sample_path: "samples/drums/kick.wav".to_string(),
+                    color: Some(TrackColor::new(0.98, 0.56, 0.20)),
                 },
             ],
             custom_effects: vec![vec![Some("widener".to_string()), None], vec![None, None]],
@@ -1181,6 +1202,14 @@ mod tests {
         assert_eq!(restored.scratch.buffer, project.scratch.buffer);
         assert_eq!(restored.scratch.cursor_row, project.scratch.cursor_row);
         assert_eq!(restored.scratch.cursor_col, project.scratch.cursor_col);
+        assert_eq!(
+            restored.tracks[0].color(),
+            Some(TrackColor::new(0.96, 0.28, 0.52))
+        );
+        assert_eq!(
+            restored.tracks[1].color(),
+            Some(TrackColor::new(0.98, 0.56, 0.20))
+        );
         assert_eq!(restored.patterns.len(), 1);
         assert_eq!(restored.patterns[0].track_bits[0], [0b1011, 0, 0, 0]);
         assert_eq!(restored.patterns[0].track_bits[1], [0b0101, 1, 0, 0]);
@@ -1251,6 +1280,19 @@ mod tests {
         assert_eq!(step[crate::sequencer::StepParam::Transpose.index()], 7.0);
         assert_eq!(step[crate::sequencer::StepParam::Pan.index()], 0.0);
         assert_eq!(step[crate::sequencer::StepParam::Chop.index()], 1.0);
+    }
+
+    #[test]
+    fn legacy_project_tracks_without_colors_deserialize() {
+        let sampler: ProjectTrack =
+            serde_json::from_str(r#"{"kind":"sampler","sample_path":"samples/kick.wav"}"#)
+                .expect("deserialize legacy sampler track");
+        let custom: ProjectTrack =
+            serde_json::from_str(r#"{"kind":"custom","instrument_name":"prophet-5"}"#)
+                .expect("deserialize legacy custom track");
+
+        assert_eq!(sampler.color(), None);
+        assert_eq!(custom.color(), None);
     }
 
     #[test]

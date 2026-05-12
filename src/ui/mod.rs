@@ -21,6 +21,7 @@ use crate::sequencer::{
     BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, StepSnapshot,
     SwingResolution, Timebase, MAX_STEPS, STEPS_PER_PAGE,
 };
+use crate::track_color::TrackColor;
 
 mod browser;
 mod cirklon;
@@ -745,10 +746,12 @@ pub struct UiState {
 pub struct App {
     pub state: Arc<SequencerState>,
     pub tracks: Vec<String>,
+    pub track_colors: Vec<TrackColor>,
     pub buses: Vec<BusChannelState>,
     pub bus_pattern_bank: Vec<Vec<BusPatternSnapshot>>,
     pub sampler_paths: Vec<Option<PathBuf>>,
     pub sample_path_registry: HashMap<String, PathBuf>,
+    pub sample_buffer_path_registry: HashMap<i32, PathBuf>,
     pub current_project_name: Option<String>,
     pub ui: UiState,
     pub editor: EditorState,
@@ -763,6 +766,29 @@ pub struct App {
 }
 
 impl App {
+    pub fn next_track_color(&self) -> TrackColor {
+        TrackColor::next_for_existing(&self.track_colors)
+    }
+
+    pub fn push_next_track_color(&mut self) {
+        let color = self.next_track_color();
+        self.track_colors.push(color);
+    }
+
+    pub fn set_track_color(&mut self, track: usize, color: TrackColor) {
+        self.normalize_track_colors();
+        if let Some(slot) = self.track_colors.get_mut(track) {
+            *slot = color.clamped();
+        }
+    }
+
+    pub fn normalize_track_colors(&mut self) {
+        self.track_colors.truncate(self.tracks.len());
+        while self.track_colors.len() < self.tracks.len() {
+            self.push_next_track_color();
+        }
+    }
+
     pub fn submit_sample_analysis(&self, loaded: &crate::sampler::LoadedSample) {
         self.sample_analysis.submit(AnalysisJob {
             buffer_id: loaded.buffer_id,
@@ -994,10 +1020,12 @@ impl App {
         let mut app = Self {
             state,
             tracks: Vec::new(),
+            track_colors: Vec::new(),
             buses: BusChannelState::default_buses(),
             bus_pattern_bank: Vec::new(),
             sampler_paths: Vec::new(),
             sample_path_registry: HashMap::new(),
+            sample_buffer_path_registry: HashMap::new(),
             current_project_name: None,
             ui: UiState {
                 cursor_step: 0,
@@ -1889,10 +1917,51 @@ impl App {
             .insert(sample_name.to_string(), path);
     }
 
-    pub(super) fn sync_sampler_path_from_name(&mut self, track: usize, sample_name: &str) {
+    pub fn register_loaded_sample_path(
+        &mut self,
+        sample_name: &str,
+        buffer_id: i32,
+        path: PathBuf,
+    ) {
+        self.register_sample_path(sample_name, path.clone());
+        if buffer_id >= 0 {
+            self.sample_buffer_path_registry.insert(buffer_id, path);
+        }
+    }
+
+    pub fn sampler_path_for_track(&self, track: usize) -> Option<PathBuf> {
+        self.sampler_paths
+            .get(track)
+            .and_then(|path| path.as_ref())
+            .cloned()
+            .or_else(|| {
+                self.graph
+                    .track_buffer_ids
+                    .get(track)
+                    .and_then(|buffer_id| self.sample_buffer_path_registry.get(buffer_id))
+                    .cloned()
+            })
+            .or_else(|| {
+                self.tracks
+                    .get(track)
+                    .and_then(|name| self.sample_path_registry.get(name))
+                    .cloned()
+            })
+    }
+
+    pub(super) fn sync_sampler_path_from_sample(
+        &mut self,
+        track: usize,
+        buffer_id: i32,
+        sample_name: &str,
+    ) {
         if track >= self.sampler_paths.len() {
             return;
         }
-        self.sampler_paths[track] = self.sample_path_registry.get(sample_name).cloned();
+        self.sampler_paths[track] = self
+            .sample_buffer_path_registry
+            .get(&buffer_id)
+            .cloned()
+            .or_else(|| self.sample_path_registry.get(sample_name).cloned());
     }
 }

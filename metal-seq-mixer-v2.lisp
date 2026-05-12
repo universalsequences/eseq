@@ -17,6 +17,23 @@
 (def mixer-v2-muted? (i)
   (or (nth SEQ.track-mutes i) (nth SEQ.track-muted-by-solo i)))
 
+(def mixer-v2-track-color (i)
+  (if (< i (len SEQ.track-colors))
+    (nth SEQ.track-colors i)
+    (list 0.34 0.48 0.98)))
+
+(def mixer-v2-track-color-r (i muted)
+  (let ((r (nth (mixer-v2-track-color i) 0)))
+    (if muted (+ (* r 0.34) (* 0.10 0.66)) r)))
+
+(def mixer-v2-track-color-g (i muted)
+  (let ((g (nth (mixer-v2-track-color i) 1)))
+    (if muted (+ (* g 0.34) (* 0.10 0.66)) g)))
+
+(def mixer-v2-track-color-b (i muted)
+  (let ((b (nth (mixer-v2-track-color i) 2)))
+    (if muted (+ (* b 0.34) (* 0.11 0.66)) b)))
+
 (def mixer-v2-strip-bg (selected muted)
   (if selected
     :mixer-strip-selected-bg
@@ -205,8 +222,12 @@
             :on-click |x y r| (seq-toggle-record-arm i)))
         (button (substring (nth SEQ.track-names i) 0 10)
           :width 9.8 :height 1.0 :padding 0 :font-size 10
-          :background-color (if muted :mixer-label-muted-bg :mixer-label-bg)
-          :color (if muted :dark-gray :dim)
+          :background-color (rgba
+            (mixer-v2-track-color-r i muted)
+            (mixer-v2-track-color-g i muted)
+            (mixer-v2-track-color-b i muted)
+            1.0)
+          :color (if muted :dim :black)
           :on-click |x y r| (mixer-v2-select-track i))))))
 
 (def mixer-v2-bus-label (i)

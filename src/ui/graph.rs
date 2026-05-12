@@ -488,7 +488,8 @@ impl GraphController<'_> {
         let sample_path = wav_path.to_path_buf();
         let sample_name = self.app.tracks[idx].clone();
         self.app.sampler_paths.push(Some(sample_path.clone()));
-        self.app.register_sample_path(&sample_name, sample_path);
+        self.app
+            .register_loaded_sample_path(&sample_name, buffer_id, sample_path);
         self.app.reset_sampler_bpm_for_analysis(idx);
         self.app.publish_sampler_analysis_runtime(idx);
         Ok(idx)
@@ -610,7 +611,8 @@ impl GraphController<'_> {
                 *track_sample_rate = *sample_rate;
             }
             self.app.tracks[track] = name.clone();
-            self.app.sync_sampler_path_from_name(track, name);
+            self.app
+                .sync_sampler_path_from_sample(track, *buffer_id, name);
             self.app.publish_sampler_analysis_runtime(track);
         }
     }
@@ -708,6 +710,7 @@ impl GraphController<'_> {
         }
 
         self.app.tracks.clear();
+        self.app.track_colors.clear();
         self.app.sampler_paths.clear();
         self.app.graph.track_node_ids.clear();
         self.app.graph.track_buffer_ids.clear();
@@ -1291,6 +1294,9 @@ impl GraphController<'_> {
 
     fn compact_app_track_vectors(&mut self, track_idx: usize) {
         self.app.tracks.remove(track_idx);
+        if track_idx < self.app.track_colors.len() {
+            self.app.track_colors.remove(track_idx);
+        }
         self.app.sampler_paths.remove(track_idx);
         self.app.graph.track_node_ids.remove(track_idx);
         self.app.graph.track_buffer_ids.remove(track_idx);
@@ -2065,6 +2071,7 @@ impl GraphController<'_> {
         );
 
         self.app.tracks.push(track_name.clone());
+        self.app.push_next_track_color();
         self.app
             .graph
             .effect_descriptors

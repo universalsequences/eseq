@@ -3,6 +3,10 @@
 
 ;; ── Main UI ──
 
+(defstate metal-track-r 0.34)
+(defstate metal-track-g 0.48)
+(defstate metal-track-b 0.98)
+
 (def metal-empty-track-fallback ()
   (v-stack :width :fill :padding 1 :gap 0
     (box :flex 1)
@@ -15,6 +19,60 @@
           :font-size 10 :color :dark-gray :bg :transparent))
       (box :flex 1))
     (box :flex 1)))
+
+(def metal-current-track-color ()
+  (if (and (< SEQ.current-track (len SEQ.track-colors)) (>= SEQ.current-track 0))
+    (nth SEQ.track-colors SEQ.current-track)
+    (list 0.34 0.48 0.98)))
+
+(def metal-track-color-r ()
+  (nth (metal-current-track-color) 0))
+
+(def metal-track-color-g ()
+  (nth (metal-current-track-color) 1))
+
+(def metal-track-color-b ()
+  (nth (metal-current-track-color) 2))
+
+(def metal-sync-track-color-state ()
+  (do
+    (set! metal-track-r (metal-track-color-r))
+    (set! metal-track-g (metal-track-color-g))
+    (set! metal-track-b (metal-track-color-b))))
+
+(def metal-track-slider-fill ()
+  (rgba (metal-track-color-r) (metal-track-color-g) (metal-track-color-b) 1.0))
+
+(def metal-track-slider-muted-fill ()
+  (rgba
+    (+ (* (metal-track-color-r) 0.30) (* 0.08 0.70))
+    (+ (* (metal-track-color-g) 0.30) (* 0.08 0.70))
+    (+ (* (metal-track-color-b) 0.30) (* 0.12 0.70))
+    0.50))
+
+(def metal-track-slider-muted-dot ()
+  (rgba
+    (+ (* (metal-track-color-r) 0.28) (* 0.25 0.72))
+    (+ (* (metal-track-color-g) 0.28) (* 0.25 0.72))
+    (+ (* (metal-track-color-b) 0.28) (* 0.30 0.72))
+    0.55))
+
+(defwidget metal-track-tick
+  :width 1.5 :height 1.5
+  :state (active plocked selected track-r track-g track-b)
+  :shader
+  (let ((sel-y (if (= selected 1) (* 0.1 (cos (* 3 itime))) 0)))
+    (sdf/translate 0 sel-y
+      (sdf/layer
+        (sdf/fill (sdf/circle 1)
+          (material
+            :lighting (lighting :edge-min -0.35 :edge-max 0.5
+              :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
+            :color
+            (* (if (= active 1) 1 0.3)
+               (aqua-color
+                 (rgba (* track-r 0.82) (* track-g 0.82) (* track-b 0.82) 1.0)
+                 (rgba track-r track-g track-b 1.0)))))))))
 
 (def metal-bus-selection-panel ()
   (v-stack
@@ -112,7 +170,7 @@
                         nil)))))
               (box
                 :active (if visible (if (nth bus-steps step) 1 0) 0)
-                :plocked 1
+                :plocked (if visible (if (nth bus-plocks step) 1 0) 0)
                 :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
                 :background "aqua-button"
                 :align :center :width 3 :height 1.5
@@ -173,6 +231,8 @@
     (metal-bus-selection-panel)
     (if (= SEQ.num-tracks 0)
     (metal-empty-track-fallback)
+    (do
+    (metal-sync-track-color-state)
     (v-stack
       :padding 2
       :gap 0.1
@@ -262,9 +322,9 @@
                     :items (if (= param-mode 5) SEQ.sync-labels '())
                     :font-size 11
                     :color :white
-                    :fill (rgba 0.20 0.20 0.92 1.0)
+                    :fill (metal-track-slider-fill)
                     :dot-color :dark-gray
-                    :material (aqua-slider-material)
+                    :material (aqua-slider-track-material)
                     :on-change (lambda (v)
                       (if visible
                         (do
@@ -289,9 +349,9 @@
                     :items (if (= param-mode 5) SEQ.sync-labels '())
                     :font-size 11
                     :color :dim
-                    :fill (rgba 0.08 0.08 0.25 0.45)
-                    :dot-color (rgba 0.25 0.25 0.30 0.45)
-                    :material (aqua-slider-muted-material)
+                    :fill (metal-track-slider-muted-fill)
+                    :dot-color (metal-track-slider-muted-dot)
+                    :material (aqua-slider-track-muted-material)
                     :on-change (lambda (v)
                       (if visible
                         (do
@@ -304,7 +364,7 @@
                         nil)))))
               (box
                 :active (if visible (if (nth SEQ.steps step) 1 0) 0)
-                :plocked 1
+                :plocked (if visible (if (nth SEQ.step-has-plocks step) 1 0) 0)
                 :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
                 :background "aqua-button"
                 :align :center :width 3 :height 1.5
@@ -320,9 +380,13 @@
                   (if visible
                     (step-pointer-up step evt)
                     nil))
-                (tick :active (if visible (if (nth SEQ.steps step) 1 0) 0)
+                (metal-track-tick
+                      :active (if visible (if (nth SEQ.steps step) 1 0) 0)
                       :plocked (if visible (if (nth SEQ.step-has-plocks step) 1 0) 0)
-                      :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)))
+                      :selected (if visible (if (nth SEQ.selected-steps step) 1 0) 0)
+                      :track-r (metal-track-color-r)
+                      :track-g (metal-track-color-g)
+                      :track-b (metal-track-color-b)))
               (label (if visible (str (+ step 1)) "")
                 :font-size 10 :bg :transparent
                 :color (if visible
@@ -379,7 +443,7 @@
                     :color (if (= page (visible-page)) :white :dim)
                     :bg :transparent))))))))
 
-    ))))
+    )))))
 
 ; Set mode after buffer exists (effect-buffer creates it above)
 (set-buffer-mode-for "*metal*" "seq-grid-mode")

@@ -358,9 +358,8 @@ pub(crate) fn sync_sampler_selection_time_fields(
         return;
     }
     let sample_duration = app
-        .sampler_paths
-        .get(track)
-        .and_then(|p| p.as_ref())
+        .sampler_path_for_track(track)
+        .as_ref()
         .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()))
         .map(|sample| sample.duration_seconds)
         .unwrap_or(1.0);
@@ -769,6 +768,25 @@ pub(crate) fn build_track_names(names: &[String]) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn build_track_colors(app: &ui::App) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = (0..app.tracks.len())
+        .map(|track| {
+            let color = app
+                .track_colors
+                .get(track)
+                .copied()
+                .unwrap_or_else(|| sequencer::track_color::TrackColor::palette_color(track))
+                .clamped();
+            Rc::new(RefCell::new(Value::List(vec![
+                Rc::new(RefCell::new(Value::Number(color.r as f64))),
+                Rc::new(RefCell::new(Value::Number(color.g as f64))),
+                Rc::new(RefCell::new(Value::Number(color.b as f64))),
+            ])))
+        })
+        .collect();
+    Value::List(items)
+}
+
 pub(crate) fn build_track_ids(app: &ui::App) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = app
         .graph
@@ -791,6 +809,7 @@ pub(crate) fn sync_track_name_state(
     *track_names = app.tracks.clone();
     rt.set_reactive("SEQ", "num-tracks", Value::Number(track_names.len() as f64));
     rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
+    rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
 }
 
 /// Build a Lisp Value::List of per-track volumes (0.0–1.0).
@@ -881,6 +900,7 @@ pub(crate) fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
 }
 
 pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Arc<SequencerState>) {
+    rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
     rt.set_reactive("SEQ", "track-pans", build_track_pans(state));
     rt.set_reactive("SEQ", "track-outputs", build_track_outputs(app, state));
@@ -948,6 +968,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-volumes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
@@ -1980,11 +2001,22 @@ pub(crate) fn build_sampler_panel_value(
 
     // Look up the pre-registered SampleBuffer and pass its Value map directly
     // to the Lisp side, so the waveform widget can use it without re-loading.
-    let registered_sample = app
-        .sampler_paths
-        .get(track)
-        .and_then(|p| p.as_ref())
-        .and_then(|p| eseqlisp::audio::sample::get_registered_sample(&p.display().to_string()));
+    let sampler_path = app.sampler_path_for_track(track);
+    let registered_sample = sampler_path.as_ref().and_then(|p| {
+        let key = p.display().to_string();
+        eseqlisp::audio::sample::get_registered_sample(&key).or_else(|| {
+            match eseqlisp::audio::sample::SampleBuffer::load_wav(p) {
+                Ok(sample) => {
+                    sample.register();
+                    eseqlisp::audio::sample::get_registered_sample(&key)
+                }
+                Err(e) => {
+                    eprintln!("waveform: failed to register sample {}: {e}", p.display());
+                    None
+                }
+            }
+        })
+    });
     let buffer_value = registered_sample.as_ref().map(|s| s.to_value());
     let sample_duration = registered_sample
         .as_ref()
@@ -2817,9 +2849,7 @@ pub(crate) fn current_custom_instrument_name(app: &ui::App, track: usize) -> Opt
 pub(crate) fn sync_sidebar_browser(rt: &mut Runtime, app: &ui::App, track: usize) {
     if app.is_sampler_track(track) {
         let selected_sample = app
-            .sampler_paths
-            .get(track)
-            .and_then(|path| path.as_ref())
+            .sampler_path_for_track(track)
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_default();
         rt.set_reactive("SEQ", "sidebar-kind", Value::String("sampler".to_string()));
@@ -4673,6 +4703,10 @@ mod tests {
         test_list(values.iter().copied().map(Value::Number).collect())
     }
 
+    fn test_track_colors() -> Value {
+        test_list(vec![test_number_list(&[0.96, 0.28, 0.52])])
+    }
+
     fn test_bool_list(values: &[bool]) -> Value {
         test_list(values.iter().copied().map(Value::Bool).collect())
     }
@@ -4806,6 +4840,7 @@ mod tests {
                 ("num-tracks", Value::Number(1.0)),
                 ("track-ids", test_number_list(&[0.0])),
                 ("track-names", test_string_list(&["bd02"])),
+                ("track-colors", test_track_colors()),
                 ("current-track", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
                 ("track-mutes", test_bool_list(&[false])),
@@ -5213,6 +5248,7 @@ mod tests {
                     "track-names",
                     test_list(vec![Value::String("kick".to_string())]),
                 ),
+                ("track-colors", test_track_colors()),
                 ("num-tracks", Value::Number(1.0)),
                 ("current-track", Value::Number(0.0)),
                 ("record-armed", test_list(vec![Value::Bool(false)])),
@@ -5932,6 +5968,7 @@ mod tests {
                     "track-names",
                     test_list(vec![Value::String("kick".to_string())]),
                 ),
+                ("track-colors", test_track_colors()),
                 ("num-tracks", Value::Number(1.0)),
                 ("current-track", Value::Number(0.0)),
                 ("record-armed", test_list(vec![Value::Bool(false)])),
