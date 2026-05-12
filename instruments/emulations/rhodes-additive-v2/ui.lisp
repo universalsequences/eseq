@@ -14,7 +14,7 @@
     (if p
       (subtree :key (str "rhodes_additive_v2-cell-" name)
         (knob-number :label title
-          :value (get p :value)
+          :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals decimals
           :step step
           :font-size 10.5 :label-font-size 10
@@ -34,7 +34,7 @@
     (if p
       (subtree :key (str "rhodes_additive_v2-base-note-cell")
         (knob-number :label "note"
-          :value (get p :value)
+          :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals 0
           :step 1
           :font-size 10.5 :label-font-size 10
@@ -52,7 +52,7 @@
         (subtree :key (str "rhodes_additive_v2-adsr-number-" name)
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label title :font-size 10 :color :dim :bg :transparent)
-            (number-picker :value (get p :value)
+            (number-picker :value (fx-param-value p)
               :min (get p :min) :max (get p :max) :decimals decimals
               :unit unit
               :noui true :font-size 10.5

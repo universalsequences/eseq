@@ -14,7 +14,7 @@
     (if p
       (subtree :key (str "mfpar-cell-" name)
         (knob-number :label title
-          :value (get p :value)
+          :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals decimals
           :step step
           :font-size 10.5 :label-font-size 10
@@ -34,7 +34,7 @@
     (if p
       (subtree :key "mfpar-base-note-cell"
         (knob-number :label "note"
-          :value (get p :value)
+          :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals 0
           :step 1
           :font-size 10.5 :label-font-size 10
@@ -48,7 +48,7 @@
 (def mfpar-param-value (name fallback)
   (if name
     (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (get p :value) fallback))
+      (if p (fx-param-value p) fallback))
     fallback))
 (def mfpar-set-param (name value)
   (if name
@@ -61,7 +61,7 @@
       (subtree :key (str "mfpar-number-" name)
         (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
           (label title :font-size 10 :color :dim :bg :transparent)
-          (number-picker :value (get p :value)
+          (number-picker :value (fx-param-value p)
             :min (get p :min) :max (get p :max) :decimals decimals
             :unit unit
             :noui true :font-size 10.5
