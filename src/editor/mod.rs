@@ -962,6 +962,31 @@ impl Editor {
             self.tile_at_screen(screen_col, screen_row)
         };
         if let Some(tile_id) = target_tile {
+            if matches!(mouse.kind, MouseEventKind::Moved) && tile_id != self.active_tile {
+                if let Some((content_col, content_row, _, _)) =
+                    self.tile_content_area(tile_id, border_inset)
+                {
+                    let (event_col, event_row) = self
+                        .tile_content_precise_event_position(
+                            tile_id,
+                            border_inset,
+                            content_col,
+                            content_row,
+                            precise_col,
+                            precise_row,
+                        )
+                        .unwrap_or((precise_col, precise_row));
+                    self.update_sdf_hover_for_inactive_tile(
+                        tile_id,
+                        content_col,
+                        content_row,
+                        event_col,
+                        event_row,
+                    );
+                }
+                return;
+            }
+
             let persist_selection = matches!(
                 mouse.kind,
                 MouseEventKind::Down(MouseButton::Left)
@@ -1206,10 +1231,7 @@ impl Editor {
         let result = f(self);
 
         if switched && !persist_selection && self.tile_root.find_leaf(previous_tile).is_some() {
-            self.switch_active_tile(previous_tile);
-            if let Some((width, height)) = previous_viewport {
-                self.set_layout_viewport(width, height);
-            }
+            self.switch_active_tile_with_viewport(previous_tile, previous_viewport);
         }
 
         result

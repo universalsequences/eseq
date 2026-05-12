@@ -254,6 +254,107 @@ impl Editor {
         }
     }
 
+    pub(super) fn update_sdf_hover_for_inactive_tile(
+        &mut self,
+        tile_id: crate::tile::TileId,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        use crate::widget_render::sdf_widget::{self, SdfHitState};
+
+        sdf_widget::set_sdf_time_seconds(sdf_widget::current_sdf_time_fallback_seconds());
+
+        let Some(leaf) = self.tile_root.find_leaf(tile_id) else {
+            return;
+        };
+        let Some(layout) = leaf.cached_layout.clone() else {
+            if sdf_widget::clear_sdf_hit_states_except(None) {
+                self.mark_needs_redraw();
+            }
+            return;
+        };
+        let buffer = &self.buffers[leaf.buffer_idx];
+        if buffer.view_mode == super::ViewMode::TextOnly {
+            if sdf_widget::clear_sdf_hit_states_except(None) {
+                self.mark_needs_redraw();
+            }
+            return;
+        }
+
+        let Some((local_col, local_row)) =
+            hit::to_local(precise_col, precise_row, content_col, content_row)
+        else {
+            if sdf_widget::clear_sdf_hit_states_except(None) {
+                self.mark_needs_redraw();
+            }
+            return;
+        };
+
+        let text_scroll = if buffer.view_mode == super::ViewMode::UiOnly {
+            0.0
+        } else {
+            buffer.scroll_top as f32
+        };
+        let layout_col = local_col + leaf.widget_scroll_left;
+        let layout_row = local_row + leaf.widget_scroll_top + text_scroll;
+
+        let Some(node) = hit_test_layout(&layout, layout_row, layout_col).cloned() else {
+            if sdf_widget::clear_sdf_hit_states_except(None) {
+                self.mark_needs_redraw();
+            }
+            return;
+        };
+
+        let background_sdf = if node.widget_type == "box" {
+            node.props
+                .get("background")
+                .and_then(|value| match value {
+                    Value::String(name) => Some(name.as_str()),
+                    _ => None,
+                })
+                .filter(|name| sdf_widget::sdf_widget_def(name).is_some())
+                .is_some()
+        } else {
+            false
+        };
+        let direct_sdf = sdf_widget::sdf_widget_def(&node.widget_type).is_some();
+        if !direct_sdf && !background_sdf {
+            if sdf_widget::clear_sdf_hit_states_except(None) {
+                self.mark_needs_redraw();
+            }
+            return;
+        }
+        if sdf_widget::clear_sdf_hit_states_except(Some(node.widget_id)) {
+            self.mark_needs_redraw();
+        }
+
+        let widget_col = layout_col - node.rect.col;
+        let widget_row = layout_row - node.rect.row;
+        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+        let px_w = node.rect.width * cell_w;
+        let px_h = node.rect.height * cell_h;
+        let pixel_aspect = if px_h > 0.0 { px_w / px_h } else { 1.0 };
+        let region = if direct_sdf {
+            sdf_widget::sdf_widget_hit_test(&node, widget_col, widget_row, pixel_aspect)
+        } else {
+            0
+        };
+
+        let old = sdf_widget::get_sdf_hit_state(node.widget_id);
+        if old.hit_region != region || old.hit_pressed {
+            sdf_widget::set_sdf_hit_state(
+                node.widget_id,
+                SdfHitState {
+                    hit_region: region,
+                    hit_pressed: false,
+                },
+            );
+            self.mark_needs_redraw();
+        }
+    }
+
     pub(super) fn try_handle_widget_double_click(
         &mut self,
         content_col: u16,
