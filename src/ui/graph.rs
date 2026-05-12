@@ -37,6 +37,7 @@ struct SamplerVoiceSetup {
 enum InstrumentRegistration<'a> {
     Sampler {
         buffer_id: i32,
+        sample_rate: u32,
         sampler_ids: Vec<i32>,
     },
     Custom {
@@ -463,11 +464,13 @@ impl GraphController<'_> {
         let loaded = crate::sampler::load_wav_buffer(self.app.graph.lg.0, wav_path)?;
         self.app.submit_sample_analysis(&loaded);
         let buffer_id = loaded.buffer_id;
+        let sample_rate = loaded.sample_rate;
         let track_name = loaded.name;
         let shell = self.create_track_shell(idx, &track_name);
         let voices = self.build_sampler_voices(
             &track_name,
             buffer_id,
+            sample_rate,
             shell.voice_sum_id,
             shell.voice_sum_r_id,
         )?;
@@ -478,6 +481,7 @@ impl GraphController<'_> {
             voice_lids: voices.voice_lids,
             instrument: InstrumentRegistration::Sampler {
                 buffer_id,
+                sample_rate,
                 sampler_ids: voices.sampler_ids,
             },
         });
@@ -497,11 +501,13 @@ impl GraphController<'_> {
         }
 
         let buffer_id = crate::sampler::create_silent_buffer(self.app.graph.lg.0)?;
+        let sample_rate = self.app.graph.sample_rate;
         let track_name = format!("Sampler {}", idx + 1);
         let shell = self.create_track_shell(idx, &track_name);
         let voices = self.build_sampler_voices(
             &track_name,
             buffer_id,
+            sample_rate,
             shell.voice_sum_id,
             shell.voice_sum_r_id,
         )?;
@@ -512,6 +518,7 @@ impl GraphController<'_> {
             voice_lids: voices.voice_lids,
             instrument: InstrumentRegistration::Sampler {
                 buffer_id,
+                sample_rate,
                 sampler_ids: voices.sampler_ids,
             },
         });
@@ -586,8 +593,8 @@ impl GraphController<'_> {
         Ok(())
     }
 
-    pub fn apply_sample_ids(&mut self, sample_ids: &[(i32, String)]) {
-        for (track, (buffer_id, name)) in sample_ids.iter().enumerate() {
+    pub fn apply_sample_ids(&mut self, sample_ids: &[(i32, String, u32)]) {
+        for (track, (buffer_id, name, sample_rate)) in sample_ids.iter().enumerate() {
             if *buffer_id < 0 {
                 continue;
             }
@@ -597,8 +604,11 @@ impl GraphController<'_> {
             if !self.app.is_sampler_track(track) {
                 continue;
             }
-            self.send_buffer_to_all_voices(track, *buffer_id);
+            self.send_sample_to_all_voices(track, *buffer_id, *sample_rate);
             self.app.graph.track_buffer_ids[track] = *buffer_id;
+            if let Some(track_sample_rate) = self.app.graph.track_sample_rates.get_mut(track) {
+                *track_sample_rate = *sample_rate;
+            }
             self.app.tracks[track] = name.clone();
             self.app.sync_sampler_path_from_name(track, name);
             self.app.publish_sampler_analysis_runtime(track);
@@ -701,6 +711,7 @@ impl GraphController<'_> {
         self.app.sampler_paths.clear();
         self.app.graph.track_node_ids.clear();
         self.app.graph.track_buffer_ids.clear();
+        self.app.graph.track_sample_rates.clear();
         self.app.graph.track_voice_lids.clear();
         self.app.graph.track_instrument_types.clear();
         self.app.graph.track_engine_ids.clear();
@@ -766,6 +777,7 @@ impl GraphController<'_> {
 
         let names = self.app.tracks.clone();
         let buffer_ids = self.app.graph.track_buffer_ids.clone();
+        let sample_rates = self.app.graph.track_sample_rates.clone();
         let instrument_types = self.app.graph.track_instrument_types.clone();
         let deleted_engine_id = self.app.graph.track_engine_ids[track_idx];
 
@@ -789,6 +801,7 @@ impl GraphController<'_> {
         if !self.app.state.remove_track(
             track_idx,
             &buffer_ids,
+            &sample_rates,
             &names,
             &instrument_types,
             &self.app.graph.effect_descriptors,
@@ -818,7 +831,7 @@ impl GraphController<'_> {
         }
 
         if self.app.is_sampler_track(track_idx) {
-            self.send_buffer_to_all_voices(track_idx, -1);
+            self.send_sample_to_all_voices(track_idx, -1, self.app.graph.sample_rate);
         }
 
         for engine_id in 0..MAX_TRACKS {
@@ -863,6 +876,7 @@ impl GraphController<'_> {
         self.app.tracks[track_idx] = format!("Empty {}", track_idx + 1);
         self.app.sampler_paths[track_idx] = None;
         self.app.graph.track_buffer_ids[track_idx] = -1;
+        self.app.graph.track_sample_rates[track_idx] = self.app.graph.sample_rate;
         self.app.graph.track_instrument_types[track_idx] = InstrumentType::Sampler;
         self.app.graph.track_engine_ids[track_idx] = None;
         self.app.graph.track_synth_node_ids[track_idx].clear();
@@ -878,7 +892,7 @@ impl GraphController<'_> {
         Ok(track_idx)
     }
 
-    pub fn send_buffer_to_all_voices(&self, track: usize, buffer_id: i32) {
+    pub fn send_sample_to_all_voices(&self, track: usize, buffer_id: i32, sample_rate: u32) {
         if track < self.app.graph.track_voice_lids.len() {
             for &lid in &self.app.graph.track_voice_lids[track] {
                 unsafe {
@@ -888,6 +902,14 @@ impl GraphController<'_> {
                             idx: crate::sampler::PARAM_BUFFER_ID,
                             logical_id: lid,
                             fvalue: buffer_id as f32,
+                        },
+                    );
+                    crate::audiograph::params_push_wrapper(
+                        self.app.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            idx: crate::sampler::PARAM_SOURCE_SAMPLE_RATE,
+                            logical_id: lid,
+                            fvalue: sample_rate.max(1) as f32,
                         },
                     );
                 }
@@ -1081,6 +1103,7 @@ impl GraphController<'_> {
             &self.app.state,
             self.app.tracks.len(),
             &self.app.graph.track_buffer_ids,
+            &self.app.graph.track_sample_rates,
             &self.app.tracks,
             &self.app.graph.track_instrument_types,
         );
@@ -1271,6 +1294,7 @@ impl GraphController<'_> {
         self.app.sampler_paths.remove(track_idx);
         self.app.graph.track_node_ids.remove(track_idx);
         self.app.graph.track_buffer_ids.remove(track_idx);
+        self.app.graph.track_sample_rates.remove(track_idx);
         self.app.graph.track_voice_lids.remove(track_idx);
         self.app.graph.track_instrument_types.remove(track_idx);
         self.app.graph.track_engine_ids.remove(track_idx);
@@ -1396,6 +1420,7 @@ impl GraphController<'_> {
         &mut self,
         track_name: &str,
         buffer_id: i32,
+        sample_rate: u32,
         voice_sum_id: i32,
         voice_sum_r_id: i32,
     ) -> Result<SamplerVoiceSetup, String> {
@@ -1404,8 +1429,12 @@ impl GraphController<'_> {
 
         for v in 0..MAX_VOICES {
             let node_name = format!("{}_{}", track_name, v);
-            let st =
-                crate::sampler::create_sampler_node(self.app.graph.lg.0, buffer_id, &node_name)?;
+            let st = crate::sampler::create_sampler_node(
+                self.app.graph.lg.0,
+                buffer_id,
+                sample_rate,
+                &node_name,
+            )?;
             unsafe {
                 crate::audiograph::graph_connect(
                     self.app.graph.lg.0,
@@ -2047,6 +2076,7 @@ impl GraphController<'_> {
         match instrument {
             InstrumentRegistration::Sampler {
                 buffer_id,
+                sample_rate,
                 sampler_ids,
             } => {
                 self.app.state.runtime.track_engine_ids[idx].store(u32::MAX, Ordering::Release);
@@ -2062,6 +2092,7 @@ impl GraphController<'_> {
                     sound.engine_id = None;
                 }
                 self.app.graph.track_buffer_ids.push(buffer_id);
+                self.app.graph.track_sample_rates.push(sample_rate);
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids,
                     voice_sum_id: shell.voice_sum_id,
@@ -2097,6 +2128,10 @@ impl GraphController<'_> {
                     sound.engine_id = Some(engine_id);
                 }
                 self.app.graph.track_buffer_ids.push(-1);
+                self.app
+                    .graph
+                    .track_sample_rates
+                    .push(self.app.graph.sample_rate);
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids: Vec::new(),
                     voice_sum_id: shell.voice_sum_id,
@@ -2136,6 +2171,7 @@ impl GraphController<'_> {
         }
         drop(bank);
         self.app.refresh_effect_sidechain_labels();
+        self.debug_assert_track_vectors_aligned();
 
         self.app
             .state
@@ -2164,6 +2200,39 @@ impl GraphController<'_> {
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.state.publish_scheduler_snapshot();
+    }
+
+    fn debug_assert_track_vectors_aligned(&self) {
+        debug_assert_eq!(self.app.graph.track_node_ids.len(), self.app.tracks.len());
+        debug_assert_eq!(self.app.graph.track_buffer_ids.len(), self.app.tracks.len());
+        debug_assert_eq!(
+            self.app.graph.track_sample_rates.len(),
+            self.app.tracks.len()
+        );
+        debug_assert_eq!(self.app.graph.track_voice_lids.len(), self.app.tracks.len());
+        debug_assert_eq!(
+            self.app.graph.track_instrument_types.len(),
+            self.app.tracks.len()
+        );
+        debug_assert_eq!(self.app.graph.track_engine_ids.len(), self.app.tracks.len());
+        debug_assert_eq!(
+            self.app.graph.track_synth_node_ids.len(),
+            self.app.tracks.len()
+        );
+        debug_assert_eq!(
+            self.app.graph.track_gatepitch_node_ids.len(),
+            self.app.tracks.len()
+        );
+        debug_assert_eq!(
+            self.app.graph.effect_descriptors.len(),
+            self.app.tracks.len()
+        );
+        debug_assert_eq!(
+            self.app.graph.instrument_descriptors.len(),
+            self.app.tracks.len()
+        );
+        debug_assert_eq!(self.app.graph.record_armed.len(), self.app.tracks.len());
+        debug_assert_eq!(self.app.sampler_paths.len(), self.app.tracks.len());
     }
 
     fn initialize_instrument_slot(&mut self, track: usize, name: &str, manifest: &DGenManifest) {

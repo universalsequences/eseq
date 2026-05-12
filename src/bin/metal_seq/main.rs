@@ -50,6 +50,7 @@ use eseqlisp::editor::ViewMode;
 use eseqlisp::vm::Value;
 use eseqlisp::{BufferMode, Editor, HostCommand, HostEvent, Runtime};
 
+use sequencer::effects::ParamKind;
 use sequencer::engine;
 use sequencer::sequencer::{
     KeyboardTrigger, MidiFxPosition, SequencerState, StepParam, SwingResolution, Timebase,
@@ -95,6 +96,36 @@ fn editor_has_visible_buffer(editor: &Editor, name: &str) -> bool {
     })
 }
 
+fn reconciled_track_index(
+    stored_track: usize,
+    cursor_track: usize,
+    track_count: usize,
+) -> Option<usize> {
+    if track_count == 0 {
+        return None;
+    }
+    if stored_track < track_count {
+        Some(stored_track)
+    } else if cursor_track < track_count {
+        Some(cursor_track)
+    } else {
+        Some(track_count - 1)
+    }
+}
+
+fn current_track_for_app(app: &mut ui::App, current_track: &Arc<AtomicUsize>) -> Option<usize> {
+    let track = reconciled_track_index(
+        current_track.load(Ordering::Relaxed),
+        app.ui.cursor_track,
+        app.tracks.len(),
+    )?;
+    if current_track.load(Ordering::Relaxed) != track {
+        current_track.store(track, Ordering::Relaxed);
+    }
+    app.ui.cursor_track = track;
+    Some(track)
+}
+
 fn track_button_state_snapshot(state: &Arc<SequencerState>) -> Vec<(bool, bool)> {
     (0..state.active_track_count())
         .map(|track| {
@@ -122,6 +153,19 @@ fn map_string(
         Value::String(value) => Some(value.clone()),
         _ => None,
     })
+}
+
+fn map_bool(map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> bool {
+    map.get(key)
+        .and_then(|cell| match &*cell.borrow() {
+            Value::Bool(value) => Some(*value),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+fn param_change_needs_fx_rebuild(param: &sequencer::effects::ParamDescriptor) -> bool {
+    matches!(param.kind, ParamKind::Boolean | ParamKind::Enum { .. })
 }
 
 struct AgentDraftApplyResult {
@@ -203,7 +247,7 @@ fn sync_after_agent_instrument_apply(
     );
     *accumulator_names.lock().unwrap() = build_accumulator_names(app);
     sync_track_params(rt, app, state, track_index, selected_steps);
-    sync_fx_param_binding_fields(rt, app, state, track_index);
+    sync_fx_param_binding_fields(rt, app, state, track_index, selected_steps);
     rt.set_reactive(
         "SEQ",
         "step-has-plocks",
@@ -505,6 +549,19 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
             acc.wrapping_add(state.id)
                 .wrapping_add(state.generation.wrapping_mul(31))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconciled_track_index;
+
+    #[test]
+    fn reconciles_stale_current_track_against_track_count() {
+        assert_eq!(reconciled_track_index(2, 0, 4), Some(2));
+        assert_eq!(reconciled_track_index(7, 1, 4), Some(1));
+        assert_eq!(reconciled_track_index(7, 9, 4), Some(3));
+        assert_eq!(reconciled_track_index(0, 0, 0), None);
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -937,6 +994,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let host_commands_started = Instant::now();
         for command in editor.drain_host_commands() {
             if let HostCommand::Custom { name, payload } = command {
+                let _ = current_track_for_app(&mut app, &current_track);
                 match name.as_str() {
                     "audition-sample" => {
                         let path_str = extract_path_from_payload(&payload);
@@ -948,16 +1006,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             let path = Path::new(&path_str);
-                            let track = current_track.load(Ordering::Relaxed);
+                            let Some(track) = current_track_for_app(&mut app, &current_track)
+                            else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Add a track before auditioning samples".to_string(),
+                                ));
+                                continue;
+                            };
                             match sequencer::sampler::load_wav_buffer(lg_raw, path) {
                                 Ok(loaded) => {
                                     app.submit_sample_analysis(&loaded);
                                     let new_buffer_id = loaded.buffer_id;
+                                    let sample_rate = loaded.sample_rate;
                                     let new_name = loaded.name;
                                     register_waveform_sample(path);
-                                    app.graph_controller()
-                                        .send_buffer_to_all_voices(track, new_buffer_id);
+                                    app.graph_controller().send_sample_to_all_voices(
+                                        track,
+                                        new_buffer_id,
+                                        sample_rate,
+                                    );
                                     app.graph.track_buffer_ids[track] = new_buffer_id;
+                                    app.graph.track_sample_rates[track] = sample_rate;
                                     app.tracks[track] = new_name.clone();
                                     app.register_sample_path(&new_name, path.to_path_buf());
                                     if track < app.sampler_paths.len() {
@@ -1041,7 +1110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                             sync_track_params(rt, &app, &state, idx, &selected_steps);
-                            sync_fx_param_binding_fields(rt, &app, &state, idx);
+                            sync_fx_param_binding_fields(rt, &app, &state, idx, &selected_steps);
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -1062,7 +1131,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     },
                     "reanalyze-sample" => {
-                        let track = current_track.load(Ordering::Relaxed);
+                        let Some(track) = current_track_for_app(&mut app, &current_track) else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "No sample loaded on this track".to_string(),
+                            ));
+                            continue;
+                        };
                         let Some(path) = app
                             .sampler_paths
                             .get(track)
@@ -1078,9 +1152,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(loaded) => {
                                 app.submit_sample_analysis(&loaded);
                                 let new_buffer_id = loaded.buffer_id;
-                                app.graph_controller()
-                                    .send_buffer_to_all_voices(track, new_buffer_id);
+                                let sample_rate = loaded.sample_rate;
+                                app.graph_controller().send_sample_to_all_voices(
+                                    track,
+                                    new_buffer_id,
+                                    sample_rate,
+                                );
                                 app.graph.track_buffer_ids[track] = new_buffer_id;
+                                app.graph.track_sample_rates[track] = sample_rate;
                                 app.publish_sampler_analysis_runtime(track);
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(
@@ -1173,7 +1252,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     *accumulator_names.lock().unwrap() =
                                         build_accumulator_names(&app);
                                     sync_track_params(rt, &app, &state, idx, &selected_steps);
-                                    sync_fx_param_binding_fields(rt, &app, &state, idx);
+                                    sync_fx_param_binding_fields(
+                                        rt,
+                                        &app,
+                                        &state,
+                                        idx,
+                                        &selected_steps,
+                                    );
                                     rt.set_reactive(
                                         "SEQ",
                                         "step-has-plocks",
@@ -1503,8 +1588,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             editor.runtime_mut(),
                                             &app,
                                             track,
+                                            &selected_steps,
                                         );
                                     }
+                                    if param_change_needs_fx_rebuild(&desc) {
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "toggle-instrument-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            if let Some(param_idx) = param_idx {
+                                let track = current_track.load(Ordering::Relaxed);
+                                if let Some(desc) = app
+                                    .graph
+                                    .instrument_descriptors
+                                    .get(track)
+                                    .and_then(|d| d.params.get(param_idx))
+                                    .cloned()
+                                {
+                                    let slot = &app.state.pattern.instrument_slots[track];
+                                    let selected: Vec<usize> =
+                                        selected_steps.lock().unwrap().iter().copied().collect();
+                                    let default = if param_idx
+                                        < slot.num_params.load(Ordering::Relaxed) as usize
+                                    {
+                                        slot.defaults.get(param_idx)
+                                    } else {
+                                        desc.default
+                                    };
+                                    let current = selected
+                                        .iter()
+                                        .copied()
+                                        .min()
+                                        .and_then(|step| slot.plocks.get(step, param_idx))
+                                        .unwrap_or(default);
+                                    let next = desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                    if selected.is_empty() {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentParam {
+                                                track,
+                                                param_idx,
+                                                value: next,
+                                            },
+                                        );
+                                        sync_instrument_param_value_field(
+                                            editor.runtime_mut(),
+                                            &app,
+                                            track,
+                                            param_idx,
+                                        );
+                                    } else {
+                                        ui::apply_command(
+                                            &mut app,
+                                            ui::AppCommand::SetInstrumentPlockMulti {
+                                                track,
+                                                steps: selected,
+                                                param_idx,
+                                                value: next,
+                                            },
+                                        );
+                                    }
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
                         }
@@ -1529,12 +1684,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 (slot_idx, param_idx, value)
                             {
                                 let track = current_track.load(Ordering::Relaxed);
-                                let clamped = app
+                                let desc = app
                                     .graph
                                     .effect_descriptors
                                     .get(track)
                                     .and_then(|slots| slots.get(slot_idx))
                                     .and_then(|desc| desc.params.get(param_idx))
+                                    .cloned();
+                                let clamped = desc
+                                    .as_ref()
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
                                 ui::apply_command(
@@ -1554,6 +1712,220 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     slot_idx,
                                     param_idx,
                                 );
+                                if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "toggle-effect-param" => {
+                        if let Value::Map(ref map) = payload {
+                            let slot_idx =
+                                map.get("slot-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            let param_idx =
+                                map.get("param-idx").and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                });
+                            if let (Some(slot_idx), Some(param_idx)) = (slot_idx, param_idx) {
+                                let selected: Vec<usize> =
+                                    selected_steps.lock().unwrap().iter().copied().collect();
+                                if map_bool(map, "bus-fx") {
+                                    let bus_idx =
+                                        map.get("bus").and_then(|cell| match &*cell.borrow() {
+                                            Value::Number(n) => Some(*n as usize),
+                                            _ => None,
+                                        });
+                                    if let Some(bus_idx) = bus_idx {
+                                        let desc = app
+                                            .buses
+                                            .get(bus_idx)
+                                            .and_then(|bus| bus.effect_descriptors.get(slot_idx))
+                                            .and_then(|desc| desc.params.get(param_idx))
+                                            .cloned();
+                                        if let Some(desc) = desc {
+                                            let current = app
+                                                .buses
+                                                .get(bus_idx)
+                                                .and_then(|bus| bus.effect_slots.get(slot_idx))
+                                                .map(|slot| {
+                                                    let default = slot
+                                                        .defaults
+                                                        .get(param_idx)
+                                                        .copied()
+                                                        .unwrap_or(desc.default);
+                                                    selected
+                                                        .iter()
+                                                        .copied()
+                                                        .min()
+                                                        .and_then(|step| {
+                                                            slot.plocks
+                                                                .get(step)
+                                                                .and_then(|step_plocks| {
+                                                                    step_plocks.get(param_idx)
+                                                                })
+                                                                .copied()
+                                                                .flatten()
+                                                        })
+                                                        .unwrap_or(default)
+                                                })
+                                                .unwrap_or(desc.default);
+                                            let next =
+                                                desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                            if selected.is_empty() {
+                                                match app.set_bus_effect_param(
+                                                    bus_idx, slot_idx, param_idx, next,
+                                                ) {
+                                                    Ok(()) => {
+                                                        app.publish_bus_gate_runtime();
+                                                        *bus_state.lock().unwrap() =
+                                                            app.buses.clone();
+                                                        sync_bus_effect_param_value_field(
+                                                            editor.runtime_mut(),
+                                                            &app,
+                                                            bus_idx,
+                                                            slot_idx,
+                                                            param_idx,
+                                                        );
+                                                    }
+                                                    Err(error) => {
+                                                        editor.handle_host_event(
+                                                            HostEvent::Status(format!(
+                                                                "Error toggling bus effect param: {error}"
+                                                            )),
+                                                        );
+                                                        continue;
+                                                    }
+                                                }
+                                            } else if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                                if let Some(slot) =
+                                                    bus.effect_slots.get_mut(slot_idx)
+                                                {
+                                                    for step in selected {
+                                                        if step < slot.plocks.len()
+                                                            && param_idx < slot.plocks[step].len()
+                                                        {
+                                                            slot.plocks[step][param_idx] =
+                                                                Some(next);
+                                                        }
+                                                    }
+                                                    app.publish_bus_gate_runtime();
+                                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                                }
+                                            }
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                } else if map_bool(map, "midi-fx") {
+                                    let track = current_track.load(Ordering::Relaxed);
+                                    let chain = state.pattern.track_params[track].midi_fx_chain();
+                                    let desc = chain
+                                        .get(slot_idx)
+                                        .and_then(|name| {
+                                            sequencer::lisp_effect::load_midi_fx_descriptor(name)
+                                        })
+                                        .and_then(|desc| desc.params.get(param_idx).cloned());
+                                    if let Some(desc) = desc {
+                                        if let Some(slot) = state
+                                            .pattern
+                                            .midi_fx_slots
+                                            .get(track)
+                                            .and_then(|slots| slots.get(slot_idx))
+                                        {
+                                            let default = slot.defaults.get(param_idx);
+                                            let current = selected
+                                                .iter()
+                                                .copied()
+                                                .min()
+                                                .and_then(|step| slot.plocks.get(step, param_idx))
+                                                .unwrap_or(default);
+                                            let next =
+                                                desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                            if selected.is_empty() {
+                                                slot.defaults.set(param_idx, next);
+                                                sync_midi_fx_param_value_field(
+                                                    editor.runtime_mut(),
+                                                    &state,
+                                                    track,
+                                                    slot_idx,
+                                                    param_idx,
+                                                );
+                                            } else {
+                                                for step in selected {
+                                                    slot.plocks.set(step, param_idx, next);
+                                                }
+                                            }
+                                            state.publish_scheduler_snapshot();
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                } else {
+                                    let track = current_track.load(Ordering::Relaxed);
+                                    let desc = app
+                                        .graph
+                                        .effect_descriptors
+                                        .get(track)
+                                        .and_then(|slots| slots.get(slot_idx))
+                                        .and_then(|desc| desc.params.get(param_idx))
+                                        .cloned();
+                                    if let Some(desc) = desc {
+                                        let chain = &state.pattern.effect_chains[track];
+                                        let current = chain
+                                            .get(slot_idx)
+                                            .map(|slot| {
+                                                let default = slot.defaults.get(param_idx);
+                                                selected
+                                                    .iter()
+                                                    .copied()
+                                                    .min()
+                                                    .and_then(|step| {
+                                                        slot.plocks.get(step, param_idx)
+                                                    })
+                                                    .unwrap_or(default)
+                                            })
+                                            .unwrap_or(desc.default);
+                                        let next =
+                                            desc.clamp(if current > 0.5 { 0.0 } else { 1.0 });
+                                        if selected.is_empty() {
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::SetEffectParam {
+                                                    track,
+                                                    slot_idx,
+                                                    param_idx,
+                                                    value: next,
+                                                },
+                                            );
+                                            sync_track_effect_param_value_field(
+                                                editor.runtime_mut(),
+                                                &state,
+                                                &app.graph.effect_descriptors,
+                                                track,
+                                                slot_idx,
+                                                param_idx,
+                                            );
+                                        } else {
+                                            ui::apply_command(
+                                                &mut app,
+                                                ui::AppCommand::SetEffectPlockMulti {
+                                                    track,
+                                                    slot_idx,
+                                                    steps: selected,
+                                                    param_idx,
+                                                    value: next,
+                                                },
+                                            );
+                                        }
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
                             }
                         }
                     }
@@ -1627,6 +1999,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             value: stored,
                                         },
                                     );
+                                    if param_idx == 2 || param_idx == 3 {
+                                        sync_sampler_selection_time_fields(
+                                            editor.runtime_mut(),
+                                            &app,
+                                            track,
+                                            &selected_steps,
+                                        );
+                                    }
                                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
                                 }
@@ -1803,7 +2183,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_track_mixer_state(rt, &app, &state);
                                     if track == current_track.load(Ordering::Relaxed) {
                                         sync_track_params(rt, &app, &state, track, &selected_steps);
-                                        sync_fx_param_binding_fields(rt, &app, &state, track);
+                                        sync_fx_param_binding_fields(
+                                            rt,
+                                            &app,
+                                            &state,
+                                            track,
+                                            &selected_steps,
+                                        );
                                     }
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
@@ -1853,7 +2239,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 sync_track_mixer_state(rt, &app, &state);
                                 if track == current_track.load(Ordering::Relaxed) {
                                     sync_track_params(rt, &app, &state, track, &selected_steps);
-                                    sync_fx_param_binding_fields(rt, &app, &state, track);
+                                    sync_fx_param_binding_fields(
+                                        rt,
+                                        &app,
+                                        &state,
+                                        track,
+                                        &selected_steps,
+                                    );
                                 }
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
@@ -2447,6 +2839,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let (Some(bus_idx), Some(slot_idx), Some(param_idx), Some(value)) =
                                 (bus_idx, slot_idx, param_idx, value)
                             {
+                                let desc = app
+                                    .buses
+                                    .get(bus_idx)
+                                    .and_then(|bus| bus.effect_descriptors.get(slot_idx))
+                                    .and_then(|desc| desc.params.get(param_idx))
+                                    .cloned();
                                 match app.set_bus_effect_param(bus_idx, slot_idx, param_idx, value)
                                 {
                                     Ok(()) => {
@@ -2459,6 +2857,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             slot_idx,
                                             param_idx,
                                         );
+                                        if desc.as_ref().is_some_and(param_change_needs_fx_rebuild)
+                                        {
+                                            fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
                                     }
                                     Err(error) => editor.handle_host_event(HostEvent::Status(
                                         format!("Error setting bus effect param: {error}"),
@@ -2767,12 +3170,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             {
                                 let track = current_track.load(Ordering::Relaxed);
                                 let chain = state.pattern.track_params[track].midi_fx_chain();
-                                let clamped = chain
+                                let desc = chain
                                     .get(slot_idx)
                                     .and_then(|name| {
                                         sequencer::lisp_effect::load_midi_fx_descriptor(name)
                                     })
-                                    .and_then(|desc| desc.params.get(param_idx).cloned())
+                                    .and_then(|desc| desc.params.get(param_idx).cloned());
+                                let clamped = desc
+                                    .as_ref()
                                     .map(|p| value.clamp(p.min, p.max))
                                     .unwrap_or(value);
                                 if let Some(slot) = state
@@ -2790,6 +3195,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         slot_idx,
                                         param_idx,
                                     );
+                                    if desc.as_ref().is_some_and(param_change_needs_fx_rebuild) {
+                                        fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    }
                                 }
                             }
                         }
@@ -3722,6 +4131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     idx,
                                     num_tracks,
                                     &app.graph.track_buffer_ids,
+                                    &app.graph.track_sample_rates,
                                     &app.tracks,
                                     &app.graph.track_instrument_types,
                                 );
@@ -3805,7 +4215,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     sync_track_params(rt, &app, &state, ct, &selected_steps);
                                     sync_track_params_elapsed = started.elapsed();
                                     let started = Instant::now();
-                                    sync_fx_param_binding_fields(rt, &app, &state, ct);
+                                    sync_fx_param_binding_fields(
+                                        rt,
+                                        &app,
+                                        &state,
+                                        ct,
+                                        &selected_steps,
+                                    );
                                     sync_fx_bindings_elapsed = started.elapsed();
                                     let started = Instant::now();
                                     rt.set_reactive(
@@ -3881,6 +4297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             track,
                             app.tracks.len(),
                             &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
                             &app.tracks,
                             &app.graph.track_instrument_types,
                         ) {
@@ -3904,6 +4321,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let new_idx = app.state.clone_pattern(
                             num_tracks,
                             &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
                             &app.tracks,
                             &app.graph.track_instrument_types,
                         );
@@ -3927,6 +4345,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(sample_ids) = app.state.delete_pattern(
                             num_tracks,
                             &app.graph.track_buffer_ids,
+                            &app.graph.track_sample_rates,
                             &app.tracks,
                             &app.graph.track_instrument_types,
                         ) {
@@ -3967,7 +4386,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                             sync_track_params(rt, &app, &state, ct, &selected_steps);
-                            sync_fx_param_binding_fields(rt, &app, &state, ct);
+                            sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -4986,7 +5405,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                             *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                             sync_track_params(rt, &app, &state, ct, &selected_steps);
-                            sync_fx_param_binding_fields(rt, &app, &state, ct);
+                            sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
                             rt.set_reactive(
                                 "SEQ",
                                 "step-has-plocks",
@@ -5045,7 +5464,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
 
         // 2. Sync reactive state AFTER events
-        let ct = current_track.load(Ordering::Relaxed);
+        let ct = current_track_for_app(&mut app, &current_track).unwrap_or(0);
         sync_watched_sampler_voices(
             &app,
             ct,
@@ -5137,7 +5556,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
-                sync_fx_param_binding_fields(rt, &app, &state, ct);
+                sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
                 rt.set_reactive(
                     "SEQ",
                     "step-has-plocks",
@@ -5331,7 +5750,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_track_params(rt, &app, &state, ct, &selected_steps);
                 sync_track_params_elapsed = started.elapsed();
                 let started = Instant::now();
-                sync_fx_param_binding_fields(rt, &app, &state, ct);
+                sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
                 sync_fx_bindings_elapsed = started.elapsed();
                 let started = Instant::now();
                 rt.set_reactive(
@@ -5397,7 +5816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sync_bus_peak_fields(rt, &cached_bus_peak_levels);
                     *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
                     sync_track_params(rt, &app, &state, ct, &selected_steps);
-                    sync_fx_param_binding_fields(rt, &app, &state, ct);
+                    sync_fx_param_binding_fields(rt, &app, &state, ct, &selected_steps);
                     rt.set_reactive(
                         "SEQ",
                         "selected-steps",
