@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod audition;
 pub mod catalog;
+pub mod dsp_validate;
 pub mod network;
 pub mod parse;
 pub mod protocol;

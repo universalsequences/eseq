@@ -62,6 +62,10 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
         .eval_str(
             r#"
             (def defsynth-ui (body) body)
+            (def synth-ui-current-inst (dict :synth '()))
+            (def synth-ui-current-name "validation")
+            (def custom-ui-current-kind "instrument")
+            (def custom-ui-selected-section 0)
             (def ui-section (title body) body)
             (def ui-panel (title section body) body)
             (def ui-panel-c (title section body) body)
@@ -104,10 +108,18 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def ui-lego-knob-s (section name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-option (name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-text-row-3 (a b c) (h-stack a b c))
             (def ui-lego-text-row-4 (a b c d) (h-stack a b c d))
+            (def inst-param (inst name) (dict :name name :value 0 :min 0 :max 1))
+            (def inst-base-note-param (inst) (dict :name "base_note" :value 0 :min -48 :max 48))
+            (def custom-ui-current-scope () (dict :kind custom-ui-current-kind :name synth-ui-current-name :inst synth-ui-current-inst))
+            (def custom-ui-select-section-in-scope (scope section) section)
+            (def custom-ui-set-param-in-scope (scope p value) value)
+            (def custom-ui-set-param-by-name-in-scope (scope name value) value)
             "#,
         )
         .map_err(|error| format!("ui validation runtime setup failed: {error:?}"))?;
@@ -199,12 +211,12 @@ fn collect_ui_validation_refs(
     match head.as_str() {
         "defsynth-ui" => *defsynth_ui_count += 1,
         "param" | "ui-param-control" | "ui-param-knob" | "ui-param-knob-c" | "ui-lego-knob"
-        | "ui-lego-num" | "ui-lego-row" => {
+        | "ui-lego-num" | "ui-lego-option" | "ui-lego-row" => {
             if let Some(name) = items.get(1).and_then(ui_param_ref_name) {
                 referenced_params.insert(name);
             }
         }
-        "ui-lego-knob-s" | "ui-lego-num-s" => {
+        "ui-lego-knob-s" | "ui-lego-num-s" | "ui-lego-option-s" => {
             if let Some(name) = items.get(2).and_then(ui_param_ref_name) {
                 referenced_params.insert(name);
             }
@@ -234,6 +246,21 @@ fn collect_ui_validation_refs(
             }
         }
         "ui-adsr-number-s" => {
+            if let Some(name) = items.get(2).and_then(ui_param_ref_name) {
+                referenced_params.insert(name);
+            }
+        }
+        "inst-param" => {
+            if let Some(name) = items.get(2).and_then(ui_param_ref_name) {
+                referenced_params.insert(name);
+            }
+        }
+        "custom-ui-current-param" => {
+            if let Some(name) = items.get(1).and_then(ui_param_ref_name) {
+                referenced_params.insert(name);
+            }
+        }
+        "custom-ui-param-in-scope" | "custom-ui-set-param-by-name-in-scope" => {
             if let Some(name) = items.get(2).and_then(ui_param_ref_name) {
                 referenced_params.insert(name);
             }
@@ -280,6 +307,7 @@ mod tests {
                 .map(|name| DGenParam {
                     name: name.to_string(),
                     cell_id: 0,
+                    cell_span: 4,
                     default: 0.0,
                     min: 0.0,
                     max: 1.0,
@@ -418,5 +446,113 @@ mod tests {
             &manifest,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn validates_dropdown_ui_and_inst_param_refs() {
+        let manifest = manifest_with_params(&["filter_model", "cutoff", "resonance"]);
+
+        validate_instrument_ui_source(
+            r#"
+            (def filter-model-label (value)
+              (if (= value 1) "ladder" "svf"))
+
+            (def filter-model-value (label)
+              (if (= label "ladder") 1 0))
+
+            (def filter-model-dropdown (section)
+              (let ((p (inst-param synth-ui-current-inst "filter_model")))
+                (if p
+                  (let ((scope (custom-ui-current-scope)))
+                    (subtree :key (str "filter-model-dropdown-" synth-ui-current-name)
+                      (v-stack :width 5.0 :height 1.12 :gap 0.08 :align :start
+                        (label "model" :font-size 8.2 :width 5.0 :color :dim :bg :transparent)
+                        (dropdown :value (filter-model-label (get p :value))
+                          :options '("svf" "ladder")
+                          :width 5.6 :height 0.78 :font-size 8.0
+                          :on-change (lambda (v)
+                            (do
+                              (custom-ui-select-section-in-scope scope section)
+                              (custom-ui-set-param-in-scope scope p (filter-model-value v))))))))
+                  (label "missing: filter_model" :font-size 9 :color :red :bg :transparent))))
+
+            (defsynth-ui
+              (h-stack :width :fill :gap 0.35 :align :stretch
+                (ui-lego-column-full
+                  (ui-control-block-medium-s "FILTER" (ui-accent-green) 1
+                    (h-stack :gap 0.32 :align :start
+                      (filter-model-dropdown 1)
+                      (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0)
+                      (ui-lego-knob-s 1 "resonance" "res" 4.8 (ui-accent-green) 2))))))
+            "#,
+            &manifest,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_inst_param_refs_in_dropdown_ui() {
+        let manifest = manifest_with_params(&["cutoff", "resonance"]);
+
+        let err = validate_instrument_ui_source(
+            r#"
+            (def filter-model-dropdown ()
+              (let ((p (inst-param synth-ui-current-inst "filter_modle")))
+                (if p
+                  (dropdown :value "svf" :options '("svf" "ladder"))
+                  (label "missing" :font-size 9 :color :red :bg :transparent))))
+
+            (defsynth-ui
+              (ui-lego-column-full
+                (ui-control-block-medium-s "FILTER" (ui-accent-green) 1
+                  (h-stack
+                    (filter-model-dropdown)
+                    (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0)))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("filter_modle"));
+        assert!(err.contains("cutoff"));
+    }
+
+    #[test]
+    fn validates_lego_option_helper_refs() {
+        let manifest = manifest_with_params(&["osc1_wave", "osc2_wave", "cutoff"]);
+
+        validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (h-stack :width :fill :gap 0.35 :align :stretch
+                (ui-lego-column-full
+                  (ui-control-block-medium-s "OSC" (ui-accent-cyan) 0
+                    (h-stack :gap 0.32 :align :start
+                      (ui-lego-option-s 0 "osc1_wave" "wave" 5.2 '("saw" "pulse" "sine" "triangle") (ui-accent-cyan))
+                      (ui-lego-option-s 0 "osc2_wave" "wave" 5.2 '("saw" "pulse" "sine" "triangle") (ui-accent-violet))
+                      (ui-lego-knob-s 0 "cutoff" "cut" 4.8 (ui-accent-green) 0))))))
+            "#,
+            &manifest,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_lego_option_helper_refs() {
+        let manifest = manifest_with_params(&["osc1_wave"]);
+
+        let err = validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (ui-lego-column-full
+                (ui-control-block-medium-s "OSC" (ui-accent-cyan) 0
+                  (ui-lego-option-s 0 "osc1_wvae" "wave" 5.2 '("saw" "pulse") (ui-accent-cyan)))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("osc1_wvae"));
+        assert!(err.contains("osc1_wave"));
     }
 }

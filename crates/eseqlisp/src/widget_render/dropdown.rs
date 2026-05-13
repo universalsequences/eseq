@@ -176,7 +176,32 @@ fn get_options(props: &HashMap<String, Value>) -> Vec<String> {
     }
 }
 
+fn get_numeric_prop(props: &HashMap<String, Value>, key: &str) -> Option<f64> {
+    match props.get(key) {
+        Some(Value::Number(value)) => Some(*value),
+        Some(Value::Bool(true)) => Some(1.0),
+        Some(Value::Bool(false)) => Some(0.0),
+        Some(Value::ReactiveRef { slot, .. }) => Some(crate::reactive::read_float_slot(slot)),
+        _ => None,
+    }
+}
+
+fn get_selected_from_index(props: &HashMap<String, Value>) -> Option<String> {
+    let options = get_options(props);
+    if options.is_empty() {
+        return None;
+    }
+    let value = get_numeric_prop(props, "value-index")?;
+    let offset = get_numeric_prop(props, "value-index-offset").unwrap_or(0.0);
+    let idx = (value - offset).round() as isize;
+    let idx = idx.clamp(0, options.len().saturating_sub(1) as isize) as usize;
+    options.get(idx).cloned()
+}
+
 fn get_selected(props: &HashMap<String, Value>) -> String {
+    if let Some(selected) = get_selected_from_index(props) {
+        return selected;
+    }
     match props.get("value") {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Keyword(k)) => k.clone(),
@@ -357,7 +382,19 @@ impl WidgetDefinition for DropdownWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["options", "value", "width", "height", "font-size"]
+        &[
+            "options",
+            "value",
+            "value-index",
+            "value-index-offset",
+            "width",
+            "height",
+            "font-size",
+        ]
+    }
+
+    fn bindable_props(&self) -> &'static [&'static str] {
+        &["value", "value-index", "value-index-offset"]
     }
 
     fn renders_own_focus(&self) -> bool {
@@ -377,19 +414,27 @@ impl WidgetDefinition for DropdownWidget {
             .unwrap_or(ctx.inherited_font_size);
         let props = props_from_node(node);
         let selected = get_selected(&props);
+        let options = get_options(&props);
         if ctx.text_measurer.is_some() {
             if !selected.is_empty() {
                 cache_text_widths(&selected, font_size, ctx);
             }
             cache_text_widths("…", font_size, ctx);
-            for option in get_options(&props) {
+            for option in &options {
                 cache_text_widths(&option, font_size, ctx);
             }
         }
         let height = get_prop_num(node, "height").map(f64_to_f32).unwrap_or(1.5);
         let explicit_width = get_prop_num(node, "width").map(f64_to_f32);
         let width = explicit_width.unwrap_or(10.0);
-        let selected_width = text_width_cells(&selected, font_size);
+        let selected_width = if props.contains_key("value-index") {
+            options
+                .iter()
+                .map(|option| text_width_cells(option, font_size))
+                .fold(text_width_cells(&selected, font_size), f32::max)
+        } else {
+            text_width_cells(&selected, font_size)
+        };
         let chevron_width = height * 0.48 * 1.8;
         let min_width =
             PADDING_H + selected_width + TEXT_CHEVRON_GAP + chevron_width + CHEVRON_RIGHT_PAD;
@@ -1026,3 +1071,88 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     return float4(col.rgb, col.a * mask);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm::BindingKind;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn string_list(values: &[&str]) -> Value {
+        Value::List(
+            values
+                .iter()
+                .map(|value| Rc::new(RefCell::new(Value::String((*value).to_string()))))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn selected_label_can_follow_index_value() {
+        let mut props = HashMap::new();
+        props.insert("options".to_string(), string_list(&["saw", "pulse", "tri"]));
+        props.insert("value-index".to_string(), Value::Number(2.0));
+
+        assert_eq!(get_selected(&props), "tri");
+    }
+
+    #[test]
+    fn selected_label_can_follow_reactive_index_value() {
+        let slot = crate::reactive::reactive_float_slot("TEST_DROPDOWN", "wave");
+        crate::reactive::write_float_slot("TEST_DROPDOWN", "wave", 1.0);
+
+        let mut props = HashMap::new();
+        props.insert("options".to_string(), string_list(&["saw", "pulse", "tri"]));
+        props.insert(
+            "value-index".to_string(),
+            Value::ReactiveRef {
+                namespace: "TEST_DROPDOWN".to_string(),
+                field: "wave".to_string(),
+                index: None,
+                kind: BindingKind::Float,
+                slot,
+            },
+        );
+
+        assert_eq!(get_selected(&props), "pulse");
+        crate::reactive::write_float_slot("TEST_DROPDOWN", "wave", 2.0);
+        assert_eq!(get_selected(&props), "tri");
+    }
+
+    #[test]
+    fn selected_label_applies_index_offset() {
+        let mut props = HashMap::new();
+        props.insert("options".to_string(), string_list(&["svf", "ladder"]));
+        props.insert("value-index".to_string(), Value::Number(2.0));
+        props.insert("value-index-offset".to_string(), Value::Number(1.0));
+
+        assert_eq!(get_selected(&props), "ladder");
+    }
+
+    #[test]
+    fn value_index_accepts_reactive_binding_at_widget_construction() {
+        let slot = crate::reactive::reactive_float_slot("TEST_DROPDOWN", "wave_construct");
+        let widget = crate::widgets::build_widget(
+            "dropdown",
+            vec![
+                Value::Keyword("value-index".to_string()),
+                Value::ReactiveRef {
+                    namespace: "TEST_DROPDOWN".to_string(),
+                    field: "wave_construct".to_string(),
+                    index: None,
+                    kind: BindingKind::Float,
+                    slot,
+                },
+                Value::Keyword("options".to_string()),
+                string_list(&["saw", "pulse"]),
+            ],
+        );
+
+        let Value::Map(props) = widget else {
+            panic!("dropdown with bound value-index should construct a widget map");
+        };
+        assert!(props.contains_key("type"));
+        assert!(props.contains_key("value-index"));
+    }
+}

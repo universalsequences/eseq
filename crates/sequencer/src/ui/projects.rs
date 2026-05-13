@@ -35,6 +35,11 @@ fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffec
             .iter()
             .map(|param| param.node_param_idx)
             .collect(),
+        param_node_spans: desc
+            .params
+            .iter()
+            .map(|param| param.node_param_span.max(1))
+            .collect(),
     }
 }
 
@@ -241,6 +246,11 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         defaults,
         plocks,
         param_node_indices: desc.params.iter().map(|p| p.node_param_idx).collect(),
+        param_node_spans: desc
+            .params
+            .iter()
+            .map(|p| p.node_param_span.max(1))
+            .collect(),
     }
 }
 
@@ -333,6 +343,7 @@ fn project_bus_pattern_snapshot_from_ui(
                 defaults: Vec::new(),
                 plocks: plocks.clone(),
                 param_node_indices: Vec::new(),
+                param_node_spans: Vec::new(),
             })
             .collect(),
     }
@@ -1399,6 +1410,7 @@ impl App {
                                     defaults: Vec::new(),
                                     plocks: vec![Vec::new(); MAX_STEPS],
                                     param_node_indices: Vec::new(),
+                                    param_node_spans: Vec::new(),
                                 }
                             });
                         if saved_slot.num_params >= 4 {
@@ -1428,6 +1440,11 @@ impl App {
                                     .iter()
                                     .map(|p| p.node_param_idx)
                                     .collect(),
+                                param_node_spans: sampler_desc
+                                    .params
+                                    .iter()
+                                    .map(|p| p.node_param_span.max(1))
+                                    .collect(),
                             }
                         }
                     } else {
@@ -1438,6 +1455,7 @@ impl App {
                                 defaults: Vec::new(),
                                 plocks: vec![Vec::new(); MAX_STEPS],
                                 param_node_indices: Vec::new(),
+                                param_node_spans: Vec::new(),
                             }
                         });
                         if slot.num_params == 0 {
@@ -1599,6 +1617,7 @@ mod tests {
             kind: crate::effects::ParamKind::Continuous { unit: None },
             scaling: crate::effects::ParamScaling::Linear,
             node_param_idx,
+            node_param_span: 1,
             host_control: None,
         }
     }
@@ -1663,6 +1682,7 @@ mod tests {
             defaults: vec![0.42],
             plocks: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![9],
+            param_node_spans: vec![1],
         };
         let mut project = minimal_project_with_effect_slots(
             vec![Some("custom-fx".to_string())],
@@ -1698,6 +1718,7 @@ mod tests {
             defaults: vec![0.24],
             plocks: vec![vec![None]; MAX_STEPS],
             param_node_indices: vec![11],
+            param_node_spans: vec![1],
         };
         let mut project = minimal_project_with_effect_slots(
             vec![Some("custom-fx".to_string())],
@@ -1740,6 +1761,7 @@ mod tests {
                 crate::voice_modulator::MOD_PARAM_BASE,
                 crate::voice_modulator::MOD_PARAM_BASE + 1,
             ],
+            param_node_spans: vec![1, 1, 1, 1],
         };
 
         let desc = crate::effects::EffectDescriptor {

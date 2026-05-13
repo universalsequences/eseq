@@ -352,6 +352,9 @@
       (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option")
       (dict :param-idx (get p :idx) :label label))))
 
+(def custom-ui-option-index (options label)
+  (nth (filter |idx| (= (nth options idx) label) (range (len options))) 0))
+
 (def fx-set-effect-value (fx p v)
   (do
     (fx-clear-selected-effect)
@@ -1032,6 +1035,42 @@
             :text-align :left
             :width width :height 0.68
             :on-change (custom-ui-param-change-callback-s section p))))
+      (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-option (name title width options accent)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
+        (v-stack :width width :height 1.12 :gap 0.08 :align :start
+          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+          (dropdown :value-index (fx-param-value p)
+            :value-index-offset (get p :min)
+            :options options
+            :width width :height 0.78 :font-size 8.0
+            :on-change (lambda (v)
+              (custom-ui-set-param-in-scope
+                (custom-ui-current-scope)
+                p
+                (+ (get p :min) (custom-ui-option-index options v)))))))
+      (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-option-s (section name title width options accent)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
+        (v-stack :width width :height 1.12 :gap 0.08 :align :start
+          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+          (dropdown :value-index (fx-param-value p)
+            :value-index-offset (get p :min)
+            :options options
+            :width width :height 0.78 :font-size 8.0
+            :on-change (lambda (v)
+              (do
+                (custom-ui-select-section-in-scope (custom-ui-current-scope) section)
+                (custom-ui-set-param-in-scope
+                  (custom-ui-current-scope)
+                  p
+                  (+ (get p :min) (custom-ui-option-index options v))))))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-row (name title decimals unit accent)

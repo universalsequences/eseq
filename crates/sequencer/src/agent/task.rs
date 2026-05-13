@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use super::actions::{AgentAppAction, AgentSessionContext};
 use super::audition::{audition_feedback, audition_loaded_instrument};
+use super::dsp_validate::validate_instrument_dsp_source;
 use super::network::{AgentNetworkClient, AgentTurnResult};
 use super::parse::{instrument_artifacts, last_dgenlisp_block, InstrumentArtifacts};
 use super::providers::{AgentMessage, AgentMessageRole};
@@ -353,6 +354,9 @@ fn create_instrument_artifact(
     dsp_source: String,
     ui_source: String,
 ) -> Result<String, String> {
+    validate_instrument_dsp_source(&dsp_source)
+        .map_err(|error| format!("dsp.lisp validation error:\n{error}"))?;
+
     let compile_result =
         crate::lisp_effect::compile_and_load_instrument(&dsp_source, store.sample_rate())
             .map_err(|error| format!("compile error:\n{error}"))?;
@@ -445,6 +449,19 @@ fn run_instrument_pipeline(
     id: ConvId,
     artifacts: InstrumentArtifacts,
 ) -> PipelineOutcome {
+    if let Err(error) = validate_instrument_dsp_source(&artifacts.dsp_source) {
+        eprintln!(
+            "[agent] dsp validation failed conv={id}: {error}\n[agent-source failed conv={id} BEGIN]\n{}\n[agent-source failed conv={id} END]",
+            artifacts.dsp_source
+        );
+        return retry_or_fail(
+            store,
+            id,
+            format!("dsp.lisp validation error:\n{error}"),
+            |state, text| state.last_compile_error = Some(text),
+        );
+    }
+
     let compile_result = match crate::lisp_effect::compile_and_load_instrument(
         &artifacts.dsp_source,
         store.sample_rate(),

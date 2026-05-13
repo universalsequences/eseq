@@ -2303,6 +2303,7 @@ impl GraphController<'_> {
                 },
                 scaling: crate::effects::ParamScaling::Linear,
                 node_param_idx: (lisp_effect::HEADER_SLOTS + dest.source_cell_id) as u32,
+                node_param_span: 1,
                 host_control: None,
             });
             inst_desc.params.push(crate::effects::ParamDescriptor {
@@ -2325,6 +2326,7 @@ impl GraphController<'_> {
                 },
                 scaling: crate::effects::ParamScaling::Linear,
                 node_param_idx: (lisp_effect::HEADER_SLOTS + dest.depth_cell_id) as u32,
+                node_param_span: 1,
                 host_control: None,
             });
         }

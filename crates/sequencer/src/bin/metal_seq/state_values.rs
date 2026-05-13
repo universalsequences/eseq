@@ -7021,6 +7021,127 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_lisp_lays_out_analog_bread_and_butter_lfo_column() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let analog_ui = std::fs::read_to_string("instruments/analog-bread-and-butter/ui.lisp")
+            .expect("read analog bread-and-butter ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/analog-bread-and-butter/ui.lisp".to_string(),
+            analog_ui,
+        )));
+        let mut analog_inst = test_instrument_map();
+        analog_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("lfo2_wave", 0, 1.0, 0.0, 3.0)),
+                Value::Map(test_param_map("lfo2_rate_hz", 1, 0.21, 0.03, 18.0)),
+                Value::Map(test_param_map("lfo2_to_f1", 2, 35.0, 0.0, 2200.0)),
+                Value::Map(test_param_map("lfo2_to_f2", 3, 15.0, 0.0, 2200.0)),
+                Value::Map(test_param_map("output_gain", 4, 0.28, 0.0, 1.0)),
+                Value::Map(test_param_map("glide_ms", 5, 0.0, 0.0, 500.0)),
+                Value::Map(test_param_map("vibrato", 6, 0.0, 0.0, 0.12)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(analog_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load analog custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("analog bread-and-butter fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("analog bread-and-butter layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        for suffix in ["lfo2_rate_hz", "lfo2_to_f2", "output_gain"] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
     fn minimoog_lad2_filter_controls_select_filter_envelope() {
         fn find_stable_key_suffix<'a>(
             node: &'a eseqlisp::layout::LayoutNode,

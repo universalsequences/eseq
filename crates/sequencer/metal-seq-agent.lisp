@@ -245,13 +245,13 @@
       (agent-message-list)
       (agent-draft-actions)
       (box :key "agent-composer"
-           :width :fill
-           :padding 0.35
-           :corner-radius 14
-           :background-color :button-ghost-bg
-           :border-width 1
-           :border-color :dropdown-menu-border
-           :align :stretch
+        :width :fill
+        :padding 0.65
+        :corner-radius 34
+        :background-color :button-ghost-bg
+        :border-width 1
+        :border-color :dropdown-menu-border
+        :align :stretch
         (v-stack :width :fill :gap 0.25
           (textbox
             :key "agent-prompt-input"
@@ -265,9 +265,10 @@
             :on-change (lambda (v) (set! agent-prompt v)))
           (box :flex 1)
           (h-stack :key "agent-composer-actions"
-                   :width :fill
-                   :gap 0.5
-                   :align :end
+            :padding 0.5
+            :width :fill
+            :gap 0.5
+            :align :end
             (dropdown
               :key "agent-model-select"
               :value (agent-current-model)
@@ -285,12 +286,14 @@
                 :on-click |x y r| (if (> agent-current-conv 0) (agent/cancel agent-current-conv) nil))
               (box :width 0.0 :height 0.0))
             (box :key "agent-submit"
-                 :width 3.4
-                 :height 3.4
-                 :h-align :center
-                 :v-align :end
-                 :on-click |x y r| (agent-send-current)
-              (agent-submit-icon :active (if (= agent-prompt "") 0 1)))))))))
+              :width 3.4
+              :height 1.34
+              :h-align :center
+              :v-align :end
+              :on-click |x y r| (agent-send-current)
+              (agent-submit-icon
+                :on-click |x y r| (agent-send-current)
+                :active (if (= agent-prompt "") 0 1)))))))))
 
 (effect-buffer "*agent-artifacts*"
   (let ((agent-generation AGENT.generation))

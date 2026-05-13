@@ -315,6 +315,7 @@ fn resolve_effect_params(
             });
         }
     }
+    params.sort_by_key(|param| (param.logical_id, param.idx));
     params
 }
 
@@ -352,6 +353,10 @@ fn resolve_instrument_params(
         }
         params.push(ScheduledInstrumentParam { target, idx, value });
     }
+    params.sort_by_key(|param| match param.target {
+        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+    });
     params
 }
 

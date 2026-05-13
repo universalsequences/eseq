@@ -1286,7 +1286,9 @@ unsafe fn dispatch_effect_chain_for_track(
     lg: *mut LiveGraph,
     effect_params: &[ScheduledEffectParam],
 ) {
-    for param in effect_params {
+    let mut sorted_params = effect_params.iter().collect::<Vec<_>>();
+    sorted_params.sort_by_key(|param| (param.logical_id, param.idx));
+    for param in sorted_params {
         params_push_wrapper(
             lg,
             ParamMsg {
@@ -1345,7 +1347,12 @@ unsafe fn dispatch_instrument_params_to_voice(
     modulator_id: u64,
     instrument_params: &[ScheduledInstrumentParam],
 ) {
-    for param in instrument_params {
+    let mut sorted_params = instrument_params.iter().collect::<Vec<_>>();
+    sorted_params.sort_by_key(|param| match param.target {
+        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+    });
+    for param in sorted_params {
         let (logical_id, idx) = match param.target {
             ScheduledInstrumentParamTarget::Synth => (synth_id, param.idx),
             ScheduledInstrumentParamTarget::Modulator => (modulator_id, param.idx),
@@ -1370,7 +1377,9 @@ unsafe fn dispatch_instrument_defaults_to_voice(
 ) {
     let slot = &state.pattern.instrument_slots[track_idx];
     let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
-    for param_idx in 0..num_params {
+    let mut param_indices = (0..num_params).collect::<Vec<_>>();
+    param_indices.sort_by_key(|param_idx| slot.resolve_node_idx(*param_idx));
+    for param_idx in param_indices {
         let idx = slot.resolve_node_idx(param_idx);
         let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
         let logical_id = if is_mod_param { modulator_id } else { synth_id };
@@ -1532,7 +1541,14 @@ unsafe fn dispatch_bus_effect_params_at_step(
             continue;
         }
         let num_params = slot.num_params as usize;
-        for param_idx in 0..num_params {
+        let mut param_indices = (0..num_params).collect::<Vec<_>>();
+        param_indices.sort_by_key(|param_idx| {
+            slot.param_node_indices
+                .get(*param_idx)
+                .copied()
+                .unwrap_or(*param_idx as u32)
+        });
+        for param_idx in param_indices {
             let idx = slot
                 .param_node_indices
                 .get(param_idx)

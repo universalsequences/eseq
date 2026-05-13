@@ -1,4 +1,3 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use eseqlisp::backend::Backend;
 use eseqlisp::metal_backend::MetalBackend;
 use eseqlisp::{Editor, EditorConfig, Runtime};
@@ -22,8 +21,11 @@ pub(crate) fn create_editor_and_backend(
 
     reload_custom_instrument_ui(&mut editor);
     let _ = editor.open_or_create_file_buffer("metal-seq-grid.lisp");
-    editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
-    editor.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+    let grid_source = editor.active_buffer().text();
+    editor
+        .runtime_mut()
+        .eval_str(&grid_source)
+        .map_err(|error| format!("failed to load metal-seq-grid.lisp: {error:?}"))?;
     editor.refresh_runtime_side_effects();
     log_lisp_ui_load_diagnostics(&mut editor);
     reload_custom_instrument_ui(&mut editor);

@@ -1389,10 +1389,42 @@ impl SequencerState {
     pub fn is_playing(&self) -> bool {
         self.transport.playing.load(Ordering::Relaxed)
     }
-    pub fn toggle_play(&self) {
-        self.transport.playing.fetch_xor(true, Ordering::Relaxed);
+
+    pub fn start_playback(&self) {
+        self.reset_playheads();
+        self.transport.playing.store(true, Ordering::Relaxed);
         self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
         self.publish_scheduler_snapshot();
+    }
+
+    pub fn stop_playback(&self) {
+        self.transport.playing.store(false, Ordering::Relaxed);
+        self.reset_playheads();
+        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        self.publish_scheduler_snapshot();
+    }
+
+    pub fn toggle_play(&self) -> bool {
+        if self.is_playing() {
+            self.stop_playback();
+            false
+        } else {
+            self.start_playback();
+            true
+        }
+    }
+
+    pub fn reset_playheads(&self) {
+        self.transport.playhead.store(0, Ordering::Relaxed);
+        self.transport
+            .playhead_phase
+            .store(0.0_f32.to_bits(), Ordering::Relaxed);
+        for playhead in &self.transport.track_playheads {
+            playhead.store(0, Ordering::Relaxed);
+        }
+        for playhead in &self.transport.sampler_playheads {
+            playhead.store(0.0_f32.to_bits(), Ordering::Relaxed);
+        }
     }
     /// Publish a snapshot of all pattern/transport atomics so that future
     /// snapshot-based audio-thread readers can pick up the latest state.
@@ -1915,6 +1947,7 @@ mod tests {
                 })
                 .collect(),
             param_node_indices: vec![id as u32, id as u32 + 10],
+            param_node_spans: vec![1, 1],
         }
     }
 
@@ -2018,6 +2051,7 @@ mod tests {
                 },
                 scaling: ParamScaling::Linear,
                 node_param_idx: u32::MAX,
+                node_param_span: 1,
                 host_control: Some(HostControl::FxSidechain { input_channel: 0 }),
             }],
             input_channels: 2,
@@ -2215,6 +2249,7 @@ mod tests {
                         plocks
                     },
                     param_node_indices: vec![0],
+                    param_node_spans: vec![1],
                 }],
                 vec![EffectSlotSnapshot::new_empty()],
                 vec![EffectSlotSnapshot::new_empty()],
@@ -2948,6 +2983,48 @@ mod tests {
         assert_eq!(snapshot.transport.bpm, DEFAULT_BPM);
         assert_eq!(snapshot.tracks.len(), 2);
         assert_eq!(snapshot.tracks[0].params.num_steps, 16);
+    }
+
+    #[test]
+    fn transport_starts_stopped_and_toggle_resets_playheads() {
+        let state = SequencerState::new(2, vec![default_empty_effect_chain()]);
+
+        assert!(!state.is_playing());
+        assert!(!state.latest_scheduler_snapshot().transport.playing);
+
+        state.transport.playhead.store(9, Ordering::Relaxed);
+        state.transport.track_playheads[0].store(3, Ordering::Relaxed);
+        state.transport.track_playheads[1].store(7, Ordering::Relaxed);
+        state.transport.sampler_playheads[0].store(0.5_f32.to_bits(), Ordering::Relaxed);
+
+        assert!(state.toggle_play());
+        assert!(state.is_playing());
+        assert!(state.latest_scheduler_snapshot().transport.playing);
+        assert_eq!(state.transport.playhead.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            state.transport.track_playheads[0].load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            state.transport.track_playheads[1].load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            f32::from_bits(state.transport.sampler_playheads[0].load(Ordering::Relaxed)),
+            0.0
+        );
+
+        state.transport.playhead.store(4, Ordering::Relaxed);
+        state.transport.track_playheads[0].store(2, Ordering::Relaxed);
+
+        assert!(!state.toggle_play());
+        assert!(!state.is_playing());
+        assert!(!state.latest_scheduler_snapshot().transport.playing);
+        assert_eq!(state.transport.playhead.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            state.transport.track_playheads[0].load(Ordering::Relaxed),
+            0
+        );
     }
 
     #[test]

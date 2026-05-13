@@ -1405,16 +1405,7 @@ pub(crate) fn init_runtime(
     // seq-toggle-play
     let st = state.clone();
     runtime.register_native("seq-toggle-play", move |_args, _ctx| {
-        let playing = st.transport.playing.load(Ordering::Relaxed);
-        if playing {
-            st.transport.playing.store(false, Ordering::Relaxed);
-            st.publish_scheduler_snapshot();
-        } else {
-            st.transport.playing.store(true, Ordering::Relaxed);
-            st.transport.playhead.store(0, Ordering::Relaxed);
-            st.publish_scheduler_snapshot();
-        }
-        Ok(Value::Bool(!playing))
+        Ok(Value::Bool(st.toggle_play()))
     });
 
     let st = state.clone();
