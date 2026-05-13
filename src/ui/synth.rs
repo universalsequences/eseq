@@ -1237,6 +1237,21 @@ impl App {
         }
     }
 
+    pub fn force_instrument_enabled(&self, track: usize) -> bool {
+        let Some(desc) = self.graph.instrument_descriptors.get(track) else {
+            return false;
+        };
+        let Some(slot) = self.state.pattern.instrument_slots.get(track) else {
+            return false;
+        };
+        let Some(enabled_idx) = slot.force_enabled_default(desc) else {
+            return false;
+        };
+
+        self.send_instrument_param(track, enabled_idx, 1.0);
+        true
+    }
+
     pub(super) fn push_all_restored_instrument_defaults(&self) {
         for track in 0..self.tracks.len() {
             if self.is_sampler_track(track) {

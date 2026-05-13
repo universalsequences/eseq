@@ -1,6 +1,6 @@
 (defsynth-ui
-  (h-stack :width :fill :gap 0.45 :align :start
-    (v-stack :width 29.0 :gap 0.10
+  (ui-rack :breathe
+    (list
       (ui-panel "GLOB" 0
         (h-stack :gap 0.35
           (base-note)
@@ -17,8 +17,8 @@
           (ui-param-knob "click_level" "click")
           (ui-param-knob "click_decay" "c.decay")
           (ui-param-knob "click_tone" "tone"))))
-    (ui-adsr 0 "amp_attack" "amp_decay" "amp_sustain" "amp_release")
-    (v-stack :width 36.0 :gap 0.10
+    (ui-adsr "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
+    (list
       (ui-panel "PITCH" 0
         (h-stack :gap 0.35
           (ui-param-knob "sweep_amount" "drop")

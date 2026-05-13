@@ -90,7 +90,7 @@ pub(crate) fn handle_add_track_instrument_command(payload: &Value, ctx: AddTrack
             );
             *accumulator_names.lock().unwrap() = build_accumulator_names(app);
             sync_track_params(rt, app, state, idx, selected_steps);
-            sync_fx_param_binding_fields(rt, app, state, idx);
+            sync_fx_param_binding_fields(rt, app, state, idx, selected_steps);
             rt.set_reactive(
                 "SEQ",
                 "step-has-plocks",

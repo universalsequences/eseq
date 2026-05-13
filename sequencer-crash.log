@@ -645,3 +645,549 @@ stack trace:
 21  libsystem_pthread.dylib             0x0000000184450ba8 thread_start + 8
 
 
+
+sequencer panic: panicked at src/bin/metal_seq/main.rs:979:65:
+index out of bounds: the len is 4 but the index is 7
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+      backtrace::backtrace::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+      backtrace::capture::Backtrace::create
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   1: backtrace::capture::Backtrace::new
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:259:22
+   2: sequencer::crash::imp::install_panic_hook::{{closure}}
+             at src/crash.rs:39:26
+   3: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/alloc/src/boxed.rs:2220:9
+      std::panicking::panic_with_hook
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:833:13
+   4: std::panicking::panic_handler::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:698:13
+   5: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/sys/backtrace.rs:176:18
+   6: __rustc::rust_begin_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:689:5
+   7: core::panicking::panic_fmt
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:80:14
+   8: core::panicking::panic_bounds_check
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:271:5
+   9: metal_seq::main
+  10: core::ops::function::FnOnce::call_once
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+      std::sys::backtrace::__rust_begin_short_backtrace
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  11: std::rt::lang_start::{{closure}}
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  12: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/ops/function.rs:287:21
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:175:24
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
+  13: _main
+
+
+sequencer panic: panicked at src/bin/metal_seq/main.rs:979:65:
+index out of bounds: the len is 4 but the index is 7
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+      backtrace::backtrace::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+      backtrace::capture::Backtrace::create
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   1: backtrace::capture::Backtrace::new
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:259:22
+   2: sequencer::crash::imp::install_panic_hook::{{closure}}
+             at src/crash.rs:39:26
+   3: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/alloc/src/boxed.rs:2220:9
+      std::panicking::panic_with_hook
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:833:13
+   4: std::panicking::panic_handler::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:698:13
+   5: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/sys/backtrace.rs:176:18
+   6: __rustc::rust_begin_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:689:5
+   7: core::panicking::panic_fmt
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:80:14
+   8: core::panicking::panic_bounds_check
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:271:5
+   9: metal_seq::main
+  10: core::ops::function::FnOnce::call_once
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+      std::sys::backtrace::__rust_begin_short_backtrace
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  11: std::rt::lang_start::{{closure}}
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  12: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/ops/function.rs:287:21
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:175:24
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
+  13: _main
+
+
+sequencer panic: panicked at src/bin/metal_seq/main.rs:1029:65:
+index out of bounds: the len is 1 but the index is 3
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+      backtrace::backtrace::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+      backtrace::capture::Backtrace::create
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   1: backtrace::capture::Backtrace::new
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:259:22
+   2: sequencer::crash::imp::install_panic_hook::{{closure}}
+             at src/crash.rs:39:26
+   3: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/alloc/src/boxed.rs:2220:9
+      std::panicking::panic_with_hook
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:833:13
+   4: std::panicking::panic_handler::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:698:13
+   5: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/sys/backtrace.rs:176:18
+   6: __rustc::rust_begin_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:689:5
+   7: core::panicking::panic_fmt
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:80:14
+   8: core::panicking::panic_bounds_check
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:271:5
+   9: metal_seq::main
+  10: core::ops::function::FnOnce::call_once
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+      std::sys::backtrace::__rust_begin_short_backtrace
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  11: std::rt::lang_start::{{closure}}
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  12: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/ops/function.rs:287:21
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:175:24
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
+  13: _main
+
+
+sequencer panic: panicked at src/bin/metal_seq/main.rs:1029:65:
+index out of bounds: the len is 1 but the index is 3
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+      backtrace::backtrace::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+      backtrace::capture::Backtrace::create
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   1: backtrace::capture::Backtrace::new
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:259:22
+   2: sequencer::crash::imp::install_panic_hook::{{closure}}
+             at src/crash.rs:39:26
+   3: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/alloc/src/boxed.rs:2220:9
+      std::panicking::panic_with_hook
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:833:13
+   4: std::panicking::panic_handler::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:698:13
+   5: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/sys/backtrace.rs:176:18
+   6: __rustc::rust_begin_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:689:5
+   7: core::panicking::panic_fmt
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:80:14
+   8: core::panicking::panic_bounds_check
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:271:5
+   9: metal_seq::main
+  10: core::ops::function::FnOnce::call_once
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+      std::sys::backtrace::__rust_begin_short_backtrace
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  11: std::rt::lang_start::{{closure}}
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  12: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/ops/function.rs:287:21
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:175:24
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
+  13: _main
+
+
+sequencer caught fatal signal 6 (SIGABRT)
+crash log: sequencer-crash.log
+stack trace:
+
+sequencer caught fatal signal 6 (SIGABRT)
+crash log: sequencer-crash.log
+stack trace:
+0   metal_seq                           0x00000001001eed78 _ZN9sequencer5crash3imp14signal_handler17hbd2bf5263e0adaf5E + 344
+1   libsystem_platform.dylib            0x000000018445f744 _sigtramp + 56
+2   libsystem_pthread.dylib             0x0000000184455888 pthread_kill + 296
+3   libsystem_c.dylib                   0x000000018435a850 abort + 124
+4   libsystem_malloc.dylib              0x0000000184259224 malloc_vreport + 892
+5   libsystem_malloc.dylib              0x000000018425cf78 malloc_report + 64
+6   libsystem_malloc.dylib              0x0000000184261e04 ___BUG_IN_CLIENT_OF_LIBMALLOC_POINTER_BEING_FREED_WAS_NOT_ALLOCATED + 76
+7   libsystem_malloc.dylib              0x0000000184282c40 _realloc + 404
+8   metal_seq                           0x00000001003114d8 indegree_inc_on_first_pred + 120
+9   metal_seq                           0x00000001003107ac apply_connect_internal + 1088
+10  metal_seq                           0x000000010030f2f8 apply_graph_edits + 896
+11  metal_seq                           0x0000000100312a98 process_next_block + 216
+12  metal_seq                           0x00000001002fced8 _ZN9sequencer5audio14audio_callback17h145e986eb16b1b53E + 22816
+13  metal_seq                           0x00000001001ea6f8 _ZN9coreaudio10audio_unit15render_callback50_$LT$impl$u20$coreaudio..audio_unit..AudioUnit$GT$19set_render_callback28_$u7b$$u7b$closure$u7d$$u7d$17hf91d64e959b32692E + 200
+14  metal_seq                           0x000000010034f5cc _ZN9coreaudio10audio_unit15render_callback10input_proc17ha80b847506ec55d2E + 24
+15  CoreAudio                           0x0000000100e5f024 CoreAudio + 12324
+16  CoreAudio                           0x0000000100e5ec60 CoreAudio + 11360
+17  CoreAudio                           0x0000000100f6b8bc AUNotQuiteSoSimpleTimeFactory + 33488
+18  CoreAudio                           0x0000000100e69da4 AUGenericOutputFactory + 39644
+19  CoreAudio                           0x000000018776cc90 _ZN19HALC_ProxyIOContext10IOWorkLoopEv + 10588
+20  CoreAudio                           0x0000000187769c8c ___ZN19HALC_ProxyIOContextC2Ejj_block_invoke + 172
+21  CoreAudio                           0x0000000187937710 _ZN13HALC_IOThread5EntryEPv + 88
+22  libsystem_pthread.dylib             0x0000000184455c08 _pthread_start + 136
+23  libsystem_pthread.dylib             0x0000000184450ba8 thread_start + 8
+
+
+
+sequencer panic: panicked at src/ui/graph.rs:2242:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+   1: backtrace::backtrace::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+   2: backtrace::capture::Backtrace::create
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   3: backtrace::capture::Backtrace::new
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:259:22
+   4: sequencer::crash::imp::install_panic_hook::{{closure}}
+             at src/crash.rs:39:26
+   5: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/alloc/src/boxed.rs:2220:9
+      std::panicking::panic_with_hook
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:833:13
+   6: std::panicking::panic_handler::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:698:13
+   7: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/sys/backtrace.rs:176:18
+   8: __rustc::rust_begin_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:689:5
+   9: core::panicking::panic_fmt
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:80:14
+  10: core::panicking::assert_failed_inner
+  11: core::panicking::assert_failed
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:394:5
+  12: sequencer::ui::graph::GraphController::debug_assert_track_vectors_aligned
+             at src/ui/graph.rs:2242:9
+  13: sequencer::ui::graph::GraphController::finish_track_registration
+             at src/ui/graph.rs:2181:14
+  14: sequencer::ui::graph::GraphController::add_track
+             at src/ui/graph.rs:477:14
+  15: metal_seq::main
+             at src/bin/metal_seq/main.rs:1197:58
+  16: core::ops::function::FnOnce::call_once
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  17: std::sys::backtrace::__rust_begin_short_backtrace
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  18: std::rt::lang_start::{{closure}}
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  19: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/ops/function.rs:287:21
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:175:24
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
+  20: std::rt::lang_start
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:205:5
+  21: _main
+
+
+sequencer panic: panicked at src/ui/graph.rs:2242:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+   1: backtrace::backtrace::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+   2: backtrace::capture::Backtrace::create
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   3: backtrace::capture::Backtrace::new
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:259:22
+   4: sequencer::crash::imp::install_panic_hook::{{closure}}
+             at src/crash.rs:39:26
+   5: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/alloc/src/boxed.rs:2220:9
+      std::panicking::panic_with_hook
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:833:13
+   6: std::panicking::panic_handler::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:698:13
+   7: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/sys/backtrace.rs:176:18
+   8: __rustc::rust_begin_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:689:5
+   9: core::panicking::panic_fmt
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:80:14
+  10: core::panicking::assert_failed_inner
+  11: core::panicking::assert_failed
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:394:5
+  12: sequencer::ui::graph::GraphController::debug_assert_track_vectors_aligned
+             at src/ui/graph.rs:2242:9
+  13: sequencer::ui::graph::GraphController::finish_track_registration
+             at src/ui/graph.rs:2181:14
+  14: sequencer::ui::graph::GraphController::add_track
+             at src/ui/graph.rs:477:14
+  15: metal_seq::main
+             at src/bin/metal_seq/main.rs:1197:58
+  16: core::ops::function::FnOnce::call_once
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  17: std::sys::backtrace::__rust_begin_short_backtrace
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  18: std::rt::lang_start::{{closure}}
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  19: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/ops/function.rs:287:21
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:175:24
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
+  20: std::rt::lang_start
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:205:5
+  21: _main
+
+
+sequencer panic: panicked at src/ui/graph.rs:2242:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+   1: backtrace::backtrace::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+   2: backtrace::capture::Backtrace::create
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   3: backtrace::capture::Backtrace::new
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:259:22
+   4: sequencer::crash::imp::install_panic_hook::{{closure}}
+             at src/crash.rs:39:26
+   5: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/alloc/src/boxed.rs:2220:9
+      std::panicking::panic_with_hook
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:833:13
+   6: std::panicking::panic_handler::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:698:13
+   7: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/sys/backtrace.rs:176:18
+   8: __rustc::rust_begin_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:689:5
+   9: core::panicking::panic_fmt
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:80:14
+  10: core::panicking::assert_failed_inner
+  11: core::panicking::assert_failed
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:394:5
+  12: sequencer::ui::graph::GraphController::debug_assert_track_vectors_aligned
+             at src/ui/graph.rs:2242:9
+  13: sequencer::ui::graph::GraphController::finish_track_registration
+             at src/ui/graph.rs:2181:14
+  14: sequencer::ui::graph::GraphController::add_blank_sampler_track
+             at src/ui/graph.rs:515:14
+  15: metal_seq::main
+             at src/bin/metal_seq/main.rs:1068:73
+  16: core::ops::function::FnOnce::call_once
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  17: std::sys::backtrace::__rust_begin_short_backtrace
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  18: std::rt::lang_start::{{closure}}
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  19: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/ops/function.rs:287:21
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:175:24
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
+  20: std::rt::lang_start
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:205:5
+  21: _main
+
+
+sequencer panic: panicked at src/ui/graph.rs:2242:9:
+assertion `left == right` failed
+  left: 0
+ right: 1
+crash log: sequencer-crash.log
+backtrace:
+   0: backtrace::backtrace::libunwind::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/libunwind.rs:117:9
+      backtrace::backtrace::trace_unsynchronized
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:66:14
+   1: backtrace::backtrace::trace
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/backtrace/mod.rs:53:14
+   2: backtrace::capture::Backtrace::create
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:294:9
+   3: backtrace::capture::Backtrace::new
+             at /Users/alecresende/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/backtrace-0.3.76/src/capture.rs:259:22
+   4: sequencer::crash::imp::install_panic_hook::{{closure}}
+             at src/crash.rs:39:26
+   5: <alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/alloc/src/boxed.rs:2220:9
+      std::panicking::panic_with_hook
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:833:13
+   6: std::panicking::panic_handler::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:698:13
+   7: std::sys::backtrace::__rust_end_short_backtrace
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/sys/backtrace.rs:176:18
+   8: __rustc::rust_begin_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:689:5
+   9: core::panicking::panic_fmt
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:80:14
+  10: core::panicking::assert_failed_inner
+  11: core::panicking::assert_failed
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/panicking.rs:394:5
+  12: sequencer::ui::graph::GraphController::debug_assert_track_vectors_aligned
+             at src/ui/graph.rs:2242:9
+  13: sequencer::ui::graph::GraphController::finish_track_registration
+             at src/ui/graph.rs:2181:14
+  14: sequencer::ui::graph::GraphController::add_blank_sampler_track
+             at src/ui/graph.rs:515:14
+  15: metal_seq::main
+             at src/bin/metal_seq/main.rs:1068:73
+  16: core::ops::function::FnOnce::call_once
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+  17: std::sys::backtrace::__rust_begin_short_backtrace
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:160:18
+  18: std::rt::lang_start::{{closure}}
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+  19: core::ops::function::impls::<impl core::ops::function::FnOnce<A> for &F>::call_once
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/ops/function.rs:287:21
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal::{{closure}}
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:175:24
+      std::panicking::catch_unwind::do_call
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:581:40
+      std::panicking::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panicking.rs:544:19
+      std::panic::catch_unwind
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/panic.rs:359:14
+      std::rt::lang_start_internal
+             at /rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/std/src/rt.rs:171:5
+  20: std::rt::lang_start
+             at /Users/alecresende/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:205:5
+  21: _main
+

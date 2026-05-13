@@ -49,7 +49,8 @@ const STATE_WARP_SAMPLE_BPM: usize = 40;
 const STATE_WARP_PROJECT_BPM: usize = 41;
 const STATE_WARP_SLICE_SOURCE_FRAME_START: usize = 42;
 const STATE_WARP_LAST_TARGET_RATIO: usize = 43;
-pub const SAMPLER_STATE_SIZE: usize = 44;
+const STATE_SOURCE_SAMPLE_RATE: usize = 44;
+pub const SAMPLER_STATE_SIZE: usize = 45;
 pub const SAMPLER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 // Envelope phase constants
@@ -67,6 +68,22 @@ const RETRIGGER_FADE_SAMPLES: f32 = 48.0;
 // Fresh triggers from silence use the user's attack value directly (even if 0).
 const MIN_RETRIGGER_ATTACK: f32 = 8.0;
 const WARP_XFADE_SECONDS: f32 = 0.005;
+
+fn sampler_playback_step(source_sample_rate: f32, host_sample_rate: f32, rate: f32) -> f32 {
+    let source_sample_rate = source_sample_rate.max(1.0);
+    let host_sample_rate = host_sample_rate.max(1.0);
+    rate * source_sample_rate / host_sample_rate
+}
+
+fn source_frames_to_host_frames(
+    source_frames: f32,
+    source_sample_rate: f32,
+    host_sample_rate: f32,
+) -> f32 {
+    let source_sample_rate = source_sample_rate.max(1.0);
+    let host_sample_rate = host_sample_rate.max(1.0);
+    source_frames * host_sample_rate / source_sample_rate
+}
 
 unsafe fn read_interpolated(
     sample_data: *mut f32,
@@ -127,6 +144,7 @@ pub const PARAM_WARP_ONSET_TABLE_PTR_LO: u64 = STATE_WARP_ONSET_TABLE_PTR_LO as 
 pub const PARAM_WARP_ONSET_TABLE_PTR_HI: u64 = STATE_WARP_ONSET_TABLE_PTR_HI as u64;
 pub const PARAM_WARP_SAMPLE_BPM: u64 = STATE_WARP_SAMPLE_BPM as u64;
 pub const PARAM_WARP_PROJECT_BPM: u64 = STATE_WARP_PROJECT_BPM as u64;
+pub const PARAM_SOURCE_SAMPLE_RATE: u64 = STATE_SOURCE_SAMPLE_RATE as u64;
 
 pub struct SamplerTrack {
     pub name: String,
@@ -154,6 +172,7 @@ unsafe extern "C" fn sampler_init(
     if !initial_state.is_null() {
         let init = initial_state as *const f32;
         *s.add(STATE_BUFFER_ID) = *init.add(0);
+        *s.add(STATE_SOURCE_SAMPLE_RATE) = (*init.add(1)).max(1.0);
     }
     *s.add(STATE_PLAYHEAD) = 0.0;
     *s.add(STATE_PLAYING) = 0.0;
@@ -198,6 +217,9 @@ unsafe extern "C" fn sampler_init(
     *s.add(STATE_WARP_PROJECT_BPM) = 120.0;
     *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START) = 0.0;
     *s.add(STATE_WARP_LAST_TARGET_RATIO) = 1.0;
+    if initial_state.is_null() {
+        *s.add(STATE_SOURCE_SAMPLE_RATE) = 44_100.0;
+    }
 }
 
 /// extern "C" process — reads sample data from buffer, writes to output.
@@ -246,6 +268,7 @@ unsafe extern "C" fn sampler_process(
     let mut sr_held_l = *s.add(STATE_SR_HELD_L);
     let mut sr_held_r = *s.add(STATE_SR_HELD_R);
     let sample_rate = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let source_sample_rate = (*s.add(STATE_SOURCE_SAMPLE_RATE)).max(1.0);
     let warp_enabled = *s.add(STATE_WARP_ENABLED) > 0.5;
     let warp_mode = (*s.add(STATE_WARP_MODE)).round() as i32;
     let mut warp_ratio = (*s.add(STATE_WARP_RATIO)).clamp(0.01, 32.0);
@@ -333,6 +356,7 @@ unsafe extern "C" fn sampler_process(
     let loop_xfade = loop_xfade_samples.min(region_len * 0.5);
     let effective_rate = speed * (2.0_f32).powf(transpose / 12.0);
     let step_rate = effective_rate.abs().max(0.0);
+    let playback_step = sampler_playback_step(source_sample_rate, sample_rate, step_rate);
     let sr_step = if sr_hz > 0.0 {
         (sample_rate / sr_hz).max(1.0)
     } else {
@@ -432,8 +456,12 @@ unsafe extern "C" fn sampler_process(
                 if next as usize >= end_sample {
                     break;
                 }
-                let next_project_frame =
-                    slice_project_frame_start + (next - slice_source_frame_start) / warp_ratio;
+                let next_project_frame = slice_project_frame_start
+                    + source_frames_to_host_frames(
+                        next - slice_source_frame_start,
+                        source_sample_rate,
+                        sample_rate,
+                    ) / warp_ratio;
                 if gate_counter < next_project_frame {
                     break;
                 }
@@ -442,7 +470,12 @@ unsafe extern "C" fn sampler_process(
                 current_slice += 1;
             }
 
-            let elapsed_in_slice = (gate_counter - slice_project_frame_start).max(0.0);
+            let elapsed_in_slice_source_frames = source_frames_to_host_frames(
+                gate_counter - slice_project_frame_start,
+                sample_rate,
+                source_sample_rate,
+            )
+            .max(0.0);
             let mut next_boundary = end_sample as f32;
             if current_slice < table.onsets_frames.len() {
                 let next = table.onsets_frames[current_slice] as f32;
@@ -450,7 +483,7 @@ unsafe extern "C" fn sampler_process(
                     next_boundary = next;
                 }
             }
-            playhead = (slice_source_frame_start + elapsed_in_slice * step_rate)
+            playhead = (slice_source_frame_start + elapsed_in_slice_source_frames * step_rate)
                 .clamp(start_sample as f32, (end_sample.saturating_sub(1)) as f32);
             if warp_ratio < 1.0 && playhead >= next_boundary {
                 playhead = next_boundary.min((end_sample.saturating_sub(1)) as f32);
@@ -552,9 +585,9 @@ unsafe extern "C" fn sampler_process(
 
             env_level -= 1.0 / RETRIGGER_FADE_SAMPLES;
             playhead += if warp_active && play_direction >= 0.0 {
-                step_rate
+                playback_step
             } else {
-                step_rate * play_direction
+                playback_step * play_direction
             };
             gate_counter += 1.0;
             if env_level <= 0.0 {
@@ -639,8 +672,12 @@ unsafe extern "C" fn sampler_process(
             if let Some(table) = onset_table {
                 if current_slice < table.onsets_frames.len() {
                     let next = table.onsets_frames[current_slice] as f32;
-                    let next_project_frame =
-                        slice_project_frame_start + (next - slice_source_frame_start) / warp_ratio;
+                    let next_project_frame = slice_project_frame_start
+                        + source_frames_to_host_frames(
+                            next - slice_source_frame_start,
+                            source_sample_rate,
+                            sample_rate,
+                        ) / warp_ratio;
                     if gate_counter >= next_project_frame {
                         warp_prev_playhead = playhead;
                         slice_project_frame_start = gate_counter;
@@ -700,7 +737,7 @@ unsafe extern "C" fn sampler_process(
                 read_interpolated(sample_data, sample_len, channel_count, warp_prev_playhead);
             sample_l = old_l * old_gain + sample_l * new_gain;
             sample_r = old_r * old_gain + sample_r * new_gain;
-            warp_prev_playhead += step_rate;
+            warp_prev_playhead += playback_step;
             warp_xfade_remaining -= 1.0;
         }
         if sr_reduced {
@@ -721,9 +758,9 @@ unsafe extern "C" fn sampler_process(
         last_out_r = *out1.add(i);
 
         playhead += if warp_active && play_direction >= 0.0 {
-            step_rate
+            playback_step
         } else {
-            step_rate * play_direction
+            playback_step * play_direction
         };
         gate_counter += 1.0; // real-time counter (1 per sample, independent of transpose/speed)
     }
@@ -858,9 +895,10 @@ pub fn create_silent_buffer(lg: *mut LiveGraph) -> Result<i32, String> {
 pub fn create_sampler_node(
     lg: *mut LiveGraph,
     buffer_id: i32,
+    source_sample_rate: u32,
     name: &str,
 ) -> Result<SamplerTrack, String> {
-    let initial_state = [buffer_id as f32];
+    let initial_state = [buffer_id as f32, source_sample_rate.max(1) as f32];
     let c_name = CString::new(name).unwrap();
 
     let node_id = unsafe {
@@ -891,5 +929,31 @@ pub fn create_sampler_node(
 /// Load a WAV file, create an audiograph buffer and sampler node.
 pub fn create_sampler_track(lg: *mut LiveGraph, wav_path: &Path) -> Result<SamplerTrack, String> {
     let loaded = load_wav_buffer(lg, wav_path)?;
-    create_sampler_node(lg, loaded.buffer_id, &loaded.name)
+    create_sampler_node(lg, loaded.buffer_id, loaded.sample_rate, &loaded.name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sampler_playback_step, source_frames_to_host_frames};
+
+    #[test]
+    fn playback_step_preserves_44100_wav_pitch_at_48000_host_rate() {
+        let step = sampler_playback_step(44_100.0, 48_000.0, 1.0);
+
+        assert!((step - 0.91875).abs() < 0.00001);
+    }
+
+    #[test]
+    fn playback_step_preserves_48000_wav_pitch_at_44100_host_rate() {
+        let step = sampler_playback_step(48_000.0, 44_100.0, 1.0);
+
+        assert!((step - 1.0884354).abs() < 0.00001);
+    }
+
+    #[test]
+    fn source_frame_durations_convert_to_host_frame_durations() {
+        let host_frames = source_frames_to_host_frames(44_100.0, 44_100.0, 48_000.0);
+
+        assert!((host_frames - 48_000.0).abs() < 0.001);
+    }
 }

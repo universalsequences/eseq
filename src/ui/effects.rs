@@ -315,6 +315,7 @@ impl App {
             &self.state,
             self.tracks.len(),
             &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
             &self.tracks,
             &self.graph.track_instrument_types,
         );
@@ -354,6 +355,7 @@ impl App {
             &self.state,
             self.tracks.len(),
             &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
             &self.tracks,
             &self.graph.track_instrument_types,
         );
@@ -664,6 +666,7 @@ impl App {
             &self.state,
             self.tracks.len(),
             &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
             &self.tracks,
             &self.graph.track_instrument_types,
         );
@@ -1046,6 +1049,7 @@ impl App {
             &self.state,
             self.tracks.len(),
             &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
             &self.tracks,
             &self.graph.track_instrument_types,
         );

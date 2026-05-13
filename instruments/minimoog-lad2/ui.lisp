@@ -1,6 +1,6 @@
 (defsynth-ui
-  (h-stack :width :fill :gap 0.45 :align :start
-    (v-stack :width 31.0 :gap 0.10
+  (ui-rack :breathe
+    (list
       (ui-panel "GLOB" 0
         (h-stack :gap 0.35
           (base-note)
@@ -22,11 +22,10 @@
     (ui-adsr-switch
       0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
       1 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release")
-    (v-stack :width 31.0 :gap 0.10
+    (list
       (ui-panel "TUNE" 0
         (h-stack :gap 0.35
-          (ui-param-knob "osc1_oct" "oct1"
-          )
+          (ui-param-knob "osc1_oct" "oct1")
           (ui-param-knob "osc2_oct" "oct2")
           (ui-param-knob "osc3_oct" "oct3")
           (ui-param-knob "osc2_detune" "dt2")

@@ -12,6 +12,20 @@
   "language": {
     "attributes": [
       {
+        "name": "@N",
+        "summary": "FFT/window size for spectral operators.",
+        "used_by": [
+          "hann",
+          "ifft",
+          "partition-ir",
+          "partitioned-convolve",
+          "partitioned-spectral-mac",
+          "phase-vocoder",
+          "spectrum-delay",
+          "spectrum-delay-mod"
+        ]
+      },
+      {
         "name": "@attack",
         "summary": "Compressor attack.",
         "used_by": [
@@ -38,10 +52,33 @@
         ]
       },
       {
+        "name": "@backend",
+        "summary": "FFT backend: tensor or accelerated.",
+        "used_by": [
+          "fft",
+          "ifft"
+        ]
+      },
+      {
+        "name": "@channel",
+        "summary": "Load one channel from an audio asset.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
         "name": "@cutoff",
         "summary": "Biquad cutoff attribute form.",
         "used_by": [
           "biquad"
+        ]
+      },
+      {
+        "name": "@data",
+        "summary": "Inline tensor or tensor-history data.",
+        "used_by": [
+          "tensor"
         ]
       },
       {
@@ -52,10 +89,40 @@
         ]
       },
       {
-        "name": "@gain",
-        "summary": "Biquad gain attribute form.",
+        "name": "@default-file",
+        "summary": "Attribute observed in evaluator source.",
         "used_by": [
-          "biquad"
+          "tensor-param",
+          "wavetable",
+          "wavetable-param"
+        ]
+      },
+      {
+        "name": "@end",
+        "summary": "Audio load end time in seconds.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
+        "name": "@file",
+        "summary": "Audio or tensor asset path.",
+        "used_by": [
+          "audio-tensor",
+          "ir",
+          "tensor",
+          "tensor-param",
+          "wavetable",
+          "wavetable-param"
+        ]
+      },
+      {
+        "name": "@gain",
+        "summary": "Gain for high-level spectral convolution.",
+        "used_by": [
+          "biquad",
+          "partitioned-convolve"
         ]
       },
       {
@@ -78,6 +145,37 @@
         "used_by": []
       },
       {
+        "name": "@hop",
+        "summary": "Hop size for STFT and hop-rate operators.",
+        "used_by": [
+          "noise",
+          "partition-ir",
+          "partitioned-convolve",
+          "phase-vocoder",
+          "spectrum-delay",
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@hopSize",
+        "summary": "Attribute observed in evaluator source.",
+        "used_by": [
+          "noise",
+          "partition-ir",
+          "partitioned-convolve",
+          "phase-vocoder",
+          "spectrum-delay",
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@hops",
+        "summary": "Fixed delay in hops for spectrum-delay.",
+        "used_by": [
+          "spectrum-delay"
+        ]
+      },
+      {
         "name": "@knee",
         "summary": "Compressor knee.",
         "used_by": [
@@ -96,6 +194,20 @@
         "summary": "Playback frame budget for `to-signal`.",
         "used_by": [
           "to-signal"
+        ]
+      },
+      {
+        "name": "@max-hops",
+        "summary": "Maximum modulated delay in hops for spectrum-delay-mod.",
+        "used_by": [
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@maxHops",
+        "summary": "Attribute observed in evaluator source.",
+        "used_by": [
+          "spectrum-delay-mod"
         ]
       },
       {
@@ -167,11 +279,45 @@
         ]
       },
       {
+        "name": "@mono",
+        "summary": "Load audio as mono.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
+        "name": "@n",
+        "summary": "Attribute observed in evaluator source.",
+        "used_by": [
+          "hann",
+          "ifft",
+          "partition-ir",
+          "partitioned-convolve",
+          "partitioned-spectral-mac",
+          "phase-vocoder",
+          "spectrum-delay",
+          "spectrum-delay-mod"
+        ]
+      },
+      {
         "name": "@name",
         "summary": "Host-visible input/output or modulator name.",
         "used_by": [
+          "audio-tensor",
           "in",
-          "out"
+          "ir",
+          "out",
+          "wavetable",
+          "wavetable-param"
+        ]
+      },
+      {
+        "name": "@normalize",
+        "summary": "Audio load normalization mode, e.g. peak.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
         ]
       },
       {
@@ -221,7 +367,11 @@
         "summary": "Target shape for reshape / expand.",
         "used_by": [
           "expand",
-          "reshape"
+          "partitioned-convolve",
+          "reshape",
+          "tensor",
+          "tensor-param",
+          "windows"
         ]
       },
       {
@@ -232,10 +382,32 @@
         ]
       },
       {
+        "name": "@size",
+        "summary": "Tensor size for tensor noise.",
+        "used_by": [
+          "noise"
+        ]
+      },
+      {
+        "name": "@start",
+        "summary": "Audio load start time in seconds.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
         "name": "@threshold",
         "summary": "Compressor threshold.",
         "used_by": [
           "compressor"
+        ]
+      },
+      {
+        "name": "@type",
+        "summary": "Window type for window operator.",
+        "used_by": [
+          "window"
         ]
       },
       {
@@ -346,390 +518,6 @@
     ],
     "examples": [
       {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "dx7-4op",
-        "output_count": 1,
-        "params": [
-          "algorithm",
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "amp_vel_amt",
-          "feedback",
-          "gain",
-          "index2",
-          "index3",
-          "index4",
-          "level1",
-          "level3",
-          "mod_decay_ms",
-          "mod_sustain",
-          "ratio1",
-          "ratio2",
-          "ratio3",
-          "ratio4",
-          "vel_to_index"
-        ],
-        "path": "instruments/dx7-4op.lisp",
-        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "hammond-organ",
-        "output_count": 1,
-        "params": [
-          "click_amt",
-          "click_decay",
-          "draw1",
-          "draw2",
-          "draw3",
-          "draw4",
-          "draw5",
-          "draw6",
-          "draw7",
-          "draw8",
-          "draw9",
-          "drive",
-          "gain",
-          "perc_decay",
-          "perc_level",
-          "rotary_depth",
-          "rotary_doppler",
-          "rotary_speed"
-        ],
-        "path": "instruments/hammond-organ.lisp",
-        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "karplus-string",
-        "output_count": 1,
-        "params": [
-          "body_tone",
-          "brightness",
-          "decay",
-          "detune_cents",
-          "exciter_decay",
-          "gain",
-          "pluck_pos",
-          "vel_to_brightness",
-          "vel_to_level"
-        ],
-        "path": "instruments/karplus-string.lisp",
-        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "minimoog",
-        "output_count": 1,
-        "params": [
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "amp_vel_amt",
-          "cutoff",
-          "filt_attack_ms",
-          "filt_decay_ms",
-          "filt_release_ms",
-          "filt_sustain",
-          "filter_drive",
-          "filter_env_amt",
-          "filter_vel_amt",
-          "gain",
-          "glide_time",
-          "keytrack",
-          "noise_level",
-          "osc1_level",
-          "osc1_pulse",
-          "osc1_saw",
-          "osc1_semi",
-          "osc2_detune",
-          "osc2_level",
-          "osc2_pulse",
-          "osc2_saw",
-          "osc2_semi",
-          "osc3_detune",
-          "osc3_fm_amt",
-          "osc3_level",
-          "osc3_saw",
-          "osc3_semi",
-          "osc3_tri",
-          "pulse_width",
-          "resonance",
-          "sync_1_to_3"
-        ],
-        "path": "instruments/minimoog.lisp",
-        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "monomachine-digipro",
-        "output_count": 1,
-        "params": [
-          "alias",
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "comb_amt",
-          "comb_time",
-          "cutoff",
-          "detune_cents",
-          "drive",
-          "filter_env_amt",
-          "formant",
-          "gain",
-          "keytrack",
-          "morph",
-          "noise_level",
-          "phase_distort",
-          "resonance",
-          "shape",
-          "sync_amt",
-          "table_jump",
-          "unison",
-          "vowel_amt"
-        ],
-        "path": "instruments/monomachine-digipro.lisp",
-        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "monomachine-fmplus",
-        "output_count": 1,
-        "params": [
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "crossmod",
-          "dyn_index_amt",
-          "feedback_a",
-          "feedback_b",
-          "filter_drive",
-          "gain",
-          "glitch_amt",
-          "glitch_rate",
-          "index_a",
-          "index_b",
-          "keytrack",
-          "parallel_mix",
-          "ratio_a",
-          "ratio_b",
-          "ratio_c",
-          "ratio_d",
-          "ratio_warp",
-          "resonance",
-          "self_fm",
-          "tone"
-        ],
-        "path": "instruments/monomachine-fmplus.lisp",
-        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "monomachine-sid",
-        "output_count": 1,
-        "params": [
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "bit_depth",
-          "buzz",
-          "cutoff",
-          "drive",
-          "filter_fm",
-          "filter_mode",
-          "fold_amt",
-          "gain",
-          "glitch_amt",
-          "glitch_rate",
-          "keytrack",
-          "noise_mix",
-          "osc1_level",
-          "osc1_semi",
-          "osc2_detune",
-          "osc2_level",
-          "osc2_semi",
-          "osc3_detune",
-          "osc3_level",
-          "osc3_semi",
-          "pulse_mix",
-          "pulse_width",
-          "resonance",
-          "ring_amt",
-          "saw_mix",
-          "sync_amt",
-          "tri_mix"
-        ],
-        "path": "instruments/monomachine-sid.lisp",
-        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "monomachine-superwave",
-        "output_count": 1,
-        "params": [
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "brightness",
-          "chaos",
-          "comb_amt",
-          "comb_time",
-          "cutoff",
-          "detune_cents",
-          "drive",
-          "filt_attack_ms",
-          "filt_decay_ms",
-          "filt_release_ms",
-          "filt_sustain",
-          "filter_env_amt",
-          "fm_smear",
-          "gain",
-          "keytrack",
-          "motion_depth",
-          "motion_rate",
-          "noise_level",
-          "phase_smear",
-          "pulse_mix",
-          "pulse_width",
-          "pwm_warp",
-          "resonance",
-          "saw_mix",
-          "sub_level",
-          "swarm"
-        ],
-        "path": "instruments/monomachine-superwave.lisp",
-        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "oberheim-sem",
-        "output_count": 1,
-        "params": [
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "amp_vel_amt",
-          "cutoff",
-          "filt_attack_ms",
-          "filt_decay_ms",
-          "filt_release_ms",
-          "filt_sustain",
-          "filter_drive",
-          "filter_env_amt",
-          "filter_mode",
-          "filter_vel_amt",
-          "gain",
-          "keytrack",
-          "noise_level",
-          "osc_a_level",
-          "osc_a_pulse",
-          "osc_a_saw",
-          "osc_a_semi",
-          "osc_b_detune",
-          "osc_b_keytrack",
-          "osc_b_level",
-          "osc_b_pulse",
-          "osc_b_saw",
-          "osc_b_semi",
-          "pulse_width",
-          "resonance",
-          "vintage"
-        ],
-        "path": "instruments/oberheim-sem.lisp",
-        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "prophet-5",
-        "output_count": 1,
-        "params": [
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "amp_vel_amt",
-          "cutoff",
-          "env_pitch_amt",
-          "env_pw_amt",
-          "filt_attack_ms",
-          "filt_decay_ms",
-          "filt_release_ms",
-          "filt_sustain",
-          "filter_drive",
-          "filter_env_amt",
-          "filter_vel_amt",
-          "gain",
-          "keytrack",
-          "noise_level",
-          "osc_a_fine_cents",
-          "osc_a_level",
-          "osc_a_pulse",
-          "osc_a_pw",
-          "osc_a_saw",
-          "osc_a_semi",
-          "osc_b_fine_cents",
-          "osc_b_keytrack",
-          "osc_b_level",
-          "osc_b_pulse",
-          "osc_b_pw",
-          "osc_b_saw",
-          "osc_b_semi",
-          "osc_b_tri",
-          "poly_filter_amt",
-          "poly_pitch_amt",
-          "poly_pw_amt",
-          "resonance",
-          "sync",
-          "vintage"
-        ],
-        "path": "instruments/prophet-5.lisp",
-        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
-      },
-      {
-        "kind": "instrument",
-        "modulator_count": 6,
-        "name": "tb-303",
-        "output_count": 1,
-        "params": [
-          "accent_amt",
-          "amp_attack_ms",
-          "amp_decay_ms",
-          "amp_release_ms",
-          "amp_sustain",
-          "cutoff",
-          "drive",
-          "env_amt",
-          "env_decay_ms",
-          "gain",
-          "keytrack",
-          "pulse_width",
-          "resonance",
-          "slide_time",
-          "tune_semi",
-          "wave_mix"
-        ],
-        "path": "instruments/tb-303.lisp",
-        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
-      },
-      {
         "kind": "effect",
         "modulator_count": 0,
         "name": "MODUM_DELAY",
@@ -744,6 +532,24 @@
         ],
         "path": "effects/MODUM_DELAY.lisp",
         "preview": "(def input (in 1 @name signal))\n(def lfo (cos (* twopi (triangle (phasor (param rate @min 0.1 @max 100 @default 1) ) 0.2 ))))\n(def x\n  (biquad\n    input\n    (+ (* (scale lfo -1 1 0 1) 100) (param cutoff @min 50 @max 4000 @default 900))"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "dimension-d-chorus",
+        "output_count": 2,
+        "params": [
+          "base",
+          "depth",
+          "mix",
+          "rate",
+          "shimmer",
+          "spread",
+          "tone",
+          "width"
+        ],
+        "path": "effects/dimension-d-chorus.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def mono (* 0.5 (+ in-l in-r)))\n(param rate @min 0.05 @max 1.2 @default 0.32)\n(param depth @min 1.0 @max 20 @default 8.5)\n(param base @min 6 @max 28 @default 12.5)"
       },
       {
         "kind": "effect",
@@ -764,72 +570,71 @@
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "filter",
-        "output_count": 1,
+        "name": "jet-flanger-stereo",
+        "output_count": 2,
         "params": [
-          "cutoff",
-          "res"
+          "depth",
+          "feedback",
+          "manual",
+          "mix",
+          "rate",
+          "width"
         ],
-        "path": "effects/filter.lisp",
-        "preview": "(def input (in 1 @name signal))\n(def x (biquad input (param cutoff @min 50 @max 8000 @default 50) (param res @min 1 @max 64 @default 4) 1 1))\n(out x 1 @name audio)"
+        "path": "effects/jet-flanger-stereo.lisp",
+        "preview": "(def sig (in 1 @name signal))\n(def rate (param rate @min 0.01 @max 10 @default 0.15))\n(def depth (param depth @min 0 @max 1 @default 0.8))\n(def manual (param manual @min 1 @max 800 @default 250))\n(def fbk (param feedback @min -0.98 @max 0.98 @default 0.85))\n(def mix-amt (param mix @min 0 @max 1 @default 0.5))"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "gater",
-        "output_count": 1,
-        "params": [],
-        "path": "effects/gater.lisp",
-        "preview": "(def input (in 1 @name signal))\n(def m (triangle (phasor 8) .9))\n(out (* m input) 1 @name audio)"
+        "name": "lexilush",
+        "output_count": 2,
+        "params": [
+          "damping",
+          "decay",
+          "diffusion",
+          "mix",
+          "mod_amt",
+          "mod_freq",
+          "pre_dly",
+          "size"
+        ],
+        "path": "effects/lexilush.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def in-stereo (+ in-l in-r))\n(param pre_dly @min 0 @max 5000 @default 240)\n(param size @min 0.5 @max 2.0 @default 1.0)\n(param decay @min 0.1 @max 0.98 @default 0.8)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
         "name": "lowdcmp",
-        "output_count": 1,
+        "output_count": 2,
         "params": [
+          "gain",
+          "knee",
+          "ratio",
           "threshold"
         ],
         "path": "effects/lowdcmp.lisp",
-        "preview": "(def input (in 1 @name signal))\n(out (compressor (* 4 input) 12 (param threshold @min -40 @max 0 @default -10) 5 0.1 0.1) 1 @name audio)"
+        "preview": "(def input1 (in 1 @name signal))\n(param threshold @min -40 @max 0 @default -10)\n(param gain @min 0 @max 10 @default 1)\n(param ratio @min 1 @max 32 @default 10)\n(param knee @min 1 @max 10 @default 5)\n(out (compressor"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "lower",
-        "output_count": 1,
+        "name": "lushlexiconreverb",
+        "output_count": 2,
         "params": [
-          "vol"
+          "damping",
+          "decay",
+          "mix",
+          "pre",
+          "size"
         ],
-        "path": "effects/lower.lisp",
-        "preview": "(def input (in 1 @name signal))\n(out (* (param vol @default 0.05 @min 0 @max .2) input) 1 @name audio)"
-      },
-      {
-        "kind": "effect",
-        "modulator_count": 0,
-        "name": "lower2",
-        "output_count": 1,
-        "params": [],
-        "path": "effects/lower2.lisp",
-        "preview": "(def input (in 1 @name signal))\n(out (* .25 input) 1 @name audio)"
-      },
-      {
-        "kind": "effect",
-        "modulator_count": 0,
-        "name": "mfilt",
-        "output_count": 1,
-        "params": [
-          "freq",
-          "res"
-        ],
-        "path": "effects/mfilt.lisp",
-        "preview": "(def input (in 1 @name signal))\n(def cmod (scale (triangle (phasor (param freq @min .5 @max 128 @default 2)) .03) 0 1 50 500))\n(out (biquad input cmod (param res @min 1 @max 9 @default 2) 1 1) 1 @name audio)"
+        "path": "effects/lushlexiconreverb.lisp",
+        "preview": "(def in-l (in 1 @name signal))\n(param mix @min 0 @max 1 @default 0.3)\n(param size @min 0.5 @max 2.0 @default 1.0)\n(param decay @min 0.1 @max 0.95 @default 0.7)\n(param damping @min 500 @max 10000 @default 3000)\n(param pre @min 0 @max 2000 @default 500)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
         "name": "mod_delay",
-        "output_count": 1,
+        "output_count": 2,
         "params": [
           "delay_max",
           "fbk",
@@ -841,65 +646,99 @@
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "nothing",
-        "output_count": 1,
+        "name": "roland-flanger-stereo",
+        "output_count": 2,
         "params": [
-          "cutoff",
-          "res"
+          "color",
+          "depth",
+          "feedback",
+          "manual",
+          "mix",
+          "rate"
         ],
-        "path": "effects/nothing.lisp",
-        "preview": "(def input (in 1 @name signal))\n(def x (biquad input (param cutoff @min 50 @max 4000 @default 1000) (param res @min 1 @max 16 @default 4) 1 1))\n(out x 1 @name audio)"
+        "path": "effects/roland-flanger-stereo.lisp",
+        "preview": "(def sig (in 1 @name signal))\n(def rate (param rate @min 0.01 @max 5 @default 0.2))\n(def depth (param depth @min 0 @max 1 @default 0.5))\n(def manual (param manual @min 1 @max 500 @default 120))\n(def fbk (param feedback @min -0.99 @max 0.99 @default 0.75))\n(def color (param color @min 1000 @max 16000 @default 5000))"
       },
       {
         "kind": "effect",
         "modulator_count": 1,
         "name": "sidechain",
-        "output_count": 1,
+        "output_count": 2,
         "params": [
           "ratio",
           "threshold"
         ],
         "path": "effects/sidechain.lisp",
-        "preview": "(def input (in 1 @name signal))\n(def side (in 2 @name signal @modulator 1))\n(param threshold @min -80 @max -2 @default -20)\n(param ratio min 1 @max 20 @default 10)\n(def o (compressor input ratio threshold 6 .01 .01 1 side))\n(out o 1 @name audio)"
+        "preview": "(def input (in 1 @name signal))\n(def input2 (in 2 @name signal))\n(def side (in 3 @name signal @modulator 1))\n(param threshold @min -80 @max -2 @default -20)\n(param ratio min 1 @max 20 @default 10)\n(def o (compressor input ratio threshold 6 .01 .01 1 side))"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "tinytest",
-        "output_count": 1,
+        "name": "spectral-bin-freeze",
+        "output_count": 2,
         "params": [
-          "cutoff",
-          "res"
+          "freeze",
+          "mix",
+          "smear",
+          "tone",
+          "width"
         ],
-        "path": "effects/tinytest.lisp",
-        "preview": "(def input (in 1 @name signal))\n(def x (biquad input (param cutoff @min 50 @max 4000 @default 50) (param res @min 1 @max 16 @default 4) 1 1))\n(out (* x 0) 1 @name audio)"
+        "path": "effects/spectral-bin-freeze.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param freeze @min 0 @max 1 @default 0.55)\n(param smear @min 0 @max 1 @default 0.35)\n(param tone @min 800 @max 18000 @default 9000)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "untitled",
-        "output_count": 1,
+        "name": "spectral-cloud-gate",
+        "output_count": 2,
         "params": [
-          "cutoff",
-          "fbk",
-          "m1",
-          "m2",
-          "res"
+          "density",
+          "mix",
+          "phase_amt",
+          "smooth"
         ],
-        "path": "effects/untitled.lisp",
-        "preview": "(def input (in 1 @name signal))\n(def lfo (cos (* twopi (triangle (phasor 2)))))\n(def x\n  (biquad\n    input\n    (+ (* (scale lfo -1 1 0 1) 1000) (param cutoff @min 50 @max 4000 @default 900))"
+        "path": "effects/spectral-cloud-gate.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param density @min 0.05 @max 1 @default 0.45)\n(param phase_amt @min 0 @max 1 @default 0.35)\n(param smooth @min 0 @max 1 @default 0.2)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "wut",
-        "output_count": 1,
+        "name": "spectral-short-ir",
+        "output_count": 2,
         "params": [
-          "cutoff",
-          "res"
+          "gain",
+          "tone",
+          "wet"
         ],
-        "path": "effects/wut.lisp",
-        "preview": "(def input (in 1 @name signal))\n(def x (biquad input (param cutoff @min 50 @max 4000 @default 3000) (param res @min 1 @max 16 @default 4) 1 1))\n(out x 1 @name audio)"
+        "path": "effects/spectral-short-ir.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param wet @min 0 @max 1 @default 0.42)\n(param gain @min 0 @max 2 @default 1.0)\n(param tone @min 600 @max 14000 @default 6500)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "spectral-vocoder-shift",
+        "output_count": 2,
+        "params": [
+          "color",
+          "drive",
+          "mix",
+          "ratio"
+        ],
+        "path": "effects/spectral-vocoder-shift.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param ratio @min 0.5 @max 2.0 @default 1.25)\n(param color @min 1000 @max 16000 @default 11000)\n(param mix @min 0 @max 1 @default 0.55)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "stereo-tremolo",
+        "output_count": 2,
+        "params": [
+          "depth",
+          "rate",
+          "spread"
+        ],
+        "path": "effects/stereo-tremolo.lisp",
+        "preview": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(param rate @min 0.1 @max 20 @default 5)\n(param depth @min 0 @max 1 @default 0.8)\n(param spread @min 0 @max 1 @default 0.5)\n(def p (phasor rate))"
       }
     ],
     "manifest": {
@@ -1199,6 +1038,52 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "math",
+        "implementation": {
+          "function": "evalAtan2",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "atan2",
+        "signatures": [
+          "(atan2 y x)"
+        ],
+        "summary": "Two-argument arctangent."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 0
+        },
+        "attributes": [
+          "@channel",
+          "@end",
+          "@file",
+          "@mono",
+          "@name",
+          "@normalize",
+          "@start"
+        ],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalAudioTensor",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "audio-tensor",
+        "signatures": [
+          "(audio-tensor @file \"irs/hall.wav\")",
+          "(audio-tensor @file \"stereo.wav\" @channel 0)",
+          "(audio-tensor @file \"x.wav\" @mono true @normalize peak)"
+        ],
+        "summary": "Load a WAV file into static tensor manifest data."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": 5,
           "minimum": 1
         },
@@ -1219,98 +1104,6 @@
           "(biquad signal @cutoff 1000 @q 0.707 @gain 0 @mode 0)"
         ],
         "summary": "IIR biquad filter."
-      },
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 4,
-          "minimum": 4
-        },
-        "attributes": [],
-        "category": "filter",
-        "implementation": {
-          "function": "preamble macro",
-          "source_file": "src/lisp_effect.rs"
-        },
-        "name": "svf",
-        "signatures": [
-          "(svf input cutoff q mode)"
-        ],
-        "summary": "Cytomic-style ZDF state variable filter. Cutoff is Hz, q is resonance/Q, mode is 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass. Prefer this over biquad for most synth filtering."
-      },
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 4,
-          "minimum": 4
-        },
-        "attributes": [],
-        "category": "filter",
-        "implementation": {
-          "function": "preamble macro",
-          "source_file": "src/lisp_effect.rs"
-        },
-        "name": "ladder",
-        "signatures": [
-          "(ladder input cutoff res drive)"
-        ],
-        "summary": "ZDF Moog-style 4-pole low-pass filter with pre-saturated input drive, tanh feedback saturation, and resonance-proportional passband gain compensation. Cutoff is Hz, res is 0..1, drive is the warm character knob before the ladder core. Use for analog, acid, Moog, mono bass, warm, or driven low-pass character."
-      },
-      {
-        "aliases": [
-          "polypleb"
-        ],
-        "arity": {
-          "maximum": 2,
-          "minimum": 2
-        },
-        "attributes": [],
-        "category": "oscillator",
-        "implementation": {
-          "function": "preamble macro",
-          "source_file": "src/lisp_effect.rs"
-        },
-        "name": "polyblep",
-        "signatures": [
-          "(polyblep phase freq)"
-        ],
-        "summary": "PolyBLEP transition correction helper for anti-aliased hard oscillator edges. Prefer polyblep_saw and polyblep_pulse directly for normal saw and pulse instruments."
-      },
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 2,
-          "minimum": 2
-        },
-        "attributes": [],
-        "category": "oscillator",
-        "implementation": {
-          "function": "preamble macro",
-          "source_file": "src/lisp_effect.rs"
-        },
-        "name": "polyblep_saw",
-        "signatures": [
-          "(polyblep_saw phase freq)"
-        ],
-        "summary": "Anti-aliased saw oscillator helper. Pass a phasor phase and frequency in Hz. Use instead of raw phase-to-saw math for bright saw, acid, SH-101, polysynth, or supersaw patches."
-      },
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 3,
-          "minimum": 3
-        },
-        "attributes": [],
-        "category": "oscillator",
-        "implementation": {
-          "function": "preamble macro",
-          "source_file": "src/lisp_effect.rs"
-        },
-        "name": "polyblep_pulse",
-        "signatures": [
-          "(polyblep_pulse phase width freq)"
-        ],
-        "summary": "Anti-aliased pulse/square oscillator helper with pulse-width control. Pass a phasor phase, width, and frequency in Hz. Clip width to roughly 0.05..0.95; 0.5 is square."
       },
       {
         "aliases": [],
@@ -1368,6 +1161,46 @@
         "summary": "Clamp into a range."
       },
       {
+        "aliases": [
+          "complexconj"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "fft",
+        "implementation": {
+          "function": "evalComplexConj",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "complex-conj",
+        "signatures": [
+          "(complex-conj re im)"
+        ],
+        "summary": "Complex conjugate, returning `(real -imag)`."
+      },
+      {
+        "aliases": [
+          "complexmul"
+        ],
+        "arity": {
+          "maximum": 4,
+          "minimum": 4
+        },
+        "attributes": [],
+        "category": "fft",
+        "implementation": {
+          "function": "evalComplexMul",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "complex-mul",
+        "signatures": [
+          "(complex-mul ar ai br bi)"
+        ],
+        "summary": "Complex multiply, returning `(real imag)`."
+      },
+      {
         "aliases": [],
         "arity": {
           "maximum": 8,
@@ -1393,6 +1226,24 @@
           "(compressor signal ratio threshold knee attack release isSidechain sidechain)"
         ],
         "summary": "Dynamics compressor with optional sidechain forms."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "tensor_op",
+        "implementation": {
+          "function": "evalConv1d",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "conv1d",
+        "signatures": [
+          "(conv1d input kernel)"
+        ],
+        "summary": "1D convolution."
       },
       {
         "aliases": [],
@@ -1453,10 +1304,12 @@
       {
         "aliases": [],
         "arity": {
-          "maximum": 2,
+          "maximum": null,
           "minimum": 1
         },
-        "attributes": [],
+        "attributes": [
+          "@backend"
+        ],
         "category": "fft",
         "implementation": {
           "function": "evalFFT",
@@ -1465,9 +1318,10 @@
         "name": "fft",
         "signatures": [
           "(fft input)",
-          "(fft input N)"
+          "(fft input N)",
+          "(fft input @N 1024 @backend accelerated)"
         ],
-        "summary": "FFT returning the real component and exposing imag in `__fft_im`."
+        "summary": "FFT returning `(real imag)`; also updates legacy `__fft_re` and `__fft_im`."
       },
       {
         "aliases": [],
@@ -1509,10 +1363,55 @@
       {
         "aliases": [],
         "arity": {
-          "maximum": 3,
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attributes": [
+          "@N",
+          "@n"
+        ],
+        "category": "windowing",
+        "implementation": {
+          "function": "evalHann",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "hann",
+        "signatures": [
+          "(hann 1024)"
+        ],
+        "summary": "Periodic Hann window tensor."
+      },
+      {
+        "aliases": [
+          "hophold"
+        ],
+        "arity": {
+          "maximum": 2,
           "minimum": 2
         },
         "attributes": [],
+        "category": "stateful",
+        "implementation": {
+          "function": "evalHopHold",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "hop-hold",
+        "signatures": [
+          "(hop-hold value hop)"
+        ],
+        "summary": "Hold a signal, tensor, or signalTensor for one hop interval."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [
+          "@N",
+          "@backend",
+          "@n"
+        ],
         "category": "fft",
         "implementation": {
           "function": "evalIFFT",
@@ -1521,7 +1420,8 @@
         "name": "ifft",
         "signatures": [
           "(ifft real imag)",
-          "(ifft real imag N)"
+          "(ifft real imag N)",
+          "(ifft real imag @N 1024 @backend accelerated)"
         ],
         "summary": "Inverse FFT from real and imaginary parts."
       },
@@ -1546,6 +1446,32 @@
           "(in channel @name mod1 @modulator 1)"
         ],
         "summary": "Audio input channel."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 0
+        },
+        "attributes": [
+          "@channel",
+          "@end",
+          "@file",
+          "@mono",
+          "@name",
+          "@normalize",
+          "@start"
+        ],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalAudioTensor",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "ir",
+        "signatures": [
+          "(ir @file \"irs/room.wav\")"
+        ],
+        "summary": "Load a WAV file as an impulse-response tensor."
       },
       {
         "aliases": [],
@@ -1727,20 +1653,26 @@
       {
         "aliases": [],
         "arity": {
-          "maximum": 0,
+          "maximum": null,
           "minimum": 0
         },
-        "attributes": [],
+        "attributes": [
+          "@hop",
+          "@hopSize",
+          "@size"
+        ],
         "category": "signal_generator",
         "implementation": {
-          "function": "signal",
+          "function": "evalNoise",
           "source_file": "LispEvaluator.swift"
         },
         "name": "noise",
         "signatures": [
-          "(noise)"
+          "(noise)",
+          "(noise @size 1024)",
+          "(noise @size 1024 @hop 256)"
         ],
-        "summary": "White noise."
+        "summary": "White noise, or per-bin tensor noise with optional hop-rate updates."
       },
       {
         "aliases": [],
@@ -1853,6 +1785,82 @@
         "summary": "Host-visible scalar parameter."
       },
       {
+        "aliases": [
+          "partitionir"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@N",
+          "@hop",
+          "@hopSize",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalPartitionIR",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "partition-ir",
+        "signatures": [
+          "(partition-ir irTensor @N 1024 @hop 256)"
+        ],
+        "summary": "Prepartition an impulse response, returning `(irRe irIm)`."
+      },
+      {
+        "aliases": [
+          "partitionedconvolve"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [
+          "@N",
+          "@gain",
+          "@hop",
+          "@hopSize",
+          "@n",
+          "@shape"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalPartitionedConvolve",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "partitioned-convolve",
+        "signatures": [
+          "(partitioned-convolve input irTensor @N 1024 @hop 256)",
+          "(partitioned-convolve input irTensor @N 1024 @hop 256 @gain 1.0)"
+        ],
+        "summary": "High-level partitioned convolution from signal and IR tensor."
+      },
+      {
+        "aliases": [
+          "partitionedspectralmac"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 4
+        },
+        "attributes": [
+          "@N",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalPartitionedSpectralMAC",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "partitioned-spectral-mac",
+        "signatures": [
+          "(partitioned-spectral-mac xre xim irre irim @N 1024)"
+        ],
+        "summary": "Multiply-accumulate an input spectrum against partitioned IR spectra, returning `(real imag)`."
+      },
+      {
         "aliases": [],
         "arity": {
           "maximum": 3,
@@ -1892,6 +1900,31 @@
         "summary": "Read a tensor row as a signalTensor."
       },
       {
+        "aliases": [
+          "phasevocoder"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 3
+        },
+        "attributes": [
+          "@N",
+          "@hop",
+          "@hopSize",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalPhaseVocoder",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "phase-vocoder",
+        "signatures": [
+          "(phase-vocoder re im ratio @N 1024 @hop 256)"
+        ],
+        "summary": "Phase-vocoder bin remap/pitch transform, returning `(real imag)`."
+      },
+      {
         "aliases": [],
         "arity": {
           "maximum": 2,
@@ -1909,6 +1942,26 @@
           "(phasor freq reset)"
         ],
         "summary": "Ramp oscillator from 0 to 1."
+      },
+      {
+        "aliases": [
+          "polarfft"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "fft",
+        "implementation": {
+          "function": "evalPolarFFT",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "polar-fft",
+        "signatures": [
+          "(polar-fft re im)"
+        ],
+        "summary": "Convert rectangular complex spectrum to `(magnitude phase)`."
       },
       {
         "aliases": [],
@@ -1964,6 +2017,26 @@
           "(randn d1 d2 ...)"
         ],
         "summary": "Random normal tensor."
+      },
+      {
+        "aliases": [
+          "rectfft"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "fft",
+        "implementation": {
+          "function": "evalRectFFT",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "rect-fft",
+        "signatures": [
+          "(rect-fft mag phase)"
+        ],
+        "summary": "Convert polar spectrum to `(real imag)`."
       },
       {
         "aliases": [],
@@ -2086,6 +2159,7 @@
           "tanh",
           "exp",
           "log",
+          "log10",
           "sqrt",
           "abs",
           "sign",
@@ -2126,6 +2200,59 @@
           "(softmax tensor @axis -1)"
         ],
         "summary": "Softmax along an axis."
+      },
+      {
+        "aliases": [
+          "spectrumdelay"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@N",
+          "@hop",
+          "@hopSize",
+          "@hops",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalSpectrumDelay",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "spectrum-delay",
+        "signatures": [
+          "(spectrum-delay spectrum @N 1024 @hops 4 @hop 256)"
+        ],
+        "summary": "Delay a spectrum by a fixed number of hops."
+      },
+      {
+        "aliases": [
+          "spectrumdelaymod"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [
+          "@N",
+          "@hop",
+          "@hopSize",
+          "@max-hops",
+          "@maxHops",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalSpectrumDelayMod",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "spectrum-delay-mod",
+        "signatures": [
+          "(spectrum-delay-mod spectrum delay @N 1024 @max-hops 32 @hop 256)"
+        ],
+        "summary": "Delay a spectrum by a signal-controlled number of hops."
       },
       {
         "aliases": [],
@@ -2192,9 +2319,13 @@
         "aliases": [],
         "arity": {
           "maximum": null,
-          "minimum": 1
+          "minimum": 0
         },
-        "attributes": [],
+        "attributes": [
+          "@data",
+          "@file",
+          "@shape"
+        ],
         "category": "tensor_creation",
         "implementation": {
           "function": "evalTensor",
@@ -2203,9 +2334,10 @@
         "name": "tensor",
         "signatures": [
           "(tensor rows cols)",
-          "(tensor [d1,d2,...])"
+          "(tensor [d1,d2,...])",
+          "(tensor @shape [4] @data [1 0.5 0.25 0])"
         ],
-        "summary": "Zero-filled tensor alias."
+        "summary": "Zero-filled tensor alias, or inline data tensor with @shape/@data."
       },
       {
         "aliases": [],
@@ -2213,7 +2345,11 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [],
+        "attributes": [
+          "@default-file",
+          "@file",
+          "@shape"
+        ],
         "category": "tensor_creation",
         "implementation": {
           "function": "evalTensorParam",
@@ -2290,6 +2426,86 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": null,
+          "minimum": null
+        },
+        "attributes": [
+          "@default-file",
+          "@file",
+          "@name"
+        ],
+        "category": "uncategorized",
+        "implementation": {
+          "function": "evalWavetable",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "wavetable",
+        "signatures": [],
+        "summary": "Operator implemented in DGenLisp evaluator."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": null
+        },
+        "attributes": [
+          "@default-file",
+          "@file",
+          "@name"
+        ],
+        "category": "uncategorized",
+        "implementation": {
+          "function": "evalWavetable",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "wavetable-param",
+        "signatures": [],
+        "summary": "Operator implemented in DGenLisp evaluator."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 0
+        },
+        "attributes": [
+          "@type"
+        ],
+        "category": "windowing",
+        "implementation": {
+          "function": "evalWindow",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "window",
+        "signatures": [
+          "(window @type hann @N 1024)"
+        ],
+        "summary": "Named window tensor. Currently supports Hann."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@shape"
+        ],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalWindows",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "windows",
+        "signatures": [
+          "(windows tensor @shape [3 3])"
+        ],
+        "summary": "Extract sliding windows / im2col-style tensor view."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": 3,
           "minimum": 3
         },
@@ -2330,7 +2546,8 @@
         "name": "def",
         "signatures": [
           "(def name expr)",
-          "(def name expr1 expr2 ...)"
+          "(def name expr1 expr2 ...)",
+          "(def (name1 name2) tupleExpr)"
         ],
         "summary": "Bind a symbol to the last evaluated body expression."
       },
@@ -2361,6 +2578,28 @@
           "(write-history name expr)"
         ],
         "summary": "Write the current frame to a history cell and return the written signal."
+      },
+      {
+        "name": "make-tensor-history",
+        "signatures": [
+          "(make-tensor-history name @shape [H W])",
+          "(make-tensor-history name @shape [H W] @data [...])"
+        ],
+        "summary": "Create a tensor history cell for recurrent tensor DSP."
+      },
+      {
+        "name": "read-tensor-history",
+        "signatures": [
+          "(read-tensor-history name)"
+        ],
+        "summary": "Read the previous tensor value from a tensor history cell."
+      },
+      {
+        "name": "write-tensor-history",
+        "signatures": [
+          "(write-tensor-history name expr)"
+        ],
+        "summary": "Write the current tensor value and return it."
       },
       {
         "name": "mod",

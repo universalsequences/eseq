@@ -649,7 +649,16 @@
 (def base-note ()
   (let ((p (inst-base-note-param synth-ui-current-inst)))
     (if p
-      (fx-param-row p false (str "custom-ui-" synth-ui-current-name "-base-note"))
+      (subtree :key (str "custom-ui-base-note-" synth-ui-current-name)
+        (knob-number :label "note"
+          :value (fx-param-value p)
+          :min (get p :min) :max (get p :max) :decimals 0
+          :step 1
+          :font-size 10.5 :label-font-size 10
+          :text-color :dim :label-color :dim
+          :width 4.4 :height 2.4
+          :value-align :center
+          :on-change (lambda (v) (fx-set-instrument-value p v))))
       (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
 
 (defstate custom-ui-selected-section 0)
@@ -668,21 +677,25 @@
   (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
     (label title :font-size 8.0 :width 2.7 :color :dim :bg :transparent)))
 
+(def ui-panel-header (title)
+  (box :width :fill :height 0.5 :h-align :start :v-align :center :padding 0.15
+    (label title :font-size 7.5 :color :dim :bg :transparent)))
+
 (def ui-section (title body)
-  (box :height 2.35
+  (box :width :fill :height 3.4
        :background-color :instrument-group-bg
-       :border-width 1 :corner-radius 16 :padding 0.1
-    (h-stack :gap 0.20 :align :start
-      (ui-row-label title)
+       :border-width 1 :corner-radius 12 :padding 0.15
+    (v-stack :width :fill :gap 0.2 :align :start
+      (ui-panel-header title)
       body)))
 
 (def ui-panel (title section body)
-  (box :height 2.35
+  (box :width :fill :height 3.4
        :background-color (ui-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
+       :border-width 1 :corner-radius 12 :padding 0.15
        :on-click (lambda (info) (ui-select-section section))
-    (h-stack :gap 0.20 :align :start
-      (ui-row-label title)
+    (v-stack :width :fill :gap 0.2 :align :start
+      (ui-panel-header title)
       body)))
 
 (def ui-param-knob (name title)
@@ -694,9 +707,57 @@
           :min (get p :min) :max (get p :max) :decimals 2
           :font-size 10.5 :label-font-size 10
           :text-color :dim :label-color :dim
-          :width 4.4 :height 2.05
+          :width 4.4 :height 2.4
+          :value-align :center
           :on-change (lambda (v) (fx-set-instrument-value p v))))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
+
+;; Compact knob: ~1.7 cell tall, value nestled in the lower-right of the knob
+;; arc (default value-align) so the knob itself stays large. For instruments
+;; that need 3-4 rows of params instead of 2.
+(def ui-param-knob-c (name title)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p
+      (subtree :key (str "custom-ui-knob-c-" synth-ui-current-name "-" name)
+        (knob-number :label title
+          :value (fx-param-value p)
+          :min (get p :min) :max (get p :max) :decimals 2
+          :font-size 8.5 :label-font-size 7.5
+          :text-color :dim :label-color :dim
+          :width 3.8 :height 1.8
+          :label-height 0.5 :knob-size 1.25
+          :on-change (lambda (v) (fx-set-instrument-value p v))))
+      (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def base-note-c ()
+  (let ((p (inst-base-note-param synth-ui-current-inst)))
+    (if p
+      (subtree :key (str "custom-ui-base-note-c-" synth-ui-current-name)
+        (knob-number :label "note"
+          :value (fx-param-value p)
+          :min (get p :min) :max (get p :max) :decimals 0
+          :step 1
+          :font-size 8.5 :label-font-size 7.5
+          :text-color :dim :label-color :dim
+          :width 3.8 :height 1.8
+          :label-height 0.5 :knob-size 1.25
+          :on-change (lambda (v) (fx-set-instrument-value p v))))
+      (label "missing: base_note" :font-size 9 :color :red :bg :transparent))))
+
+(def ui-panel-header-c (title)
+  (box :width 3.5 :height :fill :h-align :end :v-align :center :padding 0.1
+    (label title :font-size 6 :color :dim :bg :transparent)))
+
+;; Compact panel: title runs along the LEFT edge (vertical strip) so each
+;; row only takes the height of one knob — no separate title band on top.
+(def ui-panel-c (title section body)
+  (box :width :fill :height 2.0
+       :background-color (ui-panel-bg section)
+       :border-width 1 :corner-radius 10 :padding 0.08
+       :on-click (lambda (info) (ui-select-section section))
+    (h-stack :width :fill :gap 0.1 :align :center
+      (ui-panel-header-c title)
+      body)))
 
 (def ui-param-value (name fallback)
   (let ((p (inst-param synth-ui-current-inst name)))
@@ -727,16 +788,16 @@
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 (def ui-adsr (title attack decay sustain release)
-  (box :width 23.1 :height 6.55
+  (box :width 23.1 :height :fill
        :background-color :instrument-control-bg
-       :border-width 1 :corner-radius 16 :padding 0.15
-    (v-stack :width :fill :gap 0.10
+       :border-width 1 :corner-radius 12 :padding 0.15
+    (v-stack :width :fill :height :fill :gap 0.10
       (adsr-editor
         :attack (ui-param-bound-value attack 5)
         :decay (ui-param-bound-value decay 120)
         :sustain (ui-param-bound-value sustain 0.7)
         :release (ui-param-bound-value release 120)
-        :width 22.0 :height 3.55
+        :width 22.0 :height 4.0
         :background-color :instrument-control-bg
         :on-change (lambda (env)
           (do
@@ -751,13 +812,75 @@
           (ui-adsr-number sustain "sus" 2 false)
           (ui-adsr-number release "rel" 0 "ms")))
       (box :width :fill :height 0.35 :h-align :center :v-align :center
-        (label title :font-size 8.5 :color :dim :bg :transparent)))))
+        (label title :font-size 8.5 :color :dim :bg :transparent))
+      (box :width :fill :flex 1))))
 
 (def ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a
                      section-b title-b attack-b decay-b sustain-b release-b)
   (if (= custom-ui-selected-section section-b)
     (ui-adsr title-b attack-b decay-b sustain-b release-b)
     (ui-adsr title-a attack-a decay-a sustain-a release-a)))
+
+;; ui-rack — auto-arrange a flat list of panels into columns based on mode.
+;;   mode          :breathe (2 panels per column) or :compact (4 panels per col)
+;;   left-panels   ordered list of panels to place LEFT of the ADSR
+;;   adsr-form     a pre-built ADSR widget (ui-adsr / ui-adsr-switch / -c variants)
+;;   right-panels  ordered list of panels to place RIGHT of the ADSR
+;;
+;; The instrument doesn't have to know how many fit per column — just list
+;; panels in order, pick :breathe or :compact, and the helper chunks them.
+(def ui-rack-col-breathe (col)
+  (v-stack :width 31.0 :gap 0.10 col))
+(def ui-rack-col-compact (col)
+  (v-stack :width 20.0 :gap 0.08 col))
+(def ui-rack (mode left-panels adsr-form right-panels)
+  (if (= mode :compact)
+    (h-stack :width :fill :gap 0.35 :align :stretch
+      (map ui-rack-col-compact (chunks left-panels 4))
+      adsr-form
+      (map ui-rack-col-compact (chunks right-panels 4)))
+    (h-stack :width :fill :gap 0.4 :align :stretch
+      (map ui-rack-col-breathe (chunks left-panels 2))
+      adsr-form
+      (map ui-rack-col-breathe (chunks right-panels 2)))))
+
+;; Compact ADSR for use alongside ui-panel-c. Fills the available height —
+;; the outer h-stack must use `:align :stretch` so the box stretches to the
+;; tallest sibling column. ADSR-editor takes the remaining vertical space
+;; via `:flex 1`; controls + caption hold their natural height.
+(def ui-adsr-c (title attack decay sustain release)
+  (box :width 21.0 :height :fill
+       :background-color :instrument-control-bg
+       :border-width 1 :corner-radius 10 :padding 0.1
+    (v-stack :width :fill :height :fill :gap 0.08
+      (adsr-editor
+        :attack (ui-param-bound-value attack 5)
+        :decay (ui-param-bound-value decay 120)
+        :sustain (ui-param-bound-value sustain 0.7)
+        :release (ui-param-bound-value release 120)
+        :width 20.0 :height 4.0
+        :background-color :instrument-control-bg
+        :on-change (lambda (env)
+          (do
+            (ui-set-param attack (get env :attack))
+            (ui-set-param decay (get env :decay))
+            (ui-set-param sustain (get env :sustain))
+            (ui-set-param release (get env :release)))))
+      (box :width :fill :height 1.45 :padding 0.1
+        (h-stack :width :fill :gap 0.15 :align :start
+          (ui-adsr-number attack "atk" 0 "ms")
+          (ui-adsr-number decay "dec" 0 "ms")
+          (ui-adsr-number sustain "sus" 2 false)
+          (ui-adsr-number release "rel" 0 "ms")))
+      (box :width :fill :height 0.3 :h-align :center :v-align :center
+        (label title :font-size 7.5 :color :dim :bg :transparent))
+      (box :width :fill :flex 1))))
+
+(def ui-adsr-switch-c (section-a title-a attack-a decay-a sustain-a release-a
+                       section-b title-b attack-b decay-b sustain-b release-b)
+  (if (= custom-ui-selected-section section-b)
+    (ui-adsr-c title-b attack-b decay-b sustain-b release-b)
+    (ui-adsr-c title-a attack-a decay-a sustain-a release-a)))
 
 (def midi-fx-ui-param (fx name)
   (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
@@ -772,7 +895,8 @@
 (def instrument-synth-panel-body (inst)
   (let ((custom (custom-instrument-synth-ui inst)))
     (if custom
-      (box :debug-name "custom-synth-wrapper" :padding 0 :h-align :start :v-align :start custom)
+      (box :debug-name "custom-synth-wrapper" :padding 0
+           :h-align :start :v-align :stretch :flex 1 custom)
       (box :debug-name "fallback-synth-wrapper"
         (fx-param-grid (get inst :synth) false)))))
 

@@ -5893,6 +5893,254 @@ mod tests {
         assert!(value_contains_string(tree, "CUSTOM_OK"));
     }
 
+    /// Regression: `ui-rack` with a real `ui-adsr-switch` plus base-note/many
+    /// knobs (korg1's actual shape) should still produce multiple columns.
+    #[test]
+    fn metal_seq_fx_lisp_ui_rack_korg1_shape_renders_all_panels() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument/".to_string(),
+            "test/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-rack :breathe
+                (list
+                  (ui-panel "GLOBAL" 0
+                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "cut")))
+                  (ui-panel "VCO 1" 0
+                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "saw")))
+                  (ui-panel "VCO 2 / MIX" 0
+                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "vco2")))
+                  (ui-panel "DIRT" 0
+                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "input"))))
+                (ui-adsr-switch
+                  0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
+                  1 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
+                (list
+                  (ui-panel "MS FILTER" 1
+                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "cut")))
+                  (ui-panel "HP / SCREAM" 1
+                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "hp")))
+                  (ui-panel "MOD" 0
+                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "rate")))
+                  (ui-panel "NOISE / RING" 0
+                    (h-stack :gap 0.2 (ui-param-knob "cutoff" "noise"))))))
+            "#
+            .to_string(),
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(140, 20);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("ui-rack fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(140, 20);
+        editor.widget_layout().expect("ui-rack fx layout");
+        let tree = editor
+            .active_buffer()
+            .widget_tree
+            .as_ref()
+            .expect("fx tree");
+
+        for title in [
+            "GLOBAL",
+            "VCO 1",
+            "VCO 2 / MIX",
+            "DIRT",
+            "MS FILTER",
+            "HP / SCREAM",
+            "MOD",
+            "NOISE / RING",
+        ] {
+            assert!(
+                value_contains_string(tree, title),
+                "panel {title} missing — ui-rack-switch combo is broken"
+            );
+        }
+
+        // Measure-confirm: walk the LAYOUT tree and verify all column v-stacks
+        // are 31 cells wide (no v-stack should inflate to the rack width).
+        let layout = editor.widget_layout().expect("re-layout");
+        fn collect_panels(
+            node: &eseqlisp::layout::LayoutNode,
+            out: &mut Vec<eseqlisp::layout::Rect>,
+        ) {
+            // Custom panels are boxes wrapping a v-stack — record their rects.
+            if node.widget_type == "v-stack" {
+                if let Some(Value::Number(w)) = node.props.get("width") {
+                    if (*w - 31.0).abs() < 0.01 {
+                        out.push(node.rect);
+                    }
+                }
+            }
+            for child in &node.children {
+                collect_panels(child, out);
+            }
+        }
+        let mut column_rects = Vec::new();
+        collect_panels(&layout, &mut column_rects);
+        // Expect 4 columns (2 left + 2 right at :breathe with 4 panels each).
+        assert!(
+            column_rects.len() >= 4,
+            "expected at least 4 v-stack columns at width 22, found {}",
+            column_rects.len()
+        );
+        // Every column must be ≤ 32 cells wide (its declared 31 + a touch).
+        for rect in &column_rects {
+            assert!(
+                rect.width < 32.5,
+                "column v-stack inflated past its :width 31 — got {}",
+                rect.width
+            );
+        }
+        // Columns must be at DIFFERENT col positions (laid out side by side).
+        let mut cols: Vec<f32> = column_rects.iter().map(|r| r.col).collect();
+        cols.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        cols.dedup_by(|a, b| (*a - *b).abs() < 0.1);
+        assert!(
+            cols.len() >= 4,
+            "columns are stacked at same x position — h-stack didn't lay them out side by side: {:?}",
+            cols
+        );
+    }
+
+    /// Regression: `ui-rack` should produce multiple side-by-side columns
+    /// when an instrument provides a flat panel list. Caught a bug where
+    /// only the first column was rendering (panels stretched to rack width).
+    #[test]
+    fn metal_seq_fx_lisp_ui_rack_renders_multiple_columns() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument/".to_string(),
+            "test/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-rack :breathe
+                (list
+                  (ui-panel "P1" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c")))
+                  (ui-panel "P2" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c")))
+                  (ui-panel "P3" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c")))
+                  (ui-panel "P4" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c"))))
+                (ui-adsr "AMP" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
+                (list
+                  (ui-panel "P5" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c")))
+                  (ui-panel "P6" 0 (h-stack :gap 0.2 (ui-param-knob "cutoff" "c"))))))
+            "#
+            .to_string(),
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(140, 20);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("ui-rack fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(140, 20);
+        let _layout = editor.widget_layout().expect("ui-rack fx layout");
+        let tree = editor
+            .active_buffer()
+            .widget_tree
+            .as_ref()
+            .expect("fx tree");
+
+        // All six panel titles must appear somewhere in the tree.
+        for title in ["P1", "P2", "P3", "P4", "P5", "P6"] {
+            assert!(
+                value_contains_string(tree, title),
+                "panel {title} missing from widget tree — ui-rack did not splice columns"
+            );
+        }
+    }
+
     #[test]
     fn metal_seq_mixer_clicks_dispatch_to_matching_track_and_bus_controls() {
         use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};

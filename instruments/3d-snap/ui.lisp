@@ -1,6 +1,6 @@
 (defsynth-ui
-  (h-stack :width :fill :gap 0.45 :align :start
-    (v-stack :width 32.0 :gap 0.10
+  (ui-rack :breathe
+    (list
       (ui-panel "GLOB" 0
         (h-stack :gap 0.35
           (base-note)
@@ -21,8 +21,8 @@
           (ui-param-knob "membrane_tension" "tens")
           (ui-param-knob "membrane_damping" "damp")
           (ui-param-knob "shell_level" "shell"))))
-    (ui-adsr 0 "amp_attack" "amp_decay" "amp_sustain" "amp_release")
-    (v-stack :width 31.0 :gap 0.10
+    (ui-adsr "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release")
+    (list
       (ui-panel "FLAM" 0
         (h-stack :gap 0.35
           (ui-param-knob "flam_amount" "amt")
@@ -39,8 +39,7 @@
         (h-stack :gap 0.35
           (ui-param-knob "snap_decay" "snap")
           (ui-param-knob "body_decay" "body")
-          (ui-param-knob "tail_decay" "tail"))))
-    (v-stack :width 27.0 :gap 0.10
+          (ui-param-knob "tail_decay" "tail")))
       (ui-panel "LOW/AIR" 0
         (h-stack :gap 0.35
           (ui-param-knob "boom_level" "boom")

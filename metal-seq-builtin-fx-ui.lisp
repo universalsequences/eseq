@@ -24,10 +24,10 @@
        (= builtin-fx-filter-live-slot (get fx :slot-idx))))
 
 (def builtin-fx-filter-cutoff-value (fx cutoff-p)
-  (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-cutoff (get cutoff-p :value)))
+  (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-cutoff (fx-param-value cutoff-p)))
 
 (def builtin-fx-filter-resonance-value (fx resonance-p)
-  (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-resonance (get resonance-p :value)))
+  (if (builtin-fx-filter-live? fx) builtin-fx-filter-live-resonance (fx-param-value resonance-p)))
 
 (def builtin-fx-filter-band (fx mode-p cutoff-p resonance-p)
   (dict
@@ -95,7 +95,7 @@
 (def builtin-fx-filter-number (fx label-text p width decimals)
   (h-stack :gap 0.22 :align :baseline
     (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (number-picker :value (get p :value)
+    (number-picker :value (fx-param-value p)
       :min (get p :min) :max (get p :max) :decimals decimals
       :noui true :font-size 9.5 :text-color :fg
       :on-change (lambda (v) (fx-set-effect-value fx p v))
@@ -104,10 +104,10 @@
 (def builtin-fx-filter-percent (fx label-text p width)
   (h-stack :gap 0.22 :align :baseline
     (label label-text :font-size 8.5 :width 4.8 :color :dim :bg :transparent)
-    (number-picker :value (* (get p :value) 100)
-      :min (* (get p :min) 100) :max (* (get p :max) 100) :decimals 0
+    (number-picker :value (fx-param-value p)
+      :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
       :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (fx-set-effect-value fx p (/ v 100)))
+      :on-change (lambda (v) (fx-set-effect-value fx p v))
       :width width :height 1.05)))
 
 (def builtin-fx-filter-option (fx label-text p width)
@@ -132,7 +132,7 @@
 (def builtin-fx-filter-mini-number (fx label-text p)
   (h-stack :gap 0.18 :align :baseline
     (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-    (number-picker :value (get p :value)
+    (number-picker :value (fx-param-value p)
       :min (get p :min) :max (get p :max) :decimals 2
       :noui true :font-size 9.5 :text-color :fg
       :on-change (lambda (v) (fx-set-effect-value fx p v))
@@ -177,10 +177,10 @@
 (def builtin-fx-filter-mini-percent (fx label-text p)
   (h-stack :gap 0.18 :align :baseline
     (label label-text :font-size 8.5 :width 2.35 :color :dim :bg :transparent)
-    (number-picker :value (* (get p :value) 100)
-      :min (* (get p :min) 100) :max (* (get p :max) 100) :decimals 0
+    (number-picker :value (fx-param-value p)
+      :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
       :noui true :font-size 9.5 :text-color :fg
-      :on-change (lambda (v) (fx-set-effect-value fx p (/ v 100)))
+      :on-change (lambda (v) (fx-set-effect-value fx p v))
       :width 4.6 :height 1.0)))
 
 (def builtin-fx-filter-mini-option (fx p)
@@ -201,10 +201,10 @@
        (= builtin-fx-str8-delay-live-slot (get fx :slot-idx))))
 
 (def builtin-fx-str8-delay-freq-value (fx freq-p)
-  (if (builtin-fx-str8-delay-live? fx) builtin-fx-str8-delay-live-freq (get freq-p :value)))
+  (if (builtin-fx-str8-delay-live? fx) builtin-fx-str8-delay-live-freq (fx-param-value freq-p)))
 
 (def builtin-fx-str8-delay-q-value (fx q-p)
-  (if (builtin-fx-str8-delay-live? fx) builtin-fx-str8-delay-live-q (get q-p :value)))
+  (if (builtin-fx-str8-delay-live? fx) builtin-fx-str8-delay-live-q (fx-param-value q-p)))
 
 (def builtin-fx-str8-delay-band (fx freq-p q-p)
   (dict
@@ -255,7 +255,7 @@
     :width 4.95 :height 0.88 :padding 0 :font-size 8.5
     :background-color (if (> (get p :value) 0.5) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (> (get p :value) 0.5) :black :dim)
-    :on-click |x y r| (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))))
+    :on-click |x y r| (fx-toggle-effect-value fx p)))
 
 (def builtin-fx-str8-delay-div-button (fx p label-text)
   (button label-text
@@ -298,7 +298,7 @@
 
 (def builtin-fx-str8-delay-knob (fx label-text p decimals)
   (knob-number :label label-text
-    :value (get p :value)
+    :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
     :font-size 9.5 :label-font-size 9.0
     :text-color :fg :label-color :dim
@@ -307,12 +307,12 @@
 
 (def builtin-fx-str8-delay-percent-knob (fx label-text p)
   (knob-number :label label-text
-    :value (* (get p :value) 100)
-    :min (* (get p :min) 100) :max (* (get p :max) 100) :decimals 0
+    :value (fx-param-value p)
+    :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
     :font-size 9.5 :label-font-size 9.0
     :text-color :fg :label-color :dim
     :width 4.35 :height 2.45 :knob-size 1.55
-    :on-change (lambda (v) (fx-set-effect-value fx p (/ v 100)))))
+    :on-change (lambda (v) (fx-set-effect-value fx p v))))
 
 (def builtin-fx-str8-delay-ui (fx)
   (let ((params (get fx :params)))
@@ -436,16 +436,16 @@
 
 (def builtin-fx-dynamics-percent-knob (fx label-text p)
   (knob-number :label label-text
-    :value (* (get p :value) 100)
-    :min (* (get p :min) 100) :max (* (get p :max) 100) :decimals 0
+    :value (fx-param-value p)
+    :min (get p :min) :max (get p :max) :value-scale 100 :decimals 0
     :font-size 9.5 :label-font-size 9.5
     :text-color :fg :label-color :dim
     :width 6.4 :height 3.2 :knob-size 2.0
-    :on-change (lambda (v) (fx-set-effect-value fx p (/ v 100)))))
+    :on-change (lambda (v) (fx-set-effect-value fx p v))))
 
 (def builtin-fx-dynamics-number-knob (fx label-text p decimals)
   (knob-number :label label-text
-    :value (get p :value)
+    :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
     :font-size 9.5 :label-font-size 9.5
     :text-color :fg :label-color :dim
@@ -518,7 +518,7 @@
 
 (def builtin-fx-dj-mixer-knob (fx label-text p decimals)
   (knob-number :label label-text
-    :value (get p :value)
+    :value (fx-param-value p)
     :min (get p :min) :max (get p :max) :decimals decimals
     :font-size 10.0 :label-font-size 10.0
     :text-color :fg :label-color :dim
@@ -530,7 +530,7 @@
     :width 10.2 :height 1.65 :padding 0 :font-size 11.0
     :background-color (if (> (get p :value) 0.5) (rgba 1.0 0.62 0.25 1.0) :mixer-control-bg)
     :color (if (> (get p :value) 0.5) :black :dim)
-    :on-click |x y r| (fx-set-effect-value fx p (if (> (get p :value) 0.5) 0 1))))
+    :on-click |x y r| (fx-toggle-effect-value fx p)))
 
 (def builtin-fx-dj-mixer-ui (fx)
   (let ((params (get fx :params)))

@@ -308,6 +308,44 @@ mod tests {
     }
 
     #[test]
+    fn force_enabled_default_sets_enabled_without_disturbing_other_params() {
+        let desc = EffectDescriptor {
+            name: "custom".to_string(),
+            input_channels: 0,
+            output_channels: 1,
+            params: vec![
+                ParamDescriptor {
+                    name: "cutoff".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.25,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 12,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "enabled".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                    host_control: None,
+                },
+            ],
+        };
+        let slot = EffectSlotState::new(&desc, 100);
+        slot.defaults.set(0, 0.77);
+        slot.defaults.set(1, 0.0);
+
+        assert_eq!(slot.force_enabled_default(&desc), Some(1));
+        assert_eq!(slot.defaults.get(0), 0.77);
+        assert_eq!(slot.defaults.get(1), 1.0);
+    }
+
+    #[test]
     fn lisp_manifest_params_address_dgen_wrapper_state() {
         let desc = EffectDescriptor::from_lisp_manifest(
             "custom",
@@ -1899,6 +1937,15 @@ impl EffectSlotState {
                 }
             }
         }
+    }
+
+    pub fn force_enabled_default(&self, desc: &EffectDescriptor) -> Option<usize> {
+        let enabled_idx = desc
+            .params
+            .iter()
+            .position(|param| param.name.eq_ignore_ascii_case("enabled"))?;
+        self.defaults.set(enabled_idx, 1.0);
+        Some(enabled_idx)
     }
 
     /// Reset this slot to an empty state.

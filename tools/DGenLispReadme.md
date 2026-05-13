@@ -56,6 +56,10 @@ false         ; 0.0
 ```lisp
 (def name expr)
 (def osc (sin (* (phasor 440) twopi)))
+
+; Destructure tuple-returning operators.
+(def (re im) (fft frame @N 1024))
+(def (mag phase) (polar-fft re im))
 ```
 
 #### defmacro — define a reusable macro
@@ -80,6 +84,19 @@ Local `def` and `make-history` bindings inside macros are automatically scoped �
 (read-history name)         ; read previous frame's value
 (write-history name expr)   ; write current frame's value (returns expr)
 ```
+
+#### Tensor history feedback
+
+```lisp
+(make-tensor-history name @shape [32 32])
+(make-tensor-history name @shape [32 32] @data [0 0 ...])
+(read-tensor-history name)
+(write-tensor-history name expr)
+```
+
+Tensor history stores `tensor` or `signalTensor` values and returns a `signalTensor`
+when read. It is useful for recurrent tensor DSP such as membranes, image-style
+feedback, and physical models.
 
 ### I/O
 
@@ -148,7 +165,7 @@ All arithmetic respects type promotion:
 (sin x)      (cos x)      (tan x)      (tanh x)
 (exp x)      (log x)      (sqrt x)     (abs x)
 (sign x)     (floor x)    (ceil x)     (round x)
-(relu x)     (sigmoid x)
+(relu x)     (sigmoid x)  (log10 x)
 ```
 
 Work on signal, tensor, signalTensor, and float.
@@ -159,6 +176,7 @@ Work on signal, tensor, signalTensor, and float.
 (pow base exponent)
 (min a b)
 (max a b)
+(atan2 y x)
 (% a b)
 (mse prediction target)    ; mean squared error
 ```
@@ -184,6 +202,8 @@ Return 1.0 for true, 0.0 for false:
 (phasor freq reset)        ; with reset trigger
 (stateful-phasor freq)     ; forced stateful variant
 (noise)                    ; white noise
+(noise @size 1024)         ; per-bin signalTensor noise
+(noise @size 1024 @hop 256); hop-rate tensor noise
 (click)                    ; impulse: 1.0 on frame 0, then 0.0
 ```
 
@@ -196,6 +216,7 @@ Return 1.0 for true, 0.0 for false:
 (accum increment reset min max)         ; with reset trigger and bounds
 (latch value trigger)                   ; sample-and-hold
 (mix a b t)                             ; linear interpolation: a*(1-t) + b*t
+(hop-hold value hop)                    ; update value once per hop
 ```
 
 ### Audio Effects
@@ -269,6 +290,10 @@ Supported modulation modes are `additive`, `multiplicative`, and `semitone`.
 (tensor-param [d1,d2,...])   ; learnable parameter tensor
 (wavetable @shape [512 32] @file "waves/factory.json")
 (wavetable-param @shape [512 32] @default-file "waves/init.json")
+(audio-tensor @file "irs/hall.wav" @mono true @normalize peak)
+(audio-tensor @file "loops/stereo.wav" @channel 0)
+(ir @file "irs/plate.wav")
+(tensor @shape [4] @data [1 0.5 0.25 0])
 ```
 
 `wavetable` and `wavetable-param` load JSON data relative to the source file, or
@@ -279,10 +304,15 @@ Flat wavetable data should store each channel/wave contiguously. Fractional
 `index` and fractional `channel` values are interpolated, so 2D wavetable reads
 are bilinear across sample position and wave position.
 
+`audio-tensor` loads WAV files as static tensor data in the manifest. `ir` is the
+same loader tagged as an impulse response. Relative audio paths resolve from the
+input file directory, or from `--asset-base` when supplied.
+
 ### Tensor Operations
 
 ```lisp
 (matmul a b)                           ; matrix multiply
+(conv1d input kernel)                  ; 1D convolution
 (peek tensor index)                    ; interpolated scalar at index
 (peek tensor index channel)            ; bilinear scalar at (index, channel)
 (peek-row tensor rowIndex)             ; read row → signalTensor
@@ -302,6 +332,7 @@ are bilinear across sample position and wave position.
 (expand tensor @shape [4,3])           ; broadcast expand
 (repeat tensor @repeats [2,3])         ; tile/repeat
 (conv2d input kernel)                  ; 2D convolution
+(windows tensor @shape [3 3])          ; extract sliding windows / im2col view
 ```
 
 ### Reductions
@@ -320,17 +351,47 @@ are bilinear across sample position and wave position.
 ### FFT
 
 ```lisp
-(fft input)                  ; FFT, returns real part
-(fft input N)                ; with explicit size
+(fft input)                  ; FFT, returns (real imag)
+(fft input N)                ; legacy explicit size
+(fft input @N 1024 @backend accelerated)
 (ifft real imag)             ; inverse FFT
-(ifft real imag N)           ; with explicit size
+(ifft real imag N)           ; legacy explicit size
+(ifft real imag @N 1024 @backend accelerated)
+(polar-fft re im)            ; returns (magnitude phase)
+(rect-fft mag phase)         ; returns (real imag)
+(complex-mul ar ai br bi)    ; returns complex product (real imag)
+(complex-conj re im)         ; returns (real -imag)
 ```
 
-After `(fft x)`, the imaginary part is available as `__fft_im` and real as `__fft_re`.
+Preferred style is destructuring:
+
+```lisp
+(def (re im) (fft frame @N 1024 @backend accelerated))
+(def (mag phase) (polar-fft re im))
+```
+
+For compatibility, `(fft x)` still also updates `__fft_re` and `__fft_im`.
+
+### Spectral Effects
+
+```lisp
+(spectrum-delay spectrum @N 1024 @hops 4 @hop 256)
+(spectrum-delay-mod spectrum delay @N 1024 @max-hops 32 @hop 256)
+(phase-vocoder re im ratio @N 1024 @hop 256) ; returns (real imag)
+(partition-ir irTensor @N 1024 @hop 256)     ; returns (irRe irIm)
+(partitioned-spectral-mac xre xim irre irim @N 1024) ; returns (re im)
+(partitioned-convolve input irTensor @N 1024 @hop 256 @gain 1.0)
+```
+
+These are intended for STFT effects, spectral delays/freezes, pitch shifting,
+and IR/filter convolution. Use `buffer`, `hann`, `fft`, `ifft`, and
+`overlap-add` for custom spectral processors.
 
 ### Windowing
 
 ```lisp
+(hann 1024)                  ; periodic Hann tensor
+(window @type hann @N 1024)  ; named window form
 (buffer signal size)          ; ring buffer → [1, size] signalTensor
 (buffer signal size hop)      ; with hop size
 (overlap-add signalTensor hop) ; scatter-add into output signal
