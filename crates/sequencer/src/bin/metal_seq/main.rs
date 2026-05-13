@@ -723,54 +723,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             editor.refresh_visible_layouts_for_buffer_named("*agent*");
             editor.refresh_visible_layouts_for_buffer_named("*agent-artifacts*");
             editor.mark_needs_redraw();
-
-            let ready_agent_drafts = app
-                .agent_store
-                .list()
-                .into_iter()
-                .filter(|id| {
-                    app.agent_store.snapshot(*id).is_some_and(|snapshot| {
-                        snapshot.state.kind == sequencer::agent::store::AgentKind::Instrument
-                            && snapshot.state.status == sequencer::agent::store::AgentStatus::Idle
-                            && snapshot.state.draft.is_some()
-                    })
-                })
-                .collect::<Vec<_>>();
-            for conv_id in ready_agent_drafts {
-                eprintln!("[agent-ui] applying ready agent draft conv={conv_id}");
-                match apply_agent_draft_to_owned_instrument(
-                    &mut app,
-                    &mut editor,
-                    &state,
-                    &current_track,
-                    &mut track_names,
-                    &track_pan_ids,
-                    &record_armed,
-                    &selected_steps,
-                    &accumulator_names,
-                    &cached_track_peak_levels,
-                    &cached_bus_peak_levels,
-                    &ui_epoch,
-                    lg_raw,
-                    conv_id,
-                ) {
-                    Ok(result) => {
-                        let verb = if result.created_track {
-                            "Created"
-                        } else {
-                            "Updated"
-                        };
-                        editor.handle_host_event(HostEvent::Status(format!(
-                            "{verb} agent instrument on track {}",
-                            result.track_index + 1
-                        )));
-                    }
-                    Err(error) => {
-                        eprintln!("[agent-ui] auto-accept failed conv={conv_id}: {error}");
-                        editor.handle_host_event(HostEvent::Error(error));
-                    }
-                }
-            }
         }
         let (cols, rows) = backend.viewport_size();
         let (cell_w, cell_h) = backend.cell_dimensions();

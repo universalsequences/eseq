@@ -2,8 +2,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::actions::{AgentAppAction, AgentSessionContext};
 use super::audition::{audition_feedback, audition_loaded_instrument};
-use super::network::AgentNetworkClient;
+use super::network::{AgentNetworkClient, AgentTurnResult};
 use super::parse::{instrument_artifacts, last_dgenlisp_block, InstrumentArtifacts};
 use super::providers::{AgentMessage, AgentMessageRole};
 use super::store::{
@@ -90,7 +91,7 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
             request.messages.len()
         );
         let system_prompt = system_prompt_for(request.kind);
-        let response = match execute_text_turn_with_retries(
+        let turn = match execute_tool_turn_with_retries(
             request.provider,
             &request.model,
             system_prompt,
@@ -98,16 +99,16 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
             id,
             &cancel,
         ) {
-            Ok(text) => {
-                let has_dsp = last_dgenlisp_block(&text).is_some();
-                let has_artifacts = instrument_artifacts(&text).is_ok();
+            Ok(turn) => {
+                let has_dsp = last_dgenlisp_block(&turn.text).is_some();
+                let has_artifacts = instrument_artifacts(&turn.text).is_ok();
                 eprintln!(
                     "[agent] request ok conv={id} response_len={} has_dgenlisp_block={} has_required_artifacts={}",
-                    text.len(),
+                    turn.text.len(),
                     has_dsp,
                     has_artifacts
                 );
-                text
+                turn
             }
             Err(error) => {
                 eprintln!("[agent] request failed conv={id}: {error}");
@@ -125,10 +126,24 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
             let Some(state) = inner.get_mut(&id) else {
                 return;
             };
-            push_message(state, Role::Assistant, response.clone());
+            if !turn.text.trim().is_empty() {
+                push_message(state, Role::Assistant, turn.text.clone());
+            }
+            for outcome in &turn.tool_outcomes {
+                push_message(
+                    state,
+                    Role::System,
+                    format!(
+                        "tool {} [{}]\n{}",
+                        outcome.name,
+                        if outcome.ok { "ok" } else { "error" },
+                        outcome.summary
+                    ),
+                );
+            }
         }
 
-        match run_post_turn_pipeline(&store, id, &response) {
+        match run_pending_action_pipeline(&store, id, turn.pending_actions) {
             PipelineOutcome::Done => {
                 eprintln!("[agent] turn done conv={id}");
                 store.task_handles().lock().unwrap().remove(&id);
@@ -152,14 +167,14 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
     }
 }
 
-fn execute_text_turn_with_retries(
+fn execute_tool_turn_with_retries(
     provider: super::providers::AgentProviderKind,
     model: &str,
     system_prompt: &str,
     messages: &[AgentMessage],
     id: ConvId,
     cancel: &AtomicBool,
-) -> Result<String, String> {
+) -> Result<AgentTurnResult, String> {
     let client = AgentNetworkClient::load_default()?;
     let mut last_error = None::<String>;
 
@@ -169,14 +184,20 @@ fn execute_text_turn_with_retries(
         }
 
         let result = client
-            .execute_text_turn(provider, model, system_prompt, messages)
+            .execute_turn(
+                provider,
+                model,
+                system_prompt,
+                messages,
+                AgentSessionContext::default(),
+            )
             .map_err(|error| error.message);
         match result {
-            Ok(text) => {
+            Ok(turn) => {
                 if attempt > 1 {
                     eprintln!("[agent] request retry succeeded conv={id} attempt={attempt}");
                 }
-                return Ok(text);
+                return Ok(turn);
             }
             Err(error) => {
                 let retryable = is_retryable_request_error(&error);
@@ -263,6 +284,107 @@ enum PipelineOutcome {
     Done,
     Retry,
     Stop,
+}
+
+fn run_pending_action_pipeline(
+    store: &ConversationStore,
+    id: ConvId,
+    actions: Vec<AgentAppAction>,
+) -> PipelineOutcome {
+    if actions.is_empty() {
+        let inner = store.inner();
+        let mut inner = inner.lock().unwrap();
+        if let Some(state) = inner.get_mut(&id) {
+            state.retries_this_turn = 0;
+            state.status = AgentStatus::Idle;
+            bump(state);
+        }
+        return PipelineOutcome::Done;
+    }
+
+    for action in actions {
+        match apply_agent_action(store, id, action) {
+            Ok(message) => {
+                let inner = store.inner();
+                let mut inner = inner.lock().unwrap();
+                if let Some(state) = inner.get_mut(&id) {
+                    push_message(state, Role::System, message);
+                }
+            }
+            Err(error) => {
+                return retry_or_fail(store, id, error, |state, text| {
+                    state.last_compile_error = Some(text)
+                });
+            }
+        }
+    }
+
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    if let Some(state) = inner.get_mut(&id) {
+        state.retries_this_turn = 0;
+        state.status = AgentStatus::Idle;
+        bump(state);
+    }
+    PipelineOutcome::Done
+}
+
+fn apply_agent_action(
+    store: &ConversationStore,
+    id: ConvId,
+    action: AgentAppAction,
+) -> Result<String, String> {
+    match action {
+        AgentAppAction::CreateInstrumentArtifact {
+            name,
+            dsp_source,
+            ui_source,
+        } => create_instrument_artifact(store, id, name, dsp_source, ui_source),
+        other => Err(format!(
+            "Tool returned unsupported action for this agent panel: {other:?}"
+        )),
+    }
+}
+
+fn create_instrument_artifact(
+    store: &ConversationStore,
+    id: ConvId,
+    name: String,
+    dsp_source: String,
+    ui_source: String,
+) -> Result<String, String> {
+    let compile_result =
+        crate::lisp_effect::compile_and_load_instrument(&dsp_source, store.sample_rate())
+            .map_err(|error| format!("compile error:\n{error}"))?;
+
+    validate_instrument_ui_source(&ui_source, &compile_result.manifest)
+        .map_err(|error| format!("ui.lisp validation error:\n{error}"))?;
+
+    let audition = audition_loaded_instrument(&compile_result, store.sample_rate())
+        .map_err(|error| format!("audition failed:\n{error}"))?;
+    let feedback = audition_feedback(&audition);
+    if audition.silent || audition.clipped {
+        return Err(feedback);
+    }
+
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    let state = inner
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+    state.draft = Some(InstrumentDraft {
+        dsp_source,
+        ui_source,
+    });
+    state.last_audition = Some(audition);
+    state.last_compile_error = None;
+    state.finalized_instrument_name = None;
+    state.status = AgentStatus::Idle;
+    bump(state);
+    Ok(format!(
+        "Created validated draft instrument artifact '{}'. {feedback}",
+        name
+    ))
 }
 
 fn run_post_turn_pipeline(

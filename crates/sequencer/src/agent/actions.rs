@@ -48,6 +48,11 @@ pub struct AgentSessionContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentAppAction {
+    CreateInstrumentArtifact {
+        name: String,
+        dsp_source: String,
+        ui_source: String,
+    },
     CreateInstrumentTrack {
         name: String,
         source: String,

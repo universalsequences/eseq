@@ -1581,6 +1581,10 @@ impl App {
 
     fn apply_agent_action(&mut self, action: AgentAppAction) -> Result<String, String> {
         match action {
+            AgentAppAction::CreateInstrumentArtifact { .. } => Err(
+                "create_instrument_artifact is only supported by the conversation agent panel."
+                    .to_string(),
+            ),
             AgentAppAction::CreateInstrumentTrack { name, source } => {
                 let previous_source = crate::lisp_effect::load_instrument_source(&name).ok();
                 crate::lisp_effect::save_instrument(&name, &source)
