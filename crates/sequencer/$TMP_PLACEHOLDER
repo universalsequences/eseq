@@ -1,0 +1,74 @@
+; Shared instrument helpers injected at compile time.
+; Assumes 44.1 kHz for envelope coefficient conversion.
+
+(defmacro adsr (attack_ms decay_ms sustain release_ms)
+  (make-history env)
+  (make-history gate_hist)
+  (make-history stage_hist)
+
+  (def sr 44100.0)
+  (def attack_coeff (- 1.0 (exp (/ -1.0 (* attack_ms 0.001 sr)))))
+  (def decay_coeff (- 1.0 (exp (/ -1.0 (* decay_ms 0.001 sr)))))
+  (def release_coeff (- 1.0 (exp (/ -1.0 (* release_ms 0.001 sr)))))
+
+  (def prev_env (read-history env))
+  (def prev_gate (read-history gate_hist))
+  (def prev_stage (read-history stage_hist))
+
+  (def gate_on (gt gate 0.5))
+  (def rising (* gate_on (lte prev_gate 0.5)))
+  (def attack_stage 1.0)
+  (def decay_stage 2.0)
+  (def attack_done (gte prev_env 0.999))
+
+  (def stage_from_gate
+    (gswitch gate_on
+      (gswitch rising attack_stage prev_stage)
+      0.0))
+
+  (def stage
+    (gswitch attack_done
+      (gswitch (eq stage_from_gate attack_stage) decay_stage stage_from_gate)
+      stage_from_gate))
+
+  (def target
+    (gswitch gate_on
+      (gswitch (eq stage attack_stage) 1.0 sustain)
+      0.0))
+
+  (def rate
+    (gswitch gate_on
+      (gswitch (eq stage attack_stage) attack_coeff decay_coeff)
+      release_coeff))
+
+  (def level_raw (+ prev_env (* rate (- target prev_env))))
+  (def level (clip level_raw 0 1))
+  (write-history env level)
+  (write-history gate_hist gate)
+  (write-history stage_hist stage)
+  level)
+
+
+; ADSR test synth
+; Uses the injected compile-time adsr macro.
+
+(def gate (in 1 @name gate))
+(def raw_pitch (in 2 @name pitch))
+(def velocity (in 3 @name velocity))
+
+(param attack_ms  @default 30  @min 1 @max 5000)
+(param decay_ms   @default 120 @min 1 @max 5000)
+(param sustain @default 0.7   @min 0     @max 1)
+(param release_ms @default 180 @min 1 @max 5000)
+
+(def level (adsr attack_ms decay_ms sustain release_ms))
+
+(def detune (* 2 (cos (* twopi (phasor 3)))))
+
+(def fmenv (adsr 1 30 0.1 300))
+
+(def pitch (+ detune raw_pitch))
+
+(def op2  (cos (* twopi (phasor (* 2 pitch)))))
+(def op1  (cos (+ (* fmenv op2 4) (* twopi (phasor pitch)))))
+(out (* op1 level velocity) 1 @name audio)

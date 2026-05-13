@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "engine_name": "concert-harp",
+  "source_file": "instruments/concert-harp.lisp",
+  "presets": [
+    {
+      "id": "harp-grand",
+      "name": "HARP GRAND",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 0.28,
+        "brightness": 0.50,
+        "pluck_pos": 0.18,
+        "sustain_s": 5.2,
+        "soundboard": 0.74,
+        "sympathetic": 0.32,
+        "stereo_width": 0.48,
+        "weirdness": 0.00,
+        "vel_bright": 0.14,
+        "gain": 0.20
+      }
+    },
+    {
+      "id": "harp-salon",
+      "name": "HARP SALON",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 0.08,
+        "brightness": 0.30,
+        "pluck_pos": 0.28,
+        "sustain_s": 6.8,
+        "soundboard": 0.92,
+        "sympathetic": 0.14,
+        "stereo_width": 0.18,
+        "weirdness": 0.00,
+        "vel_bright": 0.08,
+        "gain": 0.21
+      }
+    },
+    {
+      "id": "harp-solo",
+      "name": "HARP SOLOIST",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 0.68,
+        "brightness": 0.78,
+        "pluck_pos": 0.11,
+        "sustain_s": 3.5,
+        "soundboard": 0.48,
+        "sympathetic": 0.52,
+        "stereo_width": 0.82,
+        "weirdness": 0.10,
+        "vel_bright": 0.28,
+        "gain": 0.19
+      }
+    },
+    {
+      "id": "harp-dark",
+      "name": "HARP DARK WOOD",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 0.02,
+        "brightness": 0.18,
+        "pluck_pos": 0.34,
+        "sustain_s": 7.4,
+        "soundboard": 1.00,
+        "sympathetic": 0.06,
+        "stereo_width": 0.10,
+        "weirdness": 0.00,
+        "vel_bright": 0.04,
+        "gain": 0.22
+      }
+    },
+    {
+      "id": "harp-bright",
+      "name": "HARP BRIGHT HALL",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 0.96,
+        "brightness": 0.92,
+        "pluck_pos": 0.05,
+        "sustain_s": 2.6,
+        "soundboard": 0.34,
+        "sympathetic": 0.88,
+        "stereo_width": 1.00,
+        "weirdness": 0.22,
+        "vel_bright": 0.36,
+        "gain": 0.18
+      }
+    },
+    {
+      "id": "harp-intimate",
+      "name": "HARP INTIMATE",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 0.14,
+        "brightness": 0.38,
+        "pluck_pos": 0.23,
+        "sustain_s": 4.0,
+        "soundboard": 0.84,
+        "sympathetic": 0.20,
+        "stereo_width": 0.00,
+        "weirdness": 0.00,
+        "vel_bright": 0.10,
+        "gain": 0.21
+      }
+    },
+    {
+      "id": "harp-glass",
+      "name": "HARP GLASS FM",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 0.78,
+        "brightness": 0.86,
+        "pluck_pos": 0.09,
+        "sustain_s": 3.2,
+        "soundboard": 0.42,
+        "sympathetic": 0.74,
+        "stereo_width": 0.88,
+        "weirdness": 0.55,
+        "vel_bright": 0.30,
+        "gain": 0.18
+      }
+    },
+    {
+      "id": "harp-celestial",
+      "name": "HARP CELESTIAL",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 0.50,
+        "brightness": 0.70,
+        "pluck_pos": 0.12,
+        "sustain_s": 4.6,
+        "soundboard": 0.56,
+        "sympathetic": 0.92,
+        "stereo_width": 1.00,
+        "weirdness": 0.72,
+        "vel_bright": 0.24,
+        "gain": 0.17
+      }
+    },
+    {
+      "id": "harp-metallic",
+      "name": "HARP METALLIC",
+      "base_note_offset": 0.0,
+      "params": {
+        "nail": 1.00,
+        "brightness": 0.95,
+        "pluck_pos": 0.05,
+        "sustain_s": 2.4,
+        "soundboard": 0.20,
+        "sympathetic": 1.00,
+        "stereo_width": 0.96,
+        "weirdness": 1.00,
+        "vel_bright": 0.40,
+        "gain": 0.16
+      }
+    }
+  ]
+}

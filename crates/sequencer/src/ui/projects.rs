@@ -1,0 +1,1783 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::time::Instant;
+
+use crossterm::event::KeyCode;
+
+use crate::effects::{EffectDescriptor, BUILTIN_SLOT_COUNT};
+use crate::project::{
+    self, chord_snapshot_from_steps_and_durations, project_file_version, ProjectBusChannel,
+    ProjectBusPatternSnapshot, ProjectFile, ProjectPattern, ProjectReverbState,
+    ProjectScratchState, ProjectTrack,
+};
+use crate::sequencer::{BusId, InstrumentType, PatternSnapshot, TrackOutput, MAX_STEPS};
+
+use super::{App, BusChannelState, InputMode, Region, SidebarMode, SidebarTab};
+
+fn project_slot_into_synced_snapshot(
+    slot: project::ProjectEffectSlot,
+    desc: &EffectDescriptor,
+    node_id: u32,
+) -> crate::effects::EffectSlotSnapshot {
+    let mut snapshot = slot.into_snapshot_with_node_id(node_id);
+    snapshot.sync_to_descriptor(desc, node_id);
+    snapshot
+}
+
+fn default_project_effect_slot(desc: &EffectDescriptor) -> project::ProjectEffectSlot {
+    let num_params = desc.params.len();
+    project::ProjectEffectSlot {
+        num_params: num_params as u32,
+        defaults: desc.params.iter().map(|param| param.default).collect(),
+        plocks: (0..MAX_STEPS).map(|_| vec![None; num_params]).collect(),
+        param_node_indices: desc
+            .params
+            .iter()
+            .map(|param| param.node_param_idx)
+            .collect(),
+    }
+}
+
+fn legacy_builtin_slot_has_edits(
+    slot: &project::ProjectEffectSlot,
+    desc: &EffectDescriptor,
+) -> bool {
+    if slot.num_params == 0 {
+        return false;
+    }
+    let num_params = (slot.num_params as usize).min(desc.params.len());
+    for param_idx in 0..num_params {
+        let saved = slot.defaults.get(param_idx).copied().unwrap_or(0.0);
+        if (saved - desc.params[param_idx].default).abs() > 0.0001 {
+            return true;
+        }
+    }
+    slot.plocks
+        .iter()
+        .any(|row| row.iter().take(num_params).any(Option::is_some))
+}
+
+fn migrate_legacy_default_track_effects(project: &mut ProjectFile) {
+    let mut filter_desc = EffectDescriptor::builtin_filter();
+    let mut delay_desc = EffectDescriptor::builtin_delay();
+    if let Some(enabled) = filter_desc
+        .params
+        .iter_mut()
+        .find(|param| param.name == "enabled")
+    {
+        enabled.default = 0.0;
+    }
+    if let Some(enabled) = delay_desc
+        .params
+        .iter_mut()
+        .find(|param| param.name == "enabled")
+    {
+        enabled.default = 0.0;
+    }
+    let legacy_descs = [&filter_desc, &delay_desc];
+    let legacy_names = ["Filter", "Delay"];
+    let max_slots = crate::lisp_effect::MAX_CUSTOM_FX;
+
+    for track_idx in 0..project.tracks.len() {
+        let old_custom_len = project
+            .custom_effects
+            .get(track_idx)
+            .map(Vec::len)
+            .unwrap_or_default();
+        let has_legacy_layout = project.patterns.iter().any(|pattern| {
+            pattern
+                .effect_slots
+                .get(track_idx)
+                .map(|slots| slots.len() >= 2 && slots.len() > old_custom_len)
+                .unwrap_or(false)
+        });
+        if !has_legacy_layout {
+            continue;
+        }
+
+        let mut preserve_legacy = [false; 2];
+        for pattern in &project.patterns {
+            let Some(slots) = pattern.effect_slots.get(track_idx) else {
+                continue;
+            };
+            for legacy_idx in 0..2 {
+                if let Some(slot) = slots.get(legacy_idx) {
+                    preserve_legacy[legacy_idx] |=
+                        legacy_builtin_slot_has_edits(slot, legacy_descs[legacy_idx]);
+                }
+            }
+        }
+
+        let old_names = project
+            .custom_effects
+            .get(track_idx)
+            .cloned()
+            .unwrap_or_default();
+        let mut migrated_names = Vec::new();
+        for legacy_idx in 0..2 {
+            if preserve_legacy[legacy_idx] {
+                migrated_names.push(EffectDescriptor::builtin_insert_project_name(
+                    legacy_names[legacy_idx],
+                ));
+            }
+        }
+        migrated_names.extend(old_names);
+        migrated_names.truncate(max_slots);
+        while project.custom_effects.len() <= track_idx {
+            project.custom_effects.push(Vec::new());
+        }
+        project.custom_effects[track_idx] = migrated_names;
+
+        for pattern in &mut project.patterns {
+            let old_slots = pattern
+                .effect_slots
+                .get(track_idx)
+                .cloned()
+                .unwrap_or_default();
+            let mut migrated_slots = Vec::new();
+            for legacy_idx in 0..2 {
+                if preserve_legacy[legacy_idx] {
+                    migrated_slots.push(
+                        old_slots.get(legacy_idx).cloned().unwrap_or_else(|| {
+                            default_project_effect_slot(legacy_descs[legacy_idx])
+                        }),
+                    );
+                }
+            }
+            if old_slots.len() > 2 {
+                migrated_slots.extend(old_slots.into_iter().skip(2));
+            }
+            migrated_slots.truncate(max_slots);
+            while pattern.effect_slots.len() <= track_idx {
+                pattern.effect_slots.push(Vec::new());
+            }
+            pattern.effect_slots[track_idx] = migrated_slots;
+        }
+    }
+}
+
+fn project_custom_instrument_slot_into_synced_snapshot(
+    slot: project::ProjectEffectSlot,
+    desc: &crate::effects::EffectDescriptor,
+    node_id: u32,
+) -> crate::effects::EffectSlotSnapshot {
+    let new_np = desc.params.len();
+    let inserted_enabled = desc
+        .params
+        .iter()
+        .position(|param| param.name.eq_ignore_ascii_case("enabled"))
+        .filter(|_| slot.num_params as usize + 1 == new_np);
+
+    let find_old_idx_by_node = |target: u32| {
+        slot.param_node_indices
+            .iter()
+            .position(|&saved| saved == target)
+    };
+
+    let old_idx_for = |new_idx: usize, target_node_idx: u32| -> Option<usize> {
+        if inserted_enabled == Some(new_idx) {
+            return None;
+        }
+
+        if let Some(enabled_idx) = inserted_enabled {
+            if target_node_idx >= crate::lisp_effect::HEADER_SLOTS as u32
+                && target_node_idx < crate::voice_modulator::MOD_PARAM_BASE
+            {
+                if let Some(old_idx) = find_old_idx_by_node(target_node_idx - 1) {
+                    return Some(old_idx);
+                }
+            } else if let Some(old_idx) = find_old_idx_by_node(target_node_idx) {
+                return Some(old_idx);
+            }
+
+            return Some(if new_idx > enabled_idx {
+                new_idx - 1
+            } else {
+                new_idx
+            })
+            .filter(|&old_idx| old_idx < slot.defaults.len());
+        }
+
+        find_old_idx_by_node(target_node_idx)
+            .or_else(|| (new_idx < slot.defaults.len()).then_some(new_idx))
+    };
+
+    let mut defaults = desc
+        .params
+        .iter()
+        .map(|param| param.default)
+        .collect::<Vec<_>>();
+    for (new_idx, param) in desc.params.iter().enumerate() {
+        if let Some(old_idx) = old_idx_for(new_idx, param.node_param_idx) {
+            if let Some(value) = slot.defaults.get(old_idx).copied() {
+                defaults[new_idx] = value;
+            }
+        }
+    }
+
+    let mut plocks = (0..MAX_STEPS)
+        .map(|_| vec![None; new_np])
+        .collect::<Vec<_>>();
+    for step in 0..MAX_STEPS {
+        for (new_idx, param) in desc.params.iter().enumerate() {
+            let Some(old_idx) = old_idx_for(new_idx, param.node_param_idx) else {
+                continue;
+            };
+            if let Some(value) = slot
+                .plocks
+                .get(step)
+                .and_then(|row| row.get(old_idx))
+                .copied()
+                .flatten()
+            {
+                plocks[step][new_idx] = Some(value);
+            }
+        }
+    }
+
+    crate::effects::EffectSlotSnapshot {
+        node_id,
+        num_params: new_np as u32,
+        defaults,
+        plocks,
+        param_node_indices: desc.params.iter().map(|p| p.node_param_idx).collect(),
+    }
+}
+
+fn project_bus_gate_sequence_from_ui(
+    sequence: &super::BusGateSequence,
+) -> project::ProjectBusGateSequence {
+    project::ProjectBusGateSequence {
+        steps: sequence.steps.to_vec(),
+        velocities: sequence.velocities.to_vec(),
+        durations: sequence.durations.to_vec(),
+        syncs: sequence.syncs.to_vec(),
+        num_steps: sequence.num_steps,
+        timebase: sequence.timebase as u8,
+        swing: sequence.swing,
+        swing_resolution: sequence.swing_resolution as u8,
+        timebase_plocks: sequence
+            .timebase_plocks
+            .iter()
+            .map(|value| value.map(|timebase| timebase as u32))
+            .collect(),
+        swing_plocks: sequence.swing_plocks.to_vec(),
+        swing_resolution_plocks: sequence
+            .swing_resolution_plocks
+            .iter()
+            .map(|value| value.map(|resolution| resolution as u32))
+            .collect(),
+    }
+}
+
+fn project_bus_gate_sequence_to_ui(
+    sequence: project::ProjectBusGateSequence,
+) -> super::BusGateSequence {
+    let mut restored = super::BusGateSequence::default();
+    for (idx, value) in sequence.steps.into_iter().take(MAX_STEPS).enumerate() {
+        restored.steps[idx] = value;
+    }
+    for (idx, value) in sequence.velocities.into_iter().take(MAX_STEPS).enumerate() {
+        restored.velocities[idx] = value.clamp(0.0, 1.0);
+    }
+    for (idx, value) in sequence.durations.into_iter().take(MAX_STEPS).enumerate() {
+        restored.durations[idx] = value.clamp(0.1, 2.0);
+    }
+    for (idx, value) in sequence.syncs.into_iter().take(MAX_STEPS).enumerate() {
+        restored.set_step_sync(idx, value);
+    }
+    restored.set_num_steps(sequence.num_steps);
+    restored.timebase = crate::sequencer::Timebase::from_index(sequence.timebase as u32);
+    restored.swing = sequence.swing.clamp(50.0, 75.0);
+    restored.swing_resolution =
+        crate::sequencer::SwingResolution::from_index(sequence.swing_resolution as u32);
+    for (idx, value) in sequence
+        .timebase_plocks
+        .into_iter()
+        .take(MAX_STEPS)
+        .enumerate()
+    {
+        restored.timebase_plocks[idx] = value.map(crate::sequencer::Timebase::from_index);
+    }
+    for (idx, value) in sequence
+        .swing_plocks
+        .into_iter()
+        .take(MAX_STEPS)
+        .enumerate()
+    {
+        restored.swing_plocks[idx] = value.map(|swing| swing.clamp(50.0, 75.0));
+    }
+    for (idx, value) in sequence
+        .swing_resolution_plocks
+        .into_iter()
+        .take(MAX_STEPS)
+        .enumerate()
+    {
+        restored.swing_resolution_plocks[idx] =
+            value.map(crate::sequencer::SwingResolution::from_index);
+    }
+    restored
+}
+
+fn project_bus_pattern_snapshot_from_ui(
+    snapshot: &super::BusPatternSnapshot,
+) -> ProjectBusPatternSnapshot {
+    ProjectBusPatternSnapshot {
+        id: snapshot.id.0,
+        gate_sequence: project_bus_gate_sequence_from_ui(&snapshot.gate_sequence),
+        effect_slots: snapshot
+            .effect_plocks
+            .iter()
+            .map(|plocks| crate::project::ProjectEffectSlot {
+                num_params: plocks.iter().map(Vec::len).max().unwrap_or(0) as u32,
+                defaults: Vec::new(),
+                plocks: plocks.clone(),
+                param_node_indices: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn project_bus_pattern_snapshot_to_ui(
+    snapshot: ProjectBusPatternSnapshot,
+) -> super::BusPatternSnapshot {
+    super::BusPatternSnapshot {
+        id: BusId(snapshot.id),
+        gate_sequence: project_bus_gate_sequence_to_ui(snapshot.gate_sequence),
+        effect_plocks: snapshot
+            .effect_slots
+            .into_iter()
+            .map(|slot| slot.plocks)
+            .collect(),
+    }
+}
+
+impl From<BusChannelState> for ProjectBusChannel {
+    fn from(value: BusChannelState) -> Self {
+        Self {
+            id: value.id.0,
+            name: value.name,
+            volume: value.volume,
+            mute: value.mute,
+            solo: value.solo,
+            gate_sequence: project_bus_gate_sequence_from_ui(&value.gate_sequence),
+            custom_effects: value.custom_effect_names,
+            effect_slots: value
+                .effect_slots
+                .iter()
+                .map(crate::project::ProjectEffectSlot::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<ProjectBusChannel> for BusChannelState {
+    fn from(value: ProjectBusChannel) -> Self {
+        let mut bus = Self::new(BusId(value.id), value.name);
+        bus.volume = value.volume.clamp(0.0, 1.0);
+        bus.mute = value.mute;
+        bus.solo = value.solo;
+        bus.gate_sequence = project_bus_gate_sequence_to_ui(value.gate_sequence);
+        for (idx, name) in value.custom_effects.into_iter().enumerate() {
+            if idx < bus.custom_effect_names.len() {
+                bus.custom_effect_names[idx] = name;
+            }
+        }
+        for (idx, slot) in value.effect_slots.into_iter().enumerate() {
+            if idx < bus.effect_slots.len() {
+                bus.effect_slots[idx] = slot.into_snapshot_with_node_id(0);
+            }
+        }
+        bus
+    }
+}
+
+impl App {
+    pub fn add_bus_channel(&mut self, name: impl Into<String>) -> BusId {
+        let next_id = self
+            .buses
+            .iter()
+            .map(|bus| bus.id.0)
+            .max()
+            .unwrap_or(crate::sequencer::DEFAULT_BUS_B_ID)
+            .saturating_add(1);
+        let id = BusId(next_id.max(crate::sequencer::DEFAULT_BUS_B_ID + 1));
+        self.buses.push(BusChannelState::new(id, name));
+        if let Some(bus) = self.buses.iter().find(|bus| bus.id == id).cloned() {
+            self.graph_controller()
+                .ensure_bus_graph_node(bus.id, &bus.name);
+        }
+        self.publish_bus_gate_runtime();
+        id
+    }
+
+    pub fn delete_bus_channel(&mut self, id: BusId) -> bool {
+        if id == BusId::MIX {
+            return false;
+        }
+
+        if let Some(bus) = self.buses.iter().find(|bus| bus.id == id) {
+            for slot in &bus.effect_slots {
+                if slot.node_id != 0 {
+                    unsafe {
+                        crate::audiograph::delete_node(self.graph.lg.0, slot.node_id as i32);
+                    }
+                }
+            }
+        }
+
+        let before = self.buses.len();
+        self.buses.retain(|bus| bus.id != id);
+        if self.buses.len() == before {
+            return false;
+        }
+
+        self.remove_bus_references_from_live_pattern(id);
+        {
+            let track_count = self.tracks.len();
+            let mut graph = self.graph_controller();
+            for track_idx in 0..track_count {
+                graph.apply_track_output_routing(track_idx);
+                graph.apply_track_bus_sends(track_idx);
+            }
+        }
+        self.graph_controller().delete_bus_graph_node(id);
+        self.publish_bus_gate_runtime();
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for pattern in bank.iter_mut() {
+            for params in &mut pattern.track_params {
+                if params.output == TrackOutput::Bus(id) {
+                    params.output = TrackOutput::Mix;
+                }
+                params.sends.retain(|send| send.destination != id);
+            }
+        }
+        true
+    }
+
+    fn remove_bus_references_from_live_pattern(&self, id: BusId) {
+        for track in 0..self.state.active_track_count() {
+            let params = &self.state.pattern.track_params[track];
+            if params.output() == TrackOutput::Bus(id) {
+                params.set_output(TrackOutput::Mix);
+            }
+            let sends = params
+                .sends()
+                .into_iter()
+                .filter(|send| send.destination != id)
+                .collect();
+            params.set_sends(sends);
+        }
+    }
+
+    pub fn save_project_with_name(
+        &mut self,
+        requested_name: Option<&str>,
+    ) -> Result<String, String> {
+        let requested_name = requested_name
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.current_project_name.clone())
+            .ok_or_else(|| "Project name must contain letters or numbers".to_string())?;
+
+        let save_name = project::sanitize_project_name(&requested_name);
+        if save_name.is_empty() {
+            return Err("Project name must contain letters or numbers".to_string());
+        }
+
+        self.save_project_named(&save_name)?;
+        self.current_project_name = Some(save_name.clone());
+        Ok(save_name)
+    }
+
+    pub fn queue_project_load_named(&mut self, name: &str) -> Result<(), String> {
+        eprintln!("project-load: queue requested name={name}");
+        let mut project = project::load_project(name).map_err(|error| error.to_string())?;
+        eprintln!(
+            "project-load: file loaded name={} version={} tracks={} patterns={} custom_effect_tracks={}",
+            name,
+            project.version,
+            project.tracks.len(),
+            project.patterns.len(),
+            project.custom_effects.len()
+        );
+        if project.version != project::project_file_version() {
+            return Err(format!("Unsupported project version {}", project.version));
+        }
+        migrate_legacy_default_track_effects(&mut project);
+
+        self.editor.pending_project_load = Some(super::PendingProjectLoad {
+            name: name.to_string(),
+            tick: 0,
+            project,
+            built_patterns: Vec::new(),
+            built_bus_patterns: Vec::new(),
+            fallback_samples: 0,
+            phase: super::PendingProjectLoadPhase::ClearExisting,
+        });
+        Ok(())
+    }
+
+    pub fn has_pending_project_load(&self) -> bool {
+        self.editor.pending_project_load.is_some()
+    }
+
+    pub fn advance_pending_project_load(&mut self) -> Result<(), String> {
+        let result = self.advance_project_load();
+        if result.is_err() {
+            self.editor.pending_project_load = None;
+        }
+        result
+    }
+
+    pub(super) fn open_project_name_prompt(&mut self) {
+        self.ui.value_buffer = self.current_project_name.clone().unwrap_or_default();
+        self.ui.input_mode = InputMode::ProjectNameEntry;
+    }
+
+    pub(super) fn open_project_picker(&mut self) {
+        match project::list_project_names() {
+            Ok(items) => {
+                self.editor.picker_items = items;
+                self.editor.picker_cursor = 0;
+                self.editor.picker_filter.clear();
+                self.ui.input_mode = InputMode::ProjectPicker;
+            }
+            Err(error) => {
+                self.editor.status_message = Some((format!("Error: {error}"), Instant::now()));
+            }
+        }
+    }
+
+    pub(super) fn handle_project_name_entry(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char(c) => self.ui.value_buffer.push(c),
+            KeyCode::Backspace => {
+                self.ui.value_buffer.pop();
+            }
+            KeyCode::Enter => {
+                let requested_name = self.ui.value_buffer.trim().to_string();
+                self.ui.value_buffer.clear();
+                self.ui.input_mode = InputMode::Normal;
+                if requested_name.is_empty() {
+                    return;
+                }
+                match self.save_project_with_name(Some(&requested_name)) {
+                    Ok(save_name) => {
+                        self.editor.status_message =
+                            Some((format!("Saved project '{}'", save_name), Instant::now()));
+                    }
+                    Err(error) => {
+                        self.editor.status_message =
+                            Some((format!("Error: {error}"), Instant::now()));
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.ui.value_buffer.clear();
+                self.ui.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn handle_project_picker(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char(c) => {
+                self.editor.picker_filter.push(c);
+                self.editor.picker_cursor = 0;
+            }
+            KeyCode::Backspace => {
+                self.editor.picker_filter.pop();
+                self.editor.picker_cursor = 0;
+            }
+            KeyCode::Up => {
+                if self.editor.picker_cursor > 0 {
+                    self.editor.picker_cursor -= 1;
+                }
+            }
+            KeyCode::Down => {
+                if self.editor.picker_cursor + 1 < self.filtered_project_items().len() {
+                    self.editor.picker_cursor += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let Some(name) = self
+                    .filtered_project_items()
+                    .get(self.editor.picker_cursor)
+                    .cloned()
+                else {
+                    return;
+                };
+                self.ui.input_mode = InputMode::Normal;
+                match self.queue_project_load_named(&name) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        self.editor.status_message =
+                            Some((format!("Error: {error}"), Instant::now()));
+                    }
+                }
+            }
+            KeyCode::Esc => {
+                self.editor.picker_filter.clear();
+                self.editor.picker_cursor = 0;
+                self.ui.input_mode = InputMode::Normal;
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) fn filtered_project_items(&self) -> Vec<String> {
+        if self.editor.picker_filter.is_empty() {
+            return self.editor.picker_items.clone();
+        }
+        let filter = self.editor.picker_filter.to_lowercase();
+        self.editor
+            .picker_items
+            .iter()
+            .filter(|item| item.to_lowercase().contains(&filter))
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn save_project_named(&mut self, project_name: &str) -> Result<(), String> {
+        let project = self.capture_project(project_name)?;
+        project::save_project(project_name, &project).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn capture_project(&mut self, project_name: &str) -> Result<ProjectFile, String> {
+        let num_tracks = self.tracks.len();
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+
+        {
+            let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+            if current_pattern < bank.len() {
+                bank[current_pattern] = PatternSnapshot::capture(
+                    &self.state,
+                    num_tracks,
+                    &self.graph.track_buffer_ids,
+                    &self.graph.track_sample_rates,
+                    &self.tracks,
+                    &self.graph.track_instrument_types,
+                );
+            }
+        }
+        self.save_current_bus_pattern();
+
+        let bank = self.state.pattern.pattern_bank.lock().unwrap().clone();
+        self.ensure_bus_pattern_bank_len(bank.len());
+        let bus_pattern_bank = self.bus_pattern_bank.clone();
+        let tracks = self.capture_project_tracks()?;
+        let custom_effects = self.capture_custom_effects();
+        let patterns = bank
+            .iter()
+            .enumerate()
+            .map(|(pattern_idx, snapshot)| {
+                let mut sample_paths = Vec::with_capacity(num_tracks);
+                let mut sample_names = Vec::with_capacity(num_tracks);
+                for track_idx in 0..num_tracks {
+                    let (sample_buffer_id, sample_name) = snapshot
+                        .sample_ids
+                        .get(track_idx)
+                        .map(|(buffer_id, name, _)| (*buffer_id, name.clone()))
+                        .unwrap_or((-1, String::new()));
+                    let sample_path = if snapshot
+                        .instrument_types
+                        .get(track_idx)
+                        .copied()
+                        .unwrap_or(InstrumentType::Sampler)
+                        == InstrumentType::Sampler
+                        && !sample_name.is_empty()
+                    {
+                        self.resolve_sample_path_for_snapshot(
+                            pattern_idx,
+                            track_idx,
+                            sample_buffer_id,
+                            &sample_name,
+                        )?
+                        .map(|path| path.to_string_lossy().to_string())
+                    } else {
+                        None
+                    };
+                    sample_paths.push(sample_path);
+                    sample_names.push(sample_name);
+                }
+                Ok(ProjectPattern::from_snapshot(
+                    snapshot,
+                    sample_paths,
+                    sample_names,
+                    bus_pattern_bank
+                        .get(pattern_idx)
+                        .cloned()
+                        .unwrap_or_else(|| self.capture_bus_pattern_snapshot())
+                        .iter()
+                        .map(project_bus_pattern_snapshot_from_ui)
+                        .collect(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        Ok(ProjectFile {
+            version: project_file_version(),
+            name: project_name.to_string(),
+            bpm: self.state.transport.bpm.load(Ordering::Relaxed),
+            master_volume: f32::from_bits(
+                self.state.transport.master_volume.load(Ordering::Relaxed),
+            ),
+            current_pattern,
+            reverb: ProjectReverbState {
+                size: self.ui.reverb_size,
+                brightness: self.ui.reverb_brightness,
+                replace: self.ui.reverb_replace,
+            },
+            buses: self
+                .buses
+                .iter()
+                .cloned()
+                .map(ProjectBusChannel::from)
+                .collect(),
+            tracks,
+            custom_effects,
+            scratch: ProjectScratchState {
+                buffer: self.editor.scratch_buffer.clone(),
+                cursor_row: self.editor.scratch_cursor.0,
+                cursor_col: self.editor.scratch_cursor.1,
+            },
+            patterns,
+        })
+    }
+
+    fn capture_project_tracks(&self) -> Result<Vec<ProjectTrack>, String> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .map(|(track_idx, name)| {
+                let color = self.track_colors.get(track_idx).copied();
+                if self.is_sampler_track(track_idx) {
+                    let path = self
+                        .sampler_path_for_track(track_idx)
+                        .or_else(|| self.resolve_sample_path_by_name(name));
+                    let Some(path) = path else {
+                        return Err(format!("Couldn't resolve sample path for '{}'", name));
+                    };
+                    Ok(ProjectTrack::Sampler {
+                        sample_path: path.to_string_lossy().to_string(),
+                        color,
+                    })
+                } else {
+                    let instrument_name = self
+                        .graph
+                        .track_engine_ids
+                        .get(track_idx)
+                        .and_then(|engine_id| *engine_id)
+                        .and_then(|engine_id| self.editor.engine_registry.get(engine_id))
+                        .map(|engine| engine.name.clone())
+                        .unwrap_or_else(|| name.clone());
+                    Ok(ProjectTrack::Custom {
+                        instrument_name,
+                        color,
+                    })
+                }
+            })
+            .collect()
+    }
+
+    fn capture_custom_effects(&self) -> Vec<Vec<Option<String>>> {
+        self.tracks
+            .iter()
+            .enumerate()
+            .map(|(track_idx, _)| {
+                (BUILTIN_SLOT_COUNT..self.graph.effect_descriptors[track_idx].len())
+                    .map(|slot_idx| {
+                        let slot = &self.state.pattern.effect_chains[track_idx][slot_idx];
+                        if slot.node_id.load(Ordering::Relaxed) == 0 {
+                            None
+                        } else {
+                            let name = self.graph.effect_descriptors[track_idx][slot_idx]
+                                .name
+                                .trim()
+                                .to_string();
+                            if name.is_empty() {
+                                None
+                            } else if let Some(project_name) =
+                                crate::effects::EffectDescriptor::builtin_insert_project_name(&name)
+                            {
+                                Some(project_name)
+                            } else {
+                                Some(name)
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn resolve_sample_path_for_snapshot(
+        &self,
+        pattern_idx: usize,
+        track_idx: usize,
+        buffer_id: i32,
+        sample_name: &str,
+    ) -> Result<Option<PathBuf>, String> {
+        if self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize == pattern_idx {
+            if let Some(path) = self.sampler_path_for_track(track_idx) {
+                return Ok(Some(path));
+            }
+        }
+        if let Some(path) = self.sample_buffer_path_registry.get(&buffer_id) {
+            return Ok(Some(path.clone()));
+        }
+        if let Some(path) = self.sample_path_registry.get(sample_name) {
+            return Ok(Some(path.clone()));
+        }
+        let resolved = self.resolve_sample_path_by_name(sample_name);
+        if resolved.is_none() {
+            return Err(format!(
+                "Couldn't resolve sample path for '{}'",
+                sample_name
+            ));
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_sample_path_by_name(&self, sample_name: &str) -> Option<PathBuf> {
+        fn walk(dir: &Path, sample_name: &str) -> Option<PathBuf> {
+            let entries = std::fs::read_dir(dir).ok()?;
+            for entry in entries {
+                let entry = entry.ok()?;
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(found) = walk(&path, sample_name) {
+                        return Some(found);
+                    }
+                    continue;
+                }
+                let stem = path.file_stem().and_then(|stem| stem.to_str())?;
+                if stem == sample_name {
+                    return Some(path);
+                }
+            }
+            None
+        }
+
+        walk(Path::new("samples"), sample_name)
+    }
+
+    pub(super) fn advance_project_load(&mut self) -> Result<(), String> {
+        let Some(mut pending) = self.editor.pending_project_load.take() else {
+            return Ok(());
+        };
+        pending.tick += 1;
+
+        match pending.phase {
+            super::PendingProjectLoadPhase::ClearExisting => {
+                eprintln!(
+                    "project-load: tick={} phase=ClearExisting existing_tracks={}",
+                    pending.tick,
+                    self.tracks.len()
+                );
+                self.graph_controller().clear_all_tracks();
+                pending.phase = super::PendingProjectLoadPhase::AddTrack(0);
+            }
+            super::PendingProjectLoadPhase::AddTrack(track_idx) => {
+                eprintln!(
+                    "project-load: tick={} phase=AddTrack index={} total={}",
+                    pending.tick,
+                    track_idx,
+                    pending.project.tracks.len()
+                );
+                if track_idx >= pending.project.tracks.len() {
+                    pending.phase = super::PendingProjectLoadPhase::AddEffect {
+                        track_idx: 0,
+                        offset: 0,
+                    };
+                } else {
+                    let saved_color = pending.project.tracks[track_idx].color();
+                    match &pending.project.tracks[track_idx] {
+                        ProjectTrack::Sampler { sample_path, .. } => {
+                            eprintln!(
+                                "project-load: add sampler track index={} path={}",
+                                track_idx, sample_path
+                            );
+                            self.graph_controller()
+                                .add_track(Path::new(sample_path))
+                                .map_err(|error| {
+                                    format!("Failed to load sample '{}': {error}", sample_path)
+                                })?;
+                        }
+                        ProjectTrack::Custom {
+                            instrument_name, ..
+                        } => {
+                            eprintln!(
+                                "project-load: add custom track index={} instrument={}",
+                                track_idx, instrument_name
+                            );
+                            self.add_saved_instrument_track_sync(instrument_name)?;
+                        }
+                    }
+                    if let Some(color) = saved_color {
+                        self.set_track_color(track_idx, color);
+                    }
+                    pending.phase = super::PendingProjectLoadPhase::AddTrack(track_idx + 1);
+                }
+            }
+            super::PendingProjectLoadPhase::AddEffect { track_idx, offset } => {
+                eprintln!(
+                    "project-load: tick={} phase=AddEffect track={} offset={}",
+                    pending.tick, track_idx, offset
+                );
+                if track_idx >= pending.project.custom_effects.len() {
+                    pending.phase = super::PendingProjectLoadPhase::BuildPattern(0);
+                } else if offset >= pending.project.custom_effects[track_idx].len() {
+                    pending.phase = super::PendingProjectLoadPhase::AddEffect {
+                        track_idx: track_idx + 1,
+                        offset: 0,
+                    };
+                } else {
+                    if let Some(effect_name) = pending.project.custom_effects[track_idx][offset]
+                        .as_ref()
+                        .map(|name| name.trim())
+                        .filter(|name| !name.is_empty())
+                    {
+                        eprintln!(
+                            "project-load: load effect track={} slot={} name={}",
+                            track_idx,
+                            BUILTIN_SLOT_COUNT + offset,
+                            effect_name
+                        );
+                        if let Some(builtin_name) =
+                            crate::effects::EffectDescriptor::strip_builtin_insert_project_name(
+                                effect_name,
+                            )
+                        {
+                            self.load_builtin_effect_to_slot_sync(
+                                track_idx,
+                                BUILTIN_SLOT_COUNT + offset,
+                                builtin_name,
+                            )?;
+                        } else {
+                            self.load_saved_effect_to_slot_sync(
+                                track_idx,
+                                BUILTIN_SLOT_COUNT + offset,
+                                effect_name,
+                            )?;
+                        }
+                    }
+                    pending.phase = super::PendingProjectLoadPhase::AddEffect {
+                        track_idx,
+                        offset: offset + 1,
+                    };
+                }
+            }
+            super::PendingProjectLoadPhase::BuildPattern(pattern_idx) => {
+                eprintln!(
+                    "project-load: tick={} phase=BuildPattern index={} total={}",
+                    pending.tick,
+                    pattern_idx,
+                    pending.project.patterns.len()
+                );
+                if pattern_idx >= pending.project.patterns.len() {
+                    pending.phase = super::PendingProjectLoadPhase::Finalize;
+                } else {
+                    let (snapshot, bus_patterns, fallback_count) = self
+                        .project_pattern_into_snapshot(
+                            pending.project.patterns[pattern_idx].clone(),
+                        )?;
+                    pending.built_patterns.push(snapshot);
+                    pending.built_bus_patterns.push(bus_patterns);
+                    pending.fallback_samples += fallback_count;
+                    pending.phase = super::PendingProjectLoadPhase::BuildPattern(pattern_idx + 1);
+                }
+            }
+            super::PendingProjectLoadPhase::Finalize => {
+                eprintln!(
+                    "project-load: tick={} phase=Finalize built_patterns={} fallback_samples={}",
+                    pending.tick,
+                    pending.built_patterns.len(),
+                    pending.fallback_samples
+                );
+                self.finish_project_load(pending)?;
+                return Ok(());
+            }
+        }
+
+        self.editor.pending_project_load = Some(pending);
+        Ok(())
+    }
+
+    fn finish_project_load(&mut self, pending: super::PendingProjectLoad) -> Result<(), String> {
+        eprintln!(
+            "project-load: finish start name={} tracks={} built_patterns={} fallback_samples={}",
+            pending.name,
+            self.tracks.len(),
+            pending.built_patterns.len(),
+            pending.fallback_samples
+        );
+        let ProjectFile {
+            version: _,
+            name: _,
+            bpm,
+            master_volume,
+            current_pattern: saved_current_pattern,
+            reverb,
+            buses,
+            scratch,
+            tracks: _,
+            custom_effects: _,
+            patterns: _,
+        } = pending.project;
+        let bank = pending.built_patterns;
+        let mut bus_pattern_bank = pending.built_bus_patterns;
+        let current_pattern = saved_current_pattern.min(bank.len().saturating_sub(1));
+        self.normalize_track_colors();
+
+        {
+            let mut pattern_bank = self.state.pattern.pattern_bank.lock().unwrap();
+            *pattern_bank = if bank.is_empty() {
+                vec![PatternSnapshot::new_default(
+                    self.tracks.len(),
+                    &self.graph.effect_descriptors,
+                )]
+            } else {
+                bank
+            };
+        }
+
+        self.state.pattern.num_patterns.store(
+            self.state.pattern.pattern_bank.lock().unwrap().len() as u32,
+            Ordering::Relaxed,
+        );
+        self.state
+            .pattern
+            .current_pattern
+            .store(current_pattern as u32, Ordering::Relaxed);
+        self.state
+            .transport
+            .pattern_epoch
+            .fetch_add(1, Ordering::Relaxed);
+        self.state.transport.bpm.store(bpm, Ordering::Relaxed);
+        self.state
+            .transport
+            .master_volume
+            .store(master_volume.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+        self.buses = if buses.is_empty() {
+            BusChannelState::default_buses()
+        } else {
+            buses.into_iter().map(BusChannelState::from).collect()
+        };
+        if !self.buses.iter().any(|bus| bus.id == BusId::MIX) {
+            self.buses
+                .insert(0, BusChannelState::new(BusId::MIX, "Mix"));
+        }
+        for bus in self.buses.clone() {
+            self.graph_controller()
+                .ensure_bus_graph_node(bus.id, &bus.name);
+        }
+        let saved_bus_effects: Vec<(usize, usize, String, crate::effects::EffectSlotSnapshot)> =
+            self.buses
+                .iter()
+                .enumerate()
+                .flat_map(|(bus_idx, bus)| {
+                    bus.custom_effect_names.iter().enumerate().filter_map(
+                        move |(slot_idx, name)| {
+                            let name = name.as_ref()?.trim();
+                            if name.is_empty() {
+                                return None;
+                            }
+                            let slot = bus
+                                .effect_slots
+                                .get(slot_idx)
+                                .cloned()
+                                .unwrap_or_else(crate::effects::EffectSlotSnapshot::new_empty);
+                            Some((bus_idx, slot_idx, name.to_string(), slot))
+                        },
+                    )
+                })
+                .collect();
+        for (bus_idx, slot_idx, name, saved_slot) in saved_bus_effects {
+            if let Some(builtin_name) =
+                crate::effects::EffectDescriptor::strip_builtin_insert_project_name(&name)
+            {
+                self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, builtin_name)?;
+            } else {
+                self.load_bus_effect_to_slot_sync(bus_idx, slot_idx, &name)?;
+            }
+            if let Some(slot) = self
+                .buses
+                .get_mut(bus_idx)
+                .and_then(|bus| bus.effect_slots.get_mut(slot_idx))
+            {
+                let live_node_id = slot.node_id;
+                *slot = saved_slot;
+                slot.node_id = live_node_id;
+            }
+            self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+        }
+        if bus_pattern_bank.is_empty() {
+            bus_pattern_bank = (0..self.state.pattern.num_patterns.load(Ordering::Relaxed)
+                as usize)
+                .map(|_| self.capture_bus_pattern_snapshot())
+                .collect();
+        }
+        self.bus_pattern_bank = bus_pattern_bank;
+        self.ensure_bus_pattern_bank_len(
+            self.state.pattern.num_patterns.load(Ordering::Relaxed) as usize
+        );
+        let current_bus_snapshot = self
+            .bus_pattern_bank
+            .get(current_pattern)
+            .cloned()
+            .unwrap_or_else(|| self.capture_bus_pattern_snapshot());
+        self.restore_bus_pattern_snapshot(&current_bus_snapshot);
+        for bus in &self.buses {
+            let Some(nodes) = self
+                .graph
+                .bus_node_ids
+                .iter()
+                .find(|nodes| nodes.id == bus.id)
+            else {
+                continue;
+            };
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: crate::mixer_volume::fader_to_gain(bus.volume),
+                    },
+                );
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: if bus.mute { 1.0 } else { 0.0 },
+                    },
+                );
+            }
+        }
+        self.publish_bus_gate_runtime();
+
+        self.ui.cursor_track = 0;
+        self.ui.cursor_step = 0;
+        self.ui.pattern_page = current_pattern / 10;
+        self.ui.focused_region = if self.tracks.is_empty() {
+            Region::Sidebar
+        } else {
+            Region::Cirklon
+        };
+        self.ui.sidebar_tab = if self.tracks.is_empty() {
+            SidebarTab::Sounds
+        } else {
+            SidebarTab::Tools
+        };
+        self.ui.sidebar_mode = if self.tracks.is_empty() {
+            SidebarMode::InstrumentPicker
+        } else {
+            self.effective_sidebar_mode()
+        };
+
+        let current_sample_ids = {
+            let bank = self.state.pattern.pattern_bank.lock().unwrap();
+            bank[current_pattern].restore(&self.state);
+            bank[current_pattern].sample_ids.clone()
+        };
+        eprintln!(
+            "project-load: restored current_pattern={} sample_ids={} graph_tracks={}",
+            current_pattern,
+            current_sample_ids.len(),
+            self.graph.track_node_ids.len()
+        );
+        self.state.publish_scheduler_snapshot();
+        self.graph_controller()
+            .apply_sample_ids(&current_sample_ids);
+        {
+            let track_count = self.tracks.len();
+            let mut graph = self.graph_controller();
+            for track_idx in 0..track_count {
+                graph.apply_track_output_routing(track_idx);
+                graph.apply_track_bus_sends(track_idx);
+            }
+        }
+        self.set_reverb_param(0, reverb.size);
+        self.set_reverb_param(1, reverb.brightness);
+        self.set_reverb_param(2, reverb.replace);
+        self.push_all_restored_defaults();
+
+        if !self.tracks.is_empty() {
+            self.clamp_cursor_to_steps();
+            self.browser.sync_to_track(
+                &self.tracks,
+                self.ui.cursor_track,
+                self.is_sampler_track(self.ui.cursor_track),
+                &self.ui,
+            );
+        }
+
+        self.current_project_name = Some(pending.name.clone());
+        self.editor.scratch_buffer = scratch.buffer;
+        self.editor.scratch_cursor = (scratch.cursor_row, scratch.cursor_col);
+        self.editor.scratch_runtime = None;
+        self.state
+            .set_scratch_source(self.editor.scratch_buffer.clone());
+        self.clear_control_hooks();
+        if let Err(error) = self.rebuild_scratch_runtime_from_buffer() {
+            self.editor.status_message =
+                Some((format!("Scratch eval error: {error}"), Instant::now()));
+        }
+        let status = if pending.fallback_samples > 0 {
+            format!(
+                "Opened project '{}' with {} fallback sample{}",
+                pending.name,
+                pending.fallback_samples,
+                if pending.fallback_samples == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )
+        } else {
+            format!("Opened project '{}'", pending.name)
+        };
+        eprintln!("project-load: finish complete status={status}");
+        self.editor.status_message = Some((status, Instant::now()));
+        self.editor.pending_project_load = None;
+        Ok(())
+    }
+
+    fn project_pattern_into_snapshot(
+        &mut self,
+        pattern: ProjectPattern,
+    ) -> Result<(PatternSnapshot, Vec<super::BusPatternSnapshot>, usize), String> {
+        let num_tracks = self.tracks.len();
+        let mut sample_ids = Vec::with_capacity(num_tracks);
+        let mut fallback_count = 0;
+        for track_idx in 0..num_tracks {
+            if self.is_sampler_track(track_idx) {
+                let saved_path = pattern
+                    .sample_paths
+                    .get(track_idx)
+                    .and_then(|path| path.as_ref())
+                    .map(PathBuf::from);
+                let saved_name = pattern
+                    .sample_names
+                    .get(track_idx)
+                    .cloned()
+                    .unwrap_or_default();
+
+                let resolved_path = saved_path
+                    .as_ref()
+                    .filter(|path| path.exists())
+                    .cloned()
+                    .or_else(|| {
+                        if saved_name.is_empty() {
+                            None
+                        } else {
+                            self.sample_path_registry
+                                .get(&saved_name)
+                                .cloned()
+                                .or_else(|| self.resolve_sample_path_by_name(&saved_name))
+                        }
+                    })
+                    .or_else(|| self.first_available_sample_path());
+
+                let Some(path_buf) = resolved_path else {
+                    return Err(format!(
+                        "Couldn't recover sample for track {} and no fallback samples exist",
+                        track_idx + 1
+                    ));
+                };
+                let loaded = crate::sampler::load_wav_buffer(self.graph.lg.0, &path_buf).map_err(
+                    |error| {
+                        format!(
+                            "Failed to load sample '{}' for track {}: {}",
+                            path_buf.display(),
+                            track_idx + 1,
+                            error
+                        )
+                    },
+                )?;
+                self.submit_sample_analysis(&loaded);
+                let buffer_id = loaded.buffer_id;
+                let sample_rate = loaded.sample_rate;
+                let sample_name = loaded.name;
+                if saved_path.as_ref() != Some(&path_buf) {
+                    fallback_count += 1;
+                }
+                self.register_loaded_sample_path(&sample_name, buffer_id, path_buf);
+                sample_ids.push((buffer_id, sample_name, sample_rate));
+            } else {
+                sample_ids.push((-1, String::new(), self.graph.sample_rate));
+            }
+        }
+
+        let crate::project::ProjectPattern {
+            track_bits,
+            step_data,
+            track_params,
+            effect_slots,
+            midi_fx_slots,
+            instrument_slots,
+            instrument_base_note_offsets,
+            track_sound_states,
+            chord_snapshots,
+            chord_duration_snapshots,
+            timebase_plock_snapshots,
+            swing_plock_snapshots,
+            swing_resolution_plock_snapshots,
+            bus_patterns,
+            instrument_types: _,
+            sample_paths: _,
+            sample_names: _,
+        } = pattern;
+        let bus_patterns = bus_patterns
+            .into_iter()
+            .map(project_bus_pattern_snapshot_to_ui)
+            .collect();
+
+        // Pre-extract attack/release for sampler instrument slot migration
+        // before track_params is consumed by into_iter().
+        let sampler_attack_release: Vec<(f32, f32)> = track_params
+            .iter()
+            .map(|tp| (tp.attack_ms, tp.release_ms))
+            .collect();
+
+        let mut snapshot = PatternSnapshot {
+            track_bits,
+            step_data,
+            track_params: track_params.into_iter().map(Into::into).collect(),
+            effect_slots: effect_slots
+                .into_iter()
+                .enumerate()
+                .map(|(track_idx, slots)| {
+                    slots
+                        .into_iter()
+                        .enumerate()
+                        .map(|(slot_idx, slot)| {
+                            let node_id = self.state.pattern.effect_chains[track_idx][slot_idx]
+                                .node_id
+                                .load(Ordering::Relaxed);
+                            if let Some(desc) = self
+                                .graph
+                                .effect_descriptors
+                                .get(track_idx)
+                                .and_then(|descs| descs.get(slot_idx))
+                            {
+                                project_slot_into_synced_snapshot(slot, desc, node_id)
+                            } else {
+                                slot.into_snapshot_with_node_id(node_id)
+                            }
+                        })
+                        .collect()
+                })
+                .collect(),
+            midi_fx_slots: (0..num_tracks)
+                .map(|track_idx| {
+                    midi_fx_slots
+                        .get(track_idx)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|slot| slot.into_snapshot_with_node_id(0))
+                        .collect()
+                })
+                .collect(),
+            instrument_slots: (0..num_tracks)
+                .map(|track_idx| {
+                    let node_id = self.state.pattern.instrument_slots[track_idx]
+                        .node_id
+                        .load(Ordering::Relaxed);
+                    if self.is_sampler_track(track_idx) {
+                        let saved_slot =
+                            instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
+                                crate::project::ProjectEffectSlot {
+                                    num_params: 0,
+                                    defaults: Vec::new(),
+                                    plocks: vec![Vec::new(); MAX_STEPS],
+                                    param_node_indices: Vec::new(),
+                                }
+                            });
+                        if saved_slot.num_params >= 4 {
+                            // Sampler params already saved; sync to pick up params added after
+                            // the project was written, such as enabled.
+                            let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
+                            project_slot_into_synced_snapshot(saved_slot, &sampler_desc, 0)
+                        } else {
+                            // Old project: migrate attack/release from TrackParams
+                            let sampler_desc = crate::effects::EffectDescriptor::builtin_sampler();
+                            let mut defaults: Vec<f32> =
+                                sampler_desc.params.iter().map(|p| p.default).collect();
+                            let (attack, release) = sampler_attack_release
+                                .get(track_idx)
+                                .copied()
+                                .unwrap_or((0.0, 0.0));
+                            defaults[0] = attack;
+                            defaults[1] = release;
+                            // start=0.0, end=1.0 already set from defaults
+                            crate::effects::EffectSlotSnapshot {
+                                node_id: 0,
+                                num_params: defaults.len() as u32,
+                                defaults,
+                                plocks: vec![Vec::new(); MAX_STEPS],
+                                param_node_indices: sampler_desc
+                                    .params
+                                    .iter()
+                                    .map(|p| p.node_param_idx)
+                                    .collect(),
+                            }
+                        }
+                    } else {
+                        let desc = self.graph.instrument_descriptors[track_idx].clone();
+                        let slot = instrument_slots.get(track_idx).cloned().unwrap_or_else(|| {
+                            crate::project::ProjectEffectSlot {
+                                num_params: 0,
+                                defaults: Vec::new(),
+                                plocks: vec![Vec::new(); MAX_STEPS],
+                                param_node_indices: Vec::new(),
+                            }
+                        });
+                        if slot.num_params == 0 {
+                            crate::effects::EffectSlotSnapshot::capture(
+                                &self.state.pattern.instrument_slots[track_idx],
+                            )
+                        } else {
+                            // Sync against the current descriptor so old projects inherit params
+                            // added after save, while remapping custom-instrument params across
+                            // the inserted enabled slot.
+                            project_custom_instrument_slot_into_synced_snapshot(
+                                slot, &desc, node_id,
+                            )
+                        }
+                    }
+                })
+                .collect(),
+            instrument_base_note_offsets,
+            track_sound_states: track_sound_states
+                .into_iter()
+                .enumerate()
+                .map(|(track_idx, sound)| {
+                    let engine_id = self
+                        .graph
+                        .track_engine_ids
+                        .get(track_idx)
+                        .and_then(|id| *id);
+                    sound.into_track_sound_state(engine_id)
+                })
+                .collect(),
+            sample_ids,
+            chord_snapshots: chord_snapshots
+                .into_iter()
+                .zip(
+                    chord_duration_snapshots
+                        .into_iter()
+                        .chain(std::iter::repeat_with(|| vec![Vec::new(); MAX_STEPS])),
+                )
+                .map(|(steps, durations)| chord_snapshot_from_steps_and_durations(steps, durations))
+                .collect(),
+            timebase_plock_snapshots: timebase_plock_snapshots
+                .into_iter()
+                .map(|steps| {
+                    let mut snapshot = [None; MAX_STEPS];
+                    for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                        snapshot[idx] = value;
+                    }
+                    snapshot
+                })
+                .collect(),
+            swing_plock_snapshots: swing_plock_snapshots
+                .into_iter()
+                .map(|steps| {
+                    let mut snapshot = [None; MAX_STEPS];
+                    for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                        snapshot[idx] = value;
+                    }
+                    snapshot
+                })
+                .collect(),
+            swing_resolution_plock_snapshots: swing_resolution_plock_snapshots
+                .into_iter()
+                .map(|steps| {
+                    let mut snapshot = [None; MAX_STEPS];
+                    for (idx, value) in steps.into_iter().take(MAX_STEPS).enumerate() {
+                        snapshot[idx] = value;
+                    }
+                    snapshot
+                })
+                .collect(),
+            instrument_types: self.graph.track_instrument_types.clone(),
+        };
+        snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
+
+        Ok((snapshot, bus_patterns, fallback_count))
+    }
+
+    fn first_available_sample_path(&self) -> Option<PathBuf> {
+        fn walk(dir: &Path) -> Option<PathBuf> {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .ok()?
+                .filter_map(Result::ok)
+                .collect();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(found) = walk(&path) {
+                        return Some(found);
+                    }
+                } else if path
+                    .extension()
+                    .map(|ext| ext.to_ascii_lowercase() == "wav")
+                    .unwrap_or(false)
+                {
+                    return Some(path);
+                }
+            }
+            None
+        }
+
+        walk(Path::new("samples"))
+    }
+
+    pub fn push_all_restored_defaults(&self) {
+        self.push_master_volume();
+        for track_idx in 0..self.tracks.len() {
+            self.push_track_volume(track_idx);
+            self.push_track_pan(track_idx);
+            self.push_track_mute(track_idx);
+            self.push_send_gain(track_idx);
+            for slot_idx in 0..self.state.pattern.effect_chains[track_idx].len() {
+                let slot = &self.state.pattern.effect_chains[track_idx][slot_idx];
+                let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+                for param_idx in 0..num_params {
+                    let value = slot.defaults.get(param_idx);
+                    let host_control = self
+                        .graph
+                        .effect_descriptors
+                        .get(track_idx)
+                        .and_then(|slots| slots.get(slot_idx))
+                        .and_then(|desc| desc.params.get(param_idx))
+                        .and_then(|param| param.host_control.as_ref());
+                    if matches!(
+                        host_control,
+                        Some(crate::effects::HostControl::FxSidechain { .. })
+                    ) {
+                        self.apply_effect_sidechain_selection(
+                            track_idx,
+                            slot_idx,
+                            param_idx,
+                            value.round().max(0.0) as usize,
+                        );
+                    } else {
+                        self.send_slot_param(track_idx, slot_idx, param_idx, value);
+                    }
+                }
+            }
+        }
+        self.push_track_solo_mutes();
+        self.push_all_restored_instrument_defaults();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_param(
+        name: &str,
+        default: f32,
+        node_param_idx: u32,
+    ) -> crate::effects::ParamDescriptor {
+        crate::effects::ParamDescriptor {
+            name: name.to_string(),
+            min: 0.0,
+            max: 1.0,
+            default,
+            kind: crate::effects::ParamKind::Continuous { unit: None },
+            scaling: crate::effects::ParamScaling::Linear,
+            node_param_idx,
+            host_control: None,
+        }
+    }
+
+    fn minimal_project_with_effect_slots(
+        custom_effects: Vec<Option<String>>,
+        effect_slots: Vec<project::ProjectEffectSlot>,
+    ) -> ProjectFile {
+        ProjectFile {
+            version: project::project_file_version(),
+            name: "test".to_string(),
+            bpm: 120,
+            master_volume: 1.0,
+            current_pattern: 0,
+            reverb: ProjectReverbState {
+                size: 0.2,
+                brightness: 0.8,
+                replace: 0.3,
+            },
+            buses: Vec::new(),
+            tracks: vec![ProjectTrack::Sampler {
+                sample_path: "samples/kick.wav".to_string(),
+                color: None,
+            }],
+            custom_effects: vec![custom_effects],
+            scratch: ProjectScratchState::default(),
+            patterns: vec![ProjectPattern {
+                track_bits: Vec::new(),
+                step_data: Vec::new(),
+                track_params: Vec::new(),
+                effect_slots: vec![effect_slots],
+                midi_fx_slots: Vec::new(),
+                instrument_slots: Vec::new(),
+                instrument_base_note_offsets: Vec::new(),
+                track_sound_states: Vec::new(),
+                chord_snapshots: Vec::new(),
+                chord_duration_snapshots: Vec::new(),
+                timebase_plock_snapshots: Vec::new(),
+                swing_plock_snapshots: Vec::new(),
+                swing_resolution_plock_snapshots: Vec::new(),
+                bus_patterns: Vec::new(),
+                instrument_types: Vec::new(),
+                sample_paths: Vec::new(),
+                sample_names: Vec::new(),
+            }],
+        }
+    }
+
+    fn legacy_default_project_effect_slot(
+        mut desc: EffectDescriptor,
+    ) -> project::ProjectEffectSlot {
+        if let Some(enabled) = desc.params.iter_mut().find(|param| param.name == "enabled") {
+            enabled.default = 0.0;
+        }
+        default_project_effect_slot(&desc)
+    }
+
+    #[test]
+    fn legacy_default_filter_delay_migration_drops_untouched_slots() {
+        let custom_slot = project::ProjectEffectSlot {
+            num_params: 1,
+            defaults: vec![0.42],
+            plocks: vec![vec![None]; MAX_STEPS],
+            param_node_indices: vec![9],
+        };
+        let mut project = minimal_project_with_effect_slots(
+            vec![Some("custom-fx".to_string())],
+            vec![
+                legacy_default_project_effect_slot(EffectDescriptor::builtin_filter()),
+                legacy_default_project_effect_slot(EffectDescriptor::builtin_delay()),
+                custom_slot.clone(),
+            ],
+        );
+
+        migrate_legacy_default_track_effects(&mut project);
+
+        assert_eq!(
+            project.custom_effects[0],
+            vec![Some("custom-fx".to_string())]
+        );
+        assert_eq!(project.patterns[0].effect_slots[0].len(), 1);
+        assert_eq!(
+            project.patterns[0].effect_slots[0][0].defaults,
+            custom_slot.defaults
+        );
+    }
+
+    #[test]
+    fn legacy_default_filter_delay_migration_preserves_edited_slots() {
+        let mut filter_slot =
+            legacy_default_project_effect_slot(EffectDescriptor::builtin_filter());
+        filter_slot.defaults[2] = 880.0;
+        let mut delay_slot = legacy_default_project_effect_slot(EffectDescriptor::builtin_delay());
+        delay_slot.plocks[3][0] = Some(0.0);
+        let custom_slot = project::ProjectEffectSlot {
+            num_params: 1,
+            defaults: vec![0.24],
+            plocks: vec![vec![None]; MAX_STEPS],
+            param_node_indices: vec![11],
+        };
+        let mut project = minimal_project_with_effect_slots(
+            vec![Some("custom-fx".to_string())],
+            vec![filter_slot, delay_slot, custom_slot.clone()],
+        );
+
+        migrate_legacy_default_track_effects(&mut project);
+
+        assert_eq!(
+            project.custom_effects[0],
+            vec![
+                EffectDescriptor::builtin_insert_project_name("Filter"),
+                EffectDescriptor::builtin_insert_project_name("Delay"),
+                Some("custom-fx".to_string()),
+            ]
+        );
+        assert_eq!(project.patterns[0].effect_slots[0][0].defaults[2], 880.0);
+        assert_eq!(
+            project.patterns[0].effect_slots[0][1].plocks[3][0],
+            Some(0.0)
+        );
+        assert_eq!(
+            project.patterns[0].effect_slots[0][2].defaults,
+            custom_slot.defaults
+        );
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_remaps_params_across_inserted_enabled() {
+        let mut plocks = vec![vec![None; 4]; MAX_STEPS];
+        plocks[7][2] = Some(0.33);
+
+        let old_slot = project::ProjectEffectSlot {
+            num_params: 4,
+            defaults: vec![0.12, 0.34, 0.56, 0.78],
+            plocks,
+            param_node_indices: vec![
+                (crate::lisp_effect::HEADER_SLOTS - 1) as u32,
+                crate::lisp_effect::HEADER_SLOTS as u32,
+                crate::voice_modulator::MOD_PARAM_BASE,
+                crate::voice_modulator::MOD_PARAM_BASE + 1,
+            ],
+        };
+
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            params: vec![
+                test_param("attack", 0.01, crate::lisp_effect::HEADER_SLOTS as u32),
+                test_param("tone", 0.02, crate::lisp_effect::HEADER_SLOTS as u32 + 1),
+                crate::effects::EffectDescriptor::enabled_param(
+                    crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                    1.0,
+                ),
+                test_param("lfo rate", 0.03, crate::voice_modulator::MOD_PARAM_BASE),
+                test_param(
+                    "lfo depth",
+                    0.04,
+                    crate::voice_modulator::MOD_PARAM_BASE + 1,
+                ),
+            ],
+        };
+
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+
+        assert_eq!(restored.node_id, 42);
+        assert_eq!(restored.num_params, 5);
+        assert_eq!(restored.defaults, vec![0.12, 0.34, 1.0, 0.56, 0.78]);
+        assert_eq!(restored.plocks[7][3], Some(0.33));
+        assert_eq!(restored.plocks[7][2], None);
+        assert_eq!(
+            restored.param_node_indices,
+            vec![
+                crate::lisp_effect::HEADER_SLOTS as u32,
+                crate::lisp_effect::HEADER_SLOTS as u32 + 1,
+                crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                crate::voice_modulator::MOD_PARAM_BASE,
+                crate::voice_modulator::MOD_PARAM_BASE + 1,
+            ]
+        );
+    }
+}

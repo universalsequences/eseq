@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "engine_name": "acoustic-guitar",
+  "source_file": "instruments/acoustic-guitar.lisp",
+  "presets": [
+    {
+      "id": "ag-fingerpick",
+      "name": "AG FINGERPICK",
+      "base_note_offset": -12.0,
+      "params": {
+        "hardness": 0.3,
+        "brightness": 0.55,
+        "pick_pos": 0.15,
+        "sustain_s": 2.0,
+        "wood": 0.6,
+        "mic_dist_ms": 2.5,
+        "vel_bright": 0.25,
+        "gain": 0.18
+      }
+    },
+    {
+      "id": "ag-strummed",
+      "name": "AG STRUMMED",
+      "base_note_offset": -12.0,
+      "params": {
+        "hardness": 0.65,
+        "brightness": 0.6,
+        "pick_pos": 0.1,
+        "sustain_s": 1.8,
+        "wood": 0.55,
+        "mic_dist_ms": 2.0,
+        "vel_bright": 0.35,
+        "gain": 0.20
+      }
+    },
+    {
+      "id": "ag-nylon",
+      "name": "AG NYLON",
+      "base_note_offset": -12.0,
+      "params": {
+        "hardness": 0.15,
+        "brightness": 0.4,
+        "pick_pos": 0.2,
+        "sustain_s": 2.5,
+        "wood": 0.65,
+        "mic_dist_ms": 3.0,
+        "vel_bright": 0.2,
+        "gain": 0.20
+      }
+    },
+    {
+      "id": "ag-steel-bright",
+      "name": "AG STEEL BRIGHT",
+      "base_note_offset": -12.0,
+      "params": {
+        "hardness": 0.8,
+        "brightness": 0.75,
+        "pick_pos": 0.07,
+        "sustain_s": 1.5,
+        "wood": 0.4,
+        "mic_dist_ms": 1.5,
+        "vel_bright": 0.45,
+        "gain": 0.18
+      }
+    },
+    {
+      "id": "ag-12string",
+      "name": "AG 12 STRING",
+      "base_note_offset": -12.0,
+      "params": {
+        "hardness": 0.55,
+        "brightness": 0.6,
+        "pick_pos": 0.1,
+        "sustain_s": 2.2,
+        "wood": 0.5,
+        "mic_dist_ms": 2.0,
+        "vel_bright": 0.3,
+        "gain": 0.17
+      }
+    },
+    {
+      "id": "ag-body-heavy",
+      "name": "AG BODY HEAVY",
+      "base_note_offset": -12.0,
+      "params": {
+        "hardness": 0.4,
+        "brightness": 0.45,
+        "pick_pos": 0.25,
+        "sustain_s": 3.0,
+        "wood": 0.9,
+        "mic_dist_ms": 4.0,
+        "vel_bright": 0.2,
+        "gain": 0.19
+      }
+    },
+    {
+      "id": "ag-muted",
+      "name": "AG MUTED",
+      "base_note_offset": -12.0,
+      "params": {
+        "hardness": 0.5,
+        "brightness": 0.25,
+        "pick_pos": 0.35,
+        "sustain_s": 0.5,
+        "wood": 0.4,
+        "mic_dist_ms": 2.0,
+        "vel_bright": 0.15,
+        "gain": 0.22
+      }
+    },
+    {
+      "id": "ag-resonator",
+      "name": "AG RESONATOR",
+      "base_note_offset": -12.0,
+      "params": {
+        "hardness": 0.7,
+        "brightness": 0.7,
+        "pick_pos": 0.08,
+        "sustain_s": 1.2,
+        "wood": 0.8,
+        "mic_dist_ms": 1.5,
+        "vel_bright": 0.5,
+        "gain": 0.18
+      }
+    }
+  ]
+}

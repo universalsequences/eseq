@@ -1,0 +1,2632 @@
+{
+  "generated_from": {
+    "dgenlisp_root": "/Users/alecresende/code/swift/dgen/Sources/DGenLisp",
+    "source_files": [
+      "README.md",
+      "main.swift",
+      "Manifest.swift",
+      "ModulationLowering.swift",
+      "LispEvaluator.swift"
+    ]
+  },
+  "language": {
+    "attributes": [
+      {
+        "name": "@N",
+        "summary": "FFT/window size for spectral operators.",
+        "used_by": [
+          "hann",
+          "ifft",
+          "partition-ir",
+          "partitioned-convolve",
+          "partitioned-spectral-mac",
+          "phase-vocoder",
+          "spectrum-delay",
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@attack",
+        "summary": "Compressor attack.",
+        "used_by": [
+          "compressor"
+        ]
+      },
+      {
+        "name": "@axes",
+        "summary": "Axis order for transpose.",
+        "used_by": [
+          "transpose"
+        ]
+      },
+      {
+        "name": "@axis",
+        "summary": "Axis argument for reductions and softmax.",
+        "used_by": [
+          "max-axis",
+          "mean",
+          "mean-axis",
+          "softmax",
+          "sum",
+          "sum-axis"
+        ]
+      },
+      {
+        "name": "@backend",
+        "summary": "FFT backend: tensor or accelerated.",
+        "used_by": [
+          "fft",
+          "ifft"
+        ]
+      },
+      {
+        "name": "@channel",
+        "summary": "Load one channel from an audio asset.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
+        "name": "@cutoff",
+        "summary": "Biquad cutoff attribute form.",
+        "used_by": [
+          "biquad"
+        ]
+      },
+      {
+        "name": "@data",
+        "summary": "Inline tensor or tensor-history data.",
+        "used_by": [
+          "tensor"
+        ]
+      },
+      {
+        "name": "@default",
+        "summary": "Default value for params and generated modulation helpers.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@default-file",
+        "summary": "Attribute observed in evaluator source.",
+        "used_by": [
+          "tensor-param",
+          "wavetable",
+          "wavetable-param"
+        ]
+      },
+      {
+        "name": "@end",
+        "summary": "Audio load end time in seconds.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
+        "name": "@file",
+        "summary": "Audio or tensor asset path.",
+        "used_by": [
+          "audio-tensor",
+          "ir",
+          "tensor",
+          "tensor-param",
+          "wavetable",
+          "wavetable-param"
+        ]
+      },
+      {
+        "name": "@gain",
+        "summary": "Gain for high-level spectral convolution.",
+        "used_by": [
+          "biquad",
+          "partitioned-convolve"
+        ]
+      },
+      {
+        "name": "@generated",
+        "summary": "Tags generated helper parameters.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@generated-for",
+        "summary": "Associates a generated helper parameter with a user parameter.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@hidden",
+        "summary": "Hide a generated or internal parameter from normal host presentation.",
+        "used_by": []
+      },
+      {
+        "name": "@hop",
+        "summary": "Hop size for STFT and hop-rate operators.",
+        "used_by": [
+          "noise",
+          "partition-ir",
+          "partitioned-convolve",
+          "phase-vocoder",
+          "spectrum-delay",
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@hopSize",
+        "summary": "Attribute observed in evaluator source.",
+        "used_by": [
+          "noise",
+          "partition-ir",
+          "partitioned-convolve",
+          "phase-vocoder",
+          "spectrum-delay",
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@hops",
+        "summary": "Fixed delay in hops for spectrum-delay.",
+        "used_by": [
+          "spectrum-delay"
+        ]
+      },
+      {
+        "name": "@knee",
+        "summary": "Compressor knee.",
+        "used_by": [
+          "compressor"
+        ]
+      },
+      {
+        "name": "@max",
+        "summary": "Maximum parameter value.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@max-frames",
+        "summary": "Playback frame budget for `to-signal`.",
+        "used_by": [
+          "to-signal"
+        ]
+      },
+      {
+        "name": "@max-hops",
+        "summary": "Maximum modulated delay in hops for spectrum-delay-mod.",
+        "used_by": [
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@maxHops",
+        "summary": "Attribute observed in evaluator source.",
+        "used_by": [
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@min",
+        "summary": "Minimum parameter value.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@mod",
+        "summary": "Marks a parameter as modulatable.",
+        "used_by": []
+      },
+      {
+        "name": "@mod-depth-max",
+        "summary": "Upper bound for generated modulation depth control.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@mod-depth-min",
+        "summary": "Lower bound for generated modulation depth control.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@mod-depth-param",
+        "summary": "Generated modulation depth parameter name.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@mod-mode",
+        "summary": "Modulation mode: additive, multiplicative, or semitone.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@mod-resolved-symbol",
+        "summary": "Generated resolved modulation symbol name.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@mod-source-param",
+        "summary": "Generated modulation source parameter name.",
+        "used_by": [
+          "param"
+        ]
+      },
+      {
+        "name": "@mode",
+        "summary": "Biquad filter mode attribute form.",
+        "used_by": [
+          "biquad"
+        ]
+      },
+      {
+        "name": "@modulator",
+        "summary": "Marks an input as a modulation source slot.",
+        "used_by": [
+          "in"
+        ]
+      },
+      {
+        "name": "@mono",
+        "summary": "Load audio as mono.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
+        "name": "@n",
+        "summary": "Attribute observed in evaluator source.",
+        "used_by": [
+          "hann",
+          "ifft",
+          "partition-ir",
+          "partitioned-convolve",
+          "partitioned-spectral-mac",
+          "phase-vocoder",
+          "spectrum-delay",
+          "spectrum-delay-mod"
+        ]
+      },
+      {
+        "name": "@name",
+        "summary": "Host-visible input/output or modulator name.",
+        "used_by": [
+          "audio-tensor",
+          "in",
+          "ir",
+          "out",
+          "wavetable",
+          "wavetable-param"
+        ]
+      },
+      {
+        "name": "@normalize",
+        "summary": "Audio load normalization mode, e.g. peak.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
+        "name": "@padding",
+        "summary": "Per-axis padding for pad.",
+        "used_by": [
+          "pad"
+        ]
+      },
+      {
+        "name": "@q",
+        "summary": "Biquad resonance / Q attribute form.",
+        "used_by": [
+          "biquad"
+        ]
+      },
+      {
+        "name": "@ranges",
+        "summary": "Slice ranges for shrink.",
+        "used_by": [
+          "shrink"
+        ]
+      },
+      {
+        "name": "@ratio",
+        "summary": "Compressor ratio.",
+        "used_by": [
+          "compressor"
+        ]
+      },
+      {
+        "name": "@release",
+        "summary": "Compressor release.",
+        "used_by": [
+          "compressor"
+        ]
+      },
+      {
+        "name": "@repeats",
+        "summary": "Per-axis repeat counts.",
+        "used_by": [
+          "repeat"
+        ]
+      },
+      {
+        "name": "@shape",
+        "summary": "Target shape for reshape / expand.",
+        "used_by": [
+          "expand",
+          "partitioned-convolve",
+          "reshape",
+          "tensor",
+          "tensor-param",
+          "windows"
+        ]
+      },
+      {
+        "name": "@sidechain",
+        "summary": "Compressor sidechain signal binding.",
+        "used_by": [
+          "compressor"
+        ]
+      },
+      {
+        "name": "@size",
+        "summary": "Tensor size for tensor noise.",
+        "used_by": [
+          "noise"
+        ]
+      },
+      {
+        "name": "@start",
+        "summary": "Audio load start time in seconds.",
+        "used_by": [
+          "audio-tensor",
+          "ir"
+        ]
+      },
+      {
+        "name": "@threshold",
+        "summary": "Compressor threshold.",
+        "used_by": [
+          "compressor"
+        ]
+      },
+      {
+        "name": "@type",
+        "summary": "Window type for window operator.",
+        "used_by": [
+          "window"
+        ]
+      },
+      {
+        "name": "@unit",
+        "summary": "Host-visible unit label.",
+        "used_by": [
+          "param"
+        ]
+      }
+    ],
+    "comments": [
+      {
+        "prefix": ";"
+      },
+      {
+        "prefix": "#"
+      }
+    ],
+    "compiler_cli": {
+      "command": "dgenlisp compile [<file.lisp>] [options]",
+      "options": [
+        {
+          "default": ".",
+          "flag": "-o",
+          "long_flag": "--output",
+          "summary": "Output directory.",
+          "value": "<dir>"
+        },
+        {
+          "default": "patch",
+          "flag": null,
+          "long_flag": "--name",
+          "summary": "Output name without extension.",
+          "value": "<name>"
+        },
+        {
+          "default": 44100,
+          "flag": null,
+          "long_flag": "--sample-rate",
+          "summary": "Sample rate in Hz.",
+          "value": "<rate>"
+        },
+        {
+          "default": 4096,
+          "flag": null,
+          "long_flag": "--max-frames",
+          "summary": "Maximum frame count.",
+          "value": "<count>"
+        },
+        {
+          "default": 1,
+          "flag": null,
+          "long_flag": "--voices",
+          "summary": "Voice count for polyphony.",
+          "value": "<count>"
+        },
+        {
+          "default": false,
+          "flag": null,
+          "long_flag": "--debug",
+          "summary": "Enable debug output.",
+          "value": null
+        },
+        {
+          "default": true,
+          "flag": "-",
+          "long_flag": null,
+          "summary": "Read source from stdin.",
+          "value": null
+        }
+      ],
+      "outputs": [
+        "<name>.dylib",
+        "<name>.json"
+      ]
+    },
+    "constants": [
+      {
+        "name": "pi",
+        "summary": "Pi.",
+        "value": "pi"
+      },
+      {
+        "name": "twopi",
+        "summary": "Two pi.",
+        "value": "2*pi"
+      },
+      {
+        "name": "tau",
+        "summary": "Alias for twopi.",
+        "value": "2*pi"
+      },
+      {
+        "name": "e",
+        "summary": "Euler's constant.",
+        "value": "Euler's number"
+      },
+      {
+        "name": "true",
+        "summary": "Boolean true as float.",
+        "value": 1.0
+      },
+      {
+        "name": "false",
+        "summary": "Boolean false as float.",
+        "value": 0.0
+      }
+    ],
+    "examples": [
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "MODUM_DELAY",
+        "output_count": 2,
+        "params": [
+          "cutoff",
+          "fbk",
+          "max1",
+          "max2",
+          "rate",
+          "res"
+        ],
+        "path": "effects/MODUM_DELAY.lisp",
+        "preview": "(def input (in 1 @name signal))\n(def lfo (cos (* twopi (triangle (phasor (param rate @min 0.1 @max 100 @default 1) ) 0.2 ))))\n(def x\n  (biquad\n    input\n    (+ (* (scale lfo -1 1 0 1) 100) (param cutoff @min 50 @max 4000 @default 900))"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "dimension-d-chorus",
+        "output_count": 2,
+        "params": [
+          "base",
+          "depth",
+          "mix",
+          "rate",
+          "shimmer",
+          "spread",
+          "tone",
+          "width"
+        ],
+        "path": "effects/dimension-d-chorus.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def mono (* 0.5 (+ in-l in-r)))\n(param rate @min 0.05 @max 1.2 @default 0.32)\n(param depth @min 1.0 @max 20 @default 8.5)\n(param base @min 6 @max 28 @default 12.5)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "dualdelaymod",
+        "output_count": 1,
+        "params": [
+          "cutoff",
+          "fbk",
+          "lforate",
+          "m1",
+          "m2",
+          "res"
+        ],
+        "path": "effects/dualdelaymod.lisp",
+        "preview": "(def input (in 1 @name signal))\n(def lfo (cos (* twopi (triangle (phasor (param lforate @min 0.1 @max 32 @default 1))))))\n(def x\n  (biquad\n    input\n    (+ (* (scale lfo -1 1 0 1) 1000) (param cutoff @min 50 @max 4000 @default 900))"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "jet-flanger-stereo",
+        "output_count": 2,
+        "params": [
+          "depth",
+          "feedback",
+          "manual",
+          "mix",
+          "rate",
+          "width"
+        ],
+        "path": "effects/jet-flanger-stereo.lisp",
+        "preview": "(def sig (in 1 @name signal))\n(def rate (param rate @min 0.01 @max 10 @default 0.15))\n(def depth (param depth @min 0 @max 1 @default 0.8))\n(def manual (param manual @min 1 @max 800 @default 250))\n(def fbk (param feedback @min -0.98 @max 0.98 @default 0.85))\n(def mix-amt (param mix @min 0 @max 1 @default 0.5))"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "lexilush",
+        "output_count": 2,
+        "params": [
+          "damping",
+          "decay",
+          "diffusion",
+          "mix",
+          "mod_amt",
+          "mod_freq",
+          "pre_dly",
+          "size"
+        ],
+        "path": "effects/lexilush.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def in-stereo (+ in-l in-r))\n(param pre_dly @min 0 @max 5000 @default 240)\n(param size @min 0.5 @max 2.0 @default 1.0)\n(param decay @min 0.1 @max 0.98 @default 0.8)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "lowdcmp",
+        "output_count": 2,
+        "params": [
+          "gain",
+          "knee",
+          "ratio",
+          "threshold"
+        ],
+        "path": "effects/lowdcmp.lisp",
+        "preview": "(def input1 (in 1 @name signal))\n(param threshold @min -40 @max 0 @default -10)\n(param gain @min 0 @max 10 @default 1)\n(param ratio @min 1 @max 32 @default 10)\n(param knee @min 1 @max 10 @default 5)\n(out (compressor"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "lushlexiconreverb",
+        "output_count": 2,
+        "params": [
+          "damping",
+          "decay",
+          "mix",
+          "pre",
+          "size"
+        ],
+        "path": "effects/lushlexiconreverb.lisp",
+        "preview": "(def in-l (in 1 @name signal))\n(param mix @min 0 @max 1 @default 0.3)\n(param size @min 0.5 @max 2.0 @default 1.0)\n(param decay @min 0.1 @max 0.95 @default 0.7)\n(param damping @min 500 @max 10000 @default 3000)\n(param pre @min 0 @max 2000 @default 500)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "mod_delay",
+        "output_count": 2,
+        "params": [
+          "delay_max",
+          "fbk",
+          "freq"
+        ],
+        "path": "effects/mod_delay.lisp",
+        "preview": "(def input (in 1 @name signal))\n(make-history h)\n(def fin (read-history h))\n(def freq (param freq @min 0.1 @max 500 @default 32))\n(def dmax (param delay_max @min 50 @max 5000 @default 100))\n(def delaytime (scale (triangle (phasor freq) 0.2) 0 1 50 dmax))"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "roland-flanger-stereo",
+        "output_count": 2,
+        "params": [
+          "color",
+          "depth",
+          "feedback",
+          "manual",
+          "mix",
+          "rate"
+        ],
+        "path": "effects/roland-flanger-stereo.lisp",
+        "preview": "(def sig (in 1 @name signal))\n(def rate (param rate @min 0.01 @max 5 @default 0.2))\n(def depth (param depth @min 0 @max 1 @default 0.5))\n(def manual (param manual @min 1 @max 500 @default 120))\n(def fbk (param feedback @min -0.99 @max 0.99 @default 0.75))\n(def color (param color @min 1000 @max 16000 @default 5000))"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 1,
+        "name": "sidechain",
+        "output_count": 2,
+        "params": [
+          "ratio",
+          "threshold"
+        ],
+        "path": "effects/sidechain.lisp",
+        "preview": "(def input (in 1 @name signal))\n(def input2 (in 2 @name signal))\n(def side (in 3 @name signal @modulator 1))\n(param threshold @min -80 @max -2 @default -20)\n(param ratio min 1 @max 20 @default 10)\n(def o (compressor input ratio threshold 6 .01 .01 1 side))"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "spectral-bin-freeze",
+        "output_count": 2,
+        "params": [
+          "freeze",
+          "mix",
+          "smear",
+          "tone",
+          "width"
+        ],
+        "path": "effects/spectral-bin-freeze.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param freeze @min 0 @max 1 @default 0.55)\n(param smear @min 0 @max 1 @default 0.35)\n(param tone @min 800 @max 18000 @default 9000)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "spectral-cloud-gate",
+        "output_count": 2,
+        "params": [
+          "density",
+          "mix",
+          "phase_amt",
+          "smooth"
+        ],
+        "path": "effects/spectral-cloud-gate.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param density @min 0.05 @max 1 @default 0.45)\n(param phase_amt @min 0 @max 1 @default 0.35)\n(param smooth @min 0 @max 1 @default 0.2)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "spectral-short-ir",
+        "output_count": 2,
+        "params": [
+          "gain",
+          "tone",
+          "wet"
+        ],
+        "path": "effects/spectral-short-ir.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param wet @min 0 @max 1 @default 0.42)\n(param gain @min 0 @max 2 @default 1.0)\n(param tone @min 600 @max 14000 @default 6500)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "spectral-vocoder-shift",
+        "output_count": 2,
+        "params": [
+          "color",
+          "drive",
+          "mix",
+          "ratio"
+        ],
+        "path": "effects/spectral-vocoder-shift.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param ratio @min 0.5 @max 2.0 @default 1.25)\n(param color @min 1000 @max 16000 @default 11000)\n(param mix @min 0 @max 1 @default 0.55)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "stereo-tremolo",
+        "output_count": 2,
+        "params": [
+          "depth",
+          "rate",
+          "spread"
+        ],
+        "path": "effects/stereo-tremolo.lisp",
+        "preview": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(param rate @min 0.1 @max 20 @default 5)\n(param depth @min 0 @max 1 @default 0.8)\n(param spread @min 0 @max 1 @default 0.5)\n(def p (phasor rate))"
+      }
+    ],
+    "manifest": {
+      "schema": {
+        "cSourcePath": {
+          "required": true,
+          "type": "string"
+        },
+        "dylib": {
+          "required": true,
+          "type": "string"
+        },
+        "inputs": {
+          "required": true,
+          "type": "ManifestInput[]"
+        },
+        "maxFrameCount": {
+          "required": true,
+          "type": "int"
+        },
+        "modDestinations": {
+          "required": true,
+          "type": "ManifestModDestination[]"
+        },
+        "modulators": {
+          "required": true,
+          "type": "ManifestModulator[]"
+        },
+        "outputs": {
+          "required": true,
+          "type": "ManifestOutput[]"
+        },
+        "params": {
+          "required": true,
+          "type": "ManifestParam[]"
+        },
+        "sampleRate": {
+          "required": true,
+          "type": "float"
+        },
+        "tensorInitData": {
+          "required": true,
+          "type": "ManifestTensorInit[]"
+        },
+        "totalMemorySlots": {
+          "required": true,
+          "type": "int"
+        },
+        "version": {
+          "required": true,
+          "type": "int"
+        },
+        "voiceCellId": {
+          "required": false,
+          "type": "int|null"
+        },
+        "voiceCount": {
+          "required": true,
+          "type": "int"
+        }
+      },
+      "types": {
+        "ManifestInput": {
+          "channel": {
+            "type": "int"
+          },
+          "name": {
+            "type": "string|null"
+          }
+        },
+        "ManifestModDestination": {
+          "depthCellId": {
+            "type": "int"
+          },
+          "depthMax": {
+            "type": "float|null"
+          },
+          "depthMin": {
+            "type": "float|null"
+          },
+          "max": {
+            "type": "float"
+          },
+          "min": {
+            "type": "float"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "paramCellId": {
+            "type": "int"
+          },
+          "sourceCellId": {
+            "type": "int"
+          },
+          "unit": {
+            "type": "string|null"
+          }
+        },
+        "ManifestModulator": {
+          "inputChannel": {
+            "type": "int"
+          },
+          "name": {
+            "type": "string|null"
+          },
+          "slot": {
+            "type": "int"
+          }
+        },
+        "ManifestOutput": {
+          "channel": {
+            "type": "int"
+          },
+          "name": {
+            "type": "string|null"
+          }
+        },
+        "ManifestParam": {
+          "cellId": {
+            "type": "int"
+          },
+          "default": {
+            "type": "float"
+          },
+          "hidden": {
+            "type": "bool|null"
+          },
+          "max": {
+            "type": "float|null"
+          },
+          "min": {
+            "type": "float|null"
+          },
+          "name": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string|null"
+          }
+        },
+        "ManifestTensorInit": {
+          "data": {
+            "type": "float[]"
+          },
+          "offset": {
+            "type": "int"
+          }
+        }
+      }
+    },
+    "modulation": {
+      "generated_helpers": [
+        "__mod__<param>__source",
+        "__mod__<param>__depth",
+        "__mod__<param>__resolved"
+      ],
+      "modes": [
+        "additive",
+        "multiplicative",
+        "semitone"
+      ],
+      "notes": [
+        "Modulatable params require at least one input marked with @modulator.",
+        "Generated modulation source and depth params are hidden host parameters."
+      ],
+      "required_param_attributes": [
+        "@mod true",
+        "@mod-mode",
+        "@min",
+        "@max"
+      ],
+      "special_form": "(mod paramName)"
+    },
+    "operators": [
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "arithmetic",
+        "implementation": {
+          "function": "evalMod",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "%",
+        "signatures": [
+          "(% a b)"
+        ],
+        "summary": "Modulo / remainder."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "attributes": [],
+        "category": "arithmetic",
+        "implementation": {
+          "function": "evalBinaryArith",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "*",
+        "signatures": [
+          "(* a b)",
+          "(* a b c ...)"
+        ],
+        "summary": "Multiply two values. The parser rewrites n-ary forms into nested binary calls."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "attributes": [],
+        "category": "arithmetic",
+        "implementation": {
+          "function": "evalBinaryArith",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "+",
+        "signatures": [
+          "(+ a b)",
+          "(+ a b c ...)"
+        ],
+        "summary": "Add two values. The parser rewrites n-ary forms into nested binary calls."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 1,
+          "parser_rewrites_nary": true
+        },
+        "attributes": [],
+        "category": "arithmetic",
+        "implementation": {
+          "function": "evalUnaryNegate",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "-",
+        "signatures": [
+          "(- x)",
+          "(- a b)",
+          "(- a b c ...)"
+        ],
+        "summary": "Negate one value or subtract two values."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "attributes": [],
+        "category": "arithmetic",
+        "implementation": {
+          "function": "evalBinaryArith",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "/",
+        "signatures": [
+          "(/ a b)",
+          "(/ a b c ...)"
+        ],
+        "summary": "Divide two values. The parser rewrites n-ary forms into nested binary calls."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 4,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "stateful",
+        "implementation": {
+          "function": "evalAccum",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "accum",
+        "signatures": [
+          "(accum increment)",
+          "(accum increment reset min max)"
+        ],
+        "summary": "Accumulator with optional reset and bounds."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "math",
+        "implementation": {
+          "function": "evalAtan2",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "atan2",
+        "signatures": [
+          "(atan2 y x)"
+        ],
+        "summary": "Two-argument arctangent."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 0
+        },
+        "attributes": [
+          "@channel",
+          "@end",
+          "@file",
+          "@mono",
+          "@name",
+          "@normalize",
+          "@start"
+        ],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalAudioTensor",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "audio-tensor",
+        "signatures": [
+          "(audio-tensor @file \"irs/hall.wav\")",
+          "(audio-tensor @file \"stereo.wav\" @channel 0)",
+          "(audio-tensor @file \"x.wav\" @mono true @normalize peak)"
+        ],
+        "summary": "Load a WAV file into static tensor manifest data."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 5,
+          "minimum": 1
+        },
+        "attributes": [
+          "@cutoff",
+          "@gain",
+          "@mode",
+          "@q"
+        ],
+        "category": "effect",
+        "implementation": {
+          "function": "evalBiquad",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "biquad",
+        "signatures": [
+          "(biquad signal cutoff q gain mode)",
+          "(biquad signal @cutoff 1000 @q 0.707 @gain 0 @mode 0)"
+        ],
+        "summary": "IIR biquad filter."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "windowing",
+        "implementation": {
+          "function": "evalBuffer",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "buffer",
+        "signatures": [
+          "(buffer signal size)",
+          "(buffer signal size hop)"
+        ],
+        "summary": "Ring buffer into a signalTensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 0,
+          "minimum": 0
+        },
+        "attributes": [],
+        "category": "signal_generator",
+        "implementation": {
+          "function": "signal",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "click",
+        "signatures": [
+          "(click)"
+        ],
+        "summary": "Impulse on the first frame."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 3
+        },
+        "attributes": [],
+        "category": "utility",
+        "implementation": {
+          "function": "evalClip",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "clip",
+        "signatures": [
+          "(clip sig min max)"
+        ],
+        "summary": "Clamp into a range."
+      },
+      {
+        "aliases": [
+          "complexconj"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "fft",
+        "implementation": {
+          "function": "evalComplexConj",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "complex-conj",
+        "signatures": [
+          "(complex-conj re im)"
+        ],
+        "summary": "Complex conjugate, returning `(real -imag)`."
+      },
+      {
+        "aliases": [
+          "complexmul"
+        ],
+        "arity": {
+          "maximum": 4,
+          "minimum": 4
+        },
+        "attributes": [],
+        "category": "fft",
+        "implementation": {
+          "function": "evalComplexMul",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "complex-mul",
+        "signatures": [
+          "(complex-mul ar ai br bi)"
+        ],
+        "summary": "Complex multiply, returning `(real imag)`."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 8,
+          "minimum": 1
+        },
+        "attributes": [
+          "@attack",
+          "@knee",
+          "@ratio",
+          "@release",
+          "@sidechain",
+          "@threshold"
+        ],
+        "category": "effect",
+        "implementation": {
+          "function": "evalCompressor",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "compressor",
+        "signatures": [
+          "(compressor signal ratio threshold knee attack release)",
+          "(compressor signal ratio threshold knee attack release sidechain)",
+          "(compressor signal ratio threshold knee attack release isSidechain sidechain)"
+        ],
+        "summary": "Dynamics compressor with optional sidechain forms."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "tensor_op",
+        "implementation": {
+          "function": "evalConv1d",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "conv1d",
+        "signatures": [
+          "(conv1d input kernel)"
+        ],
+        "summary": "1D convolution."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalConv2d",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "conv2d",
+        "signatures": [
+          "(conv2d input kernel)"
+        ],
+        "summary": "2D convolution."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "effect",
+        "implementation": {
+          "function": "evalDelay",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "delay",
+        "signatures": [
+          "(delay signal time_in_samples)"
+        ],
+        "summary": "Delay by a time in samples."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@shape"
+        ],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalExpand",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "expand",
+        "signatures": [
+          "(expand tensor @shape [4,3])"
+        ],
+        "summary": "Broadcast expand a tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@backend"
+        ],
+        "category": "fft",
+        "implementation": {
+          "function": "evalFFT",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "fft",
+        "signatures": [
+          "(fft input)",
+          "(fft input N)",
+          "(fft input @N 1024 @backend accelerated)"
+        ],
+        "summary": "FFT returning `(real imag)`; also updates legacy `__fft_re` and `__fft_im`."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalTensorCreate",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "full",
+        "signatures": [
+          "(full [d1,d2,...] value)",
+          "(full d1 d2 ... value)"
+        ],
+        "summary": "Constant-filled tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 3
+        },
+        "attributes": [],
+        "category": "conditional",
+        "implementation": {
+          "function": "evalGswitch",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "gswitch",
+        "signatures": [
+          "(gswitch condition true_value false_value)"
+        ],
+        "summary": "Conditional branch."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attributes": [
+          "@N",
+          "@n"
+        ],
+        "category": "windowing",
+        "implementation": {
+          "function": "evalHann",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "hann",
+        "signatures": [
+          "(hann 1024)"
+        ],
+        "summary": "Periodic Hann window tensor."
+      },
+      {
+        "aliases": [
+          "hophold"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "stateful",
+        "implementation": {
+          "function": "evalHopHold",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "hop-hold",
+        "signatures": [
+          "(hop-hold value hop)"
+        ],
+        "summary": "Hold a signal, tensor, or signalTensor for one hop interval."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [
+          "@N",
+          "@backend",
+          "@n"
+        ],
+        "category": "fft",
+        "implementation": {
+          "function": "evalIFFT",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "ifft",
+        "signatures": [
+          "(ifft real imag)",
+          "(ifft real imag N)",
+          "(ifft real imag @N 1024 @backend accelerated)"
+        ],
+        "summary": "Inverse FFT from real and imaginary parts."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@modulator",
+          "@name"
+        ],
+        "category": "io",
+        "implementation": {
+          "function": "evalInput",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "in",
+        "signatures": [
+          "(in channel @name string)",
+          "(in channel @name mod1 @modulator 1)"
+        ],
+        "summary": "Audio input channel."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 0
+        },
+        "attributes": [
+          "@channel",
+          "@end",
+          "@file",
+          "@mono",
+          "@name",
+          "@normalize",
+          "@start"
+        ],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalAudioTensor",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "ir",
+        "signatures": [
+          "(ir @file \"irs/room.wav\")"
+        ],
+        "summary": "Load a WAV file as an impulse-response tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "stateful",
+        "implementation": {
+          "function": "evalLatch",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "latch",
+        "signatures": [
+          "(latch value trigger)"
+        ],
+        "summary": "Sample-and-hold."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "tensor_op",
+        "implementation": {
+          "function": "evalMatmul",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "matmul",
+        "signatures": [
+          "(matmul a b)"
+        ],
+        "summary": "Matrix multiplication."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "attributes": [],
+        "category": "math",
+        "implementation": {
+          "function": "evalBinaryArith",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "max",
+        "signatures": [
+          "(max a b)",
+          "(max a b c ...)"
+        ],
+        "summary": "Maximum. The parser rewrites n-ary forms into nested binary calls."
+      },
+      {
+        "aliases": [
+          "maxaxis"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@axis"
+        ],
+        "category": "reduction",
+        "implementation": {
+          "function": "evalMaxAxis",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "max-axis",
+        "signatures": [
+          "(max-axis tensor @axis 0)"
+        ],
+        "summary": "Maximum along a specific axis."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@axis"
+        ],
+        "category": "reduction",
+        "implementation": {
+          "function": "evalMean",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "mean",
+        "signatures": [
+          "(mean tensor)",
+          "(mean tensor @axis 0)"
+        ],
+        "summary": "Mean reduction."
+      },
+      {
+        "aliases": [
+          "meanaxis"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@axis"
+        ],
+        "category": "reduction",
+        "implementation": {
+          "function": "evalMeanAxis",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "mean-axis",
+        "signatures": [
+          "(mean-axis tensor @axis 0)"
+        ],
+        "summary": "Explicit axis mean."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2,
+          "parser_rewrites_nary": true
+        },
+        "attributes": [],
+        "category": "math",
+        "implementation": {
+          "function": "evalBinaryArith",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "min",
+        "signatures": [
+          "(min a b)",
+          "(min a b c ...)"
+        ],
+        "summary": "Minimum. The parser rewrites n-ary forms into nested binary calls."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 3
+        },
+        "attributes": [],
+        "category": "stateful",
+        "implementation": {
+          "function": "evalMix",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "mix",
+        "signatures": [
+          "(mix a b t)"
+        ],
+        "summary": "Linear interpolation."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "math",
+        "implementation": {
+          "function": "evalMse",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "mse",
+        "signatures": [
+          "(mse prediction target)"
+        ],
+        "summary": "Mean squared error."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 0
+        },
+        "attributes": [
+          "@hop",
+          "@hopSize",
+          "@size"
+        ],
+        "category": "signal_generator",
+        "implementation": {
+          "function": "evalNoise",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "noise",
+        "signatures": [
+          "(noise)",
+          "(noise @size 1024)",
+          "(noise @size 1024 @hop 256)"
+        ],
+        "summary": "White noise, or per-bin tensor noise with optional hop-rate updates."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalTensorCreate",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "ones",
+        "signatures": [
+          "(ones [d1,d2,...])",
+          "(ones d1 d2 ...)"
+        ],
+        "summary": "All-ones tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [
+          "@name"
+        ],
+        "category": "io",
+        "implementation": {
+          "function": "evalOutput",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "out",
+        "signatures": [
+          "(out expr channel @name string)"
+        ],
+        "summary": "Audio output channel."
+      },
+      {
+        "aliases": [
+          "overlapadd"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "windowing",
+        "implementation": {
+          "function": "evalOverlapAdd",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "overlap-add",
+        "signatures": [
+          "(overlap-add signalTensor hop)"
+        ],
+        "summary": "Scatter-add a signalTensor into an output signal."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@padding"
+        ],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalPad",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "pad",
+        "signatures": [
+          "(pad tensor @padding [1:1,0:0])"
+        ],
+        "summary": "Pad a tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@default",
+          "@generated",
+          "@generated-for",
+          "@max",
+          "@min",
+          "@mod-depth-max",
+          "@mod-depth-min",
+          "@mod-depth-param",
+          "@mod-mode",
+          "@mod-resolved-symbol",
+          "@mod-source-param",
+          "@unit"
+        ],
+        "category": "io",
+        "implementation": {
+          "function": "evalParam",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "param",
+        "signatures": [
+          "(param name @default value @min value @max value @unit string)"
+        ],
+        "summary": "Host-visible scalar parameter."
+      },
+      {
+        "aliases": [
+          "partitionir"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@N",
+          "@hop",
+          "@hopSize",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalPartitionIR",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "partition-ir",
+        "signatures": [
+          "(partition-ir irTensor @N 1024 @hop 256)"
+        ],
+        "summary": "Prepartition an impulse response, returning `(irRe irIm)`."
+      },
+      {
+        "aliases": [
+          "partitionedconvolve"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [
+          "@N",
+          "@gain",
+          "@hop",
+          "@hopSize",
+          "@n",
+          "@shape"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalPartitionedConvolve",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "partitioned-convolve",
+        "signatures": [
+          "(partitioned-convolve input irTensor @N 1024 @hop 256)",
+          "(partitioned-convolve input irTensor @N 1024 @hop 256 @gain 1.0)"
+        ],
+        "summary": "High-level partitioned convolution from signal and IR tensor."
+      },
+      {
+        "aliases": [
+          "partitionedspectralmac"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 4
+        },
+        "attributes": [
+          "@N",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalPartitionedSpectralMAC",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "partitioned-spectral-mac",
+        "signatures": [
+          "(partitioned-spectral-mac xre xim irre irim @N 1024)"
+        ],
+        "summary": "Multiply-accumulate an input spectrum against partitioned IR spectra, returning `(real imag)`."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "tensor_op",
+        "implementation": {
+          "function": "evalPeek",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "peek",
+        "signatures": [
+          "(peek tensor index)",
+          "(peek tensor index channel)"
+        ],
+        "summary": "Read a scalar from a tensor."
+      },
+      {
+        "aliases": [
+          "peekrow"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "tensor_op",
+        "implementation": {
+          "function": "evalPeekRow",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "peek-row",
+        "signatures": [
+          "(peek-row tensor rowIndex)"
+        ],
+        "summary": "Read a tensor row as a signalTensor."
+      },
+      {
+        "aliases": [
+          "phasevocoder"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 3
+        },
+        "attributes": [
+          "@N",
+          "@hop",
+          "@hopSize",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalPhaseVocoder",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "phase-vocoder",
+        "signatures": [
+          "(phase-vocoder re im ratio @N 1024 @hop 256)"
+        ],
+        "summary": "Phase-vocoder bin remap/pitch transform, returning `(real imag)`."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "signal_generator",
+        "implementation": {
+          "function": "evalPhasor",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "phasor",
+        "signatures": [
+          "(phasor freq)",
+          "(phasor freq reset)"
+        ],
+        "summary": "Ramp oscillator from 0 to 1."
+      },
+      {
+        "aliases": [
+          "polarfft"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "fft",
+        "implementation": {
+          "function": "evalPolarFFT",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "polar-fft",
+        "signatures": [
+          "(polar-fft re im)"
+        ],
+        "summary": "Convert rectangular complex spectrum to `(magnitude phase)`."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "math",
+        "implementation": {
+          "function": "evalPow",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "pow",
+        "signatures": [
+          "(pow base exponent)"
+        ],
+        "summary": "Exponentiation."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "signal_generator",
+        "implementation": {
+          "function": "signal",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "ramp2trig",
+        "signatures": [
+          "(ramp2trig ramp)"
+        ],
+        "summary": "Convert a ramp wrap into a trigger."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalTensorCreate",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "randn",
+        "signatures": [
+          "(randn [d1,d2,...])",
+          "(randn d1 d2 ...)"
+        ],
+        "summary": "Random normal tensor."
+      },
+      {
+        "aliases": [
+          "rectfft"
+        ],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "fft",
+        "implementation": {
+          "function": "evalRectFFT",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "rect-fft",
+        "signatures": [
+          "(rect-fft mag phase)"
+        ],
+        "summary": "Convert polar spectrum to `(real imag)`."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@repeats"
+        ],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalRepeat",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "repeat",
+        "signatures": [
+          "(repeat tensor @repeats [2,3])"
+        ],
+        "summary": "Tile / repeat a tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@shape"
+        ],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalReshape",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "reshape",
+        "signatures": [
+          "(reshape tensor @shape [d1,d2,...])"
+        ],
+        "summary": "Reshape tensor dimensions."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "tensor_op",
+        "implementation": {
+          "function": "evalSample",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "sample",
+        "signatures": [
+          "(sample tensor index)"
+        ],
+        "summary": "Interpolated row read from a tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 5,
+          "minimum": 5
+        },
+        "attributes": [],
+        "category": "utility",
+        "implementation": {
+          "function": "evalScale",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "scale",
+        "signatures": [
+          "(scale sig inMin inMax outMin outMax)"
+        ],
+        "summary": "Linear rescale."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "conditional",
+        "implementation": {
+          "function": "evalSelector",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "selector",
+        "signatures": [
+          "(selector mode option1 option2 ...)"
+        ],
+        "summary": "1-based selector over options; mode <= 0 yields 0."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@ranges"
+        ],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalShrink",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "shrink",
+        "signatures": [
+          "(shrink tensor @ranges [0:2,1:3])"
+        ],
+        "summary": "Slice a tensor."
+      },
+      {
+        "aliases": [
+          "cos",
+          "tan",
+          "tanh",
+          "exp",
+          "log",
+          "log10",
+          "sqrt",
+          "abs",
+          "sign",
+          ""
+        ],
+        "arity": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "math",
+        "implementation": {
+          "function": "evalUnaryMath",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "sin",
+        "signatures": [
+          "(sin x)"
+        ],
+        "summary": "Sine."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@axis"
+        ],
+        "category": "reduction",
+        "implementation": {
+          "function": "evalSoftmax",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "softmax",
+        "signatures": [
+          "(softmax tensor @axis -1)"
+        ],
+        "summary": "Softmax along an axis."
+      },
+      {
+        "aliases": [
+          "spectrumdelay"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@N",
+          "@hop",
+          "@hopSize",
+          "@hops",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalSpectrumDelay",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "spectrum-delay",
+        "signatures": [
+          "(spectrum-delay spectrum @N 1024 @hops 4 @hop 256)"
+        ],
+        "summary": "Delay a spectrum by a fixed number of hops."
+      },
+      {
+        "aliases": [
+          "spectrumdelaymod"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 2
+        },
+        "attributes": [
+          "@N",
+          "@hop",
+          "@hopSize",
+          "@max-hops",
+          "@maxHops",
+          "@n"
+        ],
+        "category": "spectral_effect",
+        "implementation": {
+          "function": "evalSpectrumDelayMod",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "spectrum-delay-mod",
+        "signatures": [
+          "(spectrum-delay-mod spectrum delay @N 1024 @max-hops 32 @hop 256)"
+        ],
+        "summary": "Delay a spectrum by a signal-controlled number of hops."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "signal_generator",
+        "implementation": {
+          "function": "evalStatefulPhasor",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "stateful-phasor",
+        "signatures": [
+          "(stateful-phasor freq)"
+        ],
+        "summary": "Forced stateful phasor variant."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@axis"
+        ],
+        "category": "reduction",
+        "implementation": {
+          "function": "evalSum",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "sum",
+        "signatures": [
+          "(sum tensor)",
+          "(sum tensor @axis 0)"
+        ],
+        "summary": "Sum reduction."
+      },
+      {
+        "aliases": [
+          "sumaxis"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@axis"
+        ],
+        "category": "reduction",
+        "implementation": {
+          "function": "evalSumAxis",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "sum-axis",
+        "signatures": [
+          "(sum-axis tensor @axis 0)"
+        ],
+        "summary": "Explicit axis sum."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 0
+        },
+        "attributes": [
+          "@data",
+          "@file",
+          "@shape"
+        ],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalTensor",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "tensor",
+        "signatures": [
+          "(tensor rows cols)",
+          "(tensor [d1,d2,...])",
+          "(tensor @shape [4] @data [1 0.5 0.25 0])"
+        ],
+        "summary": "Zero-filled tensor alias, or inline data tensor with @shape/@data."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@default-file",
+          "@file",
+          "@shape"
+        ],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalTensorParam",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "tensor-param",
+        "signatures": [
+          "(tensor-param [d1,d2,...])"
+        ],
+        "summary": "Host-visible tensor parameter."
+      },
+      {
+        "aliases": [
+          "tosignal"
+        ],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@max-frames"
+        ],
+        "category": "tensor_op",
+        "implementation": {
+          "function": "evalToSignal",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "to-signal",
+        "signatures": [
+          "(to-signal tensor)",
+          "(to-signal tensor @max-frames 4096)"
+        ],
+        "summary": "Convert a 1D tensor into a signal playback source."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@axes"
+        ],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalTranspose",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "transpose",
+        "signatures": [
+          "(transpose tensor)",
+          "(transpose tensor @axes [1,0])"
+        ],
+        "summary": "Transpose / permute tensor axes."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "utility",
+        "implementation": {
+          "function": "evalTriangle",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "triangle",
+        "signatures": [
+          "(triangle phase)"
+        ],
+        "summary": "Convert a 0..1 phase to a -1..1 triangle."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": null
+        },
+        "attributes": [
+          "@default-file",
+          "@file",
+          "@name"
+        ],
+        "category": "uncategorized",
+        "implementation": {
+          "function": "evalWavetable",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "wavetable",
+        "signatures": [],
+        "summary": "Operator implemented in DGenLisp evaluator."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": null
+        },
+        "attributes": [
+          "@default-file",
+          "@file",
+          "@name"
+        ],
+        "category": "uncategorized",
+        "implementation": {
+          "function": "evalWavetable",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "wavetable-param",
+        "signatures": [],
+        "summary": "Operator implemented in DGenLisp evaluator."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 0
+        },
+        "attributes": [
+          "@type"
+        ],
+        "category": "windowing",
+        "implementation": {
+          "function": "evalWindow",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "window",
+        "signatures": [
+          "(window @type hann @N 1024)"
+        ],
+        "summary": "Named window tensor. Currently supports Hann."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [
+          "@shape"
+        ],
+        "category": "tensor_shape",
+        "implementation": {
+          "function": "evalWindows",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "windows",
+        "signatures": [
+          "(windows tensor @shape [3 3])"
+        ],
+        "summary": "Extract sliding windows / im2col-style tensor view."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 3
+        },
+        "attributes": [],
+        "category": "utility",
+        "implementation": {
+          "function": "evalWrap",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "wrap",
+        "signatures": [
+          "(wrap sig min max)"
+        ],
+        "summary": "Wrap into a range."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": null,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "tensor_creation",
+        "implementation": {
+          "function": "evalTensorCreate",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "zeros",
+        "signatures": [
+          "(zeros [d1,d2,...])",
+          "(zeros d1 d2 ...)"
+        ],
+        "summary": "Zero-filled tensor."
+      }
+    ],
+    "special_forms": [
+      {
+        "name": "def",
+        "signatures": [
+          "(def name expr)",
+          "(def name expr1 expr2 ...)",
+          "(def (name1 name2) tupleExpr)"
+        ],
+        "summary": "Bind a symbol to the last evaluated body expression."
+      },
+      {
+        "name": "defmacro",
+        "signatures": [
+          "(defmacro name (params...) body...)"
+        ],
+        "summary": "Define a macro with hygienic local `def` and `make-history` scoping."
+      },
+      {
+        "name": "make-history",
+        "signatures": [
+          "(make-history name)"
+        ],
+        "summary": "Create a history cell for feedback."
+      },
+      {
+        "name": "read-history",
+        "signatures": [
+          "(read-history name)"
+        ],
+        "summary": "Read the previous frame from a history cell."
+      },
+      {
+        "name": "write-history",
+        "signatures": [
+          "(write-history name expr)"
+        ],
+        "summary": "Write the current frame to a history cell and return the written signal."
+      },
+      {
+        "name": "make-tensor-history",
+        "signatures": [
+          "(make-tensor-history name @shape [H W])",
+          "(make-tensor-history name @shape [H W] @data [...])"
+        ],
+        "summary": "Create a tensor history cell for recurrent tensor DSP."
+      },
+      {
+        "name": "read-tensor-history",
+        "signatures": [
+          "(read-tensor-history name)"
+        ],
+        "summary": "Read the previous tensor value from a tensor history cell."
+      },
+      {
+        "name": "write-tensor-history",
+        "signatures": [
+          "(write-tensor-history name expr)"
+        ],
+        "summary": "Write the current tensor value and return it."
+      },
+      {
+        "name": "mod",
+        "signatures": [
+          "(mod paramName)"
+        ],
+        "summary": "Resolve the lowered modulated value for a parameter declared with `@mod true`."
+      }
+    ],
+    "types": [
+      {
+        "name": "float",
+        "summary": "Compile-time scalar constant."
+      },
+      {
+        "name": "signal",
+        "summary": "Per-frame scalar signal."
+      },
+      {
+        "name": "tensor",
+        "summary": "Static multi-dimensional array."
+      },
+      {
+        "name": "signalTensor",
+        "summary": "Per-frame tensor value."
+      }
+    ]
+  },
+  "schema_version": 1
+}

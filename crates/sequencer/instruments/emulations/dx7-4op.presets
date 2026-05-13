@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "engine_name": "dx7-4op",
+  "source_file": "instruments/dx7-4op.lisp",
+  "presets": [
+    {
+      "id": "dx-rhodes",
+      "name": "DX RHODES",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 2,
+        "ratio1": 1.0, "ratio2": 14.0, "ratio3": 1.0, "ratio4": 14.0,
+        "index2": 3.2, "index3": 0.0, "index4": 2.8,
+        "feedback": 0.0,
+        "level1": 0.85, "level3": 0.6,
+        "mod_decay_ms": 350.0, "mod_sustain": 0.0,
+        "vel_to_index": 0.7,
+        "amp_attack_ms": 4.0, "amp_decay_ms": 1800.0, "amp_sustain": 0.0,
+        "amp_release_ms": 200.0,
+        "gain": 0.13
+      }
+    },
+    {
+      "id": "dx-ep2",
+      "name": "DX EP WARM",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 2,
+        "ratio1": 1.0, "ratio2": 1.0, "ratio3": 1.0, "ratio4": 2.0,
+        "index2": 2.0, "index3": 0.0, "index4": 4.5,
+        "feedback": 0.25,
+        "level1": 0.9, "level3": 0.5,
+        "mod_decay_ms": 600.0, "mod_sustain": 0.05,
+        "vel_to_index": 0.6,
+        "amp_attack_ms": 3.0, "amp_decay_ms": 2500.0, "amp_sustain": 0.0,
+        "amp_release_ms": 250.0,
+        "gain": 0.14
+      }
+    },
+    {
+      "id": "dx-marimba",
+      "name": "DX MARIMBA",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 1,
+        "ratio1": 1.0, "ratio2": 1.0, "ratio3": 2.0, "ratio4": 3.0,
+        "index2": 4.0, "index3": 3.0, "index4": 1.5,
+        "feedback": 0.0,
+        "level1": 1.0, "level3": 0.5,
+        "mod_decay_ms": 80.0, "mod_sustain": 0.0,
+        "vel_to_index": 0.8,
+        "amp_attack_ms": 2.0, "amp_decay_ms": 600.0, "amp_sustain": 0.0,
+        "amp_release_ms": 100.0,
+        "gain": 0.14
+      }
+    },
+    {
+      "id": "dx-vibes",
+      "name": "DX VIBRAPHONE",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 2,
+        "ratio1": 1.0, "ratio2": 3.0, "ratio3": 1.0, "ratio4": 3.0,
+        "index2": 1.8, "index3": 0.0, "index4": 1.4,
+        "feedback": 0.0,
+        "level1": 0.9, "level3": 0.7,
+        "mod_decay_ms": 1200.0, "mod_sustain": 0.0,
+        "vel_to_index": 0.6,
+        "amp_attack_ms": 2.0, "amp_decay_ms": 2200.0, "amp_sustain": 0.0,
+        "amp_release_ms": 400.0,
+        "gain": 0.13
+      }
+    },
+    {
+      "id": "dx-brass",
+      "name": "DX BRASS",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 3,
+        "ratio1": 1.0, "ratio2": 1.0, "ratio3": 2.0, "ratio4": 3.0,
+        "index2": 3.5, "index3": 2.0, "index4": 1.0,
+        "feedback": 0.3,
+        "level1": 1.0, "level3": 0.6,
+        "mod_decay_ms": 200.0, "mod_sustain": 0.4,
+        "vel_to_index": 0.65,
+        "amp_attack_ms": 15.0, "amp_decay_ms": 800.0, "amp_sustain": 0.7,
+        "amp_release_ms": 80.0,
+        "gain": 0.12
+      }
+    },
+    {
+      "id": "dx-organ",
+      "name": "DX ORGAN",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 4,
+        "ratio1": 1.0, "ratio2": 2.0, "ratio3": 3.0, "ratio4": 4.0,
+        "index2": 8.0, "index3": 5.0, "index4": 3.0,
+        "feedback": 0.0,
+        "level1": 0.9, "level3": 0.7,
+        "mod_decay_ms": 5000.0, "mod_sustain": 1.0,
+        "vel_to_index": 0.3,
+        "amp_attack_ms": 3.0, "amp_decay_ms": 5000.0, "amp_sustain": 1.0,
+        "amp_release_ms": 40.0,
+        "gain": 0.11
+      }
+    },
+    {
+      "id": "dx-bell",
+      "name": "DX BELL",
+      "base_note_offset": 0.0,
+      "params": {
+        "algorithm": 1,
+        "ratio1": 1.0, "ratio2": 3.5, "ratio3": 7.0, "ratio4": 14.0,
+        "index2": 3.0, "index3": 2.5, "index4": 1.8,
+        "feedback": 0.1,
+        "level1": 1.0, "level3": 0.4,
+        "mod_decay_ms": 1800.0, "mod_sustain": 0.0,
+        "vel_to_index": 0.75,
+        "amp_attack_ms": 2.0, "amp_decay_ms": 3500.0, "amp_sustain": 0.0,
+        "amp_release_ms": 500.0,
+        "gain": 0.13
+      }
+    },
+    {
+      "id": "dx-bass",
+      "name": "DX FM BASS",
+      "base_note_offset": -12.0,
+      "params": {
+        "algorithm": 3,
+        "ratio1": 1.0, "ratio2": 1.0, "ratio3": 2.0, "ratio4": 4.0,
+        "index2": 5.0, "index3": 1.5, "index4": 0.6,
+        "feedback": 0.2,
+        "level1": 1.0, "level3": 0.5,
+        "mod_decay_ms": 80.0, "mod_sustain": 0.1,
+        "vel_to_index": 0.7,
+        "amp_attack_ms": 2.0, "amp_decay_ms": 400.0, "amp_sustain": 0.6,
+        "amp_release_ms": 40.0,
+        "gain": 0.14
+      }
+    }
+  ]
+}

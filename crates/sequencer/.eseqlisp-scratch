@@ -1,0 +1,16 @@
+; Scratch buffer for live sequencer scripting.
+; C-x C-e eval s-expression at cursor
+; C-x C-b eval whole buffer
+; C-q quit scratch
+; Examples:
+;   (seq-track-steps)
+;   (for-each |n| (seq-toggle-step n) (list 1 5 9 13))
+;   (every :bar 2 '(seq-toggle-step 1))
+;   (clear-hooks)
+
+(seq-track-steps)
+
+(def sq (n)
+     aldf 
+     (let ((n 10))
+          (* n n )))

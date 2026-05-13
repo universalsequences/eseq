@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "engine_name": "hammond-organ",
+  "source_file": "instruments/hammond-organ.lisp",
+  "presets": [
+    {
+      "id": "b3-full",
+      "name": "B3 FULL",
+      "base_note_offset": 0.0,
+      "params": {
+        "draw1": 0.8, "draw2": 1.0, "draw3": 1.0,
+        "draw4": 1.0, "draw5": 0.8, "draw6": 0.6,
+        "draw7": 0.4, "draw8": 0.0, "draw9": 0.0,
+        "drive": 0.45,
+        "click_amt": 0.35, "click_decay": 6.0,
+        "perc_level": 0.0,
+        "rotary_speed": 0.8, "rotary_depth": 0.3,
+        "gain": 0.09
+      }
+    },
+    {
+      "id": "b3-jazz",
+      "name": "B3 JAZZ",
+      "base_note_offset": 0.0,
+      "params": {
+        "draw1": 0.0, "draw2": 1.0, "draw3": 0.6,
+        "draw4": 0.8, "draw5": 0.2, "draw6": 0.0,
+        "draw7": 0.0, "draw8": 0.0, "draw9": 0.0,
+        "drive": 0.2,
+        "click_amt": 0.4, "click_decay": 5.0,
+        "perc_level": 0.6, "perc_decay": 500.0,
+        "rotary_speed": 0.9, "rotary_depth": 0.25,
+        "gain": 0.10
+      }
+    },
+    {
+      "id": "b3-gospel",
+      "name": "B3 GOSPEL",
+      "base_note_offset": 0.0,
+      "params": {
+        "draw1": 0.6, "draw2": 1.0, "draw3": 0.8,
+        "draw4": 0.8, "draw5": 0.6, "draw6": 0.4,
+        "draw7": 0.0, "draw8": 0.0, "draw9": 0.0,
+        "drive": 0.75,
+        "click_amt": 0.5, "click_decay": 8.0,
+        "perc_level": 0.4, "perc_decay": 600.0,
+        "rotary_speed": 5.5, "rotary_depth": 0.5,
+        "rotary_doppler": 0.6,
+        "gain": 0.09
+      }
+    },
+    {
+      "id": "b3-church",
+      "name": "B3 CHURCH",
+      "base_note_offset": 0.0,
+      "params": {
+        "draw1": 1.0, "draw2": 0.8, "draw3": 0.9,
+        "draw4": 0.5, "draw5": 0.6, "draw6": 0.0,
+        "draw7": 0.0, "draw8": 0.0, "draw9": 0.0,
+        "drive": 0.1,
+        "click_amt": 0.15, "click_decay": 4.0,
+        "perc_level": 0.0,
+        "rotary_speed": 0.4, "rotary_depth": 0.15,
+        "rotary_doppler": 0.2,
+        "gain": 0.10
+      }
+    },
+    {
+      "id": "b3-perc",
+      "name": "B3 PERC LEAD",
+      "base_note_offset": 0.0,
+      "params": {
+        "draw1": 0.0, "draw2": 0.8, "draw3": 0.0,
+        "draw4": 0.6, "draw5": 0.0, "draw6": 0.0,
+        "draw7": 0.0, "draw8": 0.0, "draw9": 0.0,
+        "drive": 0.3,
+        "click_amt": 0.6, "click_decay": 10.0,
+        "perc_level": 0.9, "perc_decay": 350.0,
+        "rotary_speed": 1.2, "rotary_depth": 0.35,
+        "gain": 0.10
+      }
+    },
+    {
+      "id": "b3-rotate",
+      "name": "B3 FAST LESLIE",
+      "base_note_offset": 0.0,
+      "params": {
+        "draw1": 0.3, "draw2": 1.0, "draw3": 0.7,
+        "draw4": 0.9, "draw5": 0.4, "draw6": 0.0,
+        "draw7": 0.0, "draw8": 0.0, "draw9": 0.0,
+        "drive": 0.35,
+        "click_amt": 0.3,
+        "perc_level": 0.2, "perc_decay": 700.0,
+        "rotary_speed": 6.5, "rotary_depth": 0.65,
+        "rotary_doppler": 0.8,
+        "gain": 0.09
+      }
+    },
+    {
+      "id": "b3-rock",
+      "name": "B3 ROCK DRIVE",
+      "base_note_offset": 0.0,
+      "params": {
+        "draw1": 0.8, "draw2": 1.0, "draw3": 1.0,
+        "draw4": 0.8, "draw5": 0.8, "draw6": 0.6,
+        "draw7": 0.3, "draw8": 0.0, "draw9": 0.0,
+        "drive": 0.9,
+        "click_amt": 0.5, "click_decay": 7.0,
+        "perc_level": 0.0,
+        "rotary_speed": 7.0, "rotary_depth": 0.55,
+        "rotary_doppler": 0.7,
+        "gain": 0.08
+      }
+    }
+  ]
+}
