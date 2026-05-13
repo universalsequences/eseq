@@ -6672,6 +6672,8 @@ mod tests {
             "SEQ",
             vec![
                 ("playhead", Value::Number(0.0)),
+                ("current-track", Value::Number(0.0)),
+                ("track-colors", test_track_colors()),
                 ("tp-num-steps", Value::Number(16.0)),
                 ("piano-roll-lanes", build_piano_roll_lanes_value()),
                 ("piano-roll-items", Value::List(vec![])),
@@ -6705,6 +6707,17 @@ mod tests {
             .widget_layout()
             .expect("piano roll should have a widget layout");
         assert_eq!(layout.widget_type, "timeline");
+        let expected_track_color = test_number_list(&[0.96, 0.28, 0.52]);
+        assert_eq!(
+            layout.props.get("item-color"),
+            Some(&expected_track_color),
+            "piano roll notes should use the current track color"
+        );
+        assert_eq!(
+            layout.props.get("loop-color"),
+            Some(&expected_track_color),
+            "piano roll loop selector should use the current track color"
+        );
         let _ = editor.runtime_mut().take_pending_buffer_widget_trees();
         editor
             .runtime_mut()

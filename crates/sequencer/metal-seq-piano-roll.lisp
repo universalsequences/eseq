@@ -27,6 +27,11 @@
 (def piano-roll-lane-height-value ()
   (if (= piano-roll-lane-height nil) 1 piano-roll-lane-height))
 
+(def piano-roll-current-track-color ()
+  (if (and (< SEQ.current-track (len SEQ.track-colors)) (>= SEQ.current-track 0))
+    (nth SEQ.track-colors SEQ.current-track)
+    (list 0.34 0.48 0.98)))
+
 (def piano-roll-max-view-start (duration)
   (max 0 (- (+ SEQ.tp-num-steps 4) duration)))
 
@@ -102,8 +107,8 @@
     :sidebar-style :piano
     :header-height 2
     :time-ruler (dict :mode :bars-beats :beats-per-bar 4)
-    :item-color "#48aaf8"
-    :loop-color "#48aaf8"
+    :item-color (piano-roll-current-track-color)
+    :loop-color (piano-roll-current-track-color)
     :tool piano-roll-tool
     :playhead-time (bind-seq "playhead")
     :lanes SEQ.piano-roll-lanes
