@@ -82,6 +82,11 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def ui-accent-orange () :orange)
             (def ui-accent-green () :green)
             (def ui-accent-violet () :magenta)
+            (def ui-lego-gap () 0.25)
+            (def ui-lego-small-h () 1.95)
+            (def ui-lego-medium-h () 4.08)
+            (def ui-lego-full-h () 8.48)
+            (def ui-lego-col-w () 24.0)
             (def ui-control-block-small (title accent body) body)
             (def ui-control-block-medium (title accent body) body)
             (def ui-control-block-full (title accent body) body)
@@ -133,16 +138,29 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
                 .to_string(),
         );
     }
-    if matches!(head, "ui-adsr" | "ui-adsr-c") && context == UiContext::RowPanel {
-        return Err("ui.lisp must not nest ui-adsr inside ui-panel/ui-section; place ADSR as a standalone rack column or use ui-adsr-switch".to_string());
-    }
-
-    let child_context = if matches!(
+    if matches!(
         head,
         "ui-panel"
             | "ui-panel-c"
             | "ui-section"
-            | "ui-control-block-small"
+            | "ui-rack"
+            | "ui-param-control"
+            | "ui-param-knob"
+            | "ui-param-knob-c"
+            | "base-note"
+            | "base-note-c"
+    ) {
+        return Err(format!(
+            "ui.lisp uses legacy UI helper `{head}`; generated instrument UIs must use the current ui-control-block-*/ui-readout-block-* and ui-lego-* building blocks"
+        ));
+    }
+    if matches!(head, "ui-adsr" | "ui-adsr-c") && context == UiContext::RowPanel {
+        return Err("ui.lisp must not nest ui-adsr inside a control/readout block; place ADSR as a standalone lego column or use ui-adsr-switch".to_string());
+    }
+
+    let child_context = if matches!(
+        head,
+        "ui-control-block-small"
             | "ui-control-block-medium"
             | "ui-control-block-full"
             | "ui-control-block-small-s"
@@ -292,10 +310,13 @@ mod tests {
         validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (h-stack
-                (ui-panel "FILT" 1
-                  (h-stack (ui-param-knob "cutoff" "cut")))
-                (ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
+              (h-stack :width :fill :gap 0.35 :align :stretch
+                (ui-lego-column-full
+                  (ui-control-block-medium-s "FILT" (ui-accent-green) 1
+                    (h-stack :gap 0.32 :align :start
+                      (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0))))
+                (ui-lego-column-full
+                  (ui-lego-adsr-s 0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"))))
             "#,
             &manifest,
         )
@@ -305,9 +326,17 @@ mod tests {
     #[test]
     fn rejects_unknown_param_refs() {
         let manifest = manifest_with_params(&["gain"]);
-        let err =
-            validate_instrument_ui_source(r#"(defsynth-ui (ui-param-control "gaim"))"#, &manifest)
-                .unwrap_err();
+        let err = validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (ui-lego-column-full
+                (ui-control-block-medium-s "OUT" (ui-accent-orange) 0
+                  (h-stack
+                    (ui-lego-knob-s 0 "gaim" "gain" 4.8 (ui-accent-orange) 2)))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
         assert!(err.contains("gaim"));
         assert!(err.contains("gain"));
     }
@@ -333,12 +362,61 @@ mod tests {
         let nested_err = validate_instrument_ui_source(
             r#"
             (defsynth-ui
-              (ui-panel "AMP" 0
+              (ui-control-block-medium-s "AMP" (ui-accent-orange) 0
                 (ui-adsr "amp" "amp_attack" "amp_decay" "amp_sustain" "amp_release")))
             "#,
             &manifest,
         )
         .unwrap_err();
         assert!(nested_err.contains("must not nest ui-adsr"));
+    }
+
+    #[test]
+    fn rejects_legacy_ui_helpers() {
+        let manifest = manifest_with_params(&["cutoff"]);
+        for helper_source in [
+            r#"(defsynth-ui (ui-panel "FILT" 0 (h-stack)))"#,
+            r#"(defsynth-ui (ui-param-knob "cutoff" "cut"))"#,
+            r#"(defsynth-ui (base-note))"#,
+        ] {
+            let err = validate_instrument_ui_source(helper_source, &manifest).unwrap_err();
+            assert!(err.contains("legacy UI helper"), "{err}");
+        }
+    }
+
+    #[test]
+    fn validates_lego_dimension_helpers_used_by_generated_ui() {
+        let manifest = manifest_with_params(&[
+            "amp_attack",
+            "amp_decay",
+            "amp_sustain",
+            "amp_release",
+            "filt_attack",
+            "filt_decay",
+            "filt_sustain",
+            "filt_release",
+            "cutoff",
+        ]);
+
+        validate_instrument_ui_source(
+            r#"
+            (def envelope-column ()
+              (ui-lego-column-full
+                (box :width (ui-lego-col-w) :height (ui-lego-full-h)
+                  (ui-adsr-switch
+                    0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
+                    1 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release"))))
+
+            (defsynth-ui
+              (h-stack :width :fill :gap 0.35 :align :stretch
+                (ui-lego-column-full
+                  (ui-control-block-medium-s "FILTER" (ui-accent-green) 1
+                    (h-stack :gap 0.32 :align :start
+                      (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0))))
+                (envelope-column)))
+            "#,
+            &manifest,
+        )
+        .unwrap();
     }
 }

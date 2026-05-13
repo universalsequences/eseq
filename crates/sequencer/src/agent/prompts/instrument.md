@@ -34,11 +34,18 @@ Critical syntax rules:
   `(def mod4 (in 8 @name mod4 @modulator 4))`
   `(def mod5 (in 9 @name mod5 @modulator 5))`
   `(def mod6 (in 10 @name mod6 @modulator 6))`
+- `(mod param_name)` is the host modulation accessor. Use it only to read the
+  host-modulated value of a parameter declared with `@mod true`, for example
+  `(clip (mod cutoff) 40 12000)`.
+- `%` is the numeric remainder/modulo-style operator, for example `(% 5 2)`.
+  Do not use `(mod x y)` for numeric modulo.
+- To wrap a phase or other signal into a range, use `(wrap expr min max)`, for
+  example `(wrap (+ base_phase phase_offset) 0 1)`.
 - Use `(out signal 1 @name audio)` for the final mono output.
 - Use valid operators and preamble macros from local examples such as `def`,
   `defmacro`, `param`, `in`, `out`, `adsr`, `phasor`, `sin`, `tanh`, `noise`,
   `polyblep`, `polyblep_saw`, `polyblep_pulse`, `svf`, `ladder`, `biquad`, `clip`,
-  `mod`, `+`, `-`, `*`, `/`, `exp`, `log`, `pow`, `min`, `max`.
+  `wrap`, `%`, `+`, `-`, `*`, `/`, `exp`, `log`, `pow`, `min`, `max`.
 - Prefer the preamble PolyBLEP oscillator helpers for bright saw and pulse
   sounds:
   - `(polyblep_saw phase freq)` returns an anti-aliased saw wave from a `phasor`
@@ -104,48 +111,91 @@ Mandatory ui.lisp rules:
 - Do not define the outer synth/mod/sources tabs. The host owns those.
 - Reference DSP params by exact names from dsp.lisp.
 - The synth panel is a fixed-height rack strip. Do not build vertical pages.
-- Sprawl horizontally in 2-3 row columns, like a hardware synth panel.
-- Each control row should be a compact rack row: `(ui-panel "MIX" 0 (h-stack ...knobs...))`.
-- Use at most three `ui-panel` rows per column. Put columns in a root `h-stack`.
-- Use `(ui-adsr ...)` as a standalone middle column, not nested inside `ui-panel` or `ui-section`.
+- Use the current lego-style UI building blocks used by the bundled
+  instruments. Do not use the legacy helpers `ui-panel`, `ui-panel-c`,
+  `ui-section`, `ui-rack`, `ui-param-control`, `ui-param-knob`,
+  `ui-param-knob-c`, `base-note`, or `base-note-c`.
+- Sprawl horizontally in 2-4 lego columns, like a compact hardware synth
+  panel. Put columns in a root `h-stack`.
+- Use `(ui-lego-column block-a block-b block-c)` for a three-block column,
+  `(ui-lego-column-2 block-a block-b)` for a two-block column, and
+  `(ui-lego-column-full block)` for a single full-height block.
+- Each control block should be one of:
+  `(ui-control-block-medium-s "TITLE" (ui-accent-cyan) section (h-stack ...))`,
+  `(ui-control-block-small-s "TITLE" (ui-accent-orange) section (h-stack ...))`,
+  or `(ui-control-block-full-s "TITLE" (ui-accent-green) section body)`.
+- Use readout blocks for compact numeric/text/status blocks:
+  `(ui-readout-block-small-s "TITLE" (ui-accent-blue) section body)`.
+- Use `(ui-lego-knob-s section "param_name" "label" width accent decimals)`
+  for prominent knob controls. Typical widths are `4.7`, `4.8`, or `5.2`.
+- Use `(ui-lego-num-s section "param_name" "label" width decimals unit accent)`
+  for compact numeric controls. Use `false` for no unit.
+- Use `(ui-lego-base-note width accent)` when the instrument should expose the
+  host base-note control.
+- Use `(ui-lego-text-row-3 ...)` or `(ui-lego-text-row-4 ...)` for compact text
+  readouts inside readout blocks.
+- Use `ui-adsr-switch` inside a `(ui-lego-column-full (box ...))` when there are
+  two contextual envelopes, or `ui-lego-adsr-s` for a single envelope column.
 - If there are amp and filter envelopes, use one contextual ADSR display:
   `(ui-adsr-switch 0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release" 1 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release")`
   and make the filter panel use section id `1` so clicking it switches the ADSR.
-- Use `(ui-param-control "param_name")` for a full-width standard row.
-- Use `(ui-param-knob "param_name" "label")` for compact grouped knobs.
-- Use `(base-note)` when the instrument should expose the host base-note control.
 - Use normal layout widgets: `v-stack`, `h-stack`, `box`, `label`.
 - Do not use `scroll` in instrument UI.
-- Do not use nested vertical stacks inside a row panel. A `ui-panel` body should usually be one `h-stack` of knobs.
+- Do not build custom panel chrome with raw `box` background/border styling
+  when a lego control/readout block fits. Raw `box` is fine inside a block for
+  alignment or wrapping an ADSR switch.
 
 A good ui.lisp shape:
 
 ```eseqlisp
+(def mix-block ()
+  (ui-control-block-medium-s "MIX" (ui-accent-cyan) 0
+    (h-stack :gap 0.32 :align :start
+      (ui-lego-knob-s 0 "saw_level" "saw" 4.8 (ui-accent-cyan) 2)
+      (ui-lego-knob-s 0 "pulse_level" "pulse" 4.8 (ui-accent-cyan) 2)
+      (ui-lego-knob-s 0 "sub_level" "sub" 4.8 (ui-accent-violet) 2))))
+
+(def global-block ()
+  (ui-readout-block-small-s "GLOBAL" (ui-accent-orange) 0
+    (h-stack :gap 0.30 :align :start
+      (ui-lego-base-note 4.2 (ui-accent-orange))
+      (ui-lego-num-s 0 "gain" "gain" 4.2 2 false (ui-accent-orange))
+      (ui-lego-num-s 0 "drive" "drive" 4.2 2 false (ui-accent-orange)))))
+
+(def source-block ()
+  (ui-readout-block-small-s "SOURCE" (ui-accent-cyan) 0
+    (ui-lego-text-row-3
+      (label "saw" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+      (label "+ pulse" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+      (label "sub" :font-size 9.0 :color (ui-accent-violet) :bg :transparent))))
+
+(def filter-block ()
+  (ui-control-block-medium-s "FILTER" (ui-accent-green) 1
+    (h-stack :gap 0.32 :align :start
+      (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0)
+      (ui-lego-knob-s 1 "resonance" "res" 4.8 (ui-accent-green) 2)
+      (ui-lego-knob-s 1 "filter_env_amount" "env" 4.8 (ui-accent-blue) 0))))
+
+(def tone-block ()
+  (ui-readout-block-small-s "TONE" (ui-accent-blue) 0
+    (h-stack :gap 0.30 :align :start
+      (ui-lego-num-s 0 "brightness" "bright" 4.7 2 false (ui-accent-blue)))))
+
+(def envelope-column ()
+  (ui-lego-column-full
+    (box :width (ui-lego-col-w) :height (ui-lego-full-h)
+      (ui-adsr-switch
+        0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
+        1 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release"))))
+
 (defsynth-ui
-  (h-stack :width :fill :gap 0.45 :align :start
-    (v-stack :width 27.0 :gap 0.10
-      (ui-panel "GLOB" 0
-        (h-stack :gap 0.35
-          (base-note)
-          (ui-param-knob "gain" "gain")))
-      (ui-panel "MIX" 0
-        (h-stack :gap 0.35
-          (ui-param-knob "saw_level" "saw")
-          (ui-param-knob "pulse_level" "pulse")
-          (ui-param-knob "sub_level" "sub")))
-      (ui-panel "OUT" 0
-        (h-stack :gap 0.35
-          (ui-param-knob "drive" "drive"))))
-    (ui-adsr-switch
-      0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
-      1 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release")
-    (v-stack :width 29.0 :gap 0.10
-      (ui-panel "FILT" 1
-        (h-stack :gap 0.35
-          (ui-param-knob "cutoff" "cut")
-          (ui-param-knob "resonance" "res")
-          (ui-param-knob "filter_env_amount" "env")))
-      (ui-panel "TONE" 0
-        (h-stack :gap 0.35
-          (ui-param-knob "brightness" "bright"))))))
+  (h-stack :width :fill :gap 0.35 :align :stretch
+    (ui-lego-column
+      (mix-block)
+      (global-block)
+      (source-block))
+    (envelope-column)
+    (ui-lego-column-2
+      (filter-block)
+      (tone-block))))
 ```
