@@ -1,0 +1,54 @@
+[package]
+name = "eseqlisp"
+version = "0.1.0"
+edition = "2024"
+autoexamples = false
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = { version = "0.3", features = [
+    "MTLDevice",
+    "MTLCommandQueue",
+    "MTLCommandBuffer",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLTexture",
+    "MTLDrawable",
+    "MTLLibrary",
+    "MTLRenderPipeline",
+    "MTLBuffer",
+] }
+objc2-quartz-core = { version = "0.3", features = ["CAMetalLayer"] }
+objc2-app-kit = { version = "0.3", features = ["NSView", "NSWindow", "NSColor", "NSResponder", "NSAppearance", "NSHapticFeedback"] }
+objc2-core-foundation = { version = "0.3", features = ["CFAttributedString", "CFDictionary"] }
+objc2-core-text = { version = "0.3", features = ["CTFont", "CTFontDescriptor", "CTLine", "CTStringAttributes"] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+] }
+winit = "0.29"
+etagere = "0.2"
+
+[[example]]
+name = "embed"
+path = "examples/embed.rs"
+
+[[example]]
+name = "metal_window"
+path = "examples/metal_window.rs"
+
+[[example]]
+name = "piano_roll_embed"
+path = "examples/piano_roll_embed.rs"
+
+[[example]]
+name = "piano_roll_embed_metal"
+path = "examples/piano_roll_embed_metal.rs"
