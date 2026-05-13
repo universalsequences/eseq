@@ -67,6 +67,7 @@ mod limiter;
 #[allow(dead_code)]
 pub mod lisp_effect;
 pub mod mixer_volume;
+pub mod paths;
 pub mod project;
 pub mod recorder;
 #[allow(dead_code)]

@@ -42,16 +42,7 @@ fn read_eseqlisp_init_source() -> String {
 }
 
 fn eseqlisp_init_candidates() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(root) = std::env::var("ESEQLISP_ROOT") {
-        if !root.trim().is_empty() {
-            paths.push(PathBuf::from(root).join("init.lisp"));
-        }
-    }
-    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eseqlisp/init.lisp"));
-    paths.push(PathBuf::from("../eseqlisp/init.lisp"));
-    paths.push(PathBuf::from("init.lisp"));
-    paths
+    crate::paths::eseqlisp_init_candidates()
 }
 
 // ── dlopen FFI (macOS) ──

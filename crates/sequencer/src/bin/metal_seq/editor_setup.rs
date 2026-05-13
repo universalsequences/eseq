@@ -53,16 +53,7 @@ fn read_eseqlisp_init_source() -> String {
 }
 
 fn eseqlisp_init_candidates() -> Vec<std::path::PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(root) = std::env::var("ESEQLISP_ROOT") {
-        if !root.trim().is_empty() {
-            paths.push(std::path::PathBuf::from(root).join("init.lisp"));
-        }
-    }
-    paths.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eseqlisp/init.lisp"));
-    paths.push(std::path::PathBuf::from("../eseqlisp/init.lisp"));
-    paths.push(std::path::PathBuf::from("init.lisp"));
-    paths
+    sequencer::paths::eseqlisp_init_candidates()
 }
 
 fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {

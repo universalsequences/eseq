@@ -565,7 +565,7 @@ mod tests {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    std::env::set_current_dir(env!("CARGO_MANIFEST_DIR"))?;
+    sequencer::paths::enter_sequencer_dir()?;
     sequencer::crash::install()?;
 
     // 1. Init audio engine

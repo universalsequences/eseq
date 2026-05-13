@@ -218,7 +218,7 @@ fn resume_terminal(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    std::env::set_current_dir(env!("CARGO_MANIFEST_DIR"))?;
+    sequencer::paths::enter_sequencer_dir()?;
 
     let crash_log_path = std::env::var("TINYSEQ_CRASH_LOG")
         .ok()
