@@ -2331,7 +2331,11 @@ impl GraphController<'_> {
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
         if preserve_runtime_values {
             let node_id = inst_slot.node_id.load(Ordering::Relaxed);
-            inst_slot.sync_descriptor(&inst_desc, node_id);
+            if let Some(old_desc) = self.app.graph.instrument_descriptors.get(track) {
+                inst_slot.sync_descriptor_by_param_name(old_desc, &inst_desc, node_id);
+            } else {
+                inst_slot.sync_descriptor(&inst_desc, node_id);
+            }
         } else {
             inst_slot
                 .num_params

@@ -166,16 +166,17 @@ in plain text.
 
 | Tool | Mutates | Purpose |
 |---|---:|---|
-| `create_instrument_artifact` | yes, draft only | Create a draft artifact from complete `dsp_source` and `ui_source`. Does not apply it to a track. |
-| `update_instrument_artifact` | yes, draft only | Replace an existing draft artifact's source. |
-| `validate_instrument_artifact` | yes, artifact metadata only | Compile/load/UI-validate/probe an artifact and store the validation report. |
-| `apply_instrument_artifact` | yes, project | Apply a validated or validatable artifact to a new or existing custom instrument track. |
-| `create_effect_artifact` | yes, draft only | Create a draft effect artifact from complete source. |
-| `update_effect_artifact` | yes, draft only | Replace an existing draft effect artifact's source. |
-| `validate_effect_artifact` | yes, artifact metadata only | Compile/load/probe an effect artifact. |
-| `apply_effect_artifact` | yes, project | Apply an effect artifact to the current track or selected effect slot. |
+| `create_instrument_artifact` | yes, draft only | Create a draft artifact from complete `dsp_source` and `ui_source`, then compile/load/UI-validate/probe it before succeeding. Does not apply it to a track. |
+| `update_instrument_artifact` | yes, draft only | Replace an existing draft artifact's source, then compile/load/UI-validate/probe it before succeeding. |
+| `apply_instrument_artifact` | yes, project | Re-verify an artifact and apply it to a new or existing custom instrument track. |
+| `create_effect_artifact` | yes, draft only | Create a draft effect artifact from complete source, then compile/load/probe it before succeeding. |
+| `update_effect_artifact` | yes, draft only | Replace an existing draft effect artifact's source, then compile/load/probe it before succeeding. |
+| `apply_effect_artifact` | yes, project | Re-verify an effect artifact and apply it to the current track or selected effect slot. |
 
 Artifact tools should return structured IDs and reports, not only prose.
+Validation is not model-optional: every create/update tool validates before it
+can return success, and every apply tool re-verifies the artifact before project
+mutation.
 
 Example successful create response:
 
@@ -183,12 +184,18 @@ Example successful create response:
 {
   "artifact_id": "inst-42",
   "kind": "instrument",
-  "status": "draft",
-  "summary": "Created draft artifact inst-42: glassy-fm-pad."
+  "status": "validated",
+  "summary": "Created validated draft artifact inst-42: glassy-fm-pad.",
+  "validation_report": {
+    "ok": true,
+    "peak_db": -3.2,
+    "rms_db": -14.1,
+    "clipped": false
+  }
 }
 ```
 
-Example failed apply response:
+Example failed create/update/apply response:
 
 ```json
 {
@@ -225,8 +232,9 @@ or:
 }
 ```
 
-If an artifact has not been validated, apply may run validation internally.
-Apply succeeds only if the validation and host load/apply path both succeed.
+Apply succeeds only if re-verification and the host load/apply path both
+succeed. The model must not claim an artifact was applied unless the apply tool
+returns success.
 
 Effects should mirror this:
 
@@ -267,7 +275,7 @@ The system prompt should say:
   UI unless a later effect UI contract is added.
 - To change the project, call an apply tool. Do not claim a change was applied
   unless the apply tool succeeded.
-- If a validation/apply tool fails, use the diagnostic output to revise the
+- If a create/update/apply tool fails, use the diagnostic output to revise the
   artifact and try again, within a bounded retry budget.
 
 The prompt must not require code blocks on every turn.
@@ -298,8 +306,6 @@ user: make a glassy FM pad
 model calls lookup_dgen_docs/read_example as needed
   ↓
 model calls create_instrument_artifact(dsp_source, ui_source)
-  ↓
-model calls validate_instrument_artifact(artifact_id)
   ├─ failure → update artifact and retry within budget
   └─ success → ask whether to apply, or apply immediately if user requested creation on a track
   ↓
@@ -316,8 +322,8 @@ user: make the current bass less bright
 model calls read_current_instrument_source
   ↓
 model creates or updates an artifact derived from current source
-  ↓
-model validates
+  ├─ failure → revise artifact and retry within budget
+  └─ success → continue
   ↓
 model applies with replace_current_track
 ```
@@ -330,8 +336,8 @@ user: add a widening chorus to this track
 model reads examples/docs
   ↓
 model creates effect artifact
-  ↓
-model validates effect artifact
+  ├─ failure → revise artifact and retry within budget
+  └─ success → continue
   ↓
 model applies to next free slot on current track
 ```
@@ -368,9 +374,9 @@ model applies to next free slot on current track
 
 - Add an artifact store to the agent conversation state.
 - Add `create_instrument_artifact`, `update_instrument_artifact`,
-  `validate_instrument_artifact`, and `apply_instrument_artifact`.
-- Move the existing instrument compile/UI-validate/audition logic behind
-  `validate_instrument_artifact`.
+  and `apply_instrument_artifact`.
+- Move the existing instrument compile/UI-validate/audition logic into
+  create/update/apply so validation is mandatory and not model-selected.
 - Move current accept/apply behavior behind `apply_instrument_artifact`.
 
 ### Phase 4: Effect Artifact Tools
@@ -396,9 +402,11 @@ model applies to next free slot on current track
   `polyblep_saw`, and `polyblep_pulse`.
 - `read_instrument_source` must resolve folder-style and legacy instruments
   unambiguously.
-- `create_instrument_artifact` must not write to final instrument storage.
-- `validate_instrument_artifact` must reject unknown UI parameter refs and
-  legacy generated UI helpers.
+- `create_instrument_artifact` must not write to final instrument storage, and
+  must reject unknown UI parameter refs, legacy generated UI helpers, compile
+  failures, silent output, and clipped output.
+- `update_instrument_artifact` must preserve the previous validated artifact
+  source and status if the replacement fails validation.
 - `apply_instrument_artifact` must roll back or leave existing track state
   unchanged on save/load/apply failure.
 - The UI must not auto-apply an idle draft.

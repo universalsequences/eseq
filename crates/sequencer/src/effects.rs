@@ -161,6 +161,13 @@ impl ParamDescriptor {
         }
     }
 
+    fn accepts_migrated_value_from(&self, old: &ParamDescriptor, value: f32) -> bool {
+        param_kinds_are_compatible(&old.kind, &self.kind)
+            && value.is_finite()
+            && value >= self.min
+            && value <= self.max
+    }
+
     pub fn format_value(&self, val: f32) -> String {
         match &self.kind {
             ParamKind::Boolean => {
@@ -188,6 +195,19 @@ impl ParamDescriptor {
                 }
             }
         }
+    }
+}
+
+fn param_kinds_are_compatible(old: &ParamKind, new: &ParamKind) -> bool {
+    match (old, new) {
+        (ParamKind::Continuous { unit: old_unit }, ParamKind::Continuous { unit: new_unit }) => {
+            old_unit == new_unit
+        }
+        (ParamKind::Boolean, ParamKind::Boolean) => true,
+        (ParamKind::Enum { labels: old_labels }, ParamKind::Enum { labels: new_labels }) => {
+            old_labels == new_labels
+        }
+        _ => false,
     }
 }
 
@@ -305,6 +325,159 @@ mod tests {
         assert_eq!(slot.defaults.get(1), 0.73);
         assert_eq!(slot.plocks.get(3, 0), Some(0.33));
         assert_eq!(slot.plocks.get(4, 1), Some(0.66));
+    }
+
+    #[test]
+    fn sync_descriptor_by_param_name_preserves_reordered_compatible_values() {
+        let original = EffectDescriptor {
+            name: "orig".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "cutoff".to_string(),
+                    min: 20.0,
+                    max: 20_000.0,
+                    default: 1_000.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: 3,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 4,
+                    host_control: None,
+                },
+            ],
+        };
+        let rebound = EffectDescriptor {
+            name: "rebound".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.25,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 10,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "cutoff".to_string(),
+                    min: 20.0,
+                    max: 20_000.0,
+                    default: 800.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: 11,
+                    host_control: None,
+                },
+            ],
+        };
+
+        let slot = EffectSlotState::new(&original, 100);
+        slot.defaults.set(0, 880.0);
+        slot.defaults.set(1, 0.73);
+        slot.plocks.set(3, 0, 440.0);
+        slot.plocks.set(4, 1, 0.66);
+
+        slot.sync_descriptor_by_param_name(&original, &rebound, 200);
+
+        assert_eq!(slot.node_id.load(Ordering::Relaxed), 200);
+        assert_eq!(slot.resolve_node_idx(0), 10);
+        assert_eq!(slot.resolve_node_idx(1), 11);
+        assert_eq!(slot.defaults.get(0), 0.73);
+        assert_eq!(slot.defaults.get(1), 880.0);
+        assert_eq!(slot.plocks.get(4, 0), Some(0.66));
+        assert_eq!(slot.plocks.get(3, 1), Some(440.0));
+    }
+
+    #[test]
+    fn sync_descriptor_by_param_name_drops_wrong_or_out_of_range_values() {
+        let original = EffectDescriptor {
+            name: "orig".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 2.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 3,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 10.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 4,
+                    host_control: None,
+                },
+            ],
+        };
+        let rebound = EffectDescriptor {
+            name: "rebound".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["x".to_string(), "y".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 10,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.25,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 11,
+                    host_control: None,
+                },
+            ],
+        };
+
+        let slot = EffectSlotState::new(&original, 100);
+        slot.defaults.set(0, 2.0);
+        slot.defaults.set(1, 7.0);
+        slot.plocks.set(3, 0, 1.0);
+        slot.plocks.set(4, 1, 8.0);
+
+        slot.sync_descriptor_by_param_name(&original, &rebound, 200);
+
+        assert_eq!(slot.defaults.get(0), 1.0);
+        assert_eq!(slot.defaults.get(1), 0.25);
+        assert_eq!(slot.plocks.get(3, 0), None);
+        assert_eq!(slot.plocks.get(4, 1), None);
     }
 
     #[test]
@@ -1939,6 +2112,70 @@ impl EffectSlotState {
         }
     }
 
+    /// Rebind this live slot using descriptor identity instead of param index.
+    ///
+    /// This is the correct path for generated instruments/effects whose param
+    /// order may change between edits. Runtime values are only carried across
+    /// when a parameter name is unique in both descriptors, the kind is
+    /// compatible, and the old value is already valid for the new range.
+    pub fn sync_descriptor_by_param_name(
+        &self,
+        old_desc: &EffectDescriptor,
+        new_desc: &EffectDescriptor,
+        node_id: u32,
+    ) {
+        let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
+        let mut migrated = Vec::new();
+
+        for (new_idx, new_param) in new_desc.params.iter().enumerate() {
+            let Some(old_idx) = unique_param_index_by_name(old_desc, &new_param.name) else {
+                continue;
+            };
+            if unique_param_index_by_name(new_desc, &new_param.name) != Some(new_idx) {
+                continue;
+            }
+            if old_idx >= old_num_params {
+                continue;
+            }
+            let Some(old_param) = old_desc.params.get(old_idx) else {
+                continue;
+            };
+
+            let default = self.defaults.get(old_idx);
+            let default = new_param
+                .accepts_migrated_value_from(old_param, default)
+                .then_some(default);
+
+            let mut plocks = Vec::new();
+            for step in 0..MAX_STEPS {
+                let Some(value) = self.plocks.get(step, old_idx) else {
+                    continue;
+                };
+                if new_param.accepts_migrated_value_from(old_param, value) {
+                    plocks.push((step, value));
+                }
+            }
+
+            migrated.push((new_idx, default, plocks));
+        }
+
+        self.apply_descriptor(new_desc, node_id);
+        for step in 0..MAX_STEPS {
+            for param_idx in 0..MAX_SLOT_PARAMS {
+                self.plocks.clear_param(step, param_idx);
+            }
+        }
+
+        for (new_idx, default, plocks) in migrated {
+            if let Some(value) = default {
+                self.defaults.set(new_idx, value);
+            }
+            for (step, value) in plocks {
+                self.plocks.set(step, new_idx, value);
+            }
+        }
+    }
+
     pub fn force_enabled_default(&self, desc: &EffectDescriptor) -> Option<usize> {
         let enabled_idx = desc
             .params
@@ -1973,6 +2210,17 @@ impl EffectSlotState {
     pub fn copy_from(&self, other: &EffectSlotState) {
         EffectSlotSnapshot::capture(other).restore(self);
     }
+}
+
+fn unique_param_index_by_name(desc: &EffectDescriptor, name: &str) -> Option<usize> {
+    let mut matches = desc
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(_, param)| param.name == name)
+        .map(|(idx, _)| idx);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 // ── EffectSlotSnapshot (for pattern save/restore) ──
