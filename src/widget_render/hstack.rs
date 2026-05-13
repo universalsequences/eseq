@@ -35,17 +35,23 @@ impl WidgetDefinition for HStackWidget {
         let gap = get_prop_num(node, "gap").map(f64_to_f32).unwrap_or(1.0);
         let mut inner = shrink_constraints_xy(constraints, padding, pad_y);
         if !prop_is_keyword(node, "width", "fill") {
-            inner.max_width = f32::MAX;
+            inner.max_width = f32::INFINITY;
         }
-        let child_sizes = children
+        let child_sizes: Vec<(&Value, Size)> = children
             .iter()
-            .filter_map(|child| measure_child(child, inner))
-            .collect::<Vec<_>>();
-        let width = child_sizes.iter().map(|size| size.width).sum::<f32>()
+            .filter_map(|child| measure_child(child, inner).map(|size| (child, size)))
+            .collect();
+        let width = child_sizes.iter().map(|(_, size)| size.width).sum::<f32>()
             + gap * (child_sizes.len() as f32 - 1.0).max(0.0);
+        // Exclude `:height :fill` children from the height max — they consume
+        // the full incoming constraint, which would inflate the h-stack's
+        // natural height to the parent's max and break sibling-aware layout.
+        // :fill children stretch back to the h-stack's height in layout via
+        // :align :stretch, so they don't need to contribute to the max.
         let height = child_sizes
             .iter()
-            .map(|size| size.height)
+            .filter(|(child, _)| !prop_is_keyword(child, "height", "fill"))
+            .map(|(_, size)| size.height)
             .fold(0.0_f32, f32::max);
         Some(Size {
             width: width + padding * 2.0,
@@ -78,7 +84,7 @@ impl WidgetDefinition for HStackWidget {
             aspect: 1.0,
         };
         if !prop_is_keyword(node, "width", "fill") {
-            inner_constraints.max_width = f32::MAX;
+            inner_constraints.max_width = f32::INFINITY;
         }
 
         // Pass 1: measure all children, collect flex values. In a fill row,

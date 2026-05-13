@@ -46,6 +46,46 @@ fn format_value(value: f64, decimals: u32) -> String {
     format!("{:.*}", decimals as usize, value)
 }
 
+fn display_decimals(props: &HashMap<String, Value>) -> u32 {
+    let decimals = get_f32_prop(props, "decimals", 2.0) as u32;
+    let min = get_f32_prop(props, "min", 0.0);
+    let max = get_f32_prop(props, "max", 1.0);
+    let display_range = ((max - min) * value_scale(props)).abs();
+    if display_range < 10.0 { decimals } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn numeric_props(min: f64, max: f64, decimals: f64) -> HashMap<String, Value> {
+        HashMap::from([
+            ("min".to_string(), Value::Number(min)),
+            ("max".to_string(), Value::Number(max)),
+            ("decimals".to_string(), Value::Number(decimals)),
+        ])
+    }
+
+    #[test]
+    fn display_decimals_preserves_precision_for_small_ranges() {
+        let props = numeric_props(0.0, 1.0, 2.0);
+        assert_eq!(display_decimals(&props), 2);
+    }
+
+    #[test]
+    fn display_decimals_removes_precision_for_large_ranges() {
+        let props = numeric_props(20.0, 20_000.0, 2.0);
+        assert_eq!(display_decimals(&props), 0);
+    }
+
+    #[test]
+    fn display_decimals_uses_scaled_display_range() {
+        let mut props = numeric_props(0.0, 1.0, 2.0);
+        props.insert("value-scale".to_string(), Value::Number(100.0));
+        assert_eq!(display_decimals(&props), 0);
+    }
+}
+
 fn quantized_value(props: &HashMap<String, Value>, value: f32) -> f32 {
     let min = get_f32_prop(props, "min", 0.0);
     let max = get_f32_prop(props, "max", 1.0);
@@ -221,7 +261,7 @@ impl WidgetDefinition for KnobNumberWidget {
     fn key_event(&self, node: &LayoutNode, key: WidgetKeyEvent) -> Option<WidgetEvent> {
         let mut state = get_state(node.widget_id);
         let value = get_f32_prop(&node.props, "value", 0.0);
-        let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
+        let decimals = display_decimals(&node.props);
 
         match key.code {
             KeyCode::Char(c)
@@ -329,7 +369,7 @@ impl WidgetDefinition for KnobNumberWidget {
             })
             .unwrap_or("");
         let value = quantized_value(props, get_f32_prop(props, "value", 0.0));
-        let decimals = get_f32_prop(props, "decimals", 2.0) as u32;
+        let decimals = display_decimals(props);
         let text = format!(
             "{} {}",
             label,
@@ -370,7 +410,7 @@ impl WidgetDefinition for KnobNumberWidget {
         viewport: WidgetViewport,
     ) -> Vec<MetalPrimitive> {
         let value = quantized_value(&node.props, get_f32_prop(&node.props, "value", 0.0));
-        let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
+        let decimals = display_decimals(&node.props);
         let state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
@@ -419,21 +459,80 @@ impl WidgetDefinition for KnobNumberWidget {
         let track_color =
             resolve_named_color(&node.props, "track-color", theme::WIDGET_KNOB_TRACK());
 
-        let knob_size = get_f32_prop(&node.props, "knob-size", node.rect.height * 0.53)
-            .max(0.72)
-            .min(node.rect.height * 0.9);
+        // `:value-align :center` switches to a stacked layout — label / knob /
+        // value — with the value horizontally centered below the knob (Ableton
+        // Operator-style). Default layout keeps the value tucked into the
+        // bottom-right of the knob arc (Cirklon-style).
+        let center_value = matches!(
+            node.props.get("value-align"),
+            Some(Value::Keyword(k)) if k == "center"
+        );
+        let (knob_size, knob_top, value_row, label_row) = if center_value {
+            // The metal text renderer takes `row` as the top of a 1-cell-tall
+            // band and visually centers the glyph inside it. To place a label
+            // inside an arbitrary band, we put `row` at band-center − 0.5 so
+            // the glyph's center lands at the band's center.
+            //
+            // Bands are sized to the actual font (with a small margin) so the
+            // knob keeps whatever vertical space is left — taller widgets get
+            // proportionally bigger knobs, not bigger label/value bands.
+            let cell_h = viewport.cell_h.max(0.000_001);
+            let label_band = (label_size * 1.15 / cell_h).max(0.55);
+            let value_band = (font_size * 1.05 / cell_h).max(0.55);
+            let knob_band = (node.rect.height - label_band - value_band).max(0.5);
+            let knob_size = get_f32_prop(&node.props, "knob-size", knob_band)
+                .max(0.6)
+                .min(knob_band);
+            let label_center = node.rect.row + label_band * 0.5;
+            let value_center = node.rect.row + node.rect.height - value_band * 0.5;
+            let knob_top = node.rect.row + label_band + (knob_band - knob_size) * 0.5;
+            (knob_size, knob_top, value_center - 0.5, label_center - 0.5)
+        } else {
+            // `:label-height N` lets callers shrink the band reserved above
+            // the knob for the label — useful when the widget is short and
+            // the default 45%-of-height reservation eats too much room.
+            let label_height_override = node.props.get("label-height").and_then(|v| {
+                if let Value::Number(n) = v {
+                    Some(*n as f32)
+                } else {
+                    None
+                }
+            });
+            let default_top_band = (node.rect.height * 0.45).max(0.72);
+            let top_band = label_height_override.unwrap_or(default_top_band);
+            // When the label band is overridden, also grow the knob to fill
+            // the remaining vertical space (callers can still pin it via
+            // `:knob-size`).
+            let default_knob_size = if label_height_override.is_some() {
+                (node.rect.height - top_band - 0.05).max(0.6)
+            } else {
+                node.rect.height * 0.53
+            };
+            let knob_size = get_f32_prop(&node.props, "knob-size", default_knob_size)
+                .max(0.6)
+                .min(node.rect.height * 0.9);
+            let large_knob_value_offset = ((knob_size - 1.45).max(0.0) * 1.1).min(0.32);
+            let value_row = (node.rect.row + node.rect.height * 0.62 + large_knob_value_offset)
+                .min(node.rect.row + node.rect.height - 0.55);
+            let knob_top = node.rect.row + top_band;
+            // When the label band is overridden small, the label glyph (which
+            // normally fills a 1-cell band centered on `label_row`) would dip
+            // into the knob. Shift label_row up so the glyph centers in the
+            // narrower label band instead of in a 1-cell window.
+            let label_row = if label_height_override.is_some() {
+                node.rect.row + top_band * 0.5 - 0.5
+            } else {
+                node.rect.row
+            };
+            (knob_size, knob_top, value_row, label_row)
+        };
         let knob_width = if viewport.cell_w > 0.0 {
             knob_size * viewport.cell_h / viewport.cell_w
         } else {
             knob_size
         };
-        let label_row = node.rect.row;
-        let large_knob_value_offset = ((knob_size - 1.45).max(0.0) * 1.1).min(0.32);
-        let value_row = (node.rect.row + node.rect.height * 0.62 + large_knob_value_offset)
-            .min(node.rect.row + node.rect.height - 0.55);
-        let knob_top = node.rect.row + node.rect.height * 0.45;
         let knob_rect = Rect {
-            row: knob_top.max(node.rect.row + 0.72),
+            row: knob_top,
             col: node.rect.col + (node.rect.width - knob_width) * 0.5,
             width: knob_width,
             height: knob_size,
@@ -495,16 +594,39 @@ impl WidgetDefinition for KnobNumberWidget {
                 text_color,
             )
         };
-        let text_col = knob_rect.col + knob_width * 0.55;
+        let text_width_cells = CHAR_WIDTHS.with(|cw| {
+            let cache = cw.borrow();
+            let fallback = font_size * 0.55 / viewport.cell_w.max(0.000_001);
+            cache
+                .get(&font_size.to_bits())
+                .map(|widths| {
+                    display_text
+                        .chars()
+                        .map(|ch| widths.get(&ch).copied().unwrap_or(fallback))
+                        .sum::<f32>()
+                })
+                .unwrap_or_else(|| display_text.chars().count() as f32 * fallback)
+        });
+        let (text_col, align_width, h_align, value_font_size) = if center_value {
+            let available_cells = (node.rect.width - 0.2).max(0.5);
+            let scaled = if text_width_cells > available_cells && text_width_cells > 0.0 {
+                font_size * (available_cells / text_width_cells)
+            } else {
+                font_size
+            };
+            (node.rect.col, node.rect.width, 0.5_f32, scaled)
+        } else {
+            (knob_rect.col + knob_width * 0.55, 0.0, 0.0_f32, font_size)
+        };
         let text_row = value_row;
         prims.push(MetalPrimitive::ProportionalText(
             MetalProportionalTextPrimitive {
                 row: text_row,
                 col: text_col,
-                align_width: 0.0,
-                h_align: 0.0,
+                align_width,
+                h_align,
                 text: display_text.clone(),
-                font_size,
+                font_size: value_font_size,
                 fg,
                 bg: Color {
                     r: 0.0,
@@ -516,12 +638,27 @@ impl WidgetDefinition for KnobNumberWidget {
         ));
 
         if is_focused && state.editing {
-            let cursor_x =
-                cursor_x_from_cache(&display_text, state.cursor_pos, font_size, viewport.cell_w);
+            let text_left = if center_value {
+                let scale = if font_size > 0.0 {
+                    value_font_size / font_size
+                } else {
+                    1.0
+                };
+                let rendered_text_width = text_width_cells * scale;
+                node.rect.col + (node.rect.width - rendered_text_width) * 0.5
+            } else {
+                text_col
+            };
+            let cursor_x = cursor_x_from_cache(
+                &display_text,
+                state.cursor_pos,
+                value_font_size,
+                viewport.cell_w,
+            );
             prims.push(MetalPrimitive::Rect(MetalRectPrimitive {
                 rect: Rect {
                     row: text_row + 0.08,
-                    col: text_col + cursor_x,
+                    col: text_left + cursor_x,
                     width: 0.08,
                     height: node.rect.height * 0.36,
                 },

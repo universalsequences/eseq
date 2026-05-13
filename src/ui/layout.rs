@@ -113,7 +113,7 @@ impl<'a> LayoutEngine<'a> {
                 min_width: 0.0,
                 max_width: self.terminal_cols as f32,
                 min_height: 0.0,
-                max_height: f32::MAX,
+                max_height: f32::INFINITY,
                 aspect: self.aspect,
             },
             DEFAULT_FONT_SIZE,
@@ -156,9 +156,9 @@ impl<'a> LayoutEngine<'a> {
             tree,
             Constraints {
                 min_width: 0.0,
-                max_width: f32::MAX,
+                max_width: f32::INFINITY,
                 min_height: 0.0,
-                max_height: f32::MAX,
+                max_height: f32::INFINITY,
                 aspect: self.aspect,
             },
             DEFAULT_FONT_SIZE,
@@ -1883,6 +1883,186 @@ mod tests {
 
         assert_eq!(layout.rect.width, 21.0);
         assert_eq!(layout.children[0].rect.width, 21.0);
+    }
+
+    /// Regression: `:width N` on a v-stack must constrain `:width :fill`
+    /// children to N (not let them inflate to the v-stack's parent's max).
+    /// Otherwise a row of v-stack columns each width 22 ends up rendering
+    /// each column at the FULL rack width because the panels inside grew
+    /// past the column. Multi-column layouts collapse to one.
+    #[test]
+    fn v_stack_explicit_width_constrains_fill_children() {
+        let fill_panel = build_widget("box", vec![kw("width"), kw("fill"), kw("height"), num(2.0)]);
+        let column = build_widget(
+            "v-stack",
+            vec![kw("width"), num(22.0), kw("gap"), num(0.1), fill_panel],
+        );
+        // Outer h-stack with a wide parent — the v-stack's :width must NOT be
+        // overridden by the wider max-width context.
+        let outer = build_widget(
+            "h-stack",
+            vec![kw("width"), kw("fill"), kw("gap"), num(0.5), column],
+        );
+        let root = bx(Some(100.0), Some(20.0), vec![outer]);
+
+        let engine = LayoutEngine::new(120, 24, 1.0);
+        let layout = engine.layout(&root).expect("layout");
+
+        let h_stack = &layout.children[0];
+        let v_stack = &h_stack.children[0];
+        let panel = &v_stack.children[0];
+
+        assert!(
+            (v_stack.rect.width - 22.0).abs() < 0.01,
+            "v-stack rect.width should be 22, got {}",
+            v_stack.rect.width
+        );
+        assert!(
+            (panel.rect.width - 22.0).abs() < 0.01,
+            "panel :width :fill inside v-stack :width 22 should be 22, got {}",
+            panel.rect.width
+        );
+    }
+
+    /// Regression: a `:height :fill` child should not inflate its h-stack's
+    /// measured height to the parent's max. Otherwise a padded grandparent
+    /// re-adds padding on top of the already-max height and overflows.
+    #[test]
+    fn h_stack_height_excludes_height_fill_children() {
+        let fill_box = build_widget("box", vec![kw("width"), num(4.0), kw("height"), kw("fill")]);
+        let fixed_box = bx(Some(4.0), Some(3.0), vec![]);
+        let inner_hstack = hstack(0.0, vec![fill_box, fixed_box]);
+        // Outer box uses :v-align :start so it respects the h-stack's
+        // measured height (otherwise :align :stretch hides the measure bug).
+        let outer = build_widget(
+            "box",
+            vec![
+                kw("width"),
+                num(40.0),
+                kw("height"),
+                num(10.0),
+                kw("v-align"),
+                kw("start"),
+                kw("h-align"),
+                kw("start"),
+                inner_hstack,
+            ],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&outer).expect("layout");
+        let h_stack = &layout.children[0];
+
+        assert!(
+            h_stack.rect.height <= 3.5,
+            "h-stack height={} should track non-fill child (3.0), not :fill",
+            h_stack.rect.height
+        );
+    }
+
+    /// Regression: `:width :fill` on a box inside an unbounded-width container
+    /// (h-stack without `:width :fill`) must NOT inflate to f32::MAX. The h-stack
+    /// passes `max_width = f32::MAX` as an "unbounded" sentinel, but the box's
+    /// `is_finite()` check treats MAX as bounded and explodes the layout.
+    #[test]
+    fn fill_box_in_unbounded_parent_does_not_explode() {
+        // (h-stack (box :width :fill :height 0.5 (label "T")) (box :width 4 :height 2))
+        // h-stack with no :width :fill → passes max_width = MAX to children.
+        let filling_box = build_widget(
+            "box",
+            vec![
+                kw("width"),
+                kw("fill"),
+                kw("height"),
+                num(0.5),
+                label("T", None),
+            ],
+        );
+        let fixed_box = bx(Some(4.0), Some(2.0), vec![]);
+        let tree = hstack(0.0, vec![filling_box, fixed_box]);
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).expect("layout");
+
+        let header = &layout.children[0];
+        assert!(
+            header.rect.width.is_finite() && header.rect.width < 1000.0,
+            ":width :fill in unbounded parent must not inflate to MAX; got {}",
+            header.rect.width
+        );
+    }
+
+    /// Repro: panel box with no explicit width, containing a v-stack whose
+    /// children include a `:width :fill` header and a fixed-width body row.
+    /// The header should stretch to the body's width; the box should size to
+    /// the body row. Mirrors the `ui-panel` helper used by instrument UIs.
+    #[test]
+    fn fill_header_above_fixed_body_inflates_panel_box() {
+        // header: (box :width :fill :height 0.55 (label "TITLE"))
+        let header = build_widget(
+            "box",
+            vec![
+                kw("width"),
+                kw("fill"),
+                kw("height"),
+                num(0.55),
+                label("TITLE", None),
+            ],
+        );
+        // body: h-stack of two fixed-width knob-shaped boxes (width 4, height 2)
+        let body = hstack(
+            0.2,
+            vec![
+                bx(Some(4.0), Some(2.0), vec![]),
+                bx(Some(4.0), Some(2.0), vec![]),
+                bx(Some(4.0), Some(2.0), vec![]),
+                bx(Some(4.0), Some(2.0), vec![]),
+            ],
+        );
+        // inner: (v-stack :gap 0 :align :start header body)
+        let inner = vstack(0.0, 0.0, vec![header, body]);
+        // panel: (box :height 2.7 :padding 0.15 inner)  -- no width
+        let panel = build_widget(
+            "box",
+            vec![kw("height"), num(2.7), kw("padding"), num(0.15), inner],
+        );
+        // column: (v-stack :width 28 panel)
+        let column = build_widget(
+            "v-stack",
+            vec![kw("width"), num(28.0), kw("gap"), num(0.0), panel],
+        );
+
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&column).expect("layout column");
+
+        let panel = &layout.children[0];
+        assert!(
+            panel.rect.width > 0.0,
+            "panel width must be > 0, got {}",
+            panel.rect.width
+        );
+        let inner = &panel.children[0];
+        assert!(
+            inner.rect.width > 0.0,
+            "inner v-stack width must be > 0, got {}",
+            inner.rect.width
+        );
+        let header = &inner.children[0];
+        let body = &inner.children[1];
+        assert!(
+            header.rect.width > 0.0,
+            "header should stretch to inner width, got {}",
+            header.rect.width
+        );
+        assert!(
+            body.rect.width > 0.0,
+            "body row width must be > 0, got {}",
+            body.rect.width
+        );
+        // Body should keep its natural content width (~17 cells), not collapse.
+        assert!(
+            body.rect.width >= 16.0,
+            "body row should keep its natural knob row width, got {}",
+            body.rect.width
+        );
     }
 
     #[test]

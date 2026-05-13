@@ -2553,6 +2553,164 @@ mod tests {
         );
     }
 
+    /// Regression: confirm that `(h-stack ... (map fn (chunks list n)) other)`
+    /// correctly flattens the mapped list of v-stacks as h-stack children.
+    /// This is the pattern used by `ui-rack` in metal-seq-fx.lisp; if the
+    /// list isn't spliced, instruments only render one column instead of
+    /// multiple.
+    #[test]
+    fn test_map_chunks_flattens_into_hstack_children() {
+        let mut runtime = Runtime::new();
+        let tree = runtime
+            .eval_str(
+                r#"
+                (def make-panel (title)
+                  (box :width 5 :height 2 (label title)))
+                (def make-col (panels)
+                  (v-stack :width 5 :gap 0.1 panels))
+                (h-stack :width :fill :gap 0.5
+                  (map make-col
+                       (chunks (list (make-panel "a") (make-panel "b")
+                                     (make-panel "c") (make-panel "d"))
+                               2))
+                  (label "ADSR")
+                  (map make-col
+                       (chunks (list (make-panel "e") (make-panel "f"))
+                               2)))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        // Find the h-stack's children list and count widget-typed entries.
+        let Value::Map(map) = &tree else {
+            panic!("expected widget map, got {:?}", tree);
+        };
+        let children_value = map
+            .get("children")
+            .expect("h-stack has children")
+            .borrow()
+            .clone();
+        let Value::List(children) = children_value else {
+            panic!("expected children list");
+        };
+        let widget_count = children
+            .iter()
+            .filter(|c| matches!(&*c.borrow(), Value::Map(m) if m.contains_key("type")))
+            .count();
+        // Expected: 2 v-stacks (left), 1 label (ADSR), 1 v-stack (right) = 4
+        assert_eq!(
+            widget_count, 4,
+            "h-stack should have 4 widget children after list flattening, got {widget_count}"
+        );
+    }
+
+    /// Verify the ui-rack pattern from metal-seq-fx.lisp produces the expected
+    /// number of column children (4 panels into 2-per-column = 2 v-stacks per side).
+    #[test]
+    fn test_ui_rack_breathe_produces_correct_columns() {
+        let mut runtime = Runtime::new();
+        let tree = runtime
+            .eval_str(
+                r#"
+                (def panel (title) (box :width 5 :height 3 (label title)))
+                (def col-breathe (col) (v-stack :width 22.0 :gap 0.10 col))
+                (def ui-rack (mode left adsr right)
+                  (h-stack :width :fill :gap 0.4 :align :stretch
+                    (map col-breathe (chunks left 2))
+                    adsr
+                    (map col-breathe (chunks right 2))))
+                (ui-rack :breathe
+                  (list (panel "GLOBAL") (panel "VCO 1")
+                        (panel "VCO 2 / MIX") (panel "DIRT"))
+                  (box :width 23 :height 8 (label "ADSR"))
+                  (list (panel "MS FILTER") (panel "HP / SCREAM")
+                        (panel "MOD") (panel "NOISE / RING")))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        let Value::Map(map) = &tree else {
+            panic!("expected widget map, got {:?}", tree);
+        };
+        let Value::Keyword(typ) = &*map.get("type").unwrap().borrow() else {
+            panic!("expected type keyword");
+        };
+        assert_eq!(typ, "h-stack");
+
+        let children_value = map.get("children").unwrap().borrow().clone();
+        let Value::List(children) = children_value else {
+            panic!("expected children list");
+        };
+        // Expected: 2 v-stacks (left cols) + 1 box (adsr) + 2 v-stacks (right cols) = 5
+        let kinds: Vec<String> = children
+            .iter()
+            .filter_map(|c| {
+                let v = c.borrow();
+                if let Value::Map(m) = &*v {
+                    if let Some(t) = m.get("type") {
+                        if let Value::Keyword(k) = &*t.borrow() {
+                            return Some(k.clone());
+                        }
+                    }
+                }
+                None
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["v-stack", "v-stack", "box", "v-stack", "v-stack"],
+            "ui-rack should produce 2 left cols + adsr + 2 right cols"
+        );
+
+        // Verify the v-stack has correct :width set
+        let Value::Map(first_col) = &*children[0].borrow() else {
+            panic!()
+        };
+        let width = first_col.get("width").unwrap().borrow().clone();
+        assert!(
+            matches!(width, Value::Number(n) if (n - 22.0).abs() < 0.01),
+            "first v-stack should have :width 22.0, got {:?}",
+            width
+        );
+    }
+
+    /// Verify that a macro that wraps a `(do ...)` body around an impl call
+    /// — the pattern used by metal-seq-fx's `ui-panel` to publish the panel
+    /// section to descendants — produces a usable widget.
+    #[test]
+    fn test_ui_panel_macro_expansion_produces_widget() {
+        let mut runtime = Runtime::new();
+        let widget = runtime
+            .eval_str(
+                r#"
+                (defstate current-section -1)
+                (def panel-impl (title section body)
+                  (box :width :fill :height 3.4 :on-click (lambda (info) section) body))
+                (defmacro panel (title section body)
+                  `(do
+                     (set! current-section ,section)
+                     (let ((__p (panel-impl ,title ,section ,body)))
+                       (set! current-section -1)
+                       __p)))
+                (panel "X" 1 (label "knob"))
+                "#,
+            )
+            .unwrap()
+            .unwrap();
+
+        let Value::Map(map) = &widget else {
+            panic!("expected widget map, got {:?}", widget);
+        };
+        let typ = map.get("type").unwrap().borrow().clone();
+        assert!(
+            matches!(typ, Value::Keyword(ref k) if k == "box"),
+            "macro should produce a box widget at the top, got {:?}",
+            typ
+        );
+    }
+
     #[test]
     fn test_widget_keyword_args_dont_leak_to_parent() {
         // Regression: when (v-stack :padding 1 ...) appeared as an arg to
