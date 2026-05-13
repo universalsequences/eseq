@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "crates/eseqlisp",
+    "crates/musicplayer",
+    "crates/sequencer",
+]
+resolver = "3"
+
+[profile.release]
+debug = true
+strip = "none"
+split-debuginfo = "packed"

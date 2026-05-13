@@ -1,0 +1,28 @@
+/target/
+**/target/
+
+.DS_Store
+**/.DS_Store
+
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Local app data and generated runtime output.
+crates/musicplayer/Music/
+crates/sequencer/projects/
+crates/sequencer/samples/
+crates/sequencer/recordings/
+crates/sequencer/effects/
+crates/sequencer/instruments-backup/
+crates/eseqlisp/profiles/
+
+# Build/profiling artifacts.
+*.o
+*.dylib
+*.so
+*.dSYM/
+*.trace/
+sequencer-profile
+sequencer-crash.log
