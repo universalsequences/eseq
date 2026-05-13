@@ -2729,4 +2729,43 @@ mod tests {
             "function should receive exactly 2 args"
         );
     }
+
+    #[test]
+    fn test_set_statement_does_not_leak_operand_stack_values() {
+        let result = run_prog(
+            r#"
+            (def current "")
+            (def make-child ()
+              (do
+                (set! current "leaked-if-stack-is-wrong")
+                (box :debug-name "child")))
+            (def capture (name child)
+              (list name (get child :debug-name)))
+            (capture "expected-name" (make-child))
+            "#,
+        )
+        .unwrap()
+        .unwrap();
+
+        let Value::List(items) = result else {
+            panic!("expected list, got: {result:?}");
+        };
+        assert_eq!(
+            items[0].borrow().clone(),
+            Value::String("expected-name".to_string()),
+            "set! must not leave stale values that shift caller arguments"
+        );
+        assert_eq!(
+            items[1].borrow().clone(),
+            Value::String("child".to_string())
+        );
+    }
+
+    #[test]
+    fn test_def_inside_do_is_expression_valued() {
+        let result = run_prog("(do (def local-in-do 41) (+ local-in-do 1))")
+            .unwrap()
+            .unwrap();
+        assert_eq!(result, Value::Number(42.0));
+    }
 }

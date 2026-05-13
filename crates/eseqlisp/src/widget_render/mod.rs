@@ -677,6 +677,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &response_curve_editor::RESPONSE_CURVE_EDITOR_WIDGET,
     &scroll::SCROLL_WIDGET,
     &text_input::TEXT_INPUT_WIDGET,
+    &text_input::TEXTBOX_WIDGET,
     &tree::TREE_WIDGET,
     &tree::TREE_ROW_BG_WIDGET,
 ];

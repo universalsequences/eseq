@@ -18,6 +18,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "meter",
         "mixer-meter",
         "text-input",
+        "textbox",
         "number-picker",
         "number-label",
         "response-curve-editor",
@@ -104,6 +105,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     // Text-entry and composite value widgets are always focusable.
     if widget_type == "button"
         || widget_type == "text-input"
+        || widget_type == "textbox"
         || widget_type == "number-picker"
         || widget_type == "dropdown"
         || widget_type == "knob-number"

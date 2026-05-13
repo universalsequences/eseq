@@ -221,9 +221,9 @@ impl Editor {
         let Some(node) = find_node_by_id(&layout, focused_id) else {
             return false;
         };
-        // Space bar should only be consumed by text-input widgets (for typing).
+        // Space bar should only be consumed by text-entry widgets (for typing).
         // All other widgets let space fall through to keybindings.
-        let is_text_input = node.widget_type == "text-input";
+        let is_text_input = node.widget_type == "text-input" || node.widget_type == "textbox";
         if key.code == KeyCode::Char(' ') && !is_text_input {
             return false;
         }

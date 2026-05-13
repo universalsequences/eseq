@@ -4451,6 +4451,18 @@ mod tests {
                 .any(|child| layout_contains_widget_type(child, widget_type))
     }
 
+    fn find_layout_node_by_widget_type<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_widget_type(child, widget_type))
+    }
+
     fn count_widget_type(node: &eseqlisp::layout::LayoutNode, widget_type: &str) -> usize {
         usize::from(node.widget_type == widget_type)
             + node
@@ -4503,6 +4515,26 @@ mod tests {
         node.children
             .iter()
             .find_map(|child| find_layout_node_by_text(child, text))
+    }
+
+    fn collect_layout_node_summaries(node: &eseqlisp::layout::LayoutNode, out: &mut Vec<String>) {
+        let debug_name = match node.props.get("debug-name") {
+            Some(Value::String(value)) => value.as_str(),
+            _ => "",
+        };
+        let text = match node.props.get("text") {
+            Some(Value::String(value)) => value.as_str(),
+            _ => "",
+        };
+        if out.len() < 160 {
+            out.push(format!(
+                "{} debug={debug_name:?} text={text:?} rect={:?}",
+                node.widget_type, node.rect
+            ));
+        }
+        for child in &node.children {
+            collect_layout_node_summaries(child, out);
+        }
     }
 
     fn test_param_map(
@@ -4624,6 +4656,56 @@ mod tests {
         ]
     }
 
+    fn test_reverb_params() -> Vec<Value> {
+        vec![
+            Value::Map(test_param_map("mix", 0, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("size", 1, 0.2, 0.0, 1.0)),
+            Value::Map(test_param_map("brightness", 2, 0.8, 0.0, 1.0)),
+            Value::Map(test_param_map("replace", 3, 0.3, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 4, 1.0, 0.0, 1.0)),
+        ]
+    }
+
+    fn test_modum_delay_params() -> Vec<Value> {
+        vec![
+            Value::Map(test_param_map("max1", 0, 500.0, 50.0, 5000.0)),
+            Value::Map(test_param_map("max2", 1, 750.0, 50.0, 5000.0)),
+            Value::Map(test_param_map("fbk", 2, 0.5, 0.1, 0.9)),
+            Value::Map(test_param_map("cutoff", 3, 900.0, 50.0, 4000.0)),
+            Value::Map(test_param_map("res", 4, 4.0, 1.0, 16.0)),
+            Value::Map(test_param_map("rate", 5, 1.0, 0.1, 100.0)),
+            Value::Map(test_param_map("enabled", 6, 1.0, 0.0, 1.0)),
+        ]
+    }
+
+    fn test_dimension_d_params() -> Vec<Value> {
+        vec![
+            Value::Map(test_param_map("rate", 0, 0.32, 0.05, 1.2)),
+            Value::Map(test_param_map("depth", 1, 8.5, 1.0, 20.0)),
+            Value::Map(test_param_map("base", 2, 12.5, 6.0, 28.0)),
+            Value::Map(test_param_map("spread", 3, 6.0, 0.0, 14.0)),
+            Value::Map(test_param_map("mix", 4, 0.68, 0.0, 1.0)),
+            Value::Map(test_param_map("tone", 5, 10500.0, 2000.0, 18000.0)),
+            Value::Map(test_param_map("width", 6, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("shimmer", 7, 0.28, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 8, 1.0, 0.0, 1.0)),
+        ]
+    }
+
+    fn test_lexilush_params() -> Vec<Value> {
+        vec![
+            Value::Map(test_param_map("pre_dly", 0, 1051.0, 0.0, 2000.0)),
+            Value::Map(test_param_map("size", 1, 1.3, 0.1, 5.0)),
+            Value::Map(test_param_map("decay", 2, 0.98, 0.1, 8.0)),
+            Value::Map(test_param_map("diffusion", 3, 0.7, 0.0, 1.0)),
+            Value::Map(test_param_map("damping", 4, 500.0, 100.0, 12000.0)),
+            Value::Map(test_param_map("mod_freq", 5, 0.8, 0.0, 10.0)),
+            Value::Map(test_param_map("mod_amt", 6, 40.0, 0.0, 100.0)),
+            Value::Map(test_param_map("mix", 7, 0.35, 0.0, 1.0)),
+            Value::Map(test_param_map("enabled", 8, 1.0, 0.0, 1.0)),
+        ]
+    }
+
     fn test_fx_map(
         name: &str,
         slot_idx: usize,
@@ -4702,6 +4784,144 @@ mod tests {
                 Value::Map(test_param_map("amp_sustain", 3, 0.7, 0.0, 1.0)),
                 Value::Map(test_param_map("amp_release", 4, 120.0, 1.0, 3000.0)),
             ]))),
+        );
+        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst
+    }
+
+    fn korg1_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut inst = std::collections::HashMap::new();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("korg1/".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("korg1".to_string()))),
+        );
+        inst.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("synth".to_string()))),
+        );
+
+        let params = [
+            ("base_note", 48.0, 0.0, 127.0),
+            ("vco1_saw", 0.75, 0.0, 1.0),
+            ("vco1_pulse", 0.35, 0.0, 1.0),
+            ("vco2_level", 0.45, 0.0, 1.0),
+            ("sub_level", 0.25, 0.0, 1.0),
+            ("gain", 0.80, 0.0, 1.0),
+            ("analog_drift", 0.15, 0.0, 1.0),
+            ("noise_level", 0.10, 0.0, 1.0),
+            ("vco2_interval", 7.0, -24.0, 24.0),
+            ("vco2_fine", 0.0, -100.0, 100.0),
+            ("pulse_width", 0.50, 0.0, 1.0),
+            ("pwm_amount", 0.20, 0.0, 1.0),
+            ("input_drive", 0.35, 0.0, 1.0),
+            ("output_bite", 0.25, 0.0, 1.0),
+            ("ring_level", 0.15, 0.0, 1.0),
+            ("cutoff", 0.58, 0.0, 1.0),
+            ("resonance", 0.30, 0.0, 1.0),
+            ("filter_env_amount", 0.40, -1.0, 1.0),
+            ("keytrack", 0.50, 0.0, 1.0),
+            ("hp_cutoff", 0.15, 0.0, 1.0),
+            ("hp_resonance", 0.20, 0.0, 1.0),
+            ("scream", 0.18, 0.0, 1.0),
+            ("filter_drive", 0.28, 0.0, 1.0),
+            ("lfo_rate", 4.0, 0.0, 20.0),
+            ("lfo_filter_amount", 0.30, -1.0, 1.0),
+            ("lfo_pitch", 0.0, -1.0, 1.0),
+            ("pitch_env_amount", 0.0, -1.0, 1.0),
+            ("amp_attack", 5.0, 1.0, 1000.0),
+            ("amp_decay", 120.0, 1.0, 2000.0),
+            ("amp_sustain", 0.70, 0.0, 1.0),
+            ("amp_release", 150.0, 1.0, 3000.0),
+            ("filt_attack", 8.0, 1.0, 1000.0),
+            ("filt_decay", 180.0, 1.0, 2000.0),
+            ("filt_sustain", 0.55, 0.0, 1.0),
+            ("filt_release", 220.0, 1.0, 3000.0),
+        ];
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(
+                params
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (name, value, min, max))| {
+                        Value::Map(test_param_map(name, idx, *value, *min, *max))
+                    })
+                    .collect(),
+            ))),
+        );
+        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst
+    }
+
+    fn minimoog_lad2_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>>
+    {
+        let mut inst = std::collections::HashMap::new();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("minimoog-lad2".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("minimoog-lad2".to_string()))),
+        );
+        inst.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("synth".to_string()))),
+        );
+
+        let params = [
+            ("base_note", 48.0, 0.0, 127.0),
+            ("osc1_level", 0.80, 0.0, 1.0),
+            ("osc2_level", 0.45, 0.0, 1.0),
+            ("osc3_level", 0.25, 0.0, 1.0),
+            ("noise_level", 0.10, 0.0, 1.0),
+            ("gain", 0.80, 0.0, 1.0),
+            ("drive", 0.35, 0.0, 1.0),
+            ("key_track", 0.50, 0.0, 1.0),
+            ("osc1_wave", 0.0, 0.0, 1.0),
+            ("osc2_wave", 0.2, 0.0, 1.0),
+            ("osc3_wave", 0.4, 0.0, 1.0),
+            ("pulse_width", 0.50, 0.0, 1.0),
+            ("osc1_oct", 0.0, -2.0, 2.0),
+            ("osc2_oct", 0.0, -2.0, 2.0),
+            ("osc3_oct", -1.0, -2.0, 2.0),
+            ("osc2_detune", 0.0, -100.0, 100.0),
+            ("osc3_detune", 0.0, -100.0, 100.0),
+            ("cutoff", 1200.0, 20.0, 18_000.0),
+            ("resonance", 0.30, 0.0, 1.0),
+            ("filter_env_amount", 600.0, -6000.0, 6000.0),
+            ("amp_attack", 5.0, 1.0, 1000.0),
+            ("amp_decay", 120.0, 1.0, 2000.0),
+            ("amp_sustain", 0.70, 0.0, 1.0),
+            ("amp_release", 150.0, 1.0, 3000.0),
+            ("filt_attack", 8.0, 1.0, 1000.0),
+            ("filt_decay", 180.0, 1.0, 2000.0),
+            ("filt_sustain", 0.55, 0.0, 1.0),
+            ("filt_release", 220.0, 1.0, 3000.0),
+        ];
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(
+                params
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (name, value, min, max))| {
+                        Value::Map(test_param_map(name, idx, *value, *min, *max))
+                    })
+                    .collect(),
+            ))),
         );
         inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
         inst.insert(
@@ -5531,6 +5751,7 @@ mod tests {
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
                 (defstate selected-bus -1)
                 "#,
             )
@@ -5685,6 +5906,7 @@ mod tests {
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
                 (defstate selected-bus -1)
                 "#,
             )
@@ -5768,6 +5990,7 @@ mod tests {
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-instrument-synth-ui (inst) false)
                 (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
                 (defstate selected-bus -1)
                 "#,
             )
@@ -5803,6 +6026,762 @@ mod tests {
         assert!(
             layout_contains_widget_type(&layout, "response-curve-editor"),
             "layout should contain the response curve editor"
+        );
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let panel = find_layout_node_by_debug_name(&layout, "audio-fx-panel-root-0-Str8 Delay")
+            .unwrap_or_else(|| panic!("str8 delay panel; layout={layout_summaries:#?}"));
+        let header = find_layout_node_by_debug_name(&layout, "audio-fx-panel-header")
+            .unwrap_or_else(|| panic!("str8 delay header; layout={layout_summaries:#?}"));
+        let body = find_layout_node_by_debug_name(&layout, "audio-fx-panel-content")
+            .unwrap_or_else(|| panic!("str8 delay body; layout={layout_summaries:#?}"));
+        let response = find_layout_node_by_widget_type(&layout, "response-curve-editor")
+            .unwrap_or_else(|| panic!("str8 delay response curve; layout={layout_summaries:#?}"));
+        assert!(
+            !panel.props.contains_key("on-click"),
+            "only the FX panel header should select the effect"
+        );
+        assert!(
+            header.props.contains_key("on-click"),
+            "FX panel header should remain clickable for effect selection"
+        );
+        assert!(
+            header.rect.width >= panel.rect.width - 0.05,
+            "FX panel header hit area should span the full panel width, panel={:?} header={:?}",
+            panel.rect,
+            header.rect
+        );
+        assert!(
+            body.props.contains_key("on-click"),
+            "FX panel body should clear effect selection when blank/non-control space is clicked"
+        );
+        let hit = eseqlisp::layout::hit_test_layout(
+            &layout,
+            response.rect.row + response.rect.height * 0.5,
+            response.rect.col + response.rect.width * 0.5,
+        )
+        .unwrap_or_else(|| panic!("response curve hit test missed; layout={layout_summaries:#?}"));
+        assert_eq!(
+            hit.widget_type, "response-curve-editor",
+            "dragging the response curve should hit the curve editor, not the FX panel/body"
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_builtin_without_custom_ui_falls_back_to_param_grid() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                (
+                    "available-builtin-effects",
+                    test_list(vec![Value::String("Reverb".to_string())]),
+                ),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "Reverb",
+                        0,
+                        test_reverb_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        let reverb_ui_probe = editor
+            .runtime_mut()
+            .eval_str("(builtin-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("probe reverb ui");
+        assert!(
+            matches!(reverb_ui_probe, Some(Value::Bool(false))),
+            "Reverb should not have a bespoke built-in UI: {reverb_ui_probe:?}"
+        );
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("reverb fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor.widget_layout().expect("reverb fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-Reverb"),
+            "layout should contain the Reverb panel"
+        );
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let mix = find_layout_node_by_text(&layout, "mix")
+            .unwrap_or_else(|| panic!("Reverb mix parameter label; layout={layout_summaries:#?}"));
+        let size = find_layout_node_by_text(&layout, "size")
+            .unwrap_or_else(|| panic!("Reverb size parameter label; layout={layout_summaries:#?}"));
+        assert!(
+            mix.rect.width > 0.5 && size.rect.width > 0.5,
+            "Reverb fallback param grid should have visible labels, mix={:?} size={:?}",
+            mix.rect,
+            size.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_custom_audio_effect_ui_lays_out_body_content() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let modum_ui =
+            std::fs::read_to_string("effects/MODUM_DELAY/ui.lisp").expect("read MODUM_DELAY ui");
+        let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(Some((
+            "MODUM_DELAY".to_string(),
+            "effects/MODUM_DELAY/ui.lisp".to_string(),
+            modum_ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                (
+                    "available-effects",
+                    test_list(vec![Value::String("MODUM_DELAY".to_string())]),
+                ),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "MODUM_DELAY",
+                        0,
+                        test_modum_delay_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load initial custom audio FX UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load custom audio FX UI");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("MODUM_DELAY fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor.widget_layout().expect("MODUM_DELAY fx layout");
+        assert!(
+            layout_contains_debug_name(&layout, "audio-fx-panel-root-0-MODUM_DELAY"),
+            "layout should contain the MODUM_DELAY panel"
+        );
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let delays = find_layout_node_by_text(&layout, "DELAYS")
+            .unwrap_or_else(|| panic!("DELAYS label; layout={layout_summaries:#?}"));
+        let cut = find_layout_node_by_text(&layout, "cut")
+            .unwrap_or_else(|| panic!("cut label; layout={layout_summaries:#?}"));
+        assert!(
+            delays.rect.width > 1.0 && cut.rect.width > 1.0,
+            "custom audio FX UI should have visible body labels, delays={:?} cut={:?}",
+            delays.rect,
+            cut.rect
+        );
+    }
+
+    #[test]
+    fn metal_seq_fx_dimension_d_custom_ui_fits_below_header() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let dimension_ui = std::fs::read_to_string("effects/dimension-d-chorus/ui.lisp")
+            .expect("read dimension-d-chorus ui");
+        let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(Some((
+            "dimension-d-chorus".to_string(),
+            "effects/dimension-d-chorus/ui.lisp".to_string(),
+            dimension_ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                (
+                    "available-effects",
+                    test_list(vec![Value::String("dimension-d-chorus".to_string())]),
+                ),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "dimension-d-chorus",
+                        0,
+                        test_dimension_d_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load initial custom audio FX UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load custom audio FX UI");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("dimension-d-chorus fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("dimension-d-chorus fx layout");
+
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let panel =
+            find_layout_node_by_debug_name(&layout, "audio-fx-panel-root-0-dimension-d-chorus")
+                .unwrap_or_else(|| panic!("dimension panel; layout={layout_summaries:#?}"));
+        let header = find_layout_node_by_debug_name(&layout, "audio-fx-panel-header")
+            .unwrap_or_else(|| panic!("dimension header; layout={layout_summaries:#?}"));
+        let title = find_layout_node_by_text(&layout, "dimension-d-chorus")
+            .unwrap_or_else(|| panic!("dimension title; layout={layout_summaries:#?}"));
+        let motion = find_layout_node_by_text(&layout, "MOTION")
+            .unwrap_or_else(|| panic!("MOTION label; layout={layout_summaries:#?}"));
+        let output = find_layout_node_by_text(&layout, "OUTPUT")
+            .unwrap_or_else(|| panic!("OUTPUT label; layout={layout_summaries:#?}"));
+
+        assert!(
+            find_layout_node_by_text(&layout, "4 taps").is_none(),
+            "dimension-d-chorus should omit the non-control VOICE readout"
+        );
+        assert!(
+            title.rect.row >= header.rect.row
+                && title.rect.row < header.rect.row + header.rect.height,
+            "effect title should be measured inside the header, header={:?} title={:?}",
+            header.rect,
+            title.rect
+        );
+        assert!(
+            motion.rect.row >= header.rect.row + header.rect.height,
+            "custom effect body should start below the fixed effect header, header={:?} motion={:?}",
+            header.rect,
+            motion.rect
+        );
+        assert!(
+            output.rect.row > motion.rect.row,
+            "OUTPUT block should be below MOTION, motion={:?} output={:?}",
+            motion.rect,
+            output.rect
+        );
+        assert!(
+            output.rect.row + 3.5 <= panel.rect.row + panel.rect.height,
+            "dimension custom UI should fit within the fixed effect panel, panel={:?} output={:?}",
+            panel.rect,
+            output.rect
+        );
+    }
+
+    #[test]
+    fn custom_audio_fx_callbacks_keep_their_rendered_effect_scope() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                (
+                    "available-effects",
+                    test_list(vec![
+                        Value::String("dimension-d-chorus".to_string()),
+                        Value::String("lexilush".to_string()),
+                    ]),
+                ),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![
+                        Value::Map(test_fx_map(
+                            "dimension-d-chorus",
+                            0,
+                            test_dimension_d_params(),
+                        )),
+                        Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
+                    ]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load initial custom audio FX UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load custom audio FX UI");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom audio FX lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor.widget_layout().expect("custom audio fx layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let dimension_base = find_layout_node_by_stable_key(
+            &layout,
+            "custom-ui-lego-knob-dimension-d-chorus-slot-0-base",
+        )
+        .unwrap_or_else(|| panic!("dimension base knob; layout={layout_summaries:#?}"));
+        assert!(
+            find_layout_node_by_stable_key(&layout, "custom-ui-lego-num-lexilush-slot-1-damping")
+                .is_some(),
+            "lexilush damping control should also be rendered; layout={layout_summaries:#?}"
+        );
+        let callback = dimension_base
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("dimension base on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(14.0)])
+            .expect("invoke dimension base on-change");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-effect-param");
+                let Value::Map(payload) = payload else {
+                    panic!("set-effect-param payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("slot-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0)),
+                    "dimension base callback must target the first effect slot"
+                );
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0)),
+                    "dimension base callback must target the base parameter"
+                );
+                assert_eq!(
+                    payload.get("value").map(|value| value.borrow().clone()),
+                    Some(Value::Number(14.0))
+                );
+            }
+            other => panic!("expected set-effect-param host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_instrument_callbacks_survive_audio_fx_render_scope() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
+        let custom_instrument_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/test-instrument/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-panel "SYNTH" 0
+                (h-stack :gap 0.2
+                  (ui-param-knob "cutoff" "cut"))))
+            "#
+            .to_string(),
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                (
+                    "available-effects",
+                    test_list(vec![
+                        Value::String("dimension-d-chorus".to_string()),
+                        Value::String("lexilush".to_string()),
+                    ]),
+                ),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![
+                        Value::Map(test_fx_map(
+                            "dimension-d-chorus",
+                            0,
+                            test_dimension_d_params(),
+                        )),
+                        Value::Map(test_fx_map("lexilush", 1, test_lexilush_params())),
+                    ]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_instrument_ui_source)
+            .expect("load initial custom instrument UI");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load initial custom audio FX UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_instrument_ui_source)
+            .expect("load custom instrument UI");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load custom audio FX UI");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom instrument with audio FX lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("custom instrument with audio fx layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let cutoff =
+            find_layout_node_by_stable_key(&layout, "custom-ui-knob-test-instrument-cutoff")
+                .unwrap_or_else(|| panic!("instrument cutoff knob; layout={layout_summaries:#?}"));
+        assert!(
+            find_layout_node_by_stable_key(&layout, "custom-ui-lego-num-lexilush-slot-1-damping")
+                .is_some(),
+            "audio FX should render after the instrument and leave the render globals in audio scope"
+        );
+        let callback = cutoff
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("instrument cutoff on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.75)])
+            .expect("invoke instrument cutoff on-change");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-instrument-param");
+                let Value::Map(payload) = payload else {
+                    panic!("set-instrument-param payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0)),
+                    "instrument callback must target the cutoff parameter"
+                );
+                assert_eq!(
+                    payload.get("value").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.75))
+                );
+            }
+            other => panic!("expected set-instrument-param host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn custom_ui_section_selection_is_scoped_per_rendered_ui() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_instrument_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/test-instrument/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-panel "SYNTH" 2
+                (label
+                  (if (= custom-ui-selected-section 2) "INST_SELECTED" "INST_UNSELECTED")
+                  :font-size 10 :color :white :bg :transparent)))
+            "#
+            .to_string(),
+        )));
+        let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(Some((
+            "dimension-d-chorus".to_string(),
+            "effects/dimension-d-chorus/ui.lisp".to_string(),
+            r#"
+            (defeffect-ui
+              (ui-control-block-medium-s "MOTION" (ui-accent-cyan) 1
+                (label
+                  (if (= custom-ui-selected-section 1) "FX_SELECTED" "FX_UNSELECTED")
+                  :font-size 10 :color :white :bg :transparent)))
+            "#
+            .to_string(),
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                (
+                    "available-effects",
+                    test_list(vec![Value::String("dimension-d-chorus".to_string())]),
+                ),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "dimension-d-chorus",
+                        0,
+                        test_dimension_d_params(),
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_instrument_ui_source)
+            .expect("load initial custom instrument UI");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load initial custom audio FX UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_instrument_ui_source)
+            .expect("load custom instrument UI");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load custom audio FX UI");
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (do
+                  (custom-instrument-synth-ui (nth SEQ.instrument-panel 0))
+                  (def test-instrument-section-click (ui-section-select-callback 2))
+                  (custom-audio-fx-ui (nth SEQ.effects 0))
+                  (def test-fx-section-click (ui-section-select-callback 1))
+                  (test-instrument-section-click false)
+                  (test-fx-section-click false))
+                "#,
+            )
+            .expect("select custom UI sections");
+
+        let instrument_tree = editor
+            .runtime_mut()
+            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
+            .expect("render selected custom instrument UI")
+            .expect("instrument UI value");
+        let fx_tree = editor
+            .runtime_mut()
+            .eval_str("(custom-audio-fx-ui (nth SEQ.effects 0))")
+            .expect("render selected custom FX UI")
+            .expect("FX UI value");
+
+        assert!(
+            value_contains_string(&instrument_tree, "INST_SELECTED"),
+            "instrument render should keep its own selected section: {instrument_tree:?}"
+        );
+        assert!(
+            value_contains_string(&fx_tree, "FX_SELECTED"),
+            "FX render should keep its own selected section: {fx_tree:?}"
         );
     }
 
@@ -5874,6 +6853,7 @@ mod tests {
                 (def sbrowser-editor-name "")
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
                 (defstate selected-bus -1)
                 "#,
             )
@@ -5903,6 +6883,326 @@ mod tests {
             .as_ref()
             .expect("fx tree");
         assert!(value_contains_string(tree, "CUSTOM_OK"));
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_real_korg1_custom_instrument_ui() {
+        fn assert_finite_layout(node: &eseqlisp::layout::LayoutNode) {
+            assert!(
+                node.rect.width.is_finite()
+                    && node.rect.height.is_finite()
+                    && node.rect.col.is_finite()
+                    && node.rect.row.is_finite()
+                    && node.rect.width < 10_000.0
+                    && node.rect.col.abs() < 10_000.0,
+                "non-finite or runaway layout node: type={} rect=({:.2},{:.2},{:.2},{:.2})",
+                node.widget_type,
+                node.rect.row,
+                node.rect.col,
+                node.rect.width,
+                node.rect.height
+            );
+            for child in &node.children {
+                assert_finite_layout(child);
+            }
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let korg1_ui = std::fs::read_to_string("instruments/korg1/ui.lisp").expect("read korg1 ui");
+        let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
+        let korg1_custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "korg1/".to_string(),
+            "instruments/korg1/ui.lisp".to_string(),
+            korg1_ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 20);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(korg1_test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&initial_custom_ui_source)
+            .expect("load initial empty custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&korg1_custom_ui_source)
+            .expect("load korg1 custom instrument ui");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("real korg1 custom instrument fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(160, 20);
+        let layout = editor.widget_layout().expect("korg1 fx layout");
+        assert_finite_layout(&layout);
+
+        let tree = editor
+            .active_buffer()
+            .widget_tree
+            .as_ref()
+            .expect("fx tree");
+        for title in ["OSC MIX", "OSC SHAPE", "MS FILTER"] {
+            assert!(
+                value_contains_string(tree, title),
+                "real korg1 custom UI should contain panel {title}"
+            );
+        }
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let osc_mix = find_layout_node_by_text(&layout, "OSC MIX")
+            .unwrap_or_else(|| panic!("OSC MIX label; layout={layout_summaries:#?}"));
+        let ms_filter = find_layout_node_by_text(&layout, "MS FILTER")
+            .unwrap_or_else(|| panic!("MS FILTER label; layout={layout_summaries:#?}"));
+
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+        assert!(
+            osc_mix.rect.width > 1.0
+                && osc_mix.rect.col >= instrument_panel.rect.col
+                && osc_mix.rect.col < instrument_panel.rect.col + instrument_panel.rect.width,
+            "OSC MIX label should be measured inside the instrument panel, got {:?}",
+            osc_mix.rect
+        );
+        assert!(
+            ms_filter.rect.width > 1.0
+                && ms_filter.rect.col > osc_mix.rect.col + 40.0
+                && ms_filter.rect.col < instrument_panel.rect.col + instrument_panel.rect.width,
+            "MS FILTER should be measured as a later korg1 column, got {:?}; OSC MIX={:?}; panel={:?}",
+            ms_filter.rect,
+            osc_mix.rect,
+            instrument_panel.rect
+        );
+    }
+
+    #[test]
+    fn minimoog_lad2_filter_controls_select_filter_envelope() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        fn collect_stable_keys(node: &eseqlisp::layout::LayoutNode, keys: &mut Vec<String>) {
+            if let Some(key) = &node.stable_key {
+                keys.push(key.clone());
+            }
+            for child in &node.children {
+                collect_stable_keys(child, keys);
+            }
+        }
+
+        fn layout_node_contains_string(node: &eseqlisp::layout::LayoutNode, needle: &str) -> bool {
+            node.props
+                .values()
+                .any(|value| value_contains_string(value, needle))
+                || node
+                    .children
+                    .iter()
+                    .any(|child| layout_node_contains_string(child, needle))
+        }
+
+        fn find_clickable_node_containing<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            needle: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.props.contains_key("on-click") && layout_node_contains_string(node, needle) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_clickable_node_containing(child, needle))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let minimoog_ui =
+            std::fs::read_to_string("instruments/minimoog-lad2/ui.lisp").expect("read ui");
+        let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
+        let minimoog_custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "minimoog-lad2".to_string(),
+            "instruments/minimoog-lad2/ui.lisp".to_string(),
+            minimoog_ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 20);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(minimoog_lad2_test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&initial_custom_ui_source)
+            .expect("load initial empty custom instrument UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&minimoog_custom_ui_source)
+            .expect("load minimoog-lad2 custom instrument UI");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("minimoog-lad2 custom instrument fx lisp status after refresh: {status}");
+        }
+
+        let initial_tree = editor
+            .runtime_mut()
+            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
+            .expect("render initial minimoog-lad2 UI")
+            .expect("initial UI value");
+        assert!(value_contains_string(&initial_tree, "AMP ENV"));
+        assert!(
+            !value_contains_string(&initial_tree, "FILTER ENV"),
+            "filter envelope should not be selected before filter controls are used"
+        );
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("minimoog-lad2 layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let mut stable_keys = Vec::new();
+        collect_stable_keys(&layout, &mut stable_keys);
+        let env_amount =
+            find_stable_key_suffix(&layout, "filter_env_amount").unwrap_or_else(|| {
+                panic!(
+                "filter_env_amount knob; stable_keys={stable_keys:#?}; layout={layout_summaries:#?}"
+            )
+            });
+        let callback = env_amount
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("filter_env_amount on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(750.0)])
+            .expect("invoke filter_env_amount on-change");
+        let sections = editor
+            .runtime_mut()
+            .eval_str("custom-ui-selected-sections")
+            .expect("read custom UI selected sections")
+            .expect("selected sections value");
+
+        let selected_tree = editor
+            .runtime_mut()
+            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
+            .expect("render selected minimoog-lad2 UI")
+            .expect("selected UI value");
+        assert!(
+            value_contains_string(&selected_tree, "FILTER ENV"),
+            "using filter controls should select the filter envelope; sections={sections:?}; tree={selected_tree:?}"
+        );
+
+        let mixer_panel = find_clickable_node_containing(&layout, "MIXER").unwrap_or_else(|| {
+            panic!("MIXER panel should be clickable; layout={layout_summaries:#?}")
+        });
+        let click = mixer_panel
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("MIXER on-click");
+        editor
+            .runtime_mut()
+            .invoke(click, vec![Value::Bool(false)])
+            .expect("invoke MIXER panel click");
+        let amp_tree = editor
+            .runtime_mut()
+            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
+            .expect("render amp-selected minimoog-lad2 UI")
+            .expect("amp-selected UI value");
+        assert!(
+            value_contains_string(&amp_tree, "AMP ENV"),
+            "clicking a non-filter panel should return the ADSR to AMP ENV"
+        );
     }
 
     #[test]
@@ -5953,6 +7253,7 @@ mod tests {
                 (def sbrowser-editor-name "")
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
                 (defstate selected-bus -1)
                 "#,
             )
@@ -6072,6 +7373,7 @@ mod tests {
                 (def sbrowser-editor-name "")
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
                 (defstate selected-bus -1)
                 "#,
             )
@@ -6217,6 +7519,7 @@ mod tests {
                 (def sbrowser-editor-name "")
                 (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
                 (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
                 (defstate selected-bus -1)
                 "#,
             )
@@ -7122,7 +8425,9 @@ mod tests {
                     (get p :value)))
                 (def base-note ()
                   (label "base" :font-size 10 :color :gray :bg :transparent))
+                (def custom-ui-current-kind "instrument")
                 (def custom-ui-selected-section 0)
+                (def custom-ui-selected-section-for-current-scope () custom-ui-selected-section)
                 (def ui-select-section (section) (set! custom-ui-selected-section section))
                 (def ui-accent-blue () :blue)
                 (def ui-accent-cyan () :cyan)
@@ -7235,6 +8540,155 @@ mod tests {
             .expect("render custom MIDI FX UI");
         assert!(!matches!(rendered, Some(Value::Bool(false)) | None));
     }
+
+    #[test]
+    fn generated_custom_audio_fx_ui_eval_and_dispatch() {
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"
+                (def audio-fx-ui-current-fx false)
+                (def audio-fx-ui-current-name "")
+                (def audio-fx-ui-param (fx name)
+                  (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
+                (def fx-param-row (p fx key)
+                  (dict :param (get p :name) :key key))
+                (def audio-fx-ui-param-control (name)
+                  (let ((p (audio-fx-ui-param audio-fx-ui-current-fx name)))
+                    (if p
+                      (fx-param-row p audio-fx-ui-current-fx
+                        (str "custom-audio-fx-ui-" audio-fx-ui-current-name "-" name))
+                      false)))
+                (def custom-ui-current-kind "audio-fx")
+                (def custom-ui-selected-section 0)
+                (def custom-ui-selected-section-for-current-scope () custom-ui-selected-section)
+                (def ui-select-section (section) section)
+                (def ui-accent-blue () :blue)
+                (def ui-accent-cyan () :cyan)
+                (def ui-accent-orange () :orange)
+                (def ui-accent-green () :green)
+                (def ui-accent-violet () :magenta)
+                (def ui-control-block-small-s (title accent section body) body)
+                (def ui-control-block-medium-s (title accent section body) body)
+                (def ui-control-block-full-s (title accent section body) body)
+                (def ui-readout-block-small-s (title accent section body) body)
+                (def ui-readout-block-medium (title accent body) body)
+                (def ui-readout-block-full (title accent body) body)
+                (def ui-lego-column (a b c) (v-stack a b c))
+                (def ui-lego-column-2 (a b) (v-stack a b))
+                (def ui-lego-column-full (a) (v-stack a))
+                (def ui-lego-knob-s (section name title width accent decimals)
+                  (audio-fx-ui-param-control name))
+                (def ui-lego-num-s (section name title width decimals unit accent)
+                  (audio-fx-ui-param-control name))
+                (def ui-lego-text-row-3 (a b c) (h-stack a b c))
+                (def ui-lego-text-row-4 (a b c d) (h-stack a b c d))
+                "#,
+            )
+            .expect("load custom audio FX UI test helpers");
+
+        let custom_ui_source = build_custom_audio_fx_ui_source_with_overlay(Some((
+            "folder-delay".to_string(),
+            "effects/folder-delay/ui.lisp".to_string(),
+            r#"
+            (def helper-label (text) (label text :font-size 10 :color :gray :bg :transparent))
+            (defeffect-ui
+              (v-stack :width :fill
+                (helper-label "Folder Delay")
+                (params "time" "feedback")))
+            "#
+            .to_string(),
+        )));
+        runtime
+            .eval_str(&custom_ui_source)
+            .expect("load custom audio FX UI");
+
+        let rendered = runtime
+            .eval_str(
+                r#"
+                (custom-audio-fx-ui
+                  (dict :name "folder-delay"
+                        :params (list
+                          (dict :name "time" :value 250 :min 1 :max 2000)
+                          (dict :name "feedback" :value 0.35 :min 0 :max 0.95))))
+                "#,
+            )
+            .expect("render custom audio FX UI");
+        assert!(!matches!(rendered, Some(Value::Bool(false)) | None));
+
+        let all_params = [
+            "base",
+            "color",
+            "cutoff",
+            "damping",
+            "decay",
+            "delay_max",
+            "density",
+            "depth",
+            "diffusion",
+            "drive",
+            "fbk",
+            "feedback",
+            "freeze",
+            "freq",
+            "gain",
+            "knee",
+            "lforate",
+            "m1",
+            "m2",
+            "manual",
+            "max1",
+            "max2",
+            "mix",
+            "mod_amt",
+            "mod_freq",
+            "motion",
+            "phase_amt",
+            "pre",
+            "pre_dly",
+            "ratio",
+            "rate",
+            "res",
+            "shimmer",
+            "size",
+            "smear",
+            "spread",
+            "threshold",
+            "tone",
+            "wet",
+            "width",
+        ];
+        let params = all_params
+            .iter()
+            .map(|name| format!(r#"(dict :name "{name}" :value 0.5 :min 0 :max 1)"#))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for fx_name in [
+            "MODUM_DELAY",
+            "dimension-d-chorus",
+            "dualdelaymod",
+            "jet-flanger-stereo",
+            "lexilush",
+            "lowdcmp",
+            "lushlexiconreverb",
+            "mod_delay",
+            "roland-flanger-stereo",
+            "sidechain",
+            "spectral-bin-freeze",
+            "spectral-cloud-gate",
+            "spectral-short-ir",
+            "spectral-vocoder-shift",
+            "stereo-tremolo",
+        ] {
+            let expr =
+                format!(r#"(custom-audio-fx-ui (dict :name "{fx_name}" :params (list {params})))"#);
+            let rendered = runtime.eval_str(&expr).expect(fx_name);
+            assert!(
+                !matches!(rendered, Some(Value::Bool(false)) | None),
+                "{fx_name} did not dispatch to a custom audio FX UI"
+            );
+        }
+    }
 }
 
 pub(crate) fn auto_follow_enabled(override_until: &Arc<Mutex<Option<Instant>>>) -> bool {
@@ -7286,6 +8740,7 @@ pub(crate) fn poll_pending_compile_status(
         );
         rt.run_reactive_cycle();
         editor.refresh_runtime_side_effects();
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
         fx_epoch.fetch_add(1, Ordering::Relaxed);
         editor.handle_host_event(HostEvent::Status(status));
     }

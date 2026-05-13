@@ -3268,16 +3268,22 @@ impl Editor {
                                 previous,
                                 (precise_col, precise_row),
                             );
-                        } else if let Some(output) = self.dispatch_gesture_widget_mouse_event(
-                            gesture,
-                            mouse.kind,
-                            content_col,
-                            content_row,
-                            precise_col,
-                            precise_row,
-                            mouse.modifiers,
-                        ) {
-                            let _ = self.apply_widget_output(Some(output));
+                        } else {
+                            let gen_before = crate::widget_render::widget_state_generation();
+                            if let Some(output) = self.dispatch_gesture_widget_mouse_event(
+                                gesture,
+                                mouse.kind,
+                                content_col,
+                                content_row,
+                                precise_col,
+                                precise_row,
+                                mouse.modifiers,
+                            ) {
+                                let _ = self.apply_widget_output(Some(output));
+                            } else if crate::widget_render::widget_state_generation() != gen_before
+                            {
+                                self.mark_needs_redraw();
+                            }
                         }
                     } else {
                         self.try_handle_widget_drag_segment(

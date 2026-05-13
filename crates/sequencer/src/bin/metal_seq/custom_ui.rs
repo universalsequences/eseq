@@ -171,6 +171,45 @@ fn transform_midi_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     }
 }
 
+fn transform_audio_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
+    use eseqlisp::parser::Expression;
+    match expr {
+        Expression::List(items) if !items.is_empty() => {
+            if let Expression::Symbol(head) = &items[0] {
+                if matches!(head.as_str(), "effect-param" | "fx-param" | "param") {
+                    if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
+                        return format!(
+                            "(audio-fx-ui-param-control {})",
+                            lisp_string_literal(&name)
+                        );
+                    }
+                }
+                if head == "params" {
+                    let mut controls = Vec::new();
+                    for item in items.iter().skip(1) {
+                        if matches!(item, Expression::Keyword(_)) {
+                            continue;
+                        }
+                        if let Some(name) = custom_ui_param_name(item) {
+                            controls.push(format!(
+                                "(audio-fx-ui-param-control {})",
+                                lisp_string_literal(&name)
+                            ));
+                        }
+                    }
+                    return format!("(v-stack :gap 0.25 {})", controls.join(" "));
+                }
+            }
+            format!(
+                "({})",
+                transform_layout_items_without_unbounded_width(items, transform_audio_fx_ui_expr)
+                    .join(" ")
+            )
+        }
+        _ => expr_to_lisp(expr),
+    }
+}
+
 fn safe_lisp_ident(value: &str) -> String {
     value
         .chars()
@@ -229,7 +268,6 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     }
 
     for (instrument_name, ui_path, src) in ui_sources {
-        eprintln!("[custom-ui] loading instrument ui name={instrument_name:?} path={ui_path}");
         let tokens = match Parser::new(src).parse() {
             Ok(tokens) => tokens,
             Err(err) => {
@@ -262,15 +300,15 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             );
             continue;
         };
+        let normalized_instrument_name = instrument_name.trim_end_matches('/');
         let fn_name = format!("custom-synth-ui-{}", safe_lisp_ident(&instrument_name));
         for helper in helpers {
             functions.push_str(&format!("\n{helper}\n"));
         }
         functions.push_str(&format!(
-            "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) {body}))\n",
-            lisp_string_literal(&instrument_name)
+            "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) (set! custom-ui-current-kind \"instrument\") (set! custom-ui-selected-section (custom-ui-selected-section-for-current-scope)) {body}))\n",
+            lisp_string_literal(normalized_instrument_name)
         ));
-        let normalized_instrument_name = instrument_name.trim_end_matches('/');
         let name_match = if normalized_instrument_name == instrument_name {
             format!(
                 "(= (get inst :name) {})",
@@ -382,6 +420,102 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
     format!("{functions}\n(def custom-midi-fx-ui (fx) {dispatch})\n")
 }
 
+pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
+    overlay: Option<(String, String, String)>,
+) -> String {
+    use eseqlisp::parser::{ASTParser, Expression, Parser};
+
+    fn collect(dir: &Path, root: &Path, out: &mut Vec<(String, String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if path.join("dsp.lisp").exists() {
+                    let ui_path = path.join("ui.lisp");
+                    if ui_path.exists() {
+                        if let (Ok(rel), Ok(src)) =
+                            (path.strip_prefix(root), std::fs::read_to_string(&ui_path))
+                        {
+                            let fx_name = rel.to_string_lossy().replace('\\', "/");
+                            out.push((fx_name, ui_path.display().to_string(), src));
+                        }
+                    }
+                }
+                collect(&path, root, out);
+            }
+        }
+    }
+
+    let root = Path::new("effects");
+    let mut ui_sources = Vec::new();
+    collect(root, root, &mut ui_sources);
+
+    if let Some((fx_name, ui_path, src)) = overlay {
+        if let Some(existing) = ui_sources.iter_mut().find(|(name, _, _)| name == &fx_name) {
+            *existing = (fx_name, ui_path, src);
+        } else {
+            ui_sources.push((fx_name, ui_path, src));
+        }
+    }
+
+    let mut functions = String::new();
+    let mut dispatch = "false".to_string();
+    for (fx_name, ui_path, src) in ui_sources {
+        let tokens = match Parser::new(src).parse() {
+            Ok(tokens) => tokens,
+            Err(err) => {
+                eprintln!("custom audio effect UI parse error in {ui_path}: {err:?}");
+                continue;
+            }
+        };
+        let exprs = match ASTParser::new(tokens).parse() {
+            Ok(exprs) => exprs,
+            Err(err) => {
+                eprintln!("custom audio effect UI AST error in {ui_path}: {err:?}");
+                continue;
+            }
+        };
+        let mut body = None;
+        let mut helpers = Vec::new();
+        for expr in &exprs {
+            if let Expression::List(items) = expr {
+                if matches!(items.first(), Some(Expression::Symbol(head)) if head == "defeffect-ui")
+                {
+                    body = items.get(1).map(transform_audio_fx_ui_expr);
+                    continue;
+                }
+            }
+            helpers.push(transform_audio_fx_ui_expr(expr));
+        }
+        let Some(body) = body else {
+            eprintln!(
+                "[custom-ui] audio effect ui skipped name={fx_name:?} path={ui_path}: missing defeffect-ui"
+            );
+            continue;
+        };
+        let fn_name = format!("custom-audio-fx-ui-{}", safe_lisp_ident(&fx_name));
+        for helper in helpers {
+            functions.push_str(&format!("\n{helper}\n"));
+        }
+        functions.push_str(&format!(
+            "\n(def {fn_name} (fx) (do (set! audio-fx-ui-current-fx fx) (set! audio-fx-ui-current-name {}) (set! custom-ui-current-kind \"audio-fx\") (set! custom-ui-selected-section (custom-ui-selected-section-for-current-scope)) {body}))\n",
+            lisp_string_literal(&fx_name)
+        ));
+        dispatch = format!(
+            "(if (= (get fx :name) {}) ({fn_name} fx) {dispatch})",
+            lisp_string_literal(&fx_name)
+        );
+    }
+
+    format!("{functions}\n(def custom-audio-fx-ui (fx) {dispatch})\n")
+}
+
 pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) {
     let custom_ui_source =
         build_custom_instrument_ui_source_with_overlay(active_custom_ui_buffer_overlay(editor));
@@ -396,6 +530,14 @@ pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) {
     if !custom_midi_fx_source.is_empty() {
         if let Err(err) = editor.runtime_mut().eval_str(&custom_midi_fx_source) {
             eprintln!("custom MIDI FX UI load error: {err:?}");
+        }
+    }
+    let custom_audio_fx_source = build_custom_audio_fx_ui_source_with_overlay(
+        active_custom_audio_fx_ui_buffer_overlay(editor),
+    );
+    if !custom_audio_fx_source.is_empty() {
+        if let Err(err) = editor.runtime_mut().eval_str(&custom_audio_fx_source) {
+            eprintln!("custom audio effect UI load error: {err:?}");
         }
     }
 }
@@ -427,6 +569,22 @@ fn active_custom_midi_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, S
         return None;
     }
     let root = Path::new("midi-fx");
+    let rel = folder.strip_prefix(root).ok()?;
+    let fx_name = rel.to_string_lossy().replace('\\', "/");
+    Some((fx_name, path.display().to_string(), buffer.text()))
+}
+
+fn active_custom_audio_fx_ui_buffer_overlay(editor: &Editor) -> Option<(String, String, String)> {
+    let buffer = editor.active_buffer();
+    let path = buffer.path.as_ref()?;
+    if path.file_name().and_then(|name| name.to_str()) != Some("ui.lisp") {
+        return None;
+    }
+    let folder = path.parent()?;
+    if !folder.join("dsp.lisp").exists() {
+        return None;
+    }
+    let root = Path::new("effects");
     let rel = folder.strip_prefix(root).ok()?;
     let fx_name = rel.to_string_lossy().replace('\\', "/");
     Some((fx_name, path.display().to_string(), buffer.text()))

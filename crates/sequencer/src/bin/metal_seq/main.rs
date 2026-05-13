@@ -4980,8 +4980,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         continue;
                                     }
 
-                                    let final_path = format!("effects/{effect_name}.lisp");
-                                    if let Err(e) = std::fs::write(&final_path, &source) {
+                                    if let Err(e) =
+                                        sequencer::lisp_effect::save_effect(&effect_name, &source)
+                                    {
                                         let rt = editor.runtime_mut();
                                         rt.set_reactive(
                                             "SEQ",
@@ -5064,9 +5065,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Value::Number(n) => Some(*n as usize),
                                             _ => None,
                                         });
-                                    let file_path = std::path::PathBuf::from(format!(
-                                        "effects/{effect_name}.lisp"
-                                    ));
+                                    let file_path =
+                                        sequencer::lisp_effect::effect_source_path(&effect_name);
                                     if !file_path.exists() {
                                         editor.handle_host_event(HostEvent::Error(format!(
                                             "Effect file not found: {}",
@@ -5143,8 +5143,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
 
-                            let final_path = format!("effects/{effect_name}.lisp");
-                            if let Err(e) = std::fs::write(&final_path, &source) {
+                            if let Err(e) =
+                                sequencer::lisp_effect::save_effect(&effect_name, &source)
+                            {
                                 let rt = editor.runtime_mut();
                                 rt.set_reactive(
                                     "SEQ",

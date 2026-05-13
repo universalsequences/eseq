@@ -471,6 +471,7 @@ impl Editor {
         if let Some(node) = start_node.as_ref()
             && widget_render::widget_captures_drag(&node.widget_type)
         {
+            let gen_before = widget_render::widget_state_generation();
             let (drag_col, drag_row) = if widget_render::widget_unclamped_drag(&node.widget_type) {
                 // Pass raw mouse position — widget handles value clamping itself
                 (end.0, end.1)
@@ -502,6 +503,9 @@ impl Editor {
                 mouse.modifiers,
             );
             let _ = self.apply_widget_output(output);
+            if widget_render::widget_state_generation() != gen_before {
+                self.mark_needs_redraw();
+            }
             return;
         }
 

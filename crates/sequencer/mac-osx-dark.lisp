@@ -63,19 +63,19 @@
       ;; Tile borders
       :border-active   '(0.42 0.42 0.44)     ; Lighter gray for active tile
       :border-inactive '(0.07 0.07 0.075)    ; Match buffer background
-      :tree-row-alt-bg '(0.17 0.18 0.19)   ; Subtle tree zebra stripe
+      :tree-row-alt-bg '(0.14 0.15 0.16)   ; Subtle tree zebra stripe
       
       ;; Sequencer panels
       :fx-panel-bg       '(0.17 0.17 0.18)
       :fx-inner-panel-bg '(0.15 0.15 0.155)
-      :fx-panel-selected-bg '(0.21 0.21 0.21)
+      :fx-panel-selected-bg '(0.17 0.17 0.17)
       :fx-panel-header-bg '(0.21 0.21 0.22)
       :fx-panel-header-selected-bg '(0.32 0.32 0.63)
       :fx-panel-border   '(0.26 0.26 0.27)
       :instrument-panel-bg '(0.17 0.17 0.18)
       :instrument-control-bg '(0.04 0.04 0.045)
       :instrument-group-bg '(0.15 0.15 0.155)
-      :instrument-group-selected-bg '(0.19 0.195 0.19)
+      :instrument-group-selected-bg '(0.11 0.115 0.11)
       :mixer-strip-bg    '(0.17 0.17 0.18)
       :mixer-strip-selected-bg '(0.23 0.23 0.26)
       :mixer-strip-muted-bg '(0.095 0.095 0.10)

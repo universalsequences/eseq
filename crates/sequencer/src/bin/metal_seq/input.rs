@@ -63,11 +63,15 @@ pub(crate) fn focused_widget_matches(
 }
 
 pub(crate) fn focused_widget_captures_space(editor: &Editor) -> bool {
-    focused_widget_matches(editor, |widget_type| widget_type == "text-input")
+    focused_widget_matches(editor, |widget_type| {
+        matches!(widget_type, "text-input" | "textbox")
+    })
 }
 
 pub(crate) fn focused_widget_captures_text_input(editor: &Editor) -> bool {
-    focused_widget_matches(editor, |widget_type| widget_type == "text-input")
+    focused_widget_matches(editor, |widget_type| {
+        matches!(widget_type, "text-input" | "textbox")
+    })
 }
 
 pub(crate) fn held_note_for_key(

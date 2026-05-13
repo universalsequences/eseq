@@ -11,16 +11,17 @@
 (def digitone-mode-dropdown (section)
   (let ((p (inst-param synth-ui-current-inst "filt_mode")))
     (if p
-      (subtree :key (str "digitone-mode-dropdown-" synth-ui-current-name)
-        (v-stack :width 5.0 :height 1.12 :gap 0.08 :align :start
-          (label "mode" :font-size 8.2 :width 5.0 :color :dim :bg :transparent)
-          (dropdown :value (digitone-filter-mode-label (get p :value))
-            :options '("lowpass" "highpass" "bandpass")
-            :width 5.6 :height 0.78 :font-size 8.0
-            :on-change (lambda (v)
-              (do
-                (ui-select-section section)
-                (fx-set-instrument-value p (digitone-filter-mode-value v)))))))
+      (let ((scope (custom-ui-current-scope)))
+        (subtree :key (str "digitone-mode-dropdown-" synth-ui-current-name)
+          (v-stack :width 5.0 :height 1.12 :gap 0.08 :align :start
+            (label "mode" :font-size 8.2 :width 5.0 :color :dim :bg :transparent)
+            (dropdown :value (digitone-filter-mode-label (get p :value))
+              :options '("lowpass" "highpass" "bandpass")
+              :width 5.6 :height 0.78 :font-size 8.0
+              :on-change (lambda (v)
+                (do
+                  (custom-ui-select-section-in-scope scope section)
+                  (custom-ui-set-param-in-scope scope p (digitone-filter-mode-value v))))))))
       (label "missing: filt_mode" :font-size 9 :color :red :bg :transparent))))
 
 (def digitone-op-c-block ()

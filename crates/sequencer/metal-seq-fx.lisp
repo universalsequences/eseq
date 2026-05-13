@@ -13,22 +13,57 @@
 (def synth-ui-current-name "")
 (def midi-fx-ui-current-fx false)
 (def midi-fx-ui-current-name "")
+(def audio-fx-ui-current-fx false)
+(def audio-fx-ui-current-name "")
+(def custom-ui-current-kind "instrument")
 
 ;; Matches a standard built-in FX panel with four parameter rows.
 (def fx-fixed-panel-height 9.95)
 (def fx-panel-body-padding 0.35)
 
 (def fx-panel-body (debug-name children)
-  (box :debug-name debug-name
-       :padding fx-panel-body-padding
-       :v-align :start
-       :h-align :start
+  (box
     (v-stack :gap 0
       (box :width 1 :height 0.16)
-      children)))
+      children)
+    :debug-name debug-name
+    :on-click (lambda (info) (fx-clear-selected-effect))
+    :padding fx-panel-body-padding
+    :v-align :start
+    :h-align :start))
 
 (def fx-panel-header-leading-spacer ()
   (box :width 0.4 :height 0))
+
+(def fx-panel-header (title params fx)
+  (box :width :fill :height 0.7 :padding 0 :v-align :center :h-align :start
+    :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
+    :on-click (lambda (info)
+      (if (get fx :midi-fx)
+        (fx-select-midi-effect (get fx :slot-idx))
+        (if (get fx :bus-fx)
+          (fx-select-bus-effect (get fx :slot-idx))
+          (fx-select-effect (get fx :slot-idx)))))
+    (h-stack :gap 0.5 :align :center
+      (fx-panel-header-leading-spacer)
+      (fx-enabled-toggle (enabled-param params) fx
+        (if (get fx :midi-fx)
+          (str "midi-fx-enabled-" (get fx :slot-idx))
+          (if (get fx :bus-fx)
+            (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
+            (str "audio-fx-enabled-" (get fx :slot-idx)))))
+      (label title :font-size 11 :color :white :bg :transparent)
+      (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
+        (box :bg :dark-gray :width 4 :height 1.0 :align :center
+          :on-click (lambda (info)
+            (do
+              (fx-clear-selected-effect)
+              (host-command "enter-edit-effect"
+                (if (get fx :bus-fx)
+                  (dict :name title :slot (get fx :slot-idx) :bus (get fx :bus-idx))
+                  (dict :name title :slot (get fx :slot-idx))))))
+          (label "edit" :font-size 8 :color :dim :bg :transparent))
+        (box)))))
 
 (def fx-clear-selected-effect ()
   (do
@@ -550,78 +585,42 @@
 
 (def fx-panel (title params fx)
   (let ((selected (fx-panel-selected? fx)))
-  (box :background "fx-panel-bg"
-       :color :fx-panel-bg
-       :header :fx-panel-header-bg
-       :selected-header :fx-panel-header-selected-bg
-       :height fx-fixed-panel-height
-       :debug-name (if (get fx :midi-fx)
-         (str "midi-fx-panel-root-" (get fx :slot-idx) "-" (get fx :name))
-         (if (get fx :bus-fx)
-           (str "bus-fx-panel-root-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" title)
-           (str "audio-fx-panel-root-" (get fx :slot-idx) "-" title)))
-       :selected (if selected 1 0)
-       :padding 0
+  (box
     (v-stack :gap 0
-      (box :height 0.7 :padding 0 :v-align :center :h-align :start
-           :debug-name (if (get fx :midi-fx) "midi-fx-panel-header" "audio-fx-panel-header")
-           :on-click |x y r|
-             (if (get fx :midi-fx)
-               (fx-select-midi-effect (get fx :slot-idx))
-               (if (get fx :bus-fx)
-                 (fx-select-bus-effect (get fx :slot-idx))
-                 (fx-select-effect (get fx :slot-idx))))
-        (h-stack :gap 0.5 :align :center
-          (fx-panel-header-leading-spacer)
-          (fx-enabled-toggle (enabled-param params) fx
-            (if (get fx :midi-fx)
-              (str "midi-fx-enabled-" (get fx :slot-idx))
-              (if (get fx :bus-fx)
-                (str "bus-fx-enabled-" (get fx :bus-idx) "-" (get fx :slot-idx))
-                (str "audio-fx-enabled-" (get fx :slot-idx)))))
-          (label title :font-size 11 :color :white :bg :transparent)
-          ;; Only show edit button for custom dgenlisp effects.
-          (if (and (not (get fx :midi-fx)) (not (get fx :builtin)))
-            (box :bg :dark-gray :width 4 :height 1.0 :align :center
-              :on-click |x y r|
-              (do
-                (fx-clear-selected-effect)
-                (host-command "enter-edit-effect"
-                  (if (get fx :bus-fx)
-                    (dict :name title :slot (get fx :slot-idx) :bus (get fx :bus-idx))
-                    (dict :name title :slot (get fx :slot-idx)))))
-              (label "edit" :font-size 8 :color :dim :bg :transparent))
-            (box))))
+      (fx-panel-header title params fx)
       (fx-panel-body (if (get fx :midi-fx) "midi-fx-panel-content" "audio-fx-panel-content")
         (if (get fx :midi-fx)
           (midi-fx-panel-body fx)
-          (let ((builtin-ui (builtin-audio-fx-ui fx)))
-            (if builtin-ui
-              builtin-ui
-              (fx-param-grid params fx)))))))))
+          (audio-fx-panel-body fx params))))
+    :background "fx-panel-bg"
+    :color :fx-panel-bg
+    :header :fx-panel-header-bg
+    :selected-header :fx-panel-header-selected-bg
+    :height fx-fixed-panel-height
+    :debug-name (if (get fx :midi-fx)
+      (str "midi-fx-panel-root-" (get fx :slot-idx) "-" (get fx :name))
+      (if (get fx :bus-fx)
+        (str "bus-fx-panel-root-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" title)
+        (str "audio-fx-panel-root-" (get fx :slot-idx) "-" title)))
+    :selected (if selected 1 0)
+    :padding 0)))
 
 (def midi-fx-panel (title params fx)
   (let ((selected (= selected-midi-fx-slot (get fx :slot-idx))))
-  (box :background "fx-panel-bg"
-       :color :fx-panel-bg
-       :header :fx-panel-header-bg
-       :selected-header :fx-panel-header-selected-bg
-       :height fx-fixed-panel-height
-       :debug-name (str "midi-fx-panel-bg-" (get fx :slot-idx) "-" (get fx :name))
-       :selected (if selected 1 0)
-       :padding 0
+  (box
     (v-stack :gap 0
-      (box :height 0.7 :padding 0 :v-align :center :h-align :start
-           :debug-name "midi-fx-panel-header"
-           :on-click |x y r| (fx-select-midi-effect (get fx :slot-idx))
-        (h-stack :gap 0.5 :align :center
-          (fx-panel-header-leading-spacer)
-          (fx-enabled-toggle (enabled-param params) fx
-            (str "midi-fx-enabled-" (get fx :slot-idx)))
-          (label title :font-size 11 :color :white :bg :transparent)))
+      (fx-panel-header title params fx)
       (fx-panel-body "midi-fx-panel-content"
         (subtree :key (str "midi-fx-panel-body-" (get fx :slot-idx) "-" (get fx :name))
-          (midi-fx-panel-body fx)))))))
+          (midi-fx-panel-body fx))))
+    :background "fx-panel-bg"
+    :color :fx-panel-bg
+    :header :fx-panel-header-bg
+    :selected-header :fx-panel-header-selected-bg
+    :height fx-fixed-panel-height
+    :debug-name (str "midi-fx-panel-bg-" (get fx :slot-idx) "-" (get fx :name))
+    :selected (if selected 1 0)
+    :padding 0)))
 
 (def instrument-tab-button (text idx width)
   (box :width width :height 1.2 :align :center
@@ -644,7 +643,71 @@
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 (def ui-param-control (name)
-  (inst-param-row synth-ui-current-inst name (str "custom-ui-" synth-ui-current-name "-" name)))
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p
+      (fx-param-row p false (str "custom-ui-" synth-ui-current-name "-" name))
+      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
+
+(def custom-ui-scope-name ()
+  (if (= custom-ui-current-kind "audio-fx")
+    (if (get audio-fx-ui-current-fx :bus-fx)
+      (str audio-fx-ui-current-name "-bus-" (get audio-fx-ui-current-fx :bus-idx)
+           "-slot-" (get audio-fx-ui-current-fx :slot-idx))
+      (str audio-fx-ui-current-name "-slot-" (get audio-fx-ui-current-fx :slot-idx)))
+    synth-ui-current-name))
+
+(def custom-ui-current-scope ()
+  (dict
+    :kind custom-ui-current-kind
+    :name (custom-ui-scope-name)
+    :audio-fx audio-fx-ui-current-fx
+    :inst synth-ui-current-inst))
+
+(def custom-ui-param-in-scope (scope name)
+  (if (= (get scope :kind) "audio-fx")
+    (audio-fx-ui-param (get scope :audio-fx) name)
+    (inst-param (get scope :inst) name)))
+
+(def custom-ui-base-note-param-in-scope (scope)
+  (if (= (get scope :kind) "audio-fx")
+    false
+    (inst-base-note-param (get scope :inst))))
+
+(def custom-ui-set-param-in-scope (scope p value)
+  (if (= (get scope :kind) "audio-fx")
+    (fx-set-effect-value (get scope :audio-fx) p value)
+    (fx-set-instrument-value p value)))
+
+(def custom-ui-set-param-by-name-in-scope (scope name value)
+  (let ((p (custom-ui-param-in-scope scope name)))
+    (if p (custom-ui-set-param-in-scope scope p value) false)))
+
+(def custom-ui-param-change-callback (p)
+  (let ((scope (custom-ui-current-scope)))
+    (lambda (v) (custom-ui-set-param-in-scope scope p v))))
+
+(def custom-ui-param-change-callback-s (section p)
+  (let ((scope (custom-ui-current-scope)))
+    (lambda (v)
+      (do
+        (custom-ui-select-section-in-scope scope section)
+        (custom-ui-set-param-in-scope scope p v)))))
+
+(def custom-ui-current-param (name)
+  (if (= custom-ui-current-kind "audio-fx")
+    (audio-fx-ui-param audio-fx-ui-current-fx name)
+    (inst-param synth-ui-current-inst name)))
+
+(def custom-ui-current-base-note-param ()
+  (if (= custom-ui-current-kind "audio-fx")
+    false
+    (inst-base-note-param synth-ui-current-inst)))
+
+(def custom-ui-set-param (p value)
+  (custom-ui-set-param-in-scope (custom-ui-current-scope) p value))
+
+(def custom-ui-set-param-by-name (name value)
+  (custom-ui-set-param-by-name-in-scope (custom-ui-current-scope) name value))
 
 (def base-note ()
   (let ((p (inst-base-note-param synth-ui-current-inst)))
@@ -661,10 +724,37 @@
           :on-change (lambda (v) (fx-set-instrument-value p v))))
       (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
 
-(defstate custom-ui-selected-section 0)
+(defstate custom-ui-selected-sections '())
+(def custom-ui-selected-section 0)
+
+(def custom-ui-selected-section-for-scope (scope-name)
+  (let ((entry
+          (nth
+            (filter |item| (= (get item :scope) scope-name)
+              custom-ui-selected-sections)
+            0)))
+    (if entry (get entry :section) 0)))
+
+(def custom-ui-selected-section-for-current-scope ()
+  (custom-ui-selected-section-for-scope (custom-ui-scope-name)))
+
+(def custom-ui-set-selected-section-for-scope (scope-name section)
+  (set! custom-ui-selected-sections
+    (cons
+      (dict :scope scope-name :section section)
+      (filter |item| (not (= (get item :scope) scope-name))
+        custom-ui-selected-sections))))
+
+(def custom-ui-select-section-in-scope (scope section)
+  (custom-ui-set-selected-section-for-scope (get scope :name) section))
 
 (def ui-select-section (section)
-  (set! custom-ui-selected-section section))
+  (custom-ui-set-selected-section-for-scope (custom-ui-scope-name) section))
+
+(def ui-section-select-callback (section)
+  (let ((scope-name (custom-ui-scope-name)))
+    (lambda (info)
+      (custom-ui-set-selected-section-for-scope scope-name section))))
 
 (def ui-panel-bg (section)
   (if (= section 0)
@@ -693,15 +783,15 @@
   (box :width :fill :height 3.4
        :background-color (ui-panel-bg section)
        :border-width 1 :corner-radius 12 :padding 0.15
-       :on-click (lambda (info) (ui-select-section section))
+       :on-click (ui-section-select-callback section)
     (v-stack :width :fill :gap 0.2 :align :start
       (ui-panel-header title)
       body)))
 
 (def ui-param-knob (name title)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-knob-" synth-ui-current-name "-" name)
+      (subtree :key (str "custom-ui-knob-" (custom-ui-scope-name) "-" name)
         (knob-number :label title
           :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals 2
@@ -709,16 +799,16 @@
           :text-color :dim :label-color :dim
           :width 4.4 :height 2.4
           :value-align :center
-          :on-change (lambda (v) (fx-set-instrument-value p v))))
+          :on-change (custom-ui-param-change-callback p)))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 ;; Compact knob: ~1.7 cell tall, value nestled in the lower-right of the knob
 ;; arc (default value-align) so the knob itself stays large. For instruments
 ;; that need 3-4 rows of params instead of 2.
 (def ui-param-knob-c (name title)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-knob-c-" synth-ui-current-name "-" name)
+      (subtree :key (str "custom-ui-knob-c-" (custom-ui-scope-name) "-" name)
         (knob-number :label title
           :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals 2
@@ -726,13 +816,13 @@
           :text-color :dim :label-color :dim
           :width 3.8 :height 1.8
           :label-height 0.5 :knob-size 1.25
-          :on-change (lambda (v) (fx-set-instrument-value p v))))
+          :on-change (custom-ui-param-change-callback p)))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def base-note-c ()
-  (let ((p (inst-base-note-param synth-ui-current-inst)))
+  (let ((p (custom-ui-current-base-note-param)))
     (if p
-      (subtree :key (str "custom-ui-base-note-c-" synth-ui-current-name)
+      (subtree :key (str "custom-ui-base-note-c-" (custom-ui-scope-name))
         (knob-number :label "note"
           :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals 0
@@ -741,7 +831,7 @@
           :text-color :dim :label-color :dim
           :width 3.8 :height 1.8
           :label-height 0.5 :knob-size 1.25
-          :on-change (lambda (v) (fx-set-instrument-value p v))))
+          :on-change (custom-ui-param-change-callback p)))
       (label "missing: base_note" :font-size 9 :color :red :bg :transparent))))
 
 (def ui-panel-header-c (title)
@@ -754,22 +844,22 @@
   (box :width :fill :height 2.0
        :background-color (ui-panel-bg section)
        :border-width 1 :corner-radius 10 :padding 0.08
-       :on-click (lambda (info) (ui-select-section section))
+       :on-click (ui-section-select-callback section)
     (h-stack :width :fill :gap 0.1 :align :center
       (ui-panel-header-c title)
       body)))
 
 (def ui-param-value (name fallback)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p (get p :value) fallback)))
 
 (def ui-param-bound-value (name fallback)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p (fx-param-value p) fallback)))
 
 (def ui-set-param (name value)
-  (let ((p (inst-param synth-ui-current-inst name)))
-    (if p (fx-set-instrument-value p value) false)))
+  (let ((p (custom-ui-current-param name)))
+    (if p (custom-ui-set-param p value) false)))
 
 (def ui-accent-blue () (rgba 0.00 0.48 0.95 1.0))
 (def ui-accent-cyan () (rgba 0.05 0.78 0.90 1.0))
@@ -805,7 +895,7 @@
        :corner-radius 7
        :border-width 1
        :padding 0.24
-       :on-click (lambda (info) (ui-select-section section))
+       :on-click (ui-section-select-callback section)
     (v-stack :width :fill :height :fill :gap 0.18
       (ui-lego-title title accent)
       (box :width :fill :flex 1 :padding 0.12 body))))
@@ -831,7 +921,7 @@
        :padding 0.16
        :debug-name "ui-lego-plain-surface"
        :v-align :center
-       :on-click (lambda (info) (ui-select-section section))
+       :on-click (ui-section-select-callback section)
     (box :width :fill :padding 0.12
       (h-stack :width :fill :gap 0 :align :center
         (box :width 0.55 :height 0.1)
@@ -885,9 +975,9 @@
   (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap) a))
 
 (def ui-lego-knob (name title width accent decimals)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-knob-" synth-ui-current-name "-" name)
+      (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) "-" name)
         (knob-number :label title
           :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals decimals
@@ -895,13 +985,13 @@
           :text-color accent :label-color :dim
           :width width :height 2.62
           :value-align :center
-          :on-change (lambda (v) (fx-set-instrument-value p v))))
+          :on-change (custom-ui-param-change-callback p)))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-knob-s (section name title width accent decimals)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-knob-" synth-ui-current-name "-" name)
+      (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) "-" name)
         (knob-number :label title
           :value (fx-param-value p)
           :min (get p :min) :max (get p :max) :decimals decimals
@@ -909,16 +999,13 @@
           :text-color accent :label-color :dim
           :width width :height 2.62
           :value-align :center
-          :on-change (lambda (v)
-            (do
-              (ui-select-section section)
-              (fx-set-instrument-value p v)))))
+          :on-change (custom-ui-param-change-callback-s section p)))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-num (name title width decimals unit accent)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-num-" synth-ui-current-name "-" name)
+      (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) "-" name)
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
           (label title :font-size 8.2 :width width :color :dim :bg :transparent)
           (number-picker :value (fx-param-value p)
@@ -928,13 +1015,13 @@
             :text-color accent :edit-color :yellow
             :text-align :left
             :width width :height 0.68
-            :on-change (lambda (v) (fx-set-instrument-value p v)))))
+            :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-num-s (section name title width decimals unit accent)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-num-" synth-ui-current-name "-" name)
+      (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) "-" name)
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
           (label title :font-size 8.2 :width width :color :dim :bg :transparent)
           (number-picker :value (fx-param-value p)
@@ -944,16 +1031,13 @@
             :text-color accent :edit-color :yellow
             :text-align :left
             :width width :height 0.68
-            :on-change (lambda (v)
-              (do
-                (ui-select-section section)
-                (fx-set-instrument-value p v))))))
+            :on-change (custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-row (name title decimals unit accent)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-row-" synth-ui-current-name "-" name)
+      (subtree :key (str "custom-ui-lego-row-" (custom-ui-scope-name) "-" name)
         (h-stack :width :fill :height 0.86 :gap 0.35 :align :baseline
           (label title :font-size 8.8 :width 6.2 :color :dim :bg :transparent)
           (number-picker :value (fx-param-value p)
@@ -963,13 +1047,13 @@
             :text-align :left
             :text-color accent :edit-color :yellow
             :width 6.0 :height 0.78
-            :on-change (lambda (v) (fx-set-instrument-value p v)))))
+            :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-base-note (width accent)
-  (let ((p (inst-base-note-param synth-ui-current-inst)))
+  (let ((p (custom-ui-current-base-note-param)))
     (if p
-      (subtree :key (str "custom-ui-lego-base-note-" synth-ui-current-name)
+      (subtree :key (str "custom-ui-lego-base-note-" (custom-ui-scope-name))
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
           (label "note" :font-size 8.2 :width width :color :dim :bg :transparent)
           (number-picker :value (fx-param-value p)
@@ -979,13 +1063,13 @@
             :text-color accent :edit-color :yellow
             :text-align :left
             :width width :height 0.68
-            :on-change (lambda (v) (fx-set-instrument-value p v)))))
+            :on-change (custom-ui-param-change-callback p))))
       (label "missing: base_note" :font-size 9 :color :red :bg :transparent))))
 
 (def ui-adsr-number (name title decimals unit)
-  (let ((p (inst-param synth-ui-current-inst name)))
+  (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-adsr-number-" synth-ui-current-name "-" name)
+      (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
         (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
           (label title :font-size 10 :color :dim :bg :transparent)
           (number-picker :value (fx-param-value p)
@@ -995,14 +1079,14 @@
             :text-align :center
             :text-color :widget_focus_bg :edit-color :yellow
             :width 5.0 :height 0.95
-            :on-change (lambda (v) (fx-set-instrument-value p v)))))
+            :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 (def ui-adsr-number-s (section name title decimals unit)
   (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
+    (let ((p (custom-ui-current-param name)))
       (if p
-        (subtree :key (str "custom-ui-adsr-number-" synth-ui-current-name "-" name)
+        (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
           (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
             (label title :font-size 10 :color :dim :bg :transparent)
             (number-picker :value (fx-param-value p)
@@ -1012,10 +1096,7 @@
               :text-align :center
               :text-color :widget_focus_bg :edit-color :yellow
               :width 5.0 :height 0.95
-              :on-change (lambda (v)
-                (do
-                  (ui-select-section section)
-                  (fx-set-instrument-value p v))))))
+              :on-change (custom-ui-param-change-callback-s section p))))
         (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
     (box :width 5.2 :height 1.75
       (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
@@ -1028,10 +1109,11 @@
           :width 5.0 :height 0.95)))))
 
 (def ui-lego-adsr-s (section title attack decay sustain release)
+  (let ((scope (custom-ui-current-scope)))
   (box :width (ui-lego-col-w) :height (ui-lego-full-h)
        :background-color :instrument-control-bg
        :border-width 1 :corner-radius 12 :padding 0.15
-       :on-click (lambda (info) (ui-select-section section))
+       :on-click (ui-section-select-callback section)
     (v-stack :width :fill :height :fill :gap 0.10
       (adsr-editor
         :attack (ui-param-bound-value attack 5)
@@ -1042,11 +1124,13 @@
         :background-color :instrument-control-bg
         :on-change (lambda (env)
           (do
-            (ui-select-section section)
-            (ui-set-param attack (get env :attack))
-            (ui-set-param decay (get env :decay))
-            (ui-set-param sustain (get env :sustain))
-            (if release (ui-set-param release (get env :release)) false))))
+            (custom-ui-select-section-in-scope scope section)
+            (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
+            (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
+            (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
+            (if release
+              (custom-ui-set-param-by-name-in-scope scope release (get env :release))
+              false))))
       (box :width :fill :height 1.75 :padding 0.15
         (h-stack :width :fill :gap 0.20 :align :start
           (ui-adsr-number-s section attack "atk" 0 "ms")
@@ -1055,9 +1139,10 @@
           (ui-adsr-number-s section release "rel" 0 "ms")))
       (box :width :fill :height 0.35 :h-align :center :v-align :center
         (label title :font-size 8.5 :color :dim :bg :transparent))
-      (box :width :fill :flex 1))))
+      (box :width :fill :flex 1)))))
 
 (def ui-adsr (title attack decay sustain release)
+  (let ((scope (custom-ui-current-scope)))
   (box :width 23.1 :height :fill
        :background-color :instrument-control-bg
        :border-width 1 :corner-radius 12 :padding 0.15
@@ -1071,10 +1156,10 @@
         :background-color :instrument-control-bg
         :on-change (lambda (env)
           (do
-            (ui-set-param attack (get env :attack))
-            (ui-set-param decay (get env :decay))
-            (ui-set-param sustain (get env :sustain))
-            (ui-set-param release (get env :release)))))
+            (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
+            (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
+            (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
+            (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
       (box :width :fill :height 1.75 :padding 0.15
         (h-stack :width :fill :gap 0.20 :align :start
           (ui-adsr-number attack "atk" 0 "ms")
@@ -1083,7 +1168,7 @@
           (ui-adsr-number release "rel" 0 "ms")))
       (box :width :fill :height 0.35 :h-align :center :v-align :center
         (label title :font-size 8.5 :color :dim :bg :transparent))
-      (box :width :fill :flex 1))))
+      (box :width :fill :flex 1)))))
 
 (def ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a
                      section-b title-b attack-b decay-b sustain-b release-b)
@@ -1119,6 +1204,7 @@
 ;; tallest sibling column. ADSR-editor takes the remaining vertical space
 ;; via `:flex 1`; controls + caption hold their natural height.
 (def ui-adsr-c (title attack decay sustain release)
+  (let ((scope (custom-ui-current-scope)))
   (box :width 21.0 :height :fill
        :background-color :instrument-control-bg
        :border-width 1 :corner-radius 10 :padding 0.1
@@ -1132,10 +1218,10 @@
         :background-color :instrument-control-bg
         :on-change (lambda (env)
           (do
-            (ui-set-param attack (get env :attack))
-            (ui-set-param decay (get env :decay))
-            (ui-set-param sustain (get env :sustain))
-            (ui-set-param release (get env :release)))))
+            (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
+            (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
+            (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
+            (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
       (box :width :fill :height 1.45 :padding 0.1
         (h-stack :width :fill :gap 0.15 :align :start
           (ui-adsr-number attack "atk" 0 "ms")
@@ -1144,7 +1230,7 @@
           (ui-adsr-number release "rel" 0 "ms")))
       (box :width :fill :height 0.3 :h-align :center :v-align :center
         (label title :font-size 7.5 :color :dim :bg :transparent))
-      (box :width :fill :flex 1))))
+      (box :width :fill :flex 1)))))
 
 (def ui-adsr-switch-c (section-a title-a attack-a decay-a sustain-a release-a
                        section-b title-b attack-b decay-b sustain-b release-b)
@@ -1162,21 +1248,48 @@
         (str "custom-midi-fx-ui-" midi-fx-ui-current-name "-" name))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
+(def audio-fx-ui-param (fx name)
+  (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
+
+(def audio-fx-ui-param-control (name)
+  (let ((p (audio-fx-ui-param audio-fx-ui-current-fx name)))
+    (if p
+      (fx-param-row p audio-fx-ui-current-fx
+        (str "custom-audio-fx-ui-" audio-fx-ui-current-name "-" name))
+      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
+
 (def instrument-synth-panel-body (inst)
-  (let ((custom (custom-instrument-synth-ui inst)))
-    (if custom
-      (box :debug-name "custom-synth-wrapper" :padding 0
-           :h-align :start :v-align :stretch :flex 1 custom)
-      (box :debug-name "fallback-synth-wrapper"
-        (fx-param-grid (get inst :synth) false)))))
+  (do
+    (set! custom-ui-current-kind "instrument")
+    (let ((custom (custom-instrument-synth-ui inst)))
+      (if custom
+        (box custom
+          :debug-name "custom-synth-wrapper" :padding 0
+          :h-align :start :v-align :stretch)
+        (box (fx-param-grid (get inst :synth) false)
+          :debug-name "fallback-synth-wrapper")))))
 
 (def midi-fx-panel-body (fx)
   (let ((custom (custom-midi-fx-ui fx)))
     (if custom
-      (box :debug-name "custom-midi-fx-wrapper" :padding 0 :h-align :start :v-align :start
-        (v-stack :gap 0.25 custom))
-      (box :debug-name "fallback-midi-fx-wrapper"
-        (fx-param-grid (get fx :params) fx)))))
+      (box
+        (v-stack :gap 0.25 custom)
+        :debug-name "custom-midi-fx-wrapper" :padding 0 :h-align :start :v-align :start)
+      (box (fx-param-grid (get fx :params) fx)
+        :debug-name "fallback-midi-fx-wrapper"))))
+
+(def audio-fx-panel-body (fx params)
+  (let ((builtin-ui (builtin-audio-fx-ui fx)))
+    (if builtin-ui
+      builtin-ui
+      (do
+        (set! custom-ui-current-kind "audio-fx")
+        (let ((custom (custom-audio-fx-ui fx)))
+          (if custom
+            (box
+              (v-stack :gap 0.25 custom)
+              :debug-name "custom-audio-fx-wrapper" :padding 0 :h-align :start :v-align :start)
+            (fx-param-grid params fx)))))))
 
 (def fx-panel-selected? (fx)
   (if (get fx :midi-fx)
@@ -1374,9 +1487,7 @@
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
     (sampler-panel inst)
-    (box :debug-name "instrument-panel" :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :padding 0
-         :height fx-fixed-panel-height
-         :selected 0
+    (box
       (v-stack :debug-name "instrument-panel-vstack" :gap 0
         (box :debug-name "instrument-header-box" :height 0.75 :padding 0 :v-align :center :h-align :start
           (h-stack :debug-name "instrument-header-row" :gap 0.6 :align :center
@@ -1405,7 +1516,15 @@
             (instrument-synth-panel-body inst)
             (if (= instrument-panel-tab 1)
               (box :debug-name "mods-wrapper"  (instrument-mod-grid (get inst :mod)))
-              (box :debug-name "sources-wrapper"  (instrument-source-tabs inst)))))))))
+              (box :debug-name "sources-wrapper"  (instrument-source-tabs inst))))))
+      :debug-name "instrument-panel"
+      :background "fx-panel-bg"
+      :color :instrument-panel-bg
+      :header :fx-panel-header-bg
+      :selected-header :fx-panel-header-selected-bg
+      :padding 0
+      :height fx-fixed-panel-height
+      :selected 0)))
 
 (defwidget black
   :width 2 :height 2

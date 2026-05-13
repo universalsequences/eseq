@@ -4,6 +4,29 @@
 (defstate agent-prompt "")
 (defstate agent-finalize-name "")
 
+(defwidget agent-submit-icon
+  :width 3.2 :height 3.2
+  :paint-margin 0.3
+  :state (active)
+  :shader
+  (let ((bg-col (if (= active 1)
+                  (rgba 0.98 0.98 0.99 1.0)
+                  (rgba 0.90 0.91 0.93 1.0)))
+        (fg-col (rgba 0.07 0.075 0.085 1.0)))
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.92)
+        (material :color bg-col))
+      (sdf/fill
+        (sdf/translate 0.0 0.14
+          (sdf/rounded-rect 0.05 0.46 0.025))
+        (material :color fg-col))
+      (sdf/fill
+        (let ((clip (max (- (abs x) 0.58) (- (abs y) 0.62)))
+              (left (max (sdf/line -0.38 -0.08 0.0 -0.42) clip))
+              (right (max (sdf/line 0.38 -0.08 0.0 -0.42) clip)))
+          (- (min left right) 0.045))
+        (material :color fg-col)))))
+
 (def agent-open-instrument ()
   (do
     (if (= agent-current-conv 0)
@@ -33,6 +56,24 @@
   (if (> agent-current-conv 0)
     (str (agent/status agent-current-conv))
     "idle"))
+
+(def agent-busy? ()
+  (if (> agent-current-conv 0)
+    (let ((status (agent/status agent-current-conv)))
+      (or (= status 'streaming)
+          (= status 'compiling)
+          (= status 'auditioning)))
+    false))
+
+(def agent-current-model ()
+  (if (> agent-current-conv 0)
+    (agent/model agent-current-conv)
+    (nth (agent/models) 0)))
+
+(def agent-set-current-model (model)
+  (if (> agent-current-conv 0)
+    (agent/set-model agent-current-conv model)
+    nil))
 
 (def agent-message-card (m i)
   (let ((role (get m :role))
@@ -203,31 +244,53 @@
           :on-click |x y r| (agent-close-panel)))
       (agent-message-list)
       (agent-draft-actions)
-      (v-stack :key "agent-composer"
-               :width :fill
-               :gap 0.45
-        (text-input
-          :key "agent-prompt-input"
-          :value agent-prompt
-          :placeholder "Describe an instrument..."
-          :width :fill
-          :height 1.7
-          :on-change (lambda (v) (set! agent-prompt v)))
-        (h-stack :key "agent-composer-actions"
-                 :width :fill
-                 :gap 0.5
-                 :align :center
+      (box :key "agent-composer"
+           :width :fill
+           :padding 0.35
+           :corner-radius 14
+           :background-color :button-ghost-bg
+           :border-width 1
+           :border-color :dropdown-menu-border
+           :align :stretch
+        (v-stack :width :fill :gap 0.25
+          (textbox
+            :key "agent-prompt-input"
+            :value agent-prompt
+            :placeholder "Describe an instrument..."
+            :width :fill
+            :min-lines 2
+            :max-lines 7
+            :font-size 13
+            :bg :transparent
+            :on-change (lambda (v) (set! agent-prompt v)))
           (box :flex 1)
-          (button "Send"
-            :variant :primary
-            :width 4.8
-            :height 1.4
-            :on-click |x y r| (agent-send-current))
-          (button "Cancel"
-            :variant :danger
-            :width 5.6
-            :height 1.4
-            :on-click |x y r| (if (> agent-current-conv 0) (agent/cancel agent-current-conv) nil)))))))
+          (h-stack :key "agent-composer-actions"
+                   :width :fill
+                   :gap 0.5
+                   :align :end
+            (dropdown
+              :key "agent-model-select"
+              :value (agent-current-model)
+              :options (agent/models)
+              :width 14.0
+              :height 1.35
+              :font-size 11
+              :on-change (lambda (v) (agent-set-current-model v)))
+            (box :flex 1)
+            (if (agent-busy?)
+              (button "Cancel"
+                :variant :danger
+                :width 5.6
+                :height 1.35
+                :on-click |x y r| (if (> agent-current-conv 0) (agent/cancel agent-current-conv) nil))
+              (box :width 0.0 :height 0.0))
+            (box :key "agent-submit"
+                 :width 3.4
+                 :height 3.4
+                 :h-align :center
+                 :v-align :end
+                 :on-click |x y r| (agent-send-current)
+              (agent-submit-icon :active (if (= agent-prompt "") 0 1)))))))))
 
 (effect-buffer "*agent-artifacts*"
   (let ((agent-generation AGENT.generation))

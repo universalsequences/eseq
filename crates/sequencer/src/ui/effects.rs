@@ -1062,6 +1062,11 @@ impl App {
                 snapshot.sync_effect_slot(track, slot_idx, &desc, node_id as u32);
             }
         }
+        drop(bank);
+
+        self.push_track_effect_slot_defaults(track, slot_idx);
+        self.push_all_delay_bpm();
+        self.state.publish_scheduler_snapshot();
     }
 
     fn run_effect_editor(&mut self, slot_idx: usize, existing_name: Option<String>) {
@@ -1375,6 +1380,8 @@ impl App {
         if slot_idx < bus.custom_effect_names.len() {
             bus.custom_effect_names[slot_idx] = Some(name.to_string());
         }
+        self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+        self.push_all_delay_bpm();
         self.editor.lisp_libs.push(result.lib);
         Ok(())
     }

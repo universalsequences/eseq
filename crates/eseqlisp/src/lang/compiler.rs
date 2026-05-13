@@ -569,6 +569,7 @@ impl Compiler {
         self.derived_bindings.insert(name.to_string(), node_id);
         self.emit(OpCode::InitDerived(node_id, chunk_idx));
         self.emit_symbol_store(name);
+        self.emit(OpCode::PushNil);
         Ok(())
     }
 
@@ -587,6 +588,7 @@ impl Compiler {
         self.emit(OpCode::InitState(node_id));
         let global_idx = self.use_global(name);
         self.emit(OpCode::StoreGlobal(global_idx));
+        self.emit(OpCode::PushNil);
         Ok(())
     }
 
@@ -595,8 +597,6 @@ impl Compiler {
         target: &Expression,
         value: &Expression,
     ) -> Result<(), CompilerError> {
-        self.compile_expression(value)?;
-
         match target {
             Expression::Symbol(name) => {
                 let parts = name.splitn(2, '.').collect::<Vec<_>>();
@@ -1184,6 +1184,7 @@ impl Compiler {
         self.emit(OpCode::MakeClosure(new_chunk_idx, scope.upvalues.len()));
         if let Some(name) = name {
             self.emit_symbol_store(&name);
+            self.emit(OpCode::PushNil);
         }
 
         Ok(())
@@ -1562,6 +1563,7 @@ impl Compiler {
                 Expression::Symbol(s) if s == "def" => {
                     if let Some(Expression::Symbol(s)) = list.get(1) {
                         self.emit_symbol_store(s);
+                        self.emit(OpCode::PushNil);
                     }
                 }
                 _ => {

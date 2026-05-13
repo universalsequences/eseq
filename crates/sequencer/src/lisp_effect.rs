@@ -344,37 +344,68 @@ const EFFECTS_DIR: &str = "effects";
 const INSTRUMENTS_DIR: &str = "instruments";
 
 pub fn save_effect(name: &str, source: &str) -> io::Result<()> {
-    let dir = Path::new(EFFECTS_DIR);
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{}.lisp", name));
+    let path = effect_source_path(name);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     std::fs::write(&path, source)
 }
 
 pub fn list_saved_effects() -> Vec<String> {
-    let dir = Path::new(EFFECTS_DIR);
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .ok()
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let path = e.path();
-                    if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
-                        path.file_stem().map(|s| s.to_string_lossy().to_string())
-                    } else {
-                        None
+    fn collect(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                if path.join("dsp.lisp").exists() {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        out.push(rel.to_string_lossy().replace('\\', "/"));
                     }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+                }
+                collect(&path, root, out);
+            } else if path.extension().map(|ext| ext == "lisp").unwrap_or(false) {
+                let file_stem = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("");
+                if matches!(file_stem, "dsp" | "ui") {
+                    continue;
+                }
+                out.push(file_stem.to_string());
+            }
+        }
+    }
+
+    let dir = Path::new(EFFECTS_DIR);
+    let mut names = Vec::new();
+    collect(dir, dir, &mut names);
     names.sort();
+    names.dedup();
     names
 }
 
 pub fn load_effect_source(name: &str) -> io::Result<String> {
-    let path = Path::new(EFFECTS_DIR).join(format!("{}.lisp", name));
+    let path = effect_source_path(name);
     std::fs::read_to_string(&path)
+}
+
+pub fn effect_source_path(name: &str) -> PathBuf {
+    let root = Path::new(EFFECTS_DIR);
+    let folder_dsp = root.join(name).join("dsp.lisp");
+    if folder_dsp.exists() {
+        folder_dsp
+    } else {
+        root.join(format!("{name}.lisp"))
+    }
 }
 
 // ── Editor flow ──
@@ -1279,9 +1310,16 @@ fn instrument_name_from_source_path(path: &Path) -> Option<String> {
 fn source_name_from_path(kind: &CompileKind, path: &Path) -> Option<String> {
     match kind {
         CompileKind::Instrument => instrument_name_from_source_path(path),
-        CompileKind::Effect => path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string()),
+        CompileKind::Effect => {
+            if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
+                path.parent()
+                    .and_then(|parent| parent.strip_prefix(EFFECTS_DIR).ok())
+                    .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+            } else {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+            }
+        }
     }
 }
 
@@ -2145,9 +2183,9 @@ fn editor_file_path(kind: CompileKind, existing_name: Option<&str>) -> PathBuf {
                 Path::new(INSTRUMENTS_DIR)
                     .join(format!("{}.lisp", existing_name.unwrap_or("untitled")))
             }),
-        CompileKind::Effect => {
-            Path::new(EFFECTS_DIR).join(format!("{}.lisp", existing_name.unwrap_or("untitled")))
-        }
+        CompileKind::Effect => existing_name
+            .map(effect_source_path)
+            .unwrap_or_else(|| Path::new(EFFECTS_DIR).join("untitled.lisp")),
     }
 }
 
@@ -6868,8 +6906,8 @@ mod tests {
     use super::{
         compile_instrument_with_asset_base, fallback_effect_descriptors,
         fallback_instrument_descriptors, new_eval_context, parse_manifest,
-        register_sequencer_natives, scratch_runtime_with_fallbacks, shared_native_metadata,
-        AccumulatorNoteSpan, DGenParam, ScratchControlRuntime,
+        read_eseqlisp_init_source, register_sequencer_natives, scratch_runtime_with_fallbacks,
+        shared_native_metadata, AccumulatorNoteSpan, DGenParam, ScratchControlRuntime,
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::{EffectDescriptor, EffectSlotSnapshot};

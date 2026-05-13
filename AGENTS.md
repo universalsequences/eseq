@@ -15,6 +15,10 @@ cargo run --bin instrument_probe -- emulations/monomachine-dpro-wave-v2 \
 
 For saved instrument names, the probe resolves local assets from the saved instrument directory. For direct file paths, it resolves assets from the source file's parent directory. Use `--param name=value` for parameter overrides and `--json` for machine-readable output.
 
+## UI/layout testing
+
+When changing Lisp UI structure or widget wrapper argument order, do not stop at parse/render-tree tests. Add or run a layout test that proves expected text/debug nodes have finite, nonzero measured rects inside the visible panel; regressions often look like "the panel exists, but its children measured to zero or disappeared."
+
 >> EXTREMELY IMPORTANT <<<
 NO HACKS. The user is EXTREMELY concerned about code quality, much more so than immediate results. If they ask you to build something and, while doing so, you hit a wall, and realize that the only way to ship the requested feature is to
 IMMEDIATELLY. Either fix the underlying flaw that blocked you in a ROBUST, WELL
