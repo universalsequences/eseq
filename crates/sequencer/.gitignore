@@ -1,6 +1,5 @@
 target/
 .DS_Store
-effects/
 samples/
 audiograph/*.o
 audiograph/tests/test_capacity_growth
