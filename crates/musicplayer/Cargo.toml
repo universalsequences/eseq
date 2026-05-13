@@ -1,0 +1,11 @@
+[package]
+name = "musicplayer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.28"
+eseqlisp = { path = "../eseqlisp" }
+hound = "3.5"
+mp3-duration = "0.1"
+rodio = "0.17"

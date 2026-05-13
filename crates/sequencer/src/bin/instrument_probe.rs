@@ -44,6 +44,11 @@ fn resolve_source(target: &str) -> Result<(String, Option<PathBuf>, String), Str
 }
 
 fn main() {
+    if let Err(e) = std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")) {
+        eprintln!("failed to enter sequencer crate directory: {e}");
+        std::process::exit(1);
+    }
+
     let mut args = std::env::args().skip(1);
     let Some(target) = args.next() else {
         usage();

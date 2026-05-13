@@ -11,9 +11,7 @@ pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
     app: &ui::App,
 ) -> Result<(Editor, MetalBackend), Box<dyn std::error::Error>> {
-    let init_src = std::fs::read_to_string("init.lisp")
-        .or_else(|_| std::fs::read_to_string("../eseqlisp/init.lisp"))
-        .unwrap_or_default();
+    let init_src = read_eseqlisp_init_source();
     let mut editor = Editor::new(
         runtime,
         EditorConfig {
@@ -45,6 +43,26 @@ pub(crate) fn create_editor_and_backend(
     }
 
     Ok((editor, backend))
+}
+
+fn read_eseqlisp_init_source() -> String {
+    eseqlisp_init_candidates()
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+}
+
+fn eseqlisp_init_candidates() -> Vec<std::path::PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(root) = std::env::var("ESEQLISP_ROOT") {
+        if !root.trim().is_empty() {
+            paths.push(std::path::PathBuf::from(root).join("init.lisp"));
+        }
+    }
+    paths.push(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eseqlisp/init.lisp"));
+    paths.push(std::path::PathBuf::from("../eseqlisp/init.lisp"));
+    paths.push(std::path::PathBuf::from("init.lisp"));
+    paths
 }
 
 fn log_lisp_ui_load_diagnostics(editor: &mut Editor) {

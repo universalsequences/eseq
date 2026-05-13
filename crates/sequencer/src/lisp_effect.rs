@@ -34,6 +34,26 @@ struct MidiFxDescriptorCache {
 
 static MIDI_FX_DESCRIPTOR_CACHE: OnceLock<Mutex<Option<MidiFxDescriptorCache>>> = OnceLock::new();
 
+fn read_eseqlisp_init_source() -> String {
+    eseqlisp_init_candidates()
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+}
+
+fn eseqlisp_init_candidates() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(root) = std::env::var("ESEQLISP_ROOT") {
+        if !root.trim().is_empty() {
+            paths.push(PathBuf::from(root).join("init.lisp"));
+        }
+    }
+    paths.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eseqlisp/init.lisp"));
+    paths.push(PathBuf::from("../eseqlisp/init.lisp"));
+    paths.push(PathBuf::from("init.lisp"));
+    paths
+}
+
 // ── dlopen FFI (macOS) ──
 
 extern "C" {
@@ -6013,9 +6033,7 @@ fn run_embedded_editor_session<F>(
 where
     F: FnMut(CompileKind, CompileResult, &str, &str) -> Result<(), String>,
 {
-    let init_src = std::fs::read_to_string("../eseqlisp/init.lisp")
-        .or_else(|_| std::fs::read_to_string("init.lisp"))
-        .unwrap_or_default();
+    let init_src = read_eseqlisp_init_source();
     let mut runtime = Runtime::new();
     let track_count = state.active_track_count();
     register_sequencer_natives(
@@ -6450,9 +6468,7 @@ pub fn run_embedded_scratch_flow(
         midi_fx_state,
         accumulator_eval,
     ) = control_runtime.into_parts();
-    let init_src = std::fs::read_to_string("../eseqlisp/init.lisp")
-        .or_else(|_| std::fs::read_to_string("init.lisp"))
-        .unwrap_or_default();
+    let init_src = read_eseqlisp_init_source();
     let mut editor = Editor::new(
         runtime,
         EditorConfig {
@@ -7400,9 +7416,7 @@ mod tests {
     #[test]
     fn seq_step_shows_value_through_editor_eval_binding() {
         let state = Arc::new(SequencerState::new(1, vec![default_empty_effect_chain()]));
-        let init_src = std::fs::read_to_string("../eseqlisp/init.lisp")
-            .or_else(|_| std::fs::read_to_string("init.lisp"))
-            .unwrap_or_default();
+        let init_src = read_eseqlisp_init_source();
         let mut runtime = Runtime::new();
         register_sequencer_natives(
             &mut runtime,
@@ -8465,9 +8479,7 @@ mod tests {
         )
         .into_parts()
         .0;
-        let init_src = std::fs::read_to_string("../eseqlisp/init.lisp")
-            .or_else(|_| std::fs::read_to_string("init.lisp"))
-            .unwrap_or_default();
+        let init_src = read_eseqlisp_init_source();
         let mut editor = Editor::new(
             runtime,
             EditorConfig {

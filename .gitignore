@@ -14,7 +14,6 @@ crates/musicplayer/Music/
 crates/sequencer/projects/
 crates/sequencer/samples/
 crates/sequencer/recordings/
-crates/sequencer/effects/
 crates/sequencer/instruments-backup/
 crates/eseqlisp/profiles/
 
