@@ -1,50 +1,93 @@
+(def korg1-mix-block ()
+  (ui-control-block-medium-s "OSC MIX" (ui-accent-cyan) 0
+    (h-stack :gap 0.32 :align :start
+      (ui-lego-knob-s 0 "vco1_saw" "saw" 4.8 (ui-accent-cyan) 2)
+      (ui-lego-knob-s 0 "vco1_pulse" "pulse" 4.8 (ui-accent-cyan) 2)
+      (ui-lego-knob-s 0 "vco2_level" "vco2" 4.8 (ui-accent-cyan) 2)
+      (ui-lego-knob-s 0 "sub_level" "sub" 4.8 (ui-accent-violet) 2))))
+
+(def korg1-global-block ()
+  (ui-readout-block-small-s "GLOBAL" (ui-accent-orange) 0
+    (h-stack :gap 0.30 :align :start
+      (ui-lego-base-note 4.2 (ui-accent-orange))
+      (ui-lego-num-s 0 "gain" "gain" 4.2 2 false (ui-accent-orange))
+      (ui-lego-num-s 0 "analog_drift" "drift" 4.2 1 false (ui-accent-green))
+      (ui-lego-num-s 0 "noise_level" "noise" 4.2 2 false (ui-accent-violet)))))
+
+(def korg1-source-readout-block ()
+  (ui-readout-block-small-s "SOURCE" (ui-accent-cyan) 0
+    (ui-lego-text-row-4
+      (label "saw" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+      (label "+ pulse" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+      (label "vco2" :font-size 9.0 :color (ui-accent-blue) :bg :transparent)
+      (label "sub/noise" :font-size 9.0 :color (ui-accent-violet) :bg :transparent))))
+
+(def korg1-shape-block ()
+  (ui-control-block-medium-s "OSC SHAPE" (ui-accent-cyan) 0
+    (h-stack :gap 0.32 :align :start
+      (ui-lego-knob-s 0 "vco2_interval" "semi" 4.8 (ui-accent-orange) 0)
+      (ui-lego-knob-s 0 "vco2_fine" "fine" 4.8 (ui-accent-orange) 0)
+      (ui-lego-knob-s 0 "pulse_width" "width" 4.8 (ui-accent-cyan) 2)
+      (ui-lego-knob-s 0 "pwm_amount" "pwm" 4.8 (ui-accent-blue) 2))))
+
+(def korg1-saturation-block ()
+  (ui-readout-block-small-s "SAT" (ui-accent-orange) 0
+    (h-stack :gap 0.32 :align :start
+      (ui-lego-num-s 0 "input_drive" "input" 4.7 2 false (ui-accent-orange))
+      (ui-lego-num-s 0 "output_bite" "bite" 4.7 2 false (ui-accent-orange))
+      (ui-lego-num-s 0 "ring_level" "ring" 4.7 2 false (ui-accent-violet)))))
+
+(def korg1-osc-readout-block ()
+  (ui-readout-block-small-s "ROUTING" (ui-accent-cyan) 0
+    (ui-lego-text-row-4
+      (label "dual osc" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+      (label "ring" :font-size 9.0 :color (ui-accent-violet) :bg :transparent)
+      (label "into" :font-size 9.0 :color :dim :bg :transparent)
+      (label "MS filter" :font-size 9.0 :color (ui-accent-green) :bg :transparent))))
+
+(def korg1-filter-block ()
+  (ui-control-block-medium-s "MS FILTER" (ui-accent-green) 1
+    (h-stack :gap 0.32 :align :start
+      (ui-lego-knob-s 1 "cutoff" "cut" 4.8 (ui-accent-green) 0)
+      (ui-lego-knob-s 1 "resonance" "peak" 4.8 (ui-accent-green) 2)
+      (ui-lego-knob-s 1 "filter_env_amount" "env" 4.8 (ui-accent-blue) 0)
+      (ui-lego-knob-s 1 "keytrack" "track" 4.8 (ui-accent-green) 2))))
+
+(def korg1-hp-block ()
+  (ui-readout-block-small-s "HP" (ui-accent-green) 1
+    (h-stack :gap 0.30 :align :start
+      (ui-lego-num-s 1 "hp_cutoff" "hp" 4.2 0 false (ui-accent-green))
+      (ui-lego-num-s 1 "hp_resonance" "hp q" 4.2 2 false (ui-accent-green))
+      (ui-lego-num-s 1 "scream" "scream" 4.2 2 false (ui-accent-blue))
+      (ui-lego-num-s 1 "filter_drive" "drive" 4.2 2 false (ui-accent-orange)))))
+
+(def korg1-mod-block ()
+  (ui-readout-block-small-s "MOD" (ui-accent-blue) 0
+    (h-stack :gap 0.30 :align :start
+      (ui-lego-num-s 0 "lfo_rate" "rate" 4.2 1 false (ui-accent-blue))
+      (ui-lego-num-s 0 "lfo_filter_amount" "filt" 4.2 0 false (ui-accent-green))
+      (ui-lego-num-s 0 "lfo_pitch" "pitch" 4.2 0 false (ui-accent-blue))
+      (ui-lego-num-s 0 "pitch_env_amount" "snap" 4.2 0 false (ui-accent-orange)))))
+
+(def korg1-envelope-column ()
+  (ui-lego-column-full
+    (box :width (ui-lego-col-w) :height (ui-lego-full-h)
+      (ui-adsr-switch
+        0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
+        1 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release"))))
+
 (defsynth-ui
-  (ui-rack :breathe
-    (list
-      (ui-panel "GLOBAL" 0
-        (h-stack :gap 0.2
-          (base-note)
-          (ui-param-knob "gain" "gain")
-          (ui-param-knob "analog_drift" "drift")))
-      (ui-panel "VCO 1" 0
-        (h-stack :gap 0.2
-          (ui-param-knob "vco1_saw" "saw")
-          (ui-param-knob "vco1_pulse" "pulse")
-          (ui-param-knob "pulse_width" "width")
-          (ui-param-knob "pwm_amount" "pwm")))
-      (ui-panel "VCO 2 / MIX" 0
-        (h-stack :gap 0.2
-          (ui-param-knob "vco2_level" "vco2")
-          (ui-param-knob "vco2_interval" "semi")
-          (ui-param-knob "vco2_fine" "fine")
-          (ui-param-knob "sub_level" "sub")))
-      (ui-panel "DIRT" 0
-        (h-stack :gap 0.2
-          (ui-param-knob "input_drive" "input")
-          (ui-param-knob "output_bite" "bite"))))
-    (ui-adsr-switch
-      0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
-      1 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release")
-    (list
-      (ui-panel "MS FILTER" 1
-        (h-stack :gap 0.2
-          (ui-param-knob "cutoff" "cut")
-          (ui-param-knob "resonance" "peak")
-          (ui-param-knob "filter_env_amount" "env")
-          (ui-param-knob "keytrack" "track")))
-      (ui-panel "HP / SCREAM" 1
-        (h-stack :gap 0.2
-          (ui-param-knob "hp_cutoff" "hp")
-          (ui-param-knob "hp_resonance" "hp peak")
-          (ui-param-knob "scream" "scream")
-          (ui-param-knob "filter_drive" "drive")))
-      (ui-panel "MOD" 0
-        (h-stack :gap 0.2
-          (ui-param-knob "lfo_rate" "rate")
-          (ui-param-knob "lfo_filter_amount" "filt")
-          (ui-param-knob "lfo_pitch" "pitch")
-          (ui-param-knob "pitch_env_amount" "snap")))
-      (ui-panel "NOISE / RING" 0
-        (h-stack :gap 0.2
-          (ui-param-knob "noise_level" "noise")
-          (ui-param-knob "ring_level" "ring"))))))
+  (h-stack :width :fill :gap 0.35 :align :stretch
+    (ui-lego-column
+      (korg1-mix-block)
+      (korg1-global-block)
+      (korg1-source-readout-block))
+    (ui-lego-column
+      (korg1-shape-block)
+      (korg1-saturation-block)
+      (korg1-osc-readout-block))
+    (korg1-envelope-column)
+    (ui-lego-column
+      (korg1-filter-block)
+      (korg1-hp-block)
+      (korg1-mod-block))))

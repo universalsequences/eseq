@@ -73,6 +73,8 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
             (def ui-adsr-c (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-adsr-switch-c (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-adsr-number-s (section name title decimals unit) (label title :font-size 10 :color :gray :bg :transparent))
             (def base-note () (label "base" :font-size 10 :color :gray :bg :transparent))
             (def base-note-c () (label "base" :font-size 10 :color :gray :bg :transparent))
             (def ui-accent-blue () :blue)
@@ -83,14 +85,20 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def ui-control-block-small (title accent body) body)
             (def ui-control-block-medium (title accent body) body)
             (def ui-control-block-full (title accent body) body)
+            (def ui-control-block-small-s (title accent section body) body)
+            (def ui-control-block-medium-s (title accent section body) body)
+            (def ui-control-block-full-s (title accent section body) body)
             (def ui-readout-block-small (title accent body) body)
+            (def ui-readout-block-small-s (title accent section body) body)
             (def ui-readout-block-medium (title accent body) body)
             (def ui-readout-block-full (title accent body) body)
             (def ui-lego-column (a b c) (v-stack a b c))
             (def ui-lego-column-2 (a b) (v-stack a b))
             (def ui-lego-column-full (a) (v-stack a))
             (def ui-lego-knob (name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-knob-s (section name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-text-row-3 (a b c) (h-stack a b c))
@@ -137,7 +145,11 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
             | "ui-control-block-small"
             | "ui-control-block-medium"
             | "ui-control-block-full"
+            | "ui-control-block-small-s"
+            | "ui-control-block-medium-s"
+            | "ui-control-block-full-s"
             | "ui-readout-block-small"
+            | "ui-readout-block-small-s"
             | "ui-readout-block-medium"
             | "ui-readout-block-full"
     ) {
@@ -174,6 +186,11 @@ fn collect_ui_validation_refs(
                 referenced_params.insert(name);
             }
         }
+        "ui-lego-knob-s" | "ui-lego-num-s" => {
+            if let Some(name) = items.get(2).and_then(ui_param_ref_name) {
+                referenced_params.insert(name);
+            }
+        }
         "params" => {
             for item in items.iter().skip(1) {
                 if matches!(item, Expression::Keyword(_)) {
@@ -189,6 +206,18 @@ fn collect_ui_validation_refs(
                 if let Some(name) = ui_param_ref_name(item) {
                     referenced_params.insert(name);
                 }
+            }
+        }
+        "ui-lego-adsr-s" => {
+            for item in items.iter().skip(3).take(4) {
+                if let Some(name) = ui_param_ref_name(item) {
+                    referenced_params.insert(name);
+                }
+            }
+        }
+        "ui-adsr-number-s" => {
+            if let Some(name) = items.get(2).and_then(ui_param_ref_name) {
+                referenced_params.insert(name);
             }
         }
         "ui-adsr-switch" | "ui-adsr-switch-c" => {
