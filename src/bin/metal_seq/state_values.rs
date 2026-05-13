@@ -4493,6 +4493,18 @@ mod tests {
             .find_map(|child| find_layout_node_by_debug_name(child, needle))
     }
 
+    fn find_layout_node_by_text<'a>(
+        node: &'a eseqlisp::layout::LayoutNode,
+        text: &str,
+    ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+        if matches!(node.props.get("text"), Some(Value::String(value)) if value == text) {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_layout_node_by_text(child, text))
+    }
+
     fn test_param_map(
         name: &str,
         idx: usize,
@@ -5891,6 +5903,107 @@ mod tests {
             .as_ref()
             .expect("fx tree");
         assert!(value_contains_string(tree, "CUSTOM_OK"));
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lego_text_readout_uses_optical_vertical_center() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument/".to_string(),
+            "test/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-readout-block-small "SOURCE" (ui-accent-cyan)
+                (ui-lego-text-row-4
+                  (label "saw" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+                  (label "<->" :font-size 9.0 :color :dim :bg :transparent)
+                  (label "pulse" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+                  (label "pw mod" :font-size 9.0 :color (ui-accent-blue) :bg :transparent))))
+            "#
+            .to_string(),
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(120, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("lego text readout fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("lego text readout layout should build");
+
+        let surface = find_layout_node_by_debug_name(&layout, "ui-lego-plain-surface")
+            .expect("plain readout surface");
+        let text_row =
+            find_layout_node_by_debug_name(&layout, "ui-lego-text-row").expect("text row");
+        let saw = find_layout_node_by_text(&layout, "saw").expect("saw label");
+
+        let surface_center = surface.rect.row + surface.rect.height * 0.5;
+        let text_visual_center = saw.rect.row + 0.5;
+        let optical_lift = surface_center - text_visual_center;
+        let left_inset = saw.rect.col - surface.rect.col;
+
+        assert!(
+            optical_lift > 0.13 && optical_lift < 0.22,
+            "text row should be optically lifted within the readout surface; \
+             surface={:?} text_row={:?} saw={:?} optical_lift={optical_lift:.3}",
+            surface.rect,
+            text_row.rect,
+            saw.rect
+        );
+        assert!(
+            left_inset > 0.75 && left_inset < 1.10,
+            "text row should have a stable left inset within the readout surface; \
+             surface={:?} saw={:?} left_inset={left_inset:.3}",
+            surface.rect,
+            saw.rect
+        );
     }
 
     /// Regression: `ui-rack` with a real `ui-adsr-switch` plus base-note/many

@@ -64,11 +64,37 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def defsynth-ui (body) body)
             (def ui-section (title body) body)
             (def ui-panel (title section body) body)
+            (def ui-panel-c (title section body) body)
+            (def ui-rack (mode left-panels adsr-form right-panels) (h-stack left-panels adsr-form right-panels))
             (def ui-param-control (name) (label name :font-size 10 :color :gray :bg :transparent))
             (def ui-param-knob (name title) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-param-knob-c (name title) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-adsr (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-adsr-switch (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+            (def ui-adsr-c (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-adsr-switch-c (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
             (def base-note () (label "base" :font-size 10 :color :gray :bg :transparent))
+            (def base-note-c () (label "base" :font-size 10 :color :gray :bg :transparent))
+            (def ui-accent-blue () :blue)
+            (def ui-accent-cyan () :cyan)
+            (def ui-accent-orange () :orange)
+            (def ui-accent-green () :green)
+            (def ui-accent-violet () :magenta)
+            (def ui-control-block-small (title accent body) body)
+            (def ui-control-block-medium (title accent body) body)
+            (def ui-control-block-full (title accent body) body)
+            (def ui-readout-block-small (title accent body) body)
+            (def ui-readout-block-medium (title accent body) body)
+            (def ui-readout-block-full (title accent body) body)
+            (def ui-lego-column (a b c) (v-stack a b c))
+            (def ui-lego-column-2 (a b) (v-stack a b))
+            (def ui-lego-column-full (a) (v-stack a))
+            (def ui-lego-knob (name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-text-row-3 (a b c) (h-stack a b c))
+            (def ui-lego-text-row-4 (a b c d) (h-stack a b c d))
             "#,
         )
         .map_err(|error| format!("ui validation runtime setup failed: {error:?}"))?;
@@ -99,11 +125,22 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
                 .to_string(),
         );
     }
-    if head == "ui-adsr" && context == UiContext::RowPanel {
+    if matches!(head, "ui-adsr" | "ui-adsr-c") && context == UiContext::RowPanel {
         return Err("ui.lisp must not nest ui-adsr inside ui-panel/ui-section; place ADSR as a standalone rack column or use ui-adsr-switch".to_string());
     }
 
-    let child_context = if matches!(head, "ui-panel" | "ui-section") {
+    let child_context = if matches!(
+        head,
+        "ui-panel"
+            | "ui-panel-c"
+            | "ui-section"
+            | "ui-control-block-small"
+            | "ui-control-block-medium"
+            | "ui-control-block-full"
+            | "ui-readout-block-small"
+            | "ui-readout-block-medium"
+            | "ui-readout-block-full"
+    ) {
         UiContext::RowPanel
     } else {
         context
@@ -131,7 +168,8 @@ fn collect_ui_validation_refs(
 
     match head.as_str() {
         "defsynth-ui" => *defsynth_ui_count += 1,
-        "param" | "ui-param-control" | "ui-param-knob" => {
+        "param" | "ui-param-control" | "ui-param-knob" | "ui-param-knob-c" | "ui-lego-knob"
+        | "ui-lego-num" | "ui-lego-row" => {
             if let Some(name) = items.get(1).and_then(ui_param_ref_name) {
                 referenced_params.insert(name);
             }
@@ -146,14 +184,14 @@ fn collect_ui_validation_refs(
                 }
             }
         }
-        "ui-adsr" => {
+        "ui-adsr" | "ui-adsr-c" => {
             for item in items.iter().skip(2).take(4) {
                 if let Some(name) = ui_param_ref_name(item) {
                     referenced_params.insert(name);
                 }
             }
         }
-        "ui-adsr-switch" => {
+        "ui-adsr-switch" | "ui-adsr-switch-c" => {
             for item in items.iter().skip(3).take(4) {
                 if let Some(name) = ui_param_ref_name(item) {
                     referenced_params.insert(name);

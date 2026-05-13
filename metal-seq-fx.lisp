@@ -771,6 +771,144 @@
   (let ((p (inst-param synth-ui-current-inst name)))
     (if p (fx-set-instrument-value p value) false)))
 
+(def ui-accent-blue () (rgba 0.00 0.48 0.95 1.0))
+(def ui-accent-cyan () (rgba 0.05 0.78 0.90 1.0))
+(def ui-accent-orange () (rgba 1.0 0.62 0.25 1.0))
+(def ui-accent-green () (rgba 0.30 0.82 0.48 1.0))
+(def ui-accent-violet () (rgba 0.62 0.45 0.95 1.0))
+
+(def ui-lego-gap () 0.25)
+(def ui-lego-small-h () 1.95)
+(def ui-lego-medium-h () 4.08)
+(def ui-lego-full-h ()
+  (+ (ui-lego-medium-h) (ui-lego-small-h) (ui-lego-small-h)
+     (ui-lego-gap) (ui-lego-gap)))
+(def ui-lego-col-w () 24.0)
+
+(def ui-lego-title (title accent)
+  (box :width :fill :height 0.48 :h-align :start :v-align :center :padding 0.08
+    (label title :font-size 8.6 :color :dim :bg :transparent)))
+
+(def ui-lego-surface (title height accent surface body)
+  (box :width (ui-lego-col-w) :height height
+       :background-color surface
+       :corner-radius 7
+       :border-width 1
+       :padding 0.24
+    (v-stack :width :fill :height :fill :gap 0.18
+      (ui-lego-title title accent)
+      (box :width :fill :flex 1 :padding 0.12 body))))
+
+(def ui-lego-plain-surface (height surface body)
+  (box :width (ui-lego-col-w) :height height
+       :background-color surface
+       :corner-radius 7
+       :border-width 1
+       :padding 0.16
+       :debug-name "ui-lego-plain-surface"
+       :v-align :center
+    (box :width :fill :padding 0.12
+      (h-stack :width :fill :gap 0 :align :center
+        (box :width 0.55 :height 0.1)
+        body))))
+
+(def ui-lego-text-row-3 (a b c)
+  (box :width :fill :height 1.28 :v-align :start :debug-name "ui-lego-text-row"
+    (h-stack :gap 0.34 :align :start a b c)))
+
+(def ui-lego-text-row-4 (a b c d)
+  (box :width :fill :height 1.28 :v-align :start :debug-name "ui-lego-text-row"
+    (h-stack :gap 0.34 :align :start a b c d)))
+
+(def ui-control-block-small (title accent body)
+  (ui-lego-surface title (ui-lego-small-h) accent :instrument-group-bg body))
+
+(def ui-control-block-medium (title accent body)
+  (ui-lego-surface title (ui-lego-medium-h) accent :instrument-group-bg body))
+
+(def ui-control-block-full (title accent body)
+  (ui-lego-surface title (ui-lego-full-h) accent :instrument-group-bg body))
+
+(def ui-readout-block-small (title accent body)
+  (ui-lego-plain-surface (ui-lego-small-h) (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-readout-block-medium (title accent body)
+  (ui-lego-surface title (ui-lego-medium-h) accent (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-readout-block-full (title accent body)
+  (ui-lego-surface title (ui-lego-full-h) accent (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-lego-column (a b c)
+  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap) a b c))
+
+(def ui-lego-column-2 (a b)
+  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap) a b))
+
+(def ui-lego-column-full (a)
+  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap) a))
+
+(def ui-lego-knob (name title width accent decimals)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-knob-" synth-ui-current-name "-" name)
+        (knob-number :label title
+          :value (fx-param-value p)
+          :min (get p :min) :max (get p :max) :decimals decimals
+          :font-size 10.8 :label-font-size 9.6
+          :text-color accent :label-color :dim
+          :width width :height 2.62
+          :value-align :center
+          :on-change (lambda (v) (fx-set-instrument-value p v))))
+      (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-num (name title width decimals unit accent)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-num-" synth-ui-current-name "-" name)
+        (v-stack :width width :height 1.12 :gap 0.08 :align :start
+          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+          (number-picker :value (fx-param-value p)
+            :min (get p :min) :max (get p :max) :decimals decimals
+            :unit unit
+            :noui true :font-size 10.2
+            :text-color accent :edit-color :yellow
+            :text-align :left
+            :width width :height 0.68
+            :on-change (lambda (v) (fx-set-instrument-value p v)))))
+      (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-row (name title decimals unit accent)
+  (let ((p (inst-param synth-ui-current-inst name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-row-" synth-ui-current-name "-" name)
+        (h-stack :width :fill :height 0.86 :gap 0.35 :align :baseline
+          (label title :font-size 8.8 :width 6.2 :color :dim :bg :transparent)
+          (number-picker :value (fx-param-value p)
+            :min (get p :min) :max (get p :max) :decimals decimals
+            :unit unit
+            :noui true :font-size 10.2
+            :text-align :left
+            :text-color accent :edit-color :yellow
+            :width 6.0 :height 0.78
+            :on-change (lambda (v) (fx-set-instrument-value p v)))))
+      (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-base-note (width accent)
+  (let ((p (inst-base-note-param synth-ui-current-inst)))
+    (if p
+      (subtree :key (str "custom-ui-lego-base-note-" synth-ui-current-name)
+        (v-stack :width width :height 1.12 :gap 0.08 :align :start
+          (label "note" :font-size 8.2 :width width :color :dim :bg :transparent)
+          (number-picker :value (fx-param-value p)
+            :min (get p :min) :max (get p :max) :decimals 0
+            :step 1
+            :noui true :font-size 10.2
+            :text-color accent :edit-color :yellow
+            :text-align :left
+            :width width :height 0.68
+            :on-change (lambda (v) (fx-set-instrument-value p v)))))
+      (label "missing: base_note" :font-size 9 :color :red :bg :transparent))))
+
 (def ui-adsr-number (name title decimals unit)
   (let ((p (inst-param synth-ui-current-inst name)))
     (if p
