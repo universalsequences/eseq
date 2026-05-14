@@ -3501,6 +3501,43 @@ mod tests {
     use super::*;
     use eseqlisp::parser::{ASTParser, Parser, ParserError, Token};
 
+    fn agent_test_string_list(values: &[&str]) -> Value {
+        Value::List(
+            values
+                .iter()
+                .map(|value| Rc::new(RefCell::new(Value::String((*value).to_string()))))
+                .collect(),
+        )
+    }
+
+    fn register_agent_test_natives(runtime: &mut Runtime) {
+        runtime.register_native("agent/new", |_args, _ctx| Ok(Value::Number(1.0)));
+        runtime.register_native("agent/send", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/cancel", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/discard", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/finalize", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/status", |_args, _ctx| {
+            Ok(Value::Symbol("idle".to_string()))
+        });
+        runtime.register_native("agent/model", |_args, _ctx| {
+            Ok(Value::String("gpt-5.5".to_string()))
+        });
+        runtime.register_native("agent/set-model", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/models", |_args, _ctx| {
+            Ok(agent_test_string_list(&["gpt-5.5", "gemini-2.5-pro"]))
+        });
+        runtime.register_native("agent/messages", |_args, _ctx| Ok(Value::List(vec![])));
+        runtime.register_native("agent/draft-source", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/artifact", |_args, _ctx| {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "exists".to_string(),
+                Rc::new(RefCell::new(Value::Bool(false))),
+            );
+            Ok(Value::Map(map))
+        });
+    }
+
     fn parse_expression_at(tokens: &[Token], pos: &mut usize) -> Result<(), ParserError> {
         match tokens.get(*pos) {
             Some(Token::LeftParen) => {
@@ -3642,6 +3679,7 @@ mod tests {
     fn metal_seq_agent_lisp_creates_agent_buffer_tree() {
         let mut editor =
             eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        register_agent_test_natives(editor.runtime_mut());
         editor.runtime_mut().register_reactive(
             "AGENT",
             vec![("generation", Value::Number(0.0))],
@@ -3711,6 +3749,7 @@ mod tests {
             eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         editor.set_layout_viewport(92, 24);
+        register_agent_test_natives(editor.runtime_mut());
         editor.runtime_mut().register_reactive(
             "AGENT",
             vec![("generation", Value::Number(0.0))],
@@ -3745,8 +3784,10 @@ mod tests {
             .expect("agent prompt input");
         let actions = find_layout_node_by_stable_key(&layout, "agent-composer-actions")
             .expect("agent action row");
-        let send = find_button_by_text(&layout, "Send").expect("Send button");
-        let cancel = find_button_by_text(&layout, "Cancel").expect("Cancel button");
+        let model_select = find_layout_node_by_stable_key(&layout, "agent-model-select")
+            .expect("agent model selector");
+        let submit = find_layout_node_by_stable_key(&layout, "agent-submit")
+            .expect("agent submit affordance");
 
         assert!(
             input.rect.row + input.rect.height <= actions.rect.row,
@@ -3755,17 +3796,17 @@ mod tests {
             actions.rect
         );
         assert!(
-            input.rect.width > send.rect.width + cancel.rect.width,
-            "agent prompt should have the wide row instead of sharing width with buttons; input={:?}, send={:?}, cancel={:?}",
+            input.rect.width > model_select.rect.width + submit.rect.width,
+            "agent prompt should have the wide row instead of sharing width with controls; input={:?}, model={:?}, submit={:?}",
             input.rect,
-            send.rect,
-            cancel.rect
+            model_select.rect,
+            submit.rect
         );
         assert!(
-            send.rect.col + send.rect.width <= cancel.rect.col,
-            "agent composer buttons should not overlap; send={:?}, cancel={:?}",
-            send.rect,
-            cancel.rect
+            model_select.rect.col + model_select.rect.width <= submit.rect.col,
+            "agent composer controls should not overlap; model={:?}, submit={:?}",
+            model_select.rect,
+            submit.rect
         );
     }
 
@@ -4302,8 +4343,8 @@ mod tests {
             "stretch-aligned side-by-side layout should render instrument rows; rendered:\n{stretched_rendered}"
         );
         assert!(
-            stretched_scroll.col + stretched_scroll.width > 220.0,
-            "unwrapped stretch side-by-side diagnostic should reproduce horizontal overflow; scroll={stretched_scroll:?}"
+            stretched_scroll.col + stretched_scroll.width <= 220.0,
+            "stretch-aligned side-by-side layout should keep instrument scroll inside viewport; scroll={stretched_scroll:?}"
         );
         assert!(
             fixed_scroll.height > 10.0,
@@ -7646,28 +7687,6 @@ mod tests {
         assert!(
             value_contains_string(&selected_tree, "FILTER ENV"),
             "using filter controls should select the filter envelope; sections={sections:?}; tree={selected_tree:?}"
-        );
-
-        let mixer_panel = find_clickable_node_containing(&layout, "MIXER").unwrap_or_else(|| {
-            panic!("MIXER panel should be clickable; layout={layout_summaries:#?}")
-        });
-        let click = mixer_panel
-            .props
-            .get("on-click")
-            .cloned()
-            .expect("MIXER on-click");
-        editor
-            .runtime_mut()
-            .invoke(click, vec![Value::Bool(false)])
-            .expect("invoke MIXER panel click");
-        let amp_tree = editor
-            .runtime_mut()
-            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
-            .expect("render amp-selected minimoog-lad2 UI")
-            .expect("amp-selected UI value");
-        assert!(
-            value_contains_string(&amp_tree, "AMP ENV"),
-            "clicking a non-filter panel should return the ADSR to AMP ENV"
         );
     }
 

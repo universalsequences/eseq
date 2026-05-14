@@ -50,7 +50,10 @@ use eseqlisp::editor::ViewMode;
 use eseqlisp::vm::Value;
 use eseqlisp::{BufferMode, Editor, HostCommand, HostEvent, Runtime};
 
-use sequencer::effects::ParamKind;
+use sequencer::agent::actions::{
+    AgentInstrumentParamSchema, AgentInstrumentPresetSchema, AgentSessionContext,
+};
+use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
     KeyboardTrigger, MidiFxPosition, SequencerState, StepParam, SwingResolution, Timebase,
@@ -133,6 +136,146 @@ fn track_button_state_snapshot(state: &Arc<SequencerState>) -> Vec<(bool, bool)>
             (params.is_muted(), params.is_solo())
         })
         .collect()
+}
+
+fn param_unit(param: &sequencer::effects::ParamDescriptor) -> Option<String> {
+    match &param.kind {
+        ParamKind::Continuous { unit } => unit.clone(),
+        _ => None,
+    }
+}
+
+fn param_enum_labels(param: &sequencer::effects::ParamDescriptor) -> Vec<String> {
+    match &param.kind {
+        ParamKind::Enum { labels } => labels.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn param_scaling(param: &sequencer::effects::ParamDescriptor) -> String {
+    match param.scaling {
+        ParamScaling::Linear => "linear".to_string(),
+        ParamScaling::Exponential => "exponential".to_string(),
+    }
+}
+
+fn runtime_usize_state(editor: &mut Editor, name: &str) -> Option<usize> {
+    match editor.runtime_mut().eval_str(name).ok().flatten() {
+        Some(Value::Number(value)) if value >= 0.0 => Some(value as usize),
+        _ => None,
+    }
+}
+
+fn metal_agent_session_context(
+    app: &ui::App,
+    editor: &mut Editor,
+    current_track: &Arc<AtomicUsize>,
+) -> AgentSessionContext {
+    let track = current_track_for_snapshot(app, current_track);
+    let current_track_name = track.and_then(|track| app.tracks.get(track).cloned());
+    let current_instrument_name = track.and_then(|track| {
+        if app.graph.track_instrument_types.get(track)
+            != Some(&sequencer::sequencer::InstrumentType::Custom)
+        {
+            return None;
+        }
+        current_custom_instrument_name(app, track)
+    });
+    let current_instrument_source = current_instrument_name
+        .as_deref()
+        .and_then(|name| sequencer::lisp_effect::load_instrument_source(name).ok());
+    let current_instrument_preset_schema =
+        metal_agent_instrument_preset_schema(app, track, current_instrument_name.as_deref());
+
+    let current_effect_slot = runtime_usize_state(editor, "selected-fx-slot")
+        .filter(|slot| *slot >= sequencer::effects::BUILTIN_SLOT_COUNT);
+    let current_effect_name = track.and_then(|track| {
+        current_effect_slot.and_then(|slot| {
+            app.graph
+                .effect_descriptors
+                .get(track)
+                .and_then(|descs| descs.get(slot))
+                .map(|desc| desc.name.clone())
+        })
+    });
+    let current_effect_source = current_effect_name
+        .as_deref()
+        .and_then(|name| sequencer::lisp_effect::load_effect_source(name).ok());
+
+    AgentSessionContext {
+        has_tracks: !app.tracks.is_empty(),
+        current_track_name,
+        current_track_index: track,
+        can_apply_effect_to_current_track: app.next_free_custom_slot().is_some(),
+        current_effect_name,
+        current_effect_source: current_effect_source.clone(),
+        current_effect_slot,
+        can_update_current_effect: current_effect_source.is_some(),
+        current_instrument_name,
+        current_instrument_source: current_instrument_source.clone(),
+        can_update_current_instrument: current_instrument_source.is_some(),
+        current_instrument_preset_schema,
+    }
+}
+
+fn current_track_for_snapshot(app: &ui::App, current_track: &Arc<AtomicUsize>) -> Option<usize> {
+    if app.tracks.is_empty() {
+        return None;
+    }
+    let stored = current_track.load(Ordering::Relaxed);
+    if stored < app.tracks.len() {
+        Some(stored)
+    } else {
+        Some(app.tracks.len() - 1)
+    }
+}
+
+fn metal_agent_instrument_preset_schema(
+    app: &ui::App,
+    track: Option<usize>,
+    instrument_name: Option<&str>,
+) -> Option<AgentInstrumentPresetSchema> {
+    let track = track?;
+    let instrument_name = instrument_name?;
+    let desc = app.graph.instrument_descriptors.get(track)?;
+    let slot = app.state.pattern.instrument_slots.get(track)?;
+    let existing_presets = sequencer::lisp_effect::load_instrument_presets(instrument_name)
+        .map(|presets| presets.into_iter().map(|preset| preset.name).collect())
+        .unwrap_or_default();
+
+    let mut params = Vec::new();
+    for (idx, param) in desc.params.iter().enumerate() {
+        let group = if param.node_param_idx >= 1_000_000 {
+            "source"
+        } else if param.name.starts_with("mod ") {
+            "mod"
+        } else {
+            "synth"
+        };
+        params.push(AgentInstrumentParamSchema {
+            name: param.name.clone(),
+            group: group.to_string(),
+            min: param.min,
+            max: param.max,
+            default: param.default,
+            current_value: Some(slot.defaults.get(idx)),
+            unit: param_unit(param),
+            enum_labels: param_enum_labels(param),
+            scaling: param_scaling(param),
+        });
+    }
+
+    Some(AgentInstrumentPresetSchema {
+        instrument_name: instrument_name.to_string(),
+        source_file: sequencer::lisp_effect::instrument_source_path(instrument_name)
+            .ok()
+            .map(|path| path.display().to_string()),
+        base_note_offset: f32::from_bits(
+            app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+        ),
+        existing_presets,
+        params,
+    })
 }
 
 #[derive(Default)]
@@ -962,6 +1105,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         editor.update_tile_rects(cols as u16, rows as u16);
         editor.sync_reactive_bindings_for_visible_layouts();
+        app.agent_store
+            .set_session_context(metal_agent_session_context(
+                &app,
+                &mut editor,
+                &current_track,
+            ));
         if log_voice_counts && last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL {
             log_active_voice_counts(&state, &track_names);
             last_voice_count_log_at = Instant::now();

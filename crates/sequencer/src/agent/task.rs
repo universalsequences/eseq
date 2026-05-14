@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::actions::{AgentAppAction, AgentSessionContext};
+use super::actions::AgentAppAction;
 use super::audition::{audition_feedback, audition_loaded_instrument};
 use super::dsp_validate::validate_instrument_dsp_source;
 use super::network::{AgentNetworkClient, AgentTurnResult};
@@ -200,7 +200,7 @@ fn execute_tool_turn_with_retries(
                 model,
                 system_prompt,
                 messages,
-                AgentSessionContext::default(),
+                store.session_context(),
                 Some(&|call| {
                     let message = tool_progress_message(call);
                     eprintln!("[agent] tool progress conv={id}: {message}");
