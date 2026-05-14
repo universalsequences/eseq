@@ -37,6 +37,14 @@ pub fn validate_instrument_ui_source(
         .iter()
         .map(|param| param.name.as_str())
         .collect::<BTreeSet<_>>();
+
+    if referenced_params.iter().any(|name| name.trim().is_empty()) {
+        return Err(
+            "ui.lisp references an empty parameter name (`\"\"`). Do not pass blank placeholder params to UI helpers. If the instrument has only one envelope, use `(ui-lego-adsr-s section \"AMP ENV\" \"amp_attack\" \"amp_decay\" \"amp_sustain\" \"amp_release\")` instead of `ui-adsr-switch`. Use `ui-adsr-switch` only when both ADSR slots reference real DSP params."
+                .to_string(),
+        );
+    }
+
     let unknown = referenced_params
         .iter()
         .filter(|name| name.as_str() != "base_note" && !valid_params.contains(name.as_str()))
@@ -78,6 +86,10 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def ui-adsr-c (title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-adsr-switch-c (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-detail-adsr-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-detail-adsr-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
+            (def ui-adsr-compact-s (section title attack decay sustain release) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-adsr-compact-switch-s (section-a title-a attack-a decay-a sustain-a release-a section-b title-b attack-b decay-b sustain-b release-b) (label title-a :font-size 10 :color :gray :bg :transparent))
             (def ui-adsr-number-s (section name title decimals unit) (label title :font-size 10 :color :gray :bg :transparent))
             (def base-note () (label "base" :font-size 10 :color :gray :bg :transparent))
             (def base-note-c () (label "base" :font-size 10 :color :gray :bg :transparent))
@@ -89,29 +101,47 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def ui-lego-gap () 0.25)
             (def ui-lego-small-h () 1.95)
             (def ui-lego-medium-h () 4.08)
+            (def ui-lego-dense-h () 3.08)
             (def ui-lego-full-h () 8.48)
             (def ui-lego-col-w () 24.0)
+            (def ui-lego-strip-w () 7.2)
             (def ui-control-block-small (title accent body) body)
             (def ui-control-block-medium (title accent body) body)
             (def ui-control-block-full (title accent body) body)
             (def ui-control-block-small-s (title accent section body) body)
             (def ui-control-block-medium-s (title accent section body) body)
+            (def ui-control-block-dense-s (title accent section body) body)
+            (def ui-control-panel-dense-s (section body) body)
+            (def ui-control-panel-small-s (section body) body)
+            (def ui-control-panel-medium-s (section body) body)
             (def ui-control-block-full-s (title accent section body) body)
             (def ui-readout-block-small (title accent body) body)
             (def ui-readout-block-small-s (title accent section body) body)
+            (def ui-readout-block-dense-s (title accent section body) body)
+            (def ui-readout-panel-small-s (section body) body)
+            (def ui-readout-panel-dense-s (section body) body)
+            (def ui-readout-panel-medium-s (section body) body)
             (def ui-readout-block-medium (title accent body) body)
             (def ui-readout-block-full (title accent body) body)
             (def ui-lego-column (a b c) (v-stack a b c))
             (def ui-lego-column-2 (a b) (v-stack a b))
             (def ui-lego-column-full (a) (v-stack a))
+            (def ui-lego-strip-s (title accent section body) body)
+            (def ui-lego-strip-half-s (title accent section body) body)
+            (def ui-lego-strip-panel-s (section body) body)
+            (def ui-lego-badge (title width accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-badge-s (section title width accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-knob (name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-knob-s (section name title width accent decimals) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-num (name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-micro-num-s (section name title width decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-option (name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-micro-option-s (section name title width options accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-row (name title decimals unit accent) (label title :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-base-note (width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
+            (def ui-lego-micro-base-note-s (section width accent) (label "base" :font-size 10 :color :gray :bg :transparent))
             (def ui-lego-text-row-3 (a b c) (h-stack a b c))
             (def ui-lego-text-row-4 (a b c d) (h-stack a b c d))
             (def inst-param (inst name) (dict :name name :value 0 :min 0 :max 1))
@@ -169,6 +199,12 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
     if matches!(head, "ui-adsr" | "ui-adsr-c") && context == UiContext::RowPanel {
         return Err("ui.lisp must not nest ui-adsr inside a control/readout block; place ADSR as a standalone lego column or use ui-adsr-switch".to_string());
     }
+    if head.starts_with("ui-accent-") && !is_known_ui_accent(head) {
+        return Err(format!(
+            "ui.lisp uses unknown accent helper `{head}`. Use only these accent helpers: {}. For purple/magenta styling, use `ui-accent-violet`.",
+            KNOWN_UI_ACCENTS.join(", ")
+        ));
+    }
 
     let child_context = if matches!(
         head,
@@ -191,6 +227,18 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
         validate_layout_contract(item, child_context)?;
     }
     Ok(())
+}
+
+const KNOWN_UI_ACCENTS: [&str; 5] = [
+    "ui-accent-blue",
+    "ui-accent-cyan",
+    "ui-accent-orange",
+    "ui-accent-green",
+    "ui-accent-violet",
+];
+
+fn is_known_ui_accent(name: &str) -> bool {
+    KNOWN_UI_ACCENTS.contains(&name)
 }
 
 fn collect_ui_validation_refs(
@@ -216,7 +264,11 @@ fn collect_ui_validation_refs(
                 referenced_params.insert(name);
             }
         }
-        "ui-lego-knob-s" | "ui-lego-num-s" | "ui-lego-option-s" => {
+        "ui-lego-knob-s"
+        | "ui-lego-num-s"
+        | "ui-lego-option-s"
+        | "ui-lego-micro-num-s"
+        | "ui-lego-micro-option-s" => {
             if let Some(name) = items.get(2).and_then(ui_param_ref_name) {
                 referenced_params.insert(name);
             }
@@ -265,13 +317,23 @@ fn collect_ui_validation_refs(
                 referenced_params.insert(name);
             }
         }
-        "ui-adsr-switch" | "ui-adsr-switch-c" => {
+        "ui-adsr-switch"
+        | "ui-adsr-switch-c"
+        | "ui-adsr-compact-switch-s"
+        | "ui-detail-adsr-switch-s" => {
             for item in items.iter().skip(3).take(4) {
                 if let Some(name) = ui_param_ref_name(item) {
                     referenced_params.insert(name);
                 }
             }
             for item in items.iter().skip(9).take(4) {
+                if let Some(name) = ui_param_ref_name(item) {
+                    referenced_params.insert(name);
+                }
+            }
+        }
+        "ui-adsr-compact-s" | "ui-detail-adsr-s" => {
+            for item in items.iter().skip(3).take(4) {
                 if let Some(name) = ui_param_ref_name(item) {
                     referenced_params.insert(name);
                 }
@@ -367,6 +429,48 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("gaim"));
         assert!(err.contains("gain"));
+    }
+
+    #[test]
+    fn rejects_empty_param_refs_with_adsr_guidance() {
+        let manifest =
+            manifest_with_params(&["amp_attack", "amp_decay", "amp_sustain", "amp_release"]);
+        let err = validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (ui-lego-column-full
+                (box :width (ui-lego-col-w) :height (ui-lego-full-h)
+                  (ui-adsr-switch
+                    0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
+                    0 " " "" "" "" ""))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("empty parameter name"));
+        assert!(err.contains("ui-lego-adsr-s"));
+        assert!(err
+            .contains("Use `ui-adsr-switch` only when both ADSR slots reference real DSP params"));
+    }
+
+    #[test]
+    fn rejects_unknown_ui_accent_helpers() {
+        let manifest = manifest_with_params(&["gain"]);
+        let err = validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (ui-lego-column-full
+                (ui-control-block-medium-s "OUT" (ui-accent-magenta) 0
+                  (h-stack
+                    (ui-lego-knob-s 0 "gain" "gain" 4.8 (ui-accent-magenta) 2)))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("unknown accent helper `ui-accent-magenta`"));
+        assert!(err.contains("ui-accent-violet"));
     }
 
     #[test]
@@ -531,6 +635,66 @@ mod tests {
                       (ui-lego-option-s 0 "osc1_wave" "wave" 5.2 '("saw" "pulse" "sine" "triangle") (ui-accent-cyan))
                       (ui-lego-option-s 0 "osc2_wave" "wave" 5.2 '("saw" "pulse" "sine" "triangle") (ui-accent-violet))
                       (ui-lego-knob-s 0 "cutoff" "cut" 4.8 (ui-accent-green) 0))))))
+            "#,
+            &manifest,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validates_dense_lego_helpers_recommended_by_prompt() {
+        let manifest = manifest_with_params(&[
+            "osc1_wave",
+            "osc1_level",
+            "osc2_wave",
+            "osc2_level",
+            "amp_attack",
+            "amp_decay",
+            "amp_sustain",
+            "amp_release",
+            "filt_attack",
+            "filt_decay",
+            "filt_sustain",
+            "filt_release",
+            "lfo1_wave",
+            "lfo1_rate",
+        ]);
+
+        validate_instrument_ui_source(
+            r#"
+            (def osc-block ()
+              (ui-control-panel-dense-s 0
+                (v-stack :width :fill :gap 0.12 :align :start
+                  (h-stack :gap 0.18 :align :start
+                    (ui-lego-badge-s 0 "OSC1" 3.6 (ui-accent-cyan))
+                    (ui-lego-micro-option-s 0 "osc1_wave" "wave" 4.4 '("saw" "pulse") (ui-accent-cyan))
+                    (ui-lego-micro-num-s 0 "osc1_level" "lvl" 3.4 2 false (ui-accent-cyan)))
+                  (h-stack :gap 0.18 :align :start
+                    (ui-lego-badge-s 0 "OSC2" 3.6 (ui-accent-blue))
+                    (ui-lego-micro-option-s 0 "osc2_wave" "wave" 4.4 '("saw" "pulse") (ui-accent-blue))
+                    (ui-lego-micro-num-s 0 "osc2_level" "lvl" 3.4 2 false (ui-accent-blue))))))
+
+            (def detail-block ()
+              (ui-detail-adsr-switch-s
+                0 "AMP" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
+                1 "FILTER" "filt_attack" "filt_decay" "filt_sustain" "filt_release"))
+
+            (def lfo-strip ()
+              (ui-lego-strip-panel-s 2
+                (v-stack :width :fill :align :center
+                  (ui-lego-badge-s 2 "LFO1" 5.8 (ui-accent-blue))
+                  (ui-lego-micro-option-s 2 "lfo1_wave" "wave" 5.8 '("sine" "saw") (ui-accent-blue))
+                  (ui-lego-micro-num-s 2 "lfo1_rate" "rate" 5.8 2 "Hz" (ui-accent-blue))
+                  (ui-lego-micro-base-note-s 2 5.8 (ui-accent-orange)))))
+
+            (defsynth-ui
+              (h-stack :width :fill :gap 0.35 :align :stretch
+                (ui-lego-column-full (osc-block))
+                (ui-lego-column-full
+                  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap)
+                    (ui-control-panel-small-s 0 (h-stack))
+                    (ui-readout-panel-medium-s 0 (detail-block))))
+                (lfo-strip)))
             "#,
             &manifest,
         )

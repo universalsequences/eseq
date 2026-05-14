@@ -8,6 +8,7 @@ pub fn register_widget_natives(vm: &mut VM) {
     for widget in [
         "label",
         "button",
+        "badge",
         "slider",
         "hslider",
         "vslider",
@@ -52,7 +53,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
     let mut children = Vec::new();
     let mut i = 0;
 
-    if (widget_type == "label" || widget_type == "button")
+    if (widget_type == "label" || widget_type == "button" || widget_type == "badge")
         && let Some(value) = args.first()
     {
         let text = match value {

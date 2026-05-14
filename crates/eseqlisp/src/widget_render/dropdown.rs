@@ -250,8 +250,6 @@ fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32) -> String 
         return String::new();
     }
 
-    let ellipsis = "…";
-    let ellipsis_width = text_width_cells(ellipsis, font_size).max(APPROX_CHAR_WIDTH);
     let key = (font_size.to_bits(), text.to_string());
     let widths = CHAR_WIDTH_CACHE.with(|cache| cache.borrow().get(&key).cloned());
 
@@ -262,18 +260,14 @@ fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32) -> String 
     if fits_full {
         return text.to_string();
     }
-    if max_width <= ellipsis_width {
-        return String::new();
-    }
 
-    let allowed = max_width - ellipsis_width;
     let mut acc = 0.0;
     let mut out = String::new();
 
     match widths {
         Some(widths) => {
             for (ch, ch_width) in text.chars().zip(widths.iter().copied()) {
-                if acc + ch_width > allowed {
+                if acc + ch_width > max_width {
                     break;
                 }
                 out.push(ch);
@@ -283,7 +277,7 @@ fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32) -> String 
         None => {
             let fallback = APPROX_CHAR_WIDTH;
             for ch in text.chars() {
-                if acc + fallback > allowed {
+                if acc + fallback > max_width {
                     break;
                 }
                 out.push(ch);
@@ -292,11 +286,7 @@ fn truncate_text_to_width(text: &str, max_width: f32, font_size: f32) -> String 
         }
     }
 
-    if out.is_empty() {
-        String::new()
-    } else {
-        format!("{out}{ellipsis}")
-    }
+    out
 }
 
 fn selected_index(options: &[String], selected: &str) -> Option<usize> {
@@ -419,7 +409,6 @@ impl WidgetDefinition for DropdownWidget {
             if !selected.is_empty() {
                 cache_text_widths(&selected, font_size, ctx);
             }
-            cache_text_widths("…", font_size, ctx);
             for option in &options {
                 cache_text_widths(&option, font_size, ctx);
             }
@@ -1128,6 +1117,12 @@ mod tests {
         props.insert("value-index-offset".to_string(), Value::Number(1.0));
 
         assert_eq!(get_selected(&props), "ladder");
+    }
+
+    #[test]
+    fn truncation_does_not_spend_width_on_ellipsis() {
+        assert_eq!(truncate_text_to_width("-1oct", 2.0, 10.0), "-1o");
+        assert!(!truncate_text_to_width("-1oct", 2.0, 10.0).contains('…'));
     }
 
     #[test]

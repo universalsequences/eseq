@@ -2,11 +2,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::sequencer::MAX_STEPS;
 
-/// Maximum number of parameters per effect slot.
-/// Custom instruments can easily exceed 16 params, and sequenced p-lock dispatch
-/// iterates over every declared param. Keep this comfortably above current
-/// instrument sizes so defaults/plocks/node indices stay aligned.
-pub const MAX_SLOT_PARAMS: usize = 128;
+/// Baseline storage capacity for per-slot defaults, p-locks, and node mappings.
+/// Custom instruments include generated host-modulation controls in addition to
+/// their declared DGen params, so dense synths can exceed 128 parameters.
+pub const MAX_SLOT_PARAMS: usize = 512;
 
 /// Number of fixed built-in effect slots. Built-ins are now ordinary inserts,
 /// so track effect chains start at slot 0.
@@ -254,6 +253,69 @@ mod tests {
 
         let value = desc.denormalize(0.5);
         assert!((value - 632.4555).abs() < 0.1, "value was {value}");
+    }
+
+    #[test]
+    fn dense_slots_preserve_params_past_legacy_capacity() {
+        let params: Vec<ParamDescriptor> = (0..150)
+            .map(|idx| ParamDescriptor {
+                name: format!("p{idx}"),
+                min: -10.0,
+                max: 10.0,
+                default: idx as f32,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 1_000 + idx as u32,
+                node_param_span: 1,
+                host_control: None,
+            })
+            .collect();
+        let desc = EffectDescriptor {
+            name: "dense".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            params,
+        };
+
+        let slot = EffectSlotState::new(&desc, 100);
+        slot.defaults.set(149, 7.5);
+        slot.plocks.set(3, 149, -4.25);
+
+        assert_eq!(slot.defaults.get(149), 7.5);
+        assert_eq!(slot.plocks.get(3, 149), Some(-4.25));
+        assert_eq!(slot.resolve_node_idx(149), 1_149);
+    }
+
+    #[test]
+    fn empty_slot_apply_descriptor_preserves_dense_param_mappings() {
+        let params: Vec<ParamDescriptor> = (0..150)
+            .map(|idx| ParamDescriptor {
+                name: format!("p{idx}"),
+                min: -10.0,
+                max: 10.0,
+                default: idx as f32,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 2_000 + idx as u32,
+                node_param_span: 1,
+                host_control: None,
+            })
+            .collect();
+        let desc = EffectDescriptor {
+            name: "dense".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            params,
+        };
+
+        let slot = EffectSlotState::empty();
+        slot.apply_descriptor(&desc, 100);
+        slot.defaults.set(149, 6.25);
+        slot.plocks.set(7, 149, -3.5);
+
+        assert_eq!(slot.defaults.get(149), 6.25);
+        assert_eq!(slot.plocks.get(7, 149), Some(-3.5));
+        assert_eq!(slot.resolve_node_idx(149), 2_149);
     }
 
     #[test]
@@ -2076,11 +2138,14 @@ pub struct SlotParamDefaults {
 
 impl SlotParamDefaults {
     pub fn new_from_descriptor(desc: &EffectDescriptor) -> Self {
-        let data: Vec<AtomicU32> = desc
+        let mut data: Vec<AtomicU32> = desc
             .params
             .iter()
             .map(|p| AtomicU32::new(p.default.to_bits()))
             .collect();
+        data.resize_with(MAX_SLOT_PARAMS.max(data.len()), || {
+            AtomicU32::new(0.0_f32.to_bits())
+        });
         Self { data }
     }
 
@@ -2124,19 +2189,22 @@ pub struct EffectSlotState {
 impl EffectSlotState {
     pub fn new(desc: &EffectDescriptor, node_id: u32) -> Self {
         let num_params = desc.params.len();
-        let param_node_indices: Vec<AtomicU32> = desc
+        let capacity = MAX_SLOT_PARAMS.max(num_params);
+        let mut param_node_indices: Vec<AtomicU32> = desc
             .params
             .iter()
             .map(|p| AtomicU32::new(p.node_param_idx))
             .collect();
-        let param_node_spans: Vec<AtomicU32> = desc
+        param_node_indices.resize_with(capacity, || AtomicU32::new(0));
+        let mut param_node_spans: Vec<AtomicU32> = desc
             .params
             .iter()
             .map(|p| AtomicU32::new(p.node_param_span.max(1)))
             .collect();
+        param_node_spans.resize_with(capacity, || AtomicU32::new(1));
         Self {
             node_id: AtomicU32::new(node_id),
-            plocks: SlotPLockData::new(MAX_SLOT_PARAMS),
+            plocks: SlotPLockData::new(capacity),
             defaults: SlotParamDefaults::new_from_descriptor(desc),
             num_params: AtomicU32::new(num_params as u32),
             param_node_indices,

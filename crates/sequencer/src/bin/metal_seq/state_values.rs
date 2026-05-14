@@ -4592,6 +4592,17 @@ mod tests {
         param
     }
 
+    fn test_base_note_param_map(
+        idx: usize,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut param = test_param_map("base_note", idx, 0.0, -48.0, 48.0);
+        param.insert(
+            "control".to_string(),
+            Rc::new(RefCell::new(Value::String("base-note".to_string()))),
+        );
+        param
+    }
+
     fn test_filter_params() -> Vec<Value> {
         vec![
             Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
@@ -4860,6 +4871,80 @@ mod tests {
         inst.insert(
             "sources".to_string(),
             Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst
+    }
+
+    fn mod_fm_messui_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>>
+    {
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("mod-fm-messui/".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("mod-fm-messui".to_string()))),
+        );
+
+        let params = [
+            ("amp_attack", 4.0, 1.0, 2000.0),
+            ("amp_decay", 220.0, 1.0, 4000.0),
+            ("amp_sustain", 0.65, 0.0, 1.0),
+            ("amp_release", 180.0, 1.0, 5000.0),
+            ("mod_attack", 2.0, 1.0, 2000.0),
+            ("mod_decay", 380.0, 1.0, 5000.0),
+            ("mod_sustain", 0.18, 0.0, 1.0),
+            ("mod_release", 140.0, 1.0, 5000.0),
+            ("op1_ratio", 0.25, 0.25, 16.0),
+            ("op2_ratio", 2.0, 0.25, 16.0),
+            ("op3_ratio", 1.5, 0.25, 16.0),
+            ("op1_detune", 1.0, -1200.0, 1200.0),
+            ("op2_detune", 0.0, -1200.0, 1200.0),
+            ("op3_detune", 3.0, -1200.0, 1200.0),
+            ("op1_level", 0.43, 0.0, 1.0),
+            ("op2_level", 0.44, 0.0, 1.0),
+            ("op3_level", 0.15, 0.0, 1.0),
+            ("op2_to_op1", 1.0, 0.0, 12.0),
+            ("op3_to_op1", 0.37, 0.0, 12.0),
+            ("op3_to_op2", 2.0, 0.0, 12.0),
+            ("mod_env_to_op2", 1.0, -4.0, 8.0),
+            ("mod_env_to_op3", -3.2, -4.0, 8.0),
+            ("lfo_rate", 3.05, 0.02, 30.0),
+            ("lfo_to_index", 0.13, 0.0, 6.0),
+            ("lfo_to_pitch", 0.0, 0.0, 48.0),
+            ("filter_route", 1.0, 1.0, 5.0),
+            ("f1_mode", 0.0, 0.0, 5.0),
+            ("f2_mode", 0.0, 0.0, 5.0),
+            ("f1_cutoff", 1517.0, 40.0, 16000.0),
+            ("f2_cutoff", 535.0, 40.0, 16000.0),
+            ("f1_resonance", 2.05, 0.5, 6.0),
+            ("f2_resonance", 0.75, 0.5, 6.0),
+            ("f1_drive", 0.37, 0.2, 8.0),
+            ("f2_drive", 0.20, 0.2, 8.0),
+            ("f1_env_amt", 4671.0, -8000.0, 8000.0),
+            ("f2_env_amt", -483.0, -8000.0, 8000.0),
+            ("f1_lfo_amt", 15.0, -4000.0, 4000.0),
+            ("f2_lfo_amt", 2.0, -4000.0, 4000.0),
+            ("filter_blend", 1.0, 0.0, 1.0),
+            ("fold", 0.18, 0.0, 1.0),
+            ("drive", 1.25, 0.2, 8.0),
+            ("gain", 0.28, 0.0, 1.0),
+        ];
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(
+                std::iter::once(Value::Map(test_base_note_param_map(0)))
+                    .chain(
+                        params
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, (name, value, min, max))| {
+                                Value::Map(test_param_map(name, idx + 1, *value, *min, *max))
+                            }),
+                    )
+                    .collect(),
+            ))),
         );
         inst
     }
@@ -7240,6 +7325,156 @@ mod tests {
                 "{suffix} should have a finite nonzero rect, got {:?}",
                 node.rect
             );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_mod_fm_messui_dense_controls() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let ui =
+            std::fs::read_to_string("instruments/mod-fm-messui/ui.lisp").expect("read mod FM ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "mod-fm-messui/".to_string(),
+            "instruments/mod-fm-messui/ui.lisp".to_string(),
+            ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(mod_fm_messui_test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load mod FM custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("mod FM custom instrument fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("mod FM layout should build");
+        let rendered = render_layout_cells(&layout, 180, 18);
+        assert!(
+            !rendered.contains("missing:"),
+            "mod FM dense UI should not render missing-param diagnostics:\n{rendered}"
+        );
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        let adsr_editor =
+            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
+        assert!(
+            adsr_editor.rect.width > 8.0
+                && adsr_editor.rect.height > 2.0
+                && adsr_editor.rect.height <= 4.0,
+            "mod FM ADSR editor should stay constrained in the dense detail panel, got {:?}",
+            adsr_editor.rect
+        );
+
+        let op1_ratio = find_stable_key_suffix(&layout, "op1_ratio").expect("op1 ratio control");
+        let op1_level = find_stable_key_suffix(&layout, "op1_level").expect("op1 level knob");
+        let op3_level = find_stable_key_suffix(&layout, "op3_level").expect("op3 level knob");
+        let f1_mode = find_stable_key_suffix(&layout, "f1_mode").expect("filter mode dropdown");
+        let f1_cutoff = find_stable_key_suffix(&layout, "f1_cutoff").expect("filter cutoff knob");
+
+        assert!(
+            op1_ratio.rect.width > 1.0
+                && op1_level.rect.width > 1.0
+                && op3_level.rect.width > 1.0
+                && f1_mode.rect.width > 1.0
+                && f1_cutoff.rect.width > 1.0,
+            "dense controls should have visible measured rects: op1_ratio={:?} op1_level={:?} op3_level={:?} f1_mode={:?} f1_cutoff={:?}",
+            op1_ratio.rect,
+            op1_level.rect,
+            op3_level.rect,
+            f1_mode.rect,
+            f1_cutoff.rect
+        );
+        assert!(
+            op1_ratio.rect.col + op1_ratio.rect.width <= op1_level.rect.col
+                && op1_level.rect.col + op1_level.rect.width <= op3_level.rect.col
+                && f1_mode.rect.col + f1_mode.rect.width <= f1_cutoff.rect.col,
+            "dense micro clusters should end before the knob lanes; op1_ratio={:?} op1_level={:?} op3_level={:?} f1_mode={:?} f1_cutoff={:?}",
+            op1_ratio.rect,
+            op1_level.rect,
+            op3_level.rect,
+            f1_mode.rect,
+            f1_cutoff.rect
+        );
+
+        for suffix in [
+            "op3_level",
+            "f1_cutoff",
+            "f2_resonance",
+            "filter_route",
+            "gain",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present"));
             assert!(
                 node.rect.row >= instrument_panel.rect.row
                     && node.rect.row + node.rect.height

@@ -790,6 +790,11 @@ fragment float4 waveform_frag(
         tile_content_rows_bits: u32,
     }
 
+    const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET: &str = "agent-instrument-stub-bg";
+    const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX: &str = "__agent-instrument-stub-bg";
+    const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX: &str = "__agent_instrument_stub_bg";
+    const AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME: &str = "agent-instrument-stub-skeleton";
+
     // ── Backend ───────────────────────────────────────────────────────────────
 
     pub struct MetalBackend {
@@ -827,6 +832,7 @@ fragment float4 waveform_frag(
         widget_scene_last_keys: HashMap<usize, WidgetSceneCacheKey>,
         image_rotation_states: HashMap<u64, ImageRotationState>,
         stats: RenderStats,
+        agent_instrument_stub_animation_visible: bool,
         // Winit
         event_loop: Option<EventLoop<()>>,
         window: Option<Window>,
@@ -901,6 +907,7 @@ fragment float4 waveform_frag(
                 widget_scene_last_keys: HashMap::new(),
                 image_rotation_states: HashMap::new(),
                 stats: RenderStats::new(),
+                agent_instrument_stub_animation_visible: false,
                 event_loop: None,
                 window: None,
                 pending: VecDeque::new(),
@@ -926,6 +933,14 @@ fragment float4 waveform_frag(
 
         pub fn time_seconds(&self) -> f32 {
             self.elapsed_time_seconds()
+        }
+
+        pub fn agent_instrument_stub_animation_visible(&self) -> bool {
+            self.agent_instrument_stub_animation_visible
+        }
+
+        fn note_agent_instrument_stub_animation_detected(&mut self) {
+            self.agent_instrument_stub_animation_visible = true;
         }
 
         fn widget_scene_cache_parts(
@@ -1563,6 +1578,7 @@ fragment float4 waveform_frag(
         /// Render a tiled frame with per-tile scissor clipping.
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
+            self.agent_instrument_stub_animation_visible = false;
             let render_time_seconds = self.elapsed_time_seconds();
             self.sync_window_theme();
             let mut widget_scene_build_time = Duration::ZERO;
@@ -1741,6 +1757,9 @@ fragment float4 waveform_frag(
                 // Collect with LOCAL coords (no offset) so scroll/clip logic works,
                 // then offset the resulting primitives to screen position.
                 if let Some(ref layout) = tile.frame.widget_layout {
+                    if layout_contains_agent_instrument_stub_animation(layout) {
+                        self.note_agent_instrument_stub_animation_detected();
+                    }
                     let time_seconds = self.elapsed_time_seconds();
                     let inner_rows_exact = ((content_bottom_px - content_top_px) / cell_h).max(0.0);
                     let inner_rows = inner_rows_exact.floor() as u16;
@@ -1810,6 +1829,9 @@ fragment float4 waveform_frag(
                             )
                         })
                         .collect();
+                    if contains_agent_instrument_stub_animation(&offset_prims) {
+                        self.note_agent_instrument_stub_animation_detected();
+                    }
                     // Split primitives into segments at clip rect boundaries.
                     // Each segment gets its own scissor rect for proper scroll clipping.
                     let segments =
@@ -1953,6 +1975,9 @@ fragment float4 waveform_frag(
                                 )
                             })
                             .collect();
+                        if contains_agent_instrument_stub_animation(&offset_overlay) {
+                            self.note_agent_instrument_stub_animation_detected();
+                        }
 
                         let (bg_runs, fg_runs) = partition_widget_instance_runs(&offset_overlay);
                         for (widget_type, instances) in &bg_runs {
@@ -4602,6 +4627,41 @@ fragment float4 waveform_frag(
         (bg_runs, fg_runs)
     }
 
+    fn contains_agent_instrument_stub_animation(
+        primitives: &[widget_render::MetalPrimitive],
+    ) -> bool {
+        primitives.iter().any(|primitive| {
+            matches!(
+                primitive,
+                widget_render::MetalPrimitive::WidgetInstance { widget_type, .. }
+                    if is_agent_instrument_stub_animation_widget_type(widget_type)
+            )
+        })
+    }
+
+    fn layout_contains_agent_instrument_stub_animation(layout: &crate::layout::LayoutNode) -> bool {
+        is_agent_instrument_stub_animation_widget_type(&layout.widget_type)
+            || layout_debug_name(layout) == Some(AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME)
+            || layout
+                .children
+                .iter()
+                .any(layout_contains_agent_instrument_stub_animation)
+    }
+
+    fn is_agent_instrument_stub_animation_widget_type(widget_type: &str) -> bool {
+        widget_type == AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET
+            || widget_type.ends_with(AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX)
+            || widget_type.ends_with(AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX)
+    }
+
+    fn layout_debug_name(layout: &crate::layout::LayoutNode) -> Option<&str> {
+        let value = layout.props.get("debug-name")?;
+        let crate::vm::Value::String(debug_name) = value else {
+            return None;
+        };
+        Some(debug_name.as_str())
+    }
+
     fn extend_right_edge_primitive(
         prim: widget_render::MetalPrimitive,
         layout_width: f32,
@@ -4903,6 +4963,26 @@ fragment float4 waveform_frag(
             Value::Keyword(value.to_string())
         }
 
+        fn layout_node(widget_type: &str, props: HashMap<String, Value>) -> LayoutNode {
+            LayoutNode {
+                widget_id: 1,
+                stable_widget_id: None,
+                subtree_root_id: None,
+                parent_subtree_root_id: None,
+                stable_key: None,
+                widget_type: widget_type.to_string(),
+                rect: Rect {
+                    col: 0.0,
+                    row: 0.0,
+                    width: 10.0,
+                    height: 4.0,
+                },
+                props,
+                children: Vec::new(),
+                focusable: false,
+            }
+        }
+
         fn rect_contains(outer: Rect, inner: Rect) -> bool {
             inner.col >= outer.col
                 && inner.row >= outer.row
@@ -5017,6 +5097,54 @@ fragment float4 waveform_frag(
                 covering_rect_dispatched_after_button_background.is_none(),
                 "the backend dispatches widget backgrounds before Rect primitives; this covering Rect paints over the button chrome"
             );
+        }
+
+        #[test]
+        fn agent_stub_animation_detection_matches_namespaced_custom_widget() {
+            let namespaced = layout_node(
+                "custom_ui_agent_draft___agent_instrument_stub_bg",
+                HashMap::new(),
+            );
+            assert!(layout_contains_agent_instrument_stub_animation(&namespaced));
+            assert!(contains_agent_instrument_stub_animation(&[
+                MetalPrimitive::WidgetInstance {
+                    widget_type: "custom_ui_agent_draft___agent_instrument_stub_bg".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min: [-1.0, -1.0],
+                        ndc_max: [1.0, 1.0],
+                        value_t: 0.0,
+                        orientation: 0.0,
+                        itime: 0.0,
+                        uniform_a: [0.0; 4],
+                        uniform_b: [0.0; 4],
+                        color_a: [0.0; 4],
+                        color_b: [0.0; 4],
+                        color_c: [0.0; 4],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: 1.0,
+                    },
+                    is_background: false,
+                }
+            ]));
+        }
+
+        #[test]
+        fn agent_stub_animation_detection_matches_raw_defwidget_name() {
+            let raw = layout_node("agent-instrument-stub-bg", HashMap::new());
+            assert!(layout_contains_agent_instrument_stub_animation(&raw));
+        }
+
+        #[test]
+        fn agent_stub_animation_detection_matches_skeleton_debug_name() {
+            let skeleton = layout_node(
+                "box",
+                HashMap::from([(
+                    "debug-name".to_string(),
+                    prop_string("agent-instrument-stub-skeleton"),
+                )]),
+            );
+            assert!(layout_contains_agent_instrument_stub_animation(&skeleton));
         }
     }
 }

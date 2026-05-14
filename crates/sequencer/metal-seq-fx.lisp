@@ -340,26 +340,52 @@
   :width 70 :height 1
   :paint-margin 0.2
   :shader
-  (let ((pulse (+ 0.5 (* 0.5 (sin (* itime 1.15)))))
-        (scan-y (* (sin (* itime 2.4)) (* height 0.78)))
-        (scan-d (abs (- (* y aspect) scan-y)))
-        (scan-line (- scan-d 0.018))
+  (let ((drift (* itime 0.11))
+        (pulse (+ 0.5 (* 0.5 (sin (* itime 0.72)))))
+        (sx (+ (* x 0.17) drift))
+        (sy (+ (* y aspect 0.92) (* (sin (* itime 0.19)) 0.36)))
+        (ix (floor sx))
+        (iy (floor sy))
+        (fx (fract sx))
+        (fy (fract sy))
+        (ux (smoothstep 0.0 1.0 fx))
+        (uy (smoothstep 0.0 1.0 fy))
+        (h00 (fract (* (sin (+ (* ix 127.1) (* iy 311.7))) 43758.5453)))
+        (h10 (fract (* (sin (+ (* (+ ix 1.0) 127.1) (* iy 311.7))) 43758.5453)))
+        (h01 (fract (* (sin (+ (* ix 127.1) (* (+ iy 1.0) 311.7))) 43758.5453)))
+        (h11 (fract (* (sin (+ (* (+ ix 1.0) 127.1) (* (+ iy 1.0) 311.7))) 43758.5453)))
+        (n0 (mix h00 h10 ux))
+        (n1 (mix h01 h11 ux))
+        (cloud-a (mix n0 n1 uy))
+        (sx2 (+ (* x 0.39) (* (sin (* itime 0.13)) 0.8)))
+        (sy2 (- (* y aspect 1.8) (* itime 0.17)))
+        (ix2 (floor sx2))
+        (iy2 (floor sy2))
+        (fx2 (fract sx2))
+        (fy2 (fract sy2))
+        (ux2 (smoothstep 0.0 1.0 fx2))
+        (uy2 (smoothstep 0.0 1.0 fy2))
+        (k00 (fract (* (sin (+ (* ix2 269.5) (* iy2 183.3))) 24634.6345)))
+        (k10 (fract (* (sin (+ (* (+ ix2 1.0) 269.5) (* iy2 183.3))) 24634.6345)))
+        (k01 (fract (* (sin (+ (* ix2 269.5) (* (+ iy2 1.0) 183.3))) 24634.6345)))
+        (k11 (fract (* (sin (+ (* (+ ix2 1.0) 269.5) (* (+ iy2 1.0) 183.3))) 24634.6345)))
+        (m0 (mix k00 k10 ux2))
+        (m1 (mix k01 k11 ux2))
+        (cloud-b (mix m0 m1 uy2))
+        (cloud (smoothstep 0.18 0.92 (+ (* cloud-a 0.68) (* cloud-b 0.32))))
         (body (rgba 0.055 0.060 0.072 1.0))
         (blue (rgba 0.05 0.30 0.48 1.0))
         (violet (rgba 0.48 0.20 0.56 1.0))
-        (scan (mix
-          (rgba 0.22 0.88 1.00 0.95)
-          (rgba 1.00 0.42 0.82 0.95)
-          pulse)))
+        (cyan (rgba 0.15 0.78 0.92 1.0))
+        (magenta (rgba 0.96 0.34 0.74 1.0)))
     (sdf/layer
       (sdf/fill
         (sdf/rect width height)
         (material :color
-          (mix body (mix blue violet pulse) 0.34)))
-      (sdf/fill
-        (max (sdf/rect width height) scan-line)
-        (material :color
-          (mix scan (rgba 1.0 1.0 1.0 1.0) (smoothstep -0.018 0.018 (- 0 scan-d))))))))
+          (mix
+            (mix body (mix blue violet pulse) 0.30)
+            (mix cyan magenta pulse)
+            (* cloud 0.42)))))))
 
 (def fx-set-instrument-value (p v)
   (do

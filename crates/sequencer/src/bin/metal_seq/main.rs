@@ -135,6 +135,42 @@ fn track_button_state_snapshot(state: &Arc<SequencerState>) -> Vec<(bool, bool)>
         .collect()
 }
 
+#[derive(Default)]
+struct StubAnimationRenderCache {
+    frame: Option<eseqlisp::backend::TiledRenderFrame>,
+    size: Option<(usize, usize)>,
+}
+
+impl StubAnimationRenderCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn reset(&mut self) {
+        self.frame = None;
+        self.size = None;
+    }
+
+    fn update_size(&mut self, size: (usize, usize)) {
+        if self.size != Some(size) {
+            self.reset();
+        }
+    }
+
+    fn store(&mut self, size: (usize, usize), frame: eseqlisp::backend::TiledRenderFrame) {
+        self.size = Some(size);
+        self.frame = Some(frame);
+    }
+
+    fn is_active(&self, size: (usize, usize), stub_visible: bool) -> bool {
+        stub_visible && self.size == Some(size) && self.frame.is_some()
+    }
+
+    fn frame(&self) -> Option<&eseqlisp::backend::TiledRenderFrame> {
+        self.frame.as_ref()
+    }
+}
+
 fn map_number(
     map: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
     key: &str,
@@ -842,8 +878,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut editor, mut backend) = create_editor_and_backend(runtime, &app)?;
 
     // 5. Metal event loop
-    let frame_interval = Duration::from_secs_f64(1.0 / 30.0);
-    let mut last_render_at = Instant::now() - frame_interval;
+    let idle_frame_interval = Duration::from_secs_f64(1.0 / 30.0);
+    let animation_frame_interval = Duration::from_secs_f64(1.0 / 60.0);
+    let mut last_render_at = Instant::now() - idle_frame_interval;
+    let mut stub_animation_cache = StubAnimationRenderCache::new();
     let mut pending_drag: Option<(Event, (f32, f32))> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
@@ -928,6 +966,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             log_active_voice_counts(&state, &track_names);
             last_voice_count_log_at = Instant::now();
         }
+
+        let viewport_size = (cols, rows);
+        let stub_animation_active = stub_animation_cache.is_active(
+            viewport_size,
+            backend.agent_instrument_stub_animation_visible(),
+        );
+        let frame_interval = if stub_animation_active {
+            animation_frame_interval
+        } else {
+            idle_frame_interval
+        };
 
         let sdf_animation_active =
             eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(
@@ -6215,7 +6264,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             editor.mark_needs_redraw();
         }
 
+        stub_animation_cache.update_size(viewport_size);
+
         // Render
+        if last_render_at.elapsed() >= frame_interval {
+            if stub_animation_active && !editor.needs_redraw() && !sdf_animation_active {
+                if let Some(tiled_frame) = stub_animation_cache.frame() {
+                    let render_started = Instant::now();
+                    backend
+                        .render_tiled(tiled_frame)
+                        .map_err(|_| "render failed")?;
+                    ui_loop_stats.note_frame(Duration::ZERO, render_started.elapsed());
+                    last_render_at = Instant::now();
+                    continue;
+                }
+            }
+        }
+
         if editor.needs_redraw() && last_render_at.elapsed() >= frame_interval {
             let frame_build_started = Instant::now();
             let tiled_frame =
@@ -6228,6 +6293,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let render_elapsed = render_started.elapsed();
             ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
             editor.clear_needs_redraw();
+            if backend.agent_instrument_stub_animation_visible() {
+                stub_animation_cache.store(viewport_size, tiled_frame);
+            } else {
+                stub_animation_cache.reset();
+            }
             last_render_at = Instant::now();
         }
 

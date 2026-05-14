@@ -8,47 +8,205 @@ pub fn validate_instrument_dsp_source(source: &str) -> Result<(), String> {
         .parse()
         .map_err(|error| format!("dsp.lisp AST error: {error:?}"))?;
 
+    let mut mod_declared_params = Vec::new();
+    let mut mod_accessor_params = Vec::new();
+    let mut declared_modulator_inputs = Vec::new();
     let mut direct_mod_refs = Vec::new();
     for expr in &exprs {
+        if let Some(error) = malformed_param_like_form_error(expr) {
+            return Err(error);
+        }
+        if let Some(name) = declared_modulator_input_name(expr) {
+            declared_modulator_inputs.push(name);
+        }
+        if let Some(param) = param_declared_with_mod(expr) {
+            mod_declared_params.push(param);
+        }
+        collect_mod_accessor_params(expr, &mut mod_accessor_params);
         if is_modulator_input_declaration(expr) {
             continue;
         }
         collect_direct_modulator_refs(expr, &mut direct_mod_refs);
     }
 
-    direct_mod_refs.sort();
-    direct_mod_refs.dedup();
-    if direct_mod_refs.is_empty() {
-        return Ok(());
+    mod_declared_params.sort();
+    mod_declared_params.dedup();
+    mod_accessor_params.sort();
+    mod_accessor_params.dedup();
+    declared_modulator_inputs.sort();
+    declared_modulator_inputs.dedup();
+
+    let mut non_mod_params = mod_accessor_params
+        .iter()
+        .filter(|param| !mod_declared_params.contains(param))
+        .cloned()
+        .collect::<Vec<_>>();
+    non_mod_params.sort();
+    non_mod_params.dedup();
+    if !non_mod_params.is_empty() {
+        let locations = non_mod_params
+            .iter()
+            .map(|param| param_with_line(source, param))
+            .collect::<Vec<_>>();
+        let direct_reads = non_mod_params
+            .iter()
+            .map(|param| {
+                let location = first_mod_accessor_line(source, param)
+                    .map(|line| format!(" on line {line}"))
+                    .unwrap_or_default();
+                format!("`(mod {param})`{location} -> `{param}`")
+            })
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "dsp.lisp uses `(mod param_name)` for parameter(s) not declared with `@mod true`: {}. `(mod param_name)` is only the host modulation accessor for params declared as host modulation targets. Fix this by reading these ordinary/internal controls directly by name: {}. Do not add `@mod true` merely to satisfy this error; only add `@mod true @mod-mode additive` when the parameter is intentionally exposed to the host modulation matrix.",
+            locations.join(", "),
+            direct_reads.join(", ")
+        ));
     }
 
-    Err(format!(
-        "dsp.lisp directly reads host modulator input(s): {}. Do not use mod1..mod6 in DSP expressions. Declare modulator inputs only when params use @mod true, then read the host-modulated parameter with `(mod param_name)`; the host mod matrix chooses which LFO/envelope/random source drives that param.",
-        direct_mod_refs.join(", ")
+    direct_mod_refs.sort();
+    direct_mod_refs.dedup();
+    if !direct_mod_refs.is_empty() {
+        return Err(format!(
+            "dsp.lisp directly reads host modulator input(s): {}. Do not use mod1..mod6 in DSP expressions. Declare modulator inputs only when params use @mod true, then read the host-modulated parameter with `(mod param_name)`; the host mod matrix chooses which LFO/envelope/random source drives that param.",
+            direct_mod_refs.join(", ")
+        ));
+    }
+
+    if !mod_declared_params.is_empty() {
+        let required = ["mod1", "mod2", "mod3", "mod4", "mod5", "mod6"];
+        let missing = required
+            .iter()
+            .filter(|name| {
+                !declared_modulator_inputs
+                    .iter()
+                    .any(|declared| declared == *name)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "dsp.lisp declares host-modulatable parameter(s) with `@mod true` but is missing modulator input declaration(s): {}. Declare all six host modulation lanes with `(def modN (in N+4 @name modN @modulator N))` when any param uses `@mod true`.",
+                missing.join(", ")
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn malformed_param_like_form_error(expr: &Expression) -> Option<String> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    let Some(Expression::Symbol(head)) = items.first() else {
+        return None;
+    };
+    if head == "param" {
+        return None;
+    }
+    if !items.iter().any(is_param_metadata_attribute) {
+        return None;
+    }
+
+    Some(format!(
+        "dsp.lisp has a top-level form that looks like a parameter declaration but does not start with `param`: `({head} ...)`. Every parameter must be declared as `(param name @default value @min value @max value ...)`. Do not use dotted names or generated paths such as `{head}` as operators; replace the malformed form with a normal `(param name ...)` declaration, or delete it if the parameter is already declared."
     ))
 }
 
+fn is_param_metadata_attribute(expr: &Expression) -> bool {
+    matches!(
+        expr,
+        Expression::Symbol(symbol)
+            if matches!(
+                symbol.as_str(),
+                "@default" | "@min" | "@max" | "@unit" | "@mod" | "@mod-mode"
+            )
+    )
+}
+
+fn param_with_line(source: &str, param: &str) -> String {
+    match first_mod_accessor_line(source, param) {
+        Some(line) => format!("{param} at line {line}"),
+        None => param.to_string(),
+    }
+}
+
+fn first_mod_accessor_line(source: &str, param: &str) -> Option<usize> {
+    let needle = format!("(mod {param}");
+    source
+        .lines()
+        .position(|line| line.contains(&needle))
+        .map(|index| index + 1)
+}
+
 fn is_modulator_input_declaration(expr: &Expression) -> bool {
+    declared_modulator_input_name(expr).is_some()
+}
+
+fn declared_modulator_input_name(expr: &Expression) -> Option<String> {
     let Expression::List(items) = expr else {
-        return false;
+        return None;
     };
     if items.len() < 3 {
-        return false;
+        return None;
     }
     if !matches!(items.first(), Some(Expression::Symbol(head)) if head == "def") {
-        return false;
+        return None;
     }
     let Some(Expression::Symbol(name)) = items.get(1) else {
-        return false;
+        return None;
     };
     if !is_modulator_symbol(name) {
-        return false;
+        return None;
     }
     matches!(
         items.get(2),
         Some(Expression::List(input_items))
             if matches!(input_items.first(), Some(Expression::Symbol(head)) if head == "in")
     )
+    .then(|| name.clone())
+}
+
+fn param_declared_with_mod(expr: &Expression) -> Option<String> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if !matches!(items.first(), Some(Expression::Symbol(head)) if head == "param") {
+        return None;
+    }
+    let Some(Expression::Symbol(name)) = items.get(1) else {
+        return None;
+    };
+    items
+        .windows(2)
+        .any(|window| {
+            matches!(
+                window,
+                [Expression::Symbol(attr), Expression::Symbol(value)]
+                    if attr == "@mod" && value == "true"
+            )
+        })
+        .then(|| name.clone())
+}
+
+fn collect_mod_accessor_params(expr: &Expression, params: &mut Vec<String>) {
+    match expr {
+        Expression::List(items) => {
+            if matches!(items.first(), Some(Expression::Symbol(head)) if head == "mod") {
+                if let [_, Expression::Symbol(param)] = items.as_slice() {
+                    params.push(param.clone());
+                }
+            }
+            for item in items {
+                collect_mod_accessor_params(item, params);
+            }
+        }
+        Expression::Quasiquote(expr) | Expression::Unquote(expr) => {
+            collect_mod_accessor_params(expr, params);
+        }
+        _ => {}
+    }
 }
 
 fn collect_direct_modulator_refs(expr: &Expression, refs: &mut Vec<String>) {
@@ -81,12 +239,87 @@ mod tests {
             (def trigger (in 4 @name trigger))
             (def mod1 (in 5 @name mod1 @modulator 1))
             (def mod2 (in 6 @name mod2 @modulator 2))
+            (def mod3 (in 7 @name mod3 @modulator 3))
+            (def mod4 (in 8 @name mod4 @modulator 4))
+            (def mod5 (in 9 @name mod5 @modulator 5))
+            (def mod6 (in 10 @name mod6 @modulator 6))
             (param cutoff @default 900 @min 40 @max 12000 @mod true @mod-mode additive)
             (def filtered (svf (sin (* (phasor pitch) twopi)) (clip (mod cutoff) 40 12000) 1 0))
             (out (* filtered gate velocity) 1 @name audio)
             "#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn rejects_mod_accessor_for_plain_param() {
+        let err = validate_instrument_dsp_source(
+            r#"
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (def mod1 (in 5 @name mod1 @modulator 1))
+            (def mod2 (in 6 @name mod2 @modulator 2))
+            (def mod3 (in 7 @name mod3 @modulator 3))
+            (def mod4 (in 8 @name mod4 @modulator 4))
+            (def mod5 (in 9 @name mod5 @modulator 5))
+            (def mod6 (in 10 @name mod6 @modulator 6))
+            (param lfo_to_pitch @default 0 @min 0 @max 0.14)
+            (def pitch_mod (+ pitch (* pitch (sin (* (phasor 1) twopi)) (mod lfo_to_pitch))))
+            (out (* (sin (* (phasor pitch_mod) twopi)) gate velocity) 1 @name audio)
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("lfo_to_pitch"));
+        assert!(err.contains("lfo_to_pitch at line"));
+        assert!(err.contains("not declared with `@mod true`"));
+        assert!(err.contains("`(mod lfo_to_pitch)` on line"));
+        assert!(err.contains("-> `lfo_to_pitch`"));
+        assert!(err.contains("Do not add `@mod true` merely to satisfy this error"));
+    }
+
+    #[test]
+    fn rejects_malformed_param_like_top_level_form() {
+        let err = validate_instrument_dsp_source(
+            r#"
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (mod_env.mod_param.mod_sustain @default 0.0 @min 0 @max 1)
+            (param mod_sustain @default 0.0 @min 0 @max 1)
+            (out (* (sin (* (phasor pitch) twopi)) gate velocity) 1 @name audio)
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("looks like a parameter declaration"));
+        assert!(err.contains("does not start with `param`"));
+        assert!(err.contains("mod_env.mod_param.mod_sustain"));
+        assert!(err.contains("delete it if the parameter is already declared"));
+    }
+
+    #[test]
+    fn rejects_modulatable_param_without_all_modulator_inputs() {
+        let err = validate_instrument_dsp_source(
+            r#"
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (param cutoff @default 900 @min 40 @max 12000 @mod true @mod-mode additive)
+            (def filtered (svf (sin (* (phasor pitch) twopi)) (clip (mod cutoff) 40 12000) 1 0))
+            (out (* filtered gate velocity) 1 @name audio)
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("@mod true"));
+        assert!(err.contains("missing modulator input"));
+        assert!(err.contains("mod1"));
+        assert!(err.contains("mod6"));
     }
 
     #[test]

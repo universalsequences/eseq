@@ -1294,6 +1294,7 @@ impl App {
             role: AgentMessageRole::User,
             content: prompt.clone(),
             tool_name: None,
+            reasoning_content: None,
         });
         self.agent_panel.input_buffer.clear();
         self.agent_panel.input_cursor = 0;
@@ -1422,6 +1423,7 @@ impl App {
                         role: AgentMessageRole::Assistant,
                         content: result.text,
                         tool_name: None,
+                        reasoning_content: result.reasoning_content,
                     });
                 }
                 self.editor.status_message = Some((
@@ -1444,6 +1446,7 @@ impl App {
                         role: AgentMessageRole::System,
                         content: text.clone(),
                         tool_name: None,
+                        reasoning_content: None,
                     });
                     self.agent_panel
                         .transcript
@@ -1461,6 +1464,7 @@ impl App {
                         role: AgentMessageRole::System,
                         content: repair_message.clone(),
                         tool_name: None,
+                        reasoning_content: None,
                     });
                     self.agent_panel.transcript.push(AgentTranscriptEntry {
                         role: "system".to_string(),
@@ -1532,6 +1536,7 @@ impl App {
                 role: AgentMessageRole::Tool,
                 content: tool_text.clone(),
                 tool_name: Some(outcome.name.clone()),
+                reasoning_content: None,
             });
             self.agent_panel.transcript.push(AgentTranscriptEntry {
                 role: "tool".to_string(),

@@ -85,11 +85,14 @@
          :corner-radius 7
          :background-color (if (= role 'user)
                              :button-ghost-bg
-                             (if (= role 'system) :widget-bg :buffer-bg))
+                             (if (= role 'tool) :widget-bg
+                               (if (= role 'system) :widget-bg :buffer-bg)))
       (v-stack :width :fill :gap 0.25
         (label (str role)
           :font-size 9
-          :color (if (= role 'system) :orange :gray)
+          :color (if (= role 'tool)
+                   :blue
+                   (if (= role 'system) :orange :gray))
           :bg :transparent)
         (label text
           :font-size 11

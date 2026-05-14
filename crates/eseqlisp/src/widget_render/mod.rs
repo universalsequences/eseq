@@ -733,7 +733,16 @@ pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
 fn cacheable_widget_primitives(widget_type: &str) -> bool {
     matches!(
         widget_type,
-        "label" | "button" | "slider" | "hslider" | "vslider" | "toggle" | "knob" | "tabs" | "box"
+        "label"
+            | "button"
+            | "badge"
+            | "slider"
+            | "hslider"
+            | "vslider"
+            | "toggle"
+            | "knob"
+            | "tabs"
+            | "box"
     )
 }
 
