@@ -6,13 +6,16 @@ use super::protocol::{ToolCall, ToolCallOutcome, ToolSpec};
 
 const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const GEMINI_API_KEY_ENV: &str = "GEMINI_API_KEY";
+const DEEPSEEK_API_KEY_ENV: &str = "DEEPSEEK_KEY";
 const OPENAI_MODEL_ENV: &str = "SEQUENCER_OPENAI_MODEL";
 const GEMINI_MODEL_ENV: &str = "SEQUENCER_GEMINI_MODEL";
+const DEEPSEEK_MODEL_ENV: &str = "SEQUENCER_DEEPSEEK_MODEL";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentProviderKind {
     OpenAi,
     Gemini,
+    DeepSeek,
 }
 
 impl AgentProviderKind {
@@ -20,6 +23,7 @@ impl AgentProviderKind {
         match self {
             AgentProviderKind::OpenAi => "OpenAI",
             AgentProviderKind::Gemini => "Gemini",
+            AgentProviderKind::DeepSeek => "DeepSeek",
         }
     }
 
@@ -27,6 +31,7 @@ impl AgentProviderKind {
         match self {
             AgentProviderKind::OpenAi => OPENAI_API_KEY_ENV,
             AgentProviderKind::Gemini => GEMINI_API_KEY_ENV,
+            AgentProviderKind::DeepSeek => DEEPSEEK_API_KEY_ENV,
         }
     }
 
@@ -34,6 +39,7 @@ impl AgentProviderKind {
         match self {
             AgentProviderKind::OpenAi => OPENAI_MODEL_ENV,
             AgentProviderKind::Gemini => GEMINI_MODEL_ENV,
+            AgentProviderKind::DeepSeek => DEEPSEEK_MODEL_ENV,
         }
     }
 }
@@ -80,6 +86,8 @@ pub struct AgentMessage {
     pub role: AgentMessageRole,
     pub content: String,
     pub tool_name: Option<String>,
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,27 +149,43 @@ pub fn default_model_presets() -> Vec<AgentModelPreset> {
             provider: AgentProviderKind::Gemini,
             capability: ModelCapability::Cheap,
         },
+        AgentModelPreset {
+            id: "deepseek-v4-pro".to_string(),
+            display_name: "DeepSeek V4 Pro".to_string(),
+            provider: AgentProviderKind::DeepSeek,
+            capability: ModelCapability::Balanced,
+        },
+        AgentModelPreset {
+            id: "deepseek-v4-flash".to_string(),
+            display_name: "DeepSeek V4 Flash".to_string(),
+            provider: AgentProviderKind::DeepSeek,
+            capability: ModelCapability::Fast,
+        },
     ]
 }
 
 impl AgentProviderState {
     pub fn from_env() -> Self {
         let models = default_model_presets();
-        let providers = [AgentProviderKind::OpenAi, AgentProviderKind::Gemini]
-            .into_iter()
-            .map(|provider| ProviderAvailability {
-                provider,
-                api_key_present: std::env::var(provider.api_key_env())
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(false),
-                selected_model: provider_selected_model(provider, &models),
-                available_models: models
-                    .iter()
-                    .filter(|preset| preset.provider == provider)
-                    .cloned()
-                    .collect(),
-            })
-            .collect::<Vec<_>>();
+        let providers = [
+            AgentProviderKind::OpenAi,
+            AgentProviderKind::Gemini,
+            AgentProviderKind::DeepSeek,
+        ]
+        .into_iter()
+        .map(|provider| ProviderAvailability {
+            provider,
+            api_key_present: std::env::var(provider.api_key_env())
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+            selected_model: provider_selected_model(provider, &models),
+            available_models: models
+                .iter()
+                .filter(|preset| preset.provider == provider)
+                .cloned()
+                .collect(),
+        })
+        .collect::<Vec<_>>();
 
         let selected_provider = providers
             .iter()
@@ -320,8 +344,8 @@ mod tests {
 
     use super::{
         build_gemini_generate_content_payload, build_openai_responses_payload,
-        normalize_openai_tool_call, AgentMessage, AgentMessageRole, AgentProviderKind,
-        AgentProviderState, AgentTurnRequest,
+        default_model_presets, normalize_openai_tool_call, AgentMessage, AgentMessageRole,
+        AgentProviderKind, AgentProviderState, AgentTurnRequest, ModelCapability,
     };
     use crate::agent::actions::AgentSessionContext;
     use crate::agent::protocol::AgentToolRuntime;
@@ -329,7 +353,7 @@ mod tests {
     #[test]
     fn provider_state_contains_both_backends() {
         let state = AgentProviderState::from_env();
-        assert_eq!(state.providers.len(), 2);
+        assert_eq!(state.providers.len(), 3);
         assert!(state
             .providers
             .iter()
@@ -338,6 +362,32 @@ mod tests {
             .providers
             .iter()
             .any(|entry| entry.provider == AgentProviderKind::Gemini));
+        assert!(state
+            .providers
+            .iter()
+            .any(|entry| entry.provider == AgentProviderKind::DeepSeek));
+    }
+
+    #[test]
+    fn deepseek_v4_pro_is_available() {
+        let presets = default_model_presets();
+        let preset = presets
+            .iter()
+            .find(|preset| preset.id == "deepseek-v4-pro")
+            .expect("deepseek preset");
+        assert_eq!(preset.provider, AgentProviderKind::DeepSeek);
+        assert_eq!(AgentProviderKind::DeepSeek.api_key_env(), "DEEPSEEK_KEY");
+    }
+
+    #[test]
+    fn deepseek_v4_flash_is_available() {
+        let presets = default_model_presets();
+        let preset = presets
+            .iter()
+            .find(|preset| preset.id == "deepseek-v4-flash")
+            .expect("deepseek flash preset");
+        assert_eq!(preset.provider, AgentProviderKind::DeepSeek);
+        assert_eq!(preset.capability, ModelCapability::Fast);
     }
 
     #[test]
@@ -350,6 +400,7 @@ mod tests {
                 role: AgentMessageRole::User,
                 content: "make a bright pad".to_string(),
                 tool_name: None,
+                reasoning_content: None,
             }],
             tools: runtime.specs(),
             session_context: AgentSessionContext {
@@ -384,16 +435,19 @@ mod tests {
                     role: AgentMessageRole::User,
                     content: "make an organ".to_string(),
                     tool_name: None,
+                    reasoning_content: None,
                 },
                 AgentMessage {
                     role: AgentMessageRole::Assistant,
                     content: "```dgenlisp\n(out 0 1 @name audio)\n```".to_string(),
                     tool_name: None,
+                    reasoning_content: None,
                 },
                 AgentMessage {
                     role: AgentMessageRole::System,
                     content: "compile error: parse error".to_string(),
                     tool_name: None,
+                    reasoning_content: None,
                 },
             ],
             tools: Vec::new(),
@@ -437,6 +491,7 @@ mod tests {
                 role: AgentMessageRole::User,
                 content: "make a bright pad".to_string(),
                 tool_name: None,
+                reasoning_content: None,
             }],
             tools: runtime.specs(),
             session_context: AgentSessionContext {

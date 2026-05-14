@@ -695,6 +695,26 @@ pub fn is_layout_widget_type(widget_type: &str) -> bool {
         .unwrap_or(false)
 }
 
+pub fn node_handles_pointer_events(node: &LayoutNode) -> bool {
+    let has_pointer_callback = node.props.contains_key("on-click")
+        || node.props.contains_key("on-drag")
+        || node.props.contains_key("on-change")
+        || node.props.contains_key("on-mouse-down")
+        || node.props.contains_key("on-mouse-up")
+        || node.props.contains_key("bind");
+    if has_pointer_callback {
+        return true;
+    }
+
+    if sdf_widget::sdf_widget_def(&node.widget_type).is_some() {
+        return false;
+    }
+
+    widget_definition(&node.widget_type)
+        .map(WidgetDefinition::captures_drag)
+        .unwrap_or(false)
+}
+
 pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
     // Always call tui_render (no-op for most containers)
     if let Some(definition) = widget_definition(&node.widget_type) {
@@ -713,7 +733,16 @@ pub fn render_widget_tree(node: &LayoutNode, buf: &mut CellBuffer) {
 fn cacheable_widget_primitives(widget_type: &str) -> bool {
     matches!(
         widget_type,
-        "label" | "button" | "slider" | "hslider" | "vslider" | "toggle" | "knob" | "tabs" | "box"
+        "label"
+            | "button"
+            | "badge"
+            | "slider"
+            | "hslider"
+            | "vslider"
+            | "toggle"
+            | "knob"
+            | "tabs"
+            | "box"
     )
 }
 

@@ -302,12 +302,7 @@ impl<'a> LayoutEngine<'a> {
 }
 
 fn node_has_event_handler(node: &LayoutNode) -> bool {
-    node.props.contains_key("on-click")
-        || node.props.contains_key("on-drag")
-        || node.props.contains_key("on-change")
-        || node.props.contains_key("on-mouse-down")
-        || node.props.contains_key("on-mouse-up")
-        || widget_render::widget_captures_drag(&node.widget_type)
+    widget_render::node_handles_pointer_events(node)
 }
 
 pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutNode> {
@@ -349,13 +344,7 @@ pub fn hit_test_layout(node: &LayoutNode, row: f32, col: f32) -> Option<&LayoutN
         if !widget_render::is_layout_widget_type(&node.widget_type) {
             return Some(node);
         }
-        if node.props.contains_key("on-change")
-            || node.props.contains_key("bind")
-            || node.props.contains_key("on-click")
-            || node.props.contains_key("on-drag")
-            || node.props.contains_key("on-mouse-down")
-            || node.props.contains_key("on-mouse-up")
-        {
+        if node_has_event_handler(node) {
             return Some(node);
         }
     }

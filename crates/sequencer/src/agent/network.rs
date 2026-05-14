@@ -14,6 +14,7 @@ use super::providers::{
 
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_REPEAT_TOOL_FAILURES: usize = 2;
@@ -22,6 +23,7 @@ const MAX_REPEAT_TOOL_CALL_ROUNDS: usize = 2;
 #[derive(Debug, Clone)]
 pub struct AgentTurnResult {
     pub text: String,
+    pub reasoning_content: Option<String>,
     pub tool_outcomes: Vec<ToolCallOutcome>,
     pub pending_actions: Vec<AgentAppAction>,
 }
@@ -35,6 +37,49 @@ pub struct AgentTurnError {
 pub struct AgentNetworkClient {
     http: Client,
     tools: AgentToolRuntime,
+}
+
+pub type ToolProgressCallback<'a> = dyn Fn(&ToolCall) + Send + Sync + 'a;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAiCompatibleProvider {
+    OpenAi,
+    DeepSeek,
+}
+
+impl OpenAiCompatibleProvider {
+    fn display_name(self) -> &'static str {
+        match self {
+            OpenAiCompatibleProvider::OpenAi => "OpenAI",
+            OpenAiCompatibleProvider::DeepSeek => "DeepSeek",
+        }
+    }
+
+    fn api_key_env(self) -> &'static str {
+        match self {
+            OpenAiCompatibleProvider::OpenAi => "OPENAI_API_KEY",
+            OpenAiCompatibleProvider::DeepSeek => "DEEPSEEK_KEY",
+        }
+    }
+
+    fn chat_completions_url(self) -> &'static str {
+        match self {
+            OpenAiCompatibleProvider::OpenAi => OPENAI_CHAT_COMPLETIONS_URL,
+            OpenAiCompatibleProvider::DeepSeek => DEEPSEEK_CHAT_COMPLETIONS_URL,
+        }
+    }
+
+    fn apply_request_options(self, model: &str, payload: &mut Value) {
+        if self != OpenAiCompatibleProvider::DeepSeek || model != "deepseek-v4-pro" {
+            return;
+        }
+
+        let Some(object) = payload.as_object_mut() else {
+            return;
+        };
+        object.insert("thinking".to_string(), json!({ "type": "enabled" }));
+        object.insert("reasoning_effort".to_string(), json!("high"));
+    }
 }
 
 impl AgentNetworkClient {
@@ -58,6 +103,25 @@ impl AgentNetworkClient {
         messages: &[AgentMessage],
         session_context: AgentSessionContext,
     ) -> Result<AgentTurnResult, AgentTurnError> {
+        self.execute_turn_with_progress(
+            provider,
+            model,
+            system_prompt,
+            messages,
+            session_context,
+            None,
+        )
+    }
+
+    pub fn execute_turn_with_progress(
+        &self,
+        provider: AgentProviderKind,
+        model: &str,
+        system_prompt: &str,
+        messages: &[AgentMessage],
+        session_context: AgentSessionContext,
+        progress: Option<&ToolProgressCallback<'_>>,
+    ) -> Result<AgentTurnResult, AgentTurnError> {
         let request = AgentTurnRequest {
             model: model.to_string(),
             system_prompt: system_prompt.to_string(),
@@ -67,8 +131,17 @@ impl AgentNetworkClient {
         };
 
         match provider {
-            AgentProviderKind::OpenAi => self.execute_openai_turn(&request),
-            AgentProviderKind::Gemini => self.execute_gemini_turn(&request),
+            AgentProviderKind::OpenAi => self.execute_openai_compatible_turn(
+                OpenAiCompatibleProvider::OpenAi,
+                &request,
+                progress,
+            ),
+            AgentProviderKind::Gemini => self.execute_gemini_turn(&request, progress),
+            AgentProviderKind::DeepSeek => self.execute_openai_compatible_turn(
+                OpenAiCompatibleProvider::DeepSeek,
+                &request,
+                progress,
+            ),
         }
     }
 
@@ -89,9 +162,12 @@ impl AgentNetworkClient {
 
         match provider {
             AgentProviderKind::OpenAi => self.execute_openai_responses_text_turn(&request),
-            AgentProviderKind::Gemini => {
-                self.execute_gemini_turn(&request).map(|result| result.text)
-            }
+            AgentProviderKind::Gemini => self
+                .execute_gemini_turn(&request, None)
+                .map(|result| result.text),
+            AgentProviderKind::DeepSeek => self
+                .execute_openai_compatible_turn(OpenAiCompatibleProvider::DeepSeek, &request, None)
+                .map(|result| result.text),
         }
     }
 
@@ -138,15 +214,17 @@ impl AgentNetworkClient {
         })
     }
 
-    fn execute_openai_turn(
+    fn execute_openai_compatible_turn(
         &self,
+        provider: OpenAiCompatibleProvider,
         request: &AgentTurnRequest,
+        progress: Option<&ToolProgressCallback<'_>>,
     ) -> Result<AgentTurnResult, AgentTurnError> {
-        let api_key = std::env::var("OPENAI_API_KEY").map_err(|_| AgentTurnError {
-            message: "Missing required OPENAI_API_KEY.".to_string(),
+        let api_key = std::env::var(provider.api_key_env()).map_err(|_| AgentTurnError {
+            message: format!("Missing required {}.", provider.api_key_env()),
             tool_outcomes: Vec::new(),
         })?;
-        let mut messages = openai_messages(request);
+        let mut messages = openai_messages(provider, request);
         let tools = openai_tools(&request.tools);
         let mut tool_outcomes = Vec::new();
         let mut pending_actions = Vec::new();
@@ -155,37 +233,52 @@ impl AgentNetworkClient {
         let mut last_tool_signature = None::<String>;
         let mut repeated_tool_call_rounds = 0usize;
 
-        for _ in 0..MAX_TOOL_ROUNDS {
-            let payload = json!({
-                "model": request.model,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto"
-            });
+        for round in 1..=MAX_TOOL_ROUNDS {
+            let payload = openai_compatible_chat_payload(provider, request, &messages, &tools);
+            eprintln!(
+                "[agent-net] {} request send model={} round={} messages={} tools={}",
+                provider.display_name(),
+                request.model,
+                round,
+                messages.len(),
+                tools.len()
+            );
             let response = self
                 .http
-                .post(OPENAI_CHAT_COMPLETIONS_URL)
+                .post(provider.chat_completions_url())
                 .header(AUTHORIZATION, format!("Bearer {api_key}"))
                 .header(CONTENT_TYPE, "application/json")
                 .json(&payload)
                 .send()
                 .map_err(|error| AgentTurnError {
-                    message: format!("OpenAI request failed: {error}"),
+                    message: format!("{} request failed: {error}", provider.display_name()),
                     tool_outcomes: tool_outcomes.clone(),
                 })?;
             let status = response.status();
+            eprintln!(
+                "[agent-net] {} response status={} round={}",
+                provider.display_name(),
+                status,
+                round
+            );
             if !status.is_success() {
                 let body = response
                     .text()
                     .unwrap_or_else(|_| "<failed to read response body>".to_string());
                 return Err(AgentTurnError {
-                    message: format!("OpenAI request failed: HTTP {status} body: {body}"),
+                    message: format!(
+                        "{} request failed: HTTP {status} body: {body}",
+                        provider.display_name()
+                    ),
                     tool_outcomes: tool_outcomes.clone(),
                 });
             }
             let response: OpenAiChatCompletionResponse =
                 response.json().map_err(|error| AgentTurnError {
-                    message: format!("Failed to decode OpenAI response: {error}"),
+                    message: format!(
+                        "Failed to decode {} response: {error}",
+                        provider.display_name()
+                    ),
                     tool_outcomes: tool_outcomes.clone(),
                 })?;
 
@@ -194,13 +287,22 @@ impl AgentNetworkClient {
                 .into_iter()
                 .next()
                 .ok_or_else(|| AgentTurnError {
-                    message: "OpenAI returned no choices.".to_string(),
+                    message: format!("{} returned no choices.", provider.display_name()),
                     tool_outcomes: tool_outcomes.clone(),
                 })?
                 .message;
 
             let tool_calls = message.tool_calls.unwrap_or_default();
             let assistant_content = message.content.unwrap_or_default();
+            let assistant_reasoning_content = message.reasoning_content;
+            eprintln!(
+                "[agent-net] {} response decoded round={} content_len={} reasoning_content={} tool_calls={}",
+                provider.display_name(),
+                round,
+                assistant_content.len(),
+                assistant_reasoning_content.is_some(),
+                tool_calls.len()
+            );
             if !tool_calls.is_empty() {
                 let tool_signature = openai_tool_call_signature(&tool_calls);
                 if last_tool_signature.as_deref() == Some(tool_signature.as_str()) {
@@ -216,14 +318,21 @@ impl AgentNetworkClient {
                     .into_error(tool_outcomes));
                 }
 
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": assistant_content,
-                    "tool_calls": tool_calls.iter().map(openai_tool_call_json).collect::<Vec<_>>(),
-                }));
+                messages.push(openai_assistant_tool_message(
+                    provider,
+                    &assistant_content,
+                    assistant_reasoning_content.as_deref(),
+                    &tool_calls,
+                ));
 
                 let mut round_outcomes = Vec::new();
                 for tool_call in tool_calls {
+                    eprintln!(
+                        "[agent-net] {} tool start round={} name={}",
+                        provider.display_name(),
+                        round,
+                        tool_call.function.name
+                    );
                     let call = ToolCall {
                         name: tool_call.function.name.clone(),
                         arguments: if tool_call.function.arguments.trim().is_empty() {
@@ -232,7 +341,8 @@ impl AgentNetworkClient {
                             serde_json::from_str(&tool_call.function.arguments).map_err(
                                 |error| AgentTurnError {
                                     message: format!(
-                                        "OpenAI tool arguments for '{}' were invalid JSON: {error}",
+                                        "{} tool arguments for '{}' were invalid JSON: {error}",
+                                        provider.display_name(),
                                         tool_call.function.name
                                     ),
                                     tool_outcomes: tool_outcomes.clone(),
@@ -240,7 +350,18 @@ impl AgentNetworkClient {
                             )?
                         },
                     };
+                    if let Some(progress) = progress {
+                        progress(&call);
+                    }
                     let outcome = self.tools.execute(call, &request.session_context);
+                    eprintln!(
+                        "[agent-net] {} tool finish round={} name={} ok={} pending_actions={}",
+                        provider.display_name(),
+                        round,
+                        outcome.name,
+                        outcome.ok,
+                        outcome.pending_actions.len()
+                    );
                     pending_actions.extend(outcome.pending_actions.clone());
                     messages.push(json!({
                         "role": "tool",
@@ -257,6 +378,7 @@ impl AgentNetworkClient {
                 {
                     return Ok(AgentTurnResult {
                         text: assistant_content,
+                        reasoning_content: assistant_reasoning_content,
                         tool_outcomes,
                         pending_actions,
                     });
@@ -284,20 +406,24 @@ impl AgentNetworkClient {
 
             return Ok(AgentTurnResult {
                 text: assistant_content,
+                reasoning_content: assistant_reasoning_content,
                 tool_outcomes,
                 pending_actions,
             });
         }
 
-        Err(
-            format_tool_loop_error("OpenAI", MAX_TOOL_ROUNDS, last_tool_signature.as_deref())
-                .into_error(tool_outcomes),
+        Err(format_tool_loop_error(
+            provider.display_name(),
+            MAX_TOOL_ROUNDS,
+            last_tool_signature.as_deref(),
         )
+        .into_error(tool_outcomes))
     }
 
     fn execute_gemini_turn(
         &self,
         request: &AgentTurnRequest,
+        progress: Option<&ToolProgressCallback<'_>>,
     ) -> Result<AgentTurnResult, AgentTurnError> {
         let api_key = std::env::var("GEMINI_API_KEY").map_err(|_| AgentTurnError {
             message: "Missing required GEMINI_API_KEY.".to_string(),
@@ -313,7 +439,7 @@ impl AgentNetworkClient {
         let mut last_tool_signature = None::<String>;
         let mut repeated_tool_call_rounds = 0usize;
 
-        for _ in 0..MAX_TOOL_ROUNDS {
+        for round in 1..=MAX_TOOL_ROUNDS {
             let payload = json!({
                 "systemInstruction": {
                     "parts": [{ "text": request.system_prompt }]
@@ -324,6 +450,13 @@ impl AgentNetworkClient {
                 }]
             });
 
+            eprintln!(
+                "[agent-net] Gemini request send model={} round={} contents={} tools={}",
+                request.model,
+                round,
+                contents.len(),
+                tools.len()
+            );
             let response = self
                 .http
                 .post(&endpoint)
@@ -336,6 +469,10 @@ impl AgentNetworkClient {
                     tool_outcomes: tool_outcomes.clone(),
                 })?;
             let status = response.status();
+            eprintln!(
+                "[agent-net] Gemini response status={} round={}",
+                status, round
+            );
             if !status.is_success() {
                 let body = response
                     .text()
@@ -366,6 +503,12 @@ impl AgentNetworkClient {
             })?;
             let function_calls = extract_gemini_function_calls(&content.parts);
             let assistant_text = extract_gemini_text(&content.parts);
+            eprintln!(
+                "[agent-net] Gemini response decoded round={} text_len={} function_calls={}",
+                round,
+                assistant_text.len(),
+                function_calls.len()
+            );
 
             contents.push(json!({
                 "role": content.role.unwrap_or_else(|| "model".to_string()),
@@ -375,6 +518,7 @@ impl AgentNetworkClient {
             if function_calls.is_empty() {
                 return Ok(AgentTurnResult {
                     text: assistant_text,
+                    reasoning_content: None,
                     tool_outcomes,
                     pending_actions,
                 });
@@ -397,12 +541,24 @@ impl AgentNetworkClient {
             let mut response_parts = Vec::new();
             let mut round_outcomes = Vec::new();
             for function_call in function_calls {
-                let outcome = self.tools.execute(
-                    ToolCall {
-                        name: function_call.name.clone(),
-                        arguments: function_call.args.clone().unwrap_or_else(|| json!({})),
-                    },
-                    &request.session_context,
+                eprintln!(
+                    "[agent-net] Gemini tool start round={} name={}",
+                    round, function_call.name
+                );
+                let call = ToolCall {
+                    name: function_call.name.clone(),
+                    arguments: function_call.args.clone().unwrap_or_else(|| json!({})),
+                };
+                if let Some(progress) = progress {
+                    progress(&call);
+                }
+                let outcome = self.tools.execute(call, &request.session_context);
+                eprintln!(
+                    "[agent-net] Gemini tool finish round={} name={} ok={} pending_actions={}",
+                    round,
+                    outcome.name,
+                    outcome.ok,
+                    outcome.pending_actions.len()
                 );
                 pending_actions.extend(outcome.pending_actions.clone());
                 response_parts.push(json!({
@@ -425,6 +581,7 @@ impl AgentNetworkClient {
             {
                 return Ok(AgentTurnResult {
                     text: assistant_text,
+                    reasoning_content: None,
                     tool_outcomes,
                     pending_actions,
                 });
@@ -461,6 +618,27 @@ impl AgentNetworkClient {
     }
 }
 
+fn openai_compatible_chat_payload(
+    provider: OpenAiCompatibleProvider,
+    request: &AgentTurnRequest,
+    messages: &[Value],
+    tools: &[Value],
+) -> Value {
+    let mut payload = json!({
+        "model": request.model,
+        "messages": messages
+    });
+    if !tools.is_empty() {
+        let object = payload
+            .as_object_mut()
+            .expect("chat completion payload is an object");
+        object.insert("tools".to_string(), json!(tools));
+        object.insert("tool_choice".to_string(), json!("auto"));
+    }
+    provider.apply_request_options(&request.model, &mut payload);
+    payload
+}
+
 trait IntoAgentTurnError {
     fn into_error(self, tool_outcomes: Vec<ToolCallOutcome>) -> AgentTurnError;
 }
@@ -474,7 +652,7 @@ impl IntoAgentTurnError for String {
     }
 }
 
-fn openai_messages(request: &AgentTurnRequest) -> Vec<Value> {
+fn openai_messages(provider: OpenAiCompatibleProvider, request: &AgentTurnRequest) -> Vec<Value> {
     let mut messages = vec![json!({
         "role": "system",
         "content": request.system_prompt,
@@ -491,10 +669,20 @@ fn openai_messages(request: &AgentTurnRequest) -> Vec<Value> {
             AgentMessageRole::Assistant => "assistant",
             AgentMessageRole::Tool => unreachable!("tool messages are filtered above"),
         };
-        let object = json!({
+        let mut object = json!({
             "role": role,
             "content": message.content,
         });
+        if provider == OpenAiCompatibleProvider::DeepSeek
+            && matches!(message.role, AgentMessageRole::Assistant)
+        {
+            if let Some(reasoning_content) = &message.reasoning_content {
+                object
+                    .as_object_mut()
+                    .expect("chat history message payload is an object")
+                    .insert("reasoning_content".to_string(), json!(reasoning_content));
+            }
+        }
         messages.push(object);
     }
     messages
@@ -525,6 +713,28 @@ fn openai_tool_call_json(tool_call: &OpenAiToolCall) -> Value {
             "arguments": tool_call.function.arguments,
         }
     })
+}
+
+fn openai_assistant_tool_message(
+    provider: OpenAiCompatibleProvider,
+    content: &str,
+    reasoning_content: Option<&str>,
+    tool_calls: &[OpenAiToolCall],
+) -> Value {
+    let mut message = json!({
+        "role": "assistant",
+        "content": content,
+        "tool_calls": tool_calls.iter().map(openai_tool_call_json).collect::<Vec<_>>(),
+    });
+    if provider == OpenAiCompatibleProvider::DeepSeek {
+        if let Some(reasoning_content) = reasoning_content {
+            message
+                .as_object_mut()
+                .expect("assistant message payload is an object")
+                .insert("reasoning_content".to_string(), json!(reasoning_content));
+        }
+    }
+    message
 }
 
 fn sanitize_openai_schema(value: &Value) -> Value {
@@ -761,6 +971,8 @@ struct OpenAiMessage {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<OpenAiToolCall>>,
 }
 
@@ -821,9 +1033,10 @@ mod tests {
 
     use super::{
         extract_gemini_function_calls, extract_gemini_text, gemini_tool_call_signature,
-        openai_messages, openai_tool_call_json, openai_tool_call_type, openai_tools,
-        repeated_failure_signature, sanitize_gemini_schema, sanitize_openai_schema,
-        GeminiFunctionCall, GeminiPart, OpenAiToolCall, OpenAiToolFunction,
+        openai_assistant_tool_message, openai_compatible_chat_payload, openai_messages,
+        openai_tool_call_json, openai_tool_call_type, openai_tools, repeated_failure_signature,
+        sanitize_gemini_schema, sanitize_openai_schema, GeminiFunctionCall, GeminiPart,
+        OpenAiCompatibleProvider, OpenAiToolCall, OpenAiToolFunction,
     };
     use crate::agent::actions::AgentSessionContext;
     use crate::agent::protocol::AgentToolRuntime;
@@ -909,6 +1122,81 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_pro_payload_enables_thinking() {
+        let request = AgentTurnRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system_prompt: "You are helpful.".to_string(),
+            messages: Vec::new(),
+            tools: Vec::<ToolSpec>::new(),
+            session_context: AgentSessionContext::default(),
+        };
+        let payload =
+            openai_compatible_chat_payload(OpenAiCompatibleProvider::DeepSeek, &request, &[], &[]);
+        assert_eq!(payload["thinking"]["type"], json!("enabled"));
+        assert_eq!(payload["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn openai_compatible_payload_omits_empty_tool_fields() {
+        let request = AgentTurnRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system_prompt: "You are helpful.".to_string(),
+            messages: Vec::new(),
+            tools: Vec::<ToolSpec>::new(),
+            session_context: AgentSessionContext::default(),
+        };
+        let payload =
+            openai_compatible_chat_payload(OpenAiCompatibleProvider::DeepSeek, &request, &[], &[]);
+        assert!(payload["tools"].is_null());
+        assert!(payload["tool_choice"].is_null());
+    }
+
+    #[test]
+    fn openai_compatible_payload_keeps_tool_fields_when_tools_are_present() {
+        let request = AgentTurnRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system_prompt: "You are helpful.".to_string(),
+            messages: Vec::new(),
+            tools: Vec::<ToolSpec>::new(),
+            session_context: AgentSessionContext::default(),
+        };
+        let tools = vec![json!({
+            "type": "function",
+            "function": {
+                "name": "lookup_dgen_docs",
+                "description": "Look up local DGenLisp docs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        })];
+        let payload = openai_compatible_chat_payload(
+            OpenAiCompatibleProvider::DeepSeek,
+            &request,
+            &[],
+            &tools,
+        );
+        assert_eq!(payload["tools"], json!(tools));
+        assert_eq!(payload["tool_choice"], json!("auto"));
+    }
+
+    #[test]
+    fn deepseek_uses_configured_openai_compatible_endpoint() {
+        assert_eq!(
+            OpenAiCompatibleProvider::DeepSeek.chat_completions_url(),
+            "https://api.deepseek.com/chat/completions"
+        );
+        assert_eq!(
+            OpenAiCompatibleProvider::DeepSeek.api_key_env(),
+            "DEEPSEEK_KEY"
+        );
+    }
+
+    #[test]
     fn openai_tool_call_serializes_with_type() {
         let tool_call = OpenAiToolCall {
             id: "call_123".to_string(),
@@ -938,6 +1226,49 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_assistant_tool_message_preserves_reasoning_content() {
+        let tool_call = OpenAiToolCall {
+            id: "call_123".to_string(),
+            call_type: openai_tool_call_type(),
+            function: OpenAiToolFunction {
+                name: "lookup_dgen_docs".to_string(),
+                arguments: r#"{"query":"filter"}"#.to_string(),
+            },
+        };
+        let message = openai_assistant_tool_message(
+            OpenAiCompatibleProvider::DeepSeek,
+            "",
+            Some("thinking trace token"),
+            &[tool_call],
+        );
+        assert_eq!(message["reasoning_content"], json!("thinking trace token"));
+    }
+
+    #[test]
+    fn deepseek_history_messages_preserve_reasoning_content() {
+        let request = AgentTurnRequest {
+            model: "deepseek-v4-pro".to_string(),
+            system_prompt: "You are helpful.".to_string(),
+            messages: vec![AgentMessage {
+                role: AgentMessageRole::Assistant,
+                content: "Done.".to_string(),
+                tool_name: None,
+                reasoning_content: Some("thinking trace token".to_string()),
+            }],
+            tools: Vec::<ToolSpec>::new(),
+            session_context: AgentSessionContext::default(),
+        };
+        let messages = openai_messages(OpenAiCompatibleProvider::DeepSeek, &request);
+        assert_eq!(
+            messages[1]["reasoning_content"],
+            json!("thinking trace token")
+        );
+
+        let openai_messages = openai_messages(OpenAiCompatibleProvider::OpenAi, &request);
+        assert!(openai_messages[1]["reasoning_content"].is_null());
+    }
+
+    #[test]
     fn openai_messages_skip_persisted_tool_transcript_entries() {
         let request = AgentTurnRequest {
             model: "gpt-5.5".to_string(),
@@ -947,16 +1278,19 @@ mod tests {
                     role: AgentMessageRole::User,
                     content: "make a patch".to_string(),
                     tool_name: None,
+                    reasoning_content: None,
                 },
                 AgentMessage {
                     role: AgentMessageRole::Tool,
                     content: "lookup_dgen_docs [ok]\noperator saw".to_string(),
                     tool_name: Some("lookup_dgen_docs".to_string()),
+                    reasoning_content: None,
                 },
                 AgentMessage {
                     role: AgentMessageRole::System,
                     content: "Applying your last generated change failed.".to_string(),
                     tool_name: None,
+                    reasoning_content: None,
                 },
             ],
             tools: Vec::<ToolSpec>::new(),
@@ -975,7 +1309,7 @@ mod tests {
                 current_instrument_preset_schema: None,
             },
         };
-        let messages = openai_messages(&request);
+        let messages = openai_messages(OpenAiCompatibleProvider::OpenAi, &request);
         assert_eq!(messages.len(), 3);
         assert!(messages.iter().all(|msg| msg["role"] != json!("tool")));
     }

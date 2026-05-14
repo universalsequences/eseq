@@ -241,6 +241,7 @@ pub struct DGenManifest {
 pub struct DGenParam {
     pub name: String,
     pub cell_id: usize,
+    pub cell_span: usize,
     pub default: f32,
     pub min: f32,
     pub max: f32,
@@ -679,6 +680,26 @@ pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
 
 // ── Parse manifest ──
 
+fn parse_dgen_param_span(param: &serde_json::Value) -> usize {
+    const DEFAULT_DGEN_PARAM_SPAN: usize = 4;
+    const MAX_DGEN_PARAM_SPAN: usize = 64;
+
+    [
+        "cellSpan",
+        "cellWidth",
+        "laneWidth",
+        "laneCount",
+        "span",
+        "width",
+    ]
+    .iter()
+    .find_map(|key| param.get(*key).and_then(|value| value.as_u64()))
+    .map(|span| span as usize)
+    .filter(|span| *span > 0)
+    .unwrap_or(DEFAULT_DGEN_PARAM_SPAN)
+    .min(MAX_DGEN_PARAM_SPAN)
+}
+
 pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
     let v: serde_json::Value =
         serde_json::from_str(json).map_err(|e| format!("Failed to parse manifest: {e}"))?;
@@ -694,6 +715,7 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
                 .map(|p| DGenParam {
                     name: p["name"].as_str().unwrap_or("").to_string(),
                     cell_id: p["cellId"].as_u64().unwrap_or(0) as usize,
+                    cell_span: parse_dgen_param_span(p),
                     default: p["default"].as_f64().unwrap_or(0.0) as f32,
                     min: p["min"].as_f64().unwrap_or(0.0) as f32,
                     max: p["max"].as_f64().unwrap_or(1.0) as f32,
@@ -846,7 +868,7 @@ fn build_init_message(slot_id: usize, manifest: &DGenManifest) -> Vec<f32> {
 
     for param in &manifest.params {
         if param.cell_id < manifest.total_memory_slots && param.default != 0.0 {
-            for lane in 0..4 {
+            for lane in 0..param.cell_span {
                 let idx = param.cell_id + lane;
                 if idx < manifest.total_memory_slots {
                     entries.push((idx, param.default));
@@ -1552,7 +1574,7 @@ pub fn build_init_message_for_voice(
 
     for param in &manifest.params {
         if param.cell_id < manifest.total_memory_slots && param.default != 0.0 {
-            for lane in 0..4 {
+            for lane in 0..param.cell_span {
                 let idx = param.cell_id + lane;
                 if idx < manifest.total_memory_slots {
                     entries.push((idx, param.default));
@@ -2014,7 +2036,7 @@ pub fn render_loaded_instrument_for_test(
                 param.name, param.cell_id, total_slots
             ));
         }
-        for lane in 0..4 {
+        for lane in 0..param.cell_span {
             let idx = param.cell_id + lane;
             if idx < total_slots {
                 memory_read[idx] = *value;
@@ -5906,6 +5928,7 @@ fn parse_midi_fx_param_descriptor(
             .unwrap_or(crate::effects::ParamKind::Continuous { unit }),
         scaling: crate::effects::ParamScaling::Linear,
         node_param_idx: 0,
+        node_param_span: 1,
         host_control: None,
     })
 }
@@ -6946,6 +6969,73 @@ mod tests {
             Some("emulations/monomachine-fmplus/")
         );
     }
+
+    #[test]
+    fn parse_manifest_uses_dgen_param_span_metadata() {
+        let manifest = parse_manifest(
+            r#"{
+                "dylib": "test.dylib",
+                "totalMemorySlots": 16,
+                "params": [
+                    {"name": "scalar", "cellId": 4, "cellSpan": 1, "default": 0.25},
+                    {"name": "vector", "cellId": 8, "laneWidth": 4, "default": 0.5}
+                ]
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(manifest.params[0].cell_span, 1);
+        assert_eq!(manifest.params[1].cell_span, 4);
+    }
+
+    #[test]
+    fn dgen_init_message_honors_param_span() {
+        let manifest = super::DGenManifest {
+            dylib_path: std::path::PathBuf::new(),
+            total_memory_slots: 16,
+            params: vec![
+                DGenParam {
+                    name: "scalar".to_string(),
+                    cell_id: 4,
+                    cell_span: 1,
+                    default: 0.25,
+                    min: 0.0,
+                    max: 1.0,
+                    unit: None,
+                    hidden: false,
+                },
+                DGenParam {
+                    name: "vector".to_string(),
+                    cell_id: 8,
+                    cell_span: 4,
+                    default: 0.5,
+                    min: 0.0,
+                    max: 1.0,
+                    unit: None,
+                    hidden: false,
+                },
+            ],
+            inputs: Vec::new(),
+            modulators: Vec::new(),
+            mod_destinations: Vec::new(),
+            n_inputs: 0,
+            n_outputs: 2,
+            tensors: Vec::new(),
+            tensor_init_data: Vec::new(),
+            voice_cell_id: None,
+        };
+
+        let init = super::build_init_message_for_voice(0, &manifest, 0);
+        let entries = init[6..]
+            .chunks_exact(2)
+            .map(|entry| (entry[0] as usize, entry[1]))
+            .collect::<Vec<_>>();
+
+        assert!(entries.contains(&(4, 0.25)));
+        assert!(!entries.contains(&(5, 0.25)));
+        assert!(entries.contains(&(8, 0.5)));
+        assert!(entries.contains(&(11, 0.5)));
+    }
     use std::sync::Arc;
 
     #[test]
@@ -7274,6 +7364,7 @@ mod tests {
             &[DGenParam {
                 name: "cutoff".to_string(),
                 cell_id: 0,
+                cell_span: 4,
                 default: 0.5,
                 min: 0.0,
                 max: 1.0,
@@ -7316,6 +7407,7 @@ mod tests {
             &[DGenParam {
                 name: "max1".to_string(),
                 cell_id: 0,
+                cell_span: 4,
                 default: 0.0,
                 min: 0.0,
                 max: 1.0,
@@ -7358,6 +7450,7 @@ mod tests {
             &[DGenParam {
                 name: "cutoff".to_string(),
                 cell_id: 0,
+                cell_span: 4,
                 default: 0.5,
                 min: 0.0,
                 max: 1.0,

@@ -52,6 +52,40 @@ mod tests {
                 .contains(&"value")
         );
     }
+
+    #[test]
+    fn zero_decimal_values_snap_to_integers() {
+        let props = HashMap::from([("decimals".to_string(), Value::Number(0.0))]);
+        let step = quantize_step(&props, 0);
+
+        assert_eq!(quantize_value(2.49, -12.0, 12.0, step), 2.0);
+        assert_eq!(quantize_value(2.50, -12.0, 12.0, step), 3.0);
+    }
+
+    #[test]
+    fn zero_decimal_scaled_values_snap_in_display_units() {
+        let props = HashMap::from([
+            ("decimals".to_string(), Value::Number(0.0)),
+            ("value-scale".to_string(), Value::Number(100.0)),
+        ]);
+        let step = quantize_step(&props, 0);
+
+        assert_eq!(step, Some(0.01));
+        assert!((quantize_value(0.124, -0.5, 0.5, step) - 0.12).abs() < f32::EPSILON);
+        assert!((quantize_value(0.125, -0.5, 0.5, step) - 0.13).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn explicit_step_snaps_decimal_values() {
+        let props = HashMap::from([
+            ("decimals".to_string(), Value::Number(2.0)),
+            ("step".to_string(), Value::Number(0.25)),
+        ]);
+        let step = quantize_step(&props, 2);
+
+        assert_eq!(quantize_value(0.62, 0.0, 1.0, step), 0.5);
+        assert_eq!(quantize_value(0.63, 0.0, 1.0, step), 0.75);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,6 +133,26 @@ fn display_value(props: &HashMap<String, Value>, value: f32) -> f32 {
 
 fn model_value_from_display(props: &HashMap<String, Value>, value: f32) -> f32 {
     value / value_scale(props)
+}
+
+fn quantize_step(props: &HashMap<String, Value>, decimals: u32) -> Option<f32> {
+    let explicit_step = get_f32_prop(props, "step", 0.0);
+    if explicit_step > 0.0 {
+        Some(explicit_step)
+    } else if decimals == 0 {
+        Some(1.0 / value_scale(props))
+    } else {
+        None
+    }
+}
+
+fn quantize_value(value: f32, min: f32, max: f32, step: Option<f32>) -> f32 {
+    let clamped = value.clamp(min, max);
+    let Some(step) = step.filter(|step| *step > 0.0) else {
+        return clamped;
+    };
+    let steps_from_min = ((clamped - min) / step).round();
+    (min + steps_from_min * step).clamp(min, max)
 }
 
 pub fn number_picker_display_text(state: &NumberPickerEditState) -> String {
@@ -319,6 +373,8 @@ impl WidgetDefinition for NumberPickerWidget {
 
                 let min = get_f32_prop(&node.props, "min", 0.0);
                 let max = get_f32_prop(&node.props, "max", 1.0);
+                let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
+                let step = quantize_step(&node.props, decimals);
                 let delta_rows = start_row - local_row; // positive = dragging up
 
                 // Dynamic sensitivity: dragging up to the content-area top
@@ -335,10 +391,9 @@ impl WidgetDefinition for NumberPickerWidget {
                     let frac = ((-delta_rows) / room).min(1.0);
                     start_value - frac * (start_value - min)
                 };
+                let new_value = quantize_value(new_value, min, max, step);
 
-                MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(
-                    new_value.clamp(min, max) as f64,
-                )))
+                MouseEventOutcome::Dispatch(WidgetEvent::Custom(Value::Number(new_value as f64)))
             }
             _ => MouseEventOutcome::Consume,
         }
@@ -368,6 +423,8 @@ impl WidgetDefinition for NumberPickerWidget {
             }
             NumberPickerEditOutcome::Commit(value) => {
                 let value = model_value_from_display(&node.props, value as f32) as f64;
+                let step = quantize_step(&node.props, decimals);
+                let value = quantize_value(value as f32, min as f32, max as f32, step) as f64;
                 set_state(node.widget_id, state);
                 Some(WidgetEvent::Custom(Value::Number(value)))
             }
@@ -388,7 +445,10 @@ impl WidgetDefinition for NumberPickerWidget {
         let previous = get_f32_prop(&node.props, "value", 0.0);
         let min = get_f32_prop(&node.props, "min", 0.0);
         let max = get_f32_prop(&node.props, "max", 1.0);
-        if should_trigger_integer_haptic(node.widget_id, previous, *new_value as f32, min, max) {
+        let decimals = get_f32_prop(&node.props, "decimals", 2.0) as u32;
+        let step = quantize_step(&node.props, decimals);
+        let new_value = quantize_value(*new_value as f32, min, max, step);
+        if should_trigger_integer_haptic(node.widget_id, previous, new_value, min, max) {
             trigger_level_change_haptic();
         }
         let callback = node
@@ -398,7 +458,7 @@ impl WidgetDefinition for NumberPickerWidget {
             .cloned()?;
         Some(EventOutput {
             callback,
-            args: vec![Value::Number(*new_value)],
+            args: vec![Value::Number(new_value as f64)],
         })
     }
 

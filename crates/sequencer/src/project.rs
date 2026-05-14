@@ -300,6 +300,7 @@ pub struct ProjectEffectSlot {
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
     pub param_node_indices: Vec<u32>,
+    pub param_node_spans: Vec<u32>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -542,6 +543,7 @@ impl From<&EffectSlotSnapshot> for ProjectEffectSlot {
             defaults: value.defaults.clone(),
             plocks: value.plocks.clone(),
             param_node_indices: value.param_node_indices.clone(),
+            param_node_spans: value.param_node_spans.clone(),
         }
     }
 }
@@ -554,6 +556,7 @@ impl ProjectEffectSlot {
             defaults: self.defaults,
             plocks: self.plocks,
             param_node_indices: self.param_node_indices,
+            param_node_spans: self.param_node_spans,
         }
     }
 }
@@ -950,6 +953,8 @@ struct SparseProjectEffectSlot {
     plocks_sparse: Vec<SparseEffectSlotPlock>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     param_node_indices: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    param_node_spans: Vec<u32>,
 }
 
 #[derive(Deserialize)]
@@ -958,6 +963,8 @@ struct DenseProjectEffectSlot {
     defaults: Vec<f32>,
     plocks: Vec<Vec<Option<f32>>>,
     param_node_indices: Vec<u32>,
+    #[serde(default)]
+    param_node_spans: Vec<u32>,
 }
 
 #[derive(Deserialize)]
@@ -997,6 +1004,7 @@ impl Serialize for ProjectEffectSlot {
             defaults: self.defaults.clone(),
             plocks_sparse,
             param_node_indices: self.param_node_indices.clone(),
+            param_node_spans: self.param_node_spans.clone(),
         }
         .serialize(serializer)
     }
@@ -1021,6 +1029,7 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                     defaults: slot.defaults,
                     plocks,
                     param_node_indices: slot.param_node_indices,
+                    param_node_spans: slot.param_node_spans,
                 }
             }
             ProjectEffectSlotRepr::Dense(slot) => Self {
@@ -1028,12 +1037,14 @@ impl<'de> Deserialize<'de> for ProjectEffectSlot {
                 defaults: slot.defaults,
                 plocks: slot.plocks,
                 param_node_indices: slot.param_node_indices,
+                param_node_spans: slot.param_node_spans,
             },
             ProjectEffectSlotRepr::Empty(_) => Self {
                 num_params: 0,
                 defaults: Vec::new(),
                 plocks: vec![Vec::new(); MAX_STEPS],
                 param_node_indices: Vec::new(),
+                param_node_spans: Vec::new(),
             },
         })
     }
@@ -1156,12 +1167,14 @@ mod tests {
                         defaults: vec![0.1, 0.2],
                         plocks: vec![vec![None, Some(0.8)]; 256],
                         param_node_indices: vec![0, 1],
+                        param_node_spans: vec![1, 1],
                     },
                     ProjectEffectSlot {
                         num_params: 0,
                         defaults: vec![],
                         plocks: vec![vec![]; 256],
                         param_node_indices: vec![],
+                        param_node_spans: vec![],
                     },
                 ],
                 instrument_base_note_offsets: vec![0.0, 12.0],

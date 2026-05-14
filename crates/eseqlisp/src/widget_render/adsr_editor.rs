@@ -15,6 +15,16 @@ pub struct AdsrEditorWidget;
 
 pub static ADSR_EDITOR_WIDGET: AdsrEditorWidget = AdsrEditorWidget;
 
+fn clamp_measured_axis(requested: f32, min: f32, max: f32) -> f32 {
+    if max.is_finite() {
+        let upper = max.max(0.0);
+        let lower = min.min(upper);
+        requested.clamp(lower, upper)
+    } else {
+        requested.max(min)
+    }
+}
+
 fn prop_ms(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
     super::get_f32_prop(props, key, default)
         .clamp(0.0, 120_000.0)
@@ -172,15 +182,12 @@ impl WidgetDefinition for AdsrEditorWidget {
         _ctx: &MeasureCtx<'_>,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
-        let width = get_prop_num(node, "width")
+        let requested_width = get_prop_num(node, "width")
             .map(f64_to_f32)
-            .unwrap_or(constraints.max_width)
-            .clamp(4.0, constraints.max_width.max(4.0));
-        let height = get_prop_num(node, "height")
-            .map(f64_to_f32)
-            .unwrap_or(5.0)
-            .max(2.0);
-        let _ = width;
+            .unwrap_or(constraints.max_width);
+        let requested_height = get_prop_num(node, "height").map(f64_to_f32).unwrap_or(5.0);
+        let width = clamp_measured_axis(requested_width, 4.0, constraints.max_width);
+        let height = clamp_measured_axis(requested_height, 2.0, constraints.max_height);
         Some(Size { width, height })
     }
 

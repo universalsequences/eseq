@@ -2,11 +2,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::sequencer::MAX_STEPS;
 
-/// Maximum number of parameters per effect slot.
-/// Custom instruments can easily exceed 16 params, and sequenced p-lock dispatch
-/// iterates over every declared param. Keep this comfortably above current
-/// instrument sizes so defaults/plocks/node indices stay aligned.
-pub const MAX_SLOT_PARAMS: usize = 128;
+/// Baseline storage capacity for per-slot defaults, p-locks, and node mappings.
+/// Custom instruments include generated host-modulation controls in addition to
+/// their declared DGen params, so dense synths can exceed 128 parameters.
+pub const MAX_SLOT_PARAMS: usize = 512;
 
 /// Number of fixed built-in effect slots. Built-ins are now ordinary inserts,
 /// so track effect chains start at slot 0.
@@ -47,7 +46,8 @@ pub struct ParamDescriptor {
     pub default: f32,
     pub kind: ParamKind,
     pub scaling: ParamScaling,
-    pub node_param_idx: u32, // index into audio node's state array
+    pub node_param_idx: u32,  // index into audio node's state array
+    pub node_param_span: u32, // number of contiguous state cells that share this value
     pub host_control: Option<HostControl>,
 }
 
@@ -161,6 +161,13 @@ impl ParamDescriptor {
         }
     }
 
+    fn accepts_migrated_value_from(&self, old: &ParamDescriptor, value: f32) -> bool {
+        param_kinds_are_compatible(&old.kind, &self.kind)
+            && value.is_finite()
+            && value >= self.min
+            && value <= self.max
+    }
+
     pub fn format_value(&self, val: f32) -> String {
         match &self.kind {
             ParamKind::Boolean => {
@@ -191,6 +198,19 @@ impl ParamDescriptor {
     }
 }
 
+fn param_kinds_are_compatible(old: &ParamKind, new: &ParamKind) -> bool {
+    match (old, new) {
+        (ParamKind::Continuous { unit: old_unit }, ParamKind::Continuous { unit: new_unit }) => {
+            old_unit == new_unit
+        }
+        (ParamKind::Boolean, ParamKind::Boolean) => true,
+        (ParamKind::Enum { labels: old_labels }, ParamKind::Enum { labels: new_labels }) => {
+            old_labels == new_labels
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering;
@@ -207,6 +227,7 @@ mod tests {
             kind: ParamKind::Boolean,
             scaling: ParamScaling::Linear,
             node_param_idx: 0,
+            node_param_span: 1,
             host_control: None,
         };
 
@@ -226,11 +247,75 @@ mod tests {
             },
             scaling: ParamScaling::Exponential,
             node_param_idx: 0,
+            node_param_span: 1,
             host_control: None,
         };
 
         let value = desc.denormalize(0.5);
         assert!((value - 632.4555).abs() < 0.1, "value was {value}");
+    }
+
+    #[test]
+    fn dense_slots_preserve_params_past_legacy_capacity() {
+        let params: Vec<ParamDescriptor> = (0..150)
+            .map(|idx| ParamDescriptor {
+                name: format!("p{idx}"),
+                min: -10.0,
+                max: 10.0,
+                default: idx as f32,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 1_000 + idx as u32,
+                node_param_span: 1,
+                host_control: None,
+            })
+            .collect();
+        let desc = EffectDescriptor {
+            name: "dense".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            params,
+        };
+
+        let slot = EffectSlotState::new(&desc, 100);
+        slot.defaults.set(149, 7.5);
+        slot.plocks.set(3, 149, -4.25);
+
+        assert_eq!(slot.defaults.get(149), 7.5);
+        assert_eq!(slot.plocks.get(3, 149), Some(-4.25));
+        assert_eq!(slot.resolve_node_idx(149), 1_149);
+    }
+
+    #[test]
+    fn empty_slot_apply_descriptor_preserves_dense_param_mappings() {
+        let params: Vec<ParamDescriptor> = (0..150)
+            .map(|idx| ParamDescriptor {
+                name: format!("p{idx}"),
+                min: -10.0,
+                max: 10.0,
+                default: idx as f32,
+                kind: ParamKind::Continuous { unit: None },
+                scaling: ParamScaling::Linear,
+                node_param_idx: 2_000 + idx as u32,
+                node_param_span: 1,
+                host_control: None,
+            })
+            .collect();
+        let desc = EffectDescriptor {
+            name: "dense".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            params,
+        };
+
+        let slot = EffectSlotState::empty();
+        slot.apply_descriptor(&desc, 100);
+        slot.defaults.set(149, 6.25);
+        slot.plocks.set(7, 149, -3.5);
+
+        assert_eq!(slot.defaults.get(149), 6.25);
+        assert_eq!(slot.plocks.get(7, 149), Some(-3.5));
+        assert_eq!(slot.resolve_node_idx(149), 2_149);
     }
 
     #[test]
@@ -248,6 +333,7 @@ mod tests {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 3,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -258,6 +344,7 @@ mod tests {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 4,
+                    node_param_span: 1,
                     host_control: None,
                 },
             ],
@@ -275,6 +362,7 @@ mod tests {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 10,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -285,6 +373,7 @@ mod tests {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 11,
+                    node_param_span: 1,
                     host_control: None,
                 },
             ],
@@ -308,6 +397,167 @@ mod tests {
     }
 
     #[test]
+    fn sync_descriptor_by_param_name_preserves_reordered_compatible_values() {
+        let original = EffectDescriptor {
+            name: "orig".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "cutoff".to_string(),
+                    min: 20.0,
+                    max: 20_000.0,
+                    default: 1_000.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: 3,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 4,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+            ],
+        };
+        let rebound = EffectDescriptor {
+            name: "rebound".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.25,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 10,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "cutoff".to_string(),
+                    min: 20.0,
+                    max: 20_000.0,
+                    default: 800.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Exponential,
+                    node_param_idx: 11,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+            ],
+        };
+
+        let slot = EffectSlotState::new(&original, 100);
+        slot.defaults.set(0, 880.0);
+        slot.defaults.set(1, 0.73);
+        slot.plocks.set(3, 0, 440.0);
+        slot.plocks.set(4, 1, 0.66);
+
+        slot.sync_descriptor_by_param_name(&original, &rebound, 200);
+
+        assert_eq!(slot.node_id.load(Ordering::Relaxed), 200);
+        assert_eq!(slot.resolve_node_idx(0), 10);
+        assert_eq!(slot.resolve_node_idx(1), 11);
+        assert_eq!(slot.defaults.get(0), 0.73);
+        assert_eq!(slot.defaults.get(1), 880.0);
+        assert_eq!(slot.plocks.get(4, 0), Some(0.66));
+        assert_eq!(slot.plocks.get(3, 1), Some(440.0));
+    }
+
+    #[test]
+    fn sync_descriptor_by_param_name_drops_wrong_or_out_of_range_values() {
+        let original = EffectDescriptor {
+            name: "orig".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 2.0,
+                    default: 0.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 3,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 10.0,
+                    default: 0.5,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 4,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+            ],
+        };
+        let rebound = EffectDescriptor {
+            name: "rebound".to_string(),
+            input_channels: 2,
+            output_channels: 2,
+            params: vec![
+                ParamDescriptor {
+                    name: "mode".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    kind: ParamKind::Enum {
+                        labels: vec!["x".to_string(), "y".to_string()],
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 10,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "gain".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.25,
+                    kind: ParamKind::Continuous { unit: None },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 11,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+            ],
+        };
+
+        let slot = EffectSlotState::new(&original, 100);
+        slot.defaults.set(0, 2.0);
+        slot.defaults.set(1, 7.0);
+        slot.plocks.set(3, 0, 1.0);
+        slot.plocks.set(4, 1, 8.0);
+
+        slot.sync_descriptor_by_param_name(&original, &rebound, 200);
+
+        assert_eq!(slot.defaults.get(0), 1.0);
+        assert_eq!(slot.defaults.get(1), 0.25);
+        assert_eq!(slot.plocks.get(3, 0), None);
+        assert_eq!(slot.plocks.get(4, 1), None);
+    }
+
+    #[test]
     fn force_enabled_default_sets_enabled_without_disturbing_other_params() {
         let desc = EffectDescriptor {
             name: "custom".to_string(),
@@ -322,6 +572,7 @@ mod tests {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 12,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -332,6 +583,7 @@ mod tests {
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::lisp_effect::DGEN_ENABLED_PARAM_IDX as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
             ],
@@ -352,6 +604,7 @@ mod tests {
             &[crate::lisp_effect::DGenParam {
                 name: "cutoff".to_string(),
                 cell_id: 12,
+                cell_span: 4,
                 default: 1000.0,
                 min: 20.0,
                 max: 20_000.0,
@@ -576,6 +829,7 @@ impl EffectDescriptor {
             kind: ParamKind::Boolean,
             scaling: ParamScaling::Linear,
             node_param_idx,
+            node_param_span: 1,
             host_control: None,
         }
     }
@@ -662,6 +916,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_MODE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -674,6 +929,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::filter::FILTER_PARAM_CUTOFF as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -684,6 +940,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_RESONANCE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -696,6 +953,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_DRIVE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -708,6 +966,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_WET as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -720,6 +979,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_AMOUNT as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -732,6 +992,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_RATE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -742,6 +1003,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_SYNCED as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -766,6 +1028,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_DIVISION as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -785,6 +1048,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_WAVE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -797,6 +1061,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_LFO_PHASE_OFFSET as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -809,6 +1074,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_ENV_AMOUNT as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -821,6 +1087,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::filter::FILTER_PARAM_ENV_ATTACK_MS as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -833,6 +1100,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::filter::FILTER_PARAM_ENV_RELEASE_MS as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -845,6 +1113,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::filter::FILTER_PARAM_SLOPE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
             ],
@@ -868,6 +1137,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_ATTACK_SAMPLES as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -878,6 +1148,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_RELEASE_SAMPLES as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -890,6 +1161,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_START_POINT as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -900,6 +1172,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_END_POINT as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -910,6 +1183,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 4,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -920,6 +1194,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 5,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 Self::enabled_param(crate::delay::DELAY_PARAM_ENABLED as u32, 1.0),
@@ -959,6 +1234,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_WET as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -969,6 +1245,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FEEDBACK as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -979,6 +1256,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_SYNC as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -991,6 +1269,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_DIV as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1003,6 +1282,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_OFFSET as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1015,6 +1295,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_LEFT_TIME_MS as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1025,6 +1306,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_SYNC as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1037,6 +1319,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_DIV as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1049,6 +1332,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_OFFSET as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1061,6 +1345,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_RIGHT_TIME_MS as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1073,6 +1358,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FILTER_FREQ as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1083,6 +1369,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_FILTER_Q as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1095,6 +1382,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_RATE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1107,6 +1395,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_AMOUNT as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1119,6 +1408,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::str8_delay::STR8_DELAY_PARAM_MOD_PHASE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
             ],
@@ -1140,6 +1430,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_SPEED as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1152,6 +1443,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_LENGTH_SEC as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1162,6 +1454,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dj_mixer::DJ_MIXER_PARAM_LOOP as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
             ],
@@ -1186,6 +1479,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 4,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1196,6 +1490,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::reverb::REVERB_PARAM_SIZE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1206,6 +1501,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::reverb::REVERB_PARAM_BRIGHT as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1216,6 +1512,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::reverb::REVERB_PARAM_REPLACE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 Self::enabled_param(crate::reverb::REVERB_PARAM_ENABLED as u32, 1.0),
@@ -1249,6 +1546,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_MODE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1261,6 +1559,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_AMOUNT as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1278,6 +1577,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_ATTACK as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1295,6 +1595,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_RELEASE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 if mode == 0.0 {
@@ -1313,6 +1614,7 @@ impl EffectDescriptor {
                         },
                         scaling: ParamScaling::Linear,
                         node_param_idx: crate::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
+                        node_param_span: 1,
                         host_control: None,
                     }
                 } else {
@@ -1326,6 +1628,7 @@ impl EffectDescriptor {
                         },
                         scaling: ParamScaling::Exponential,
                         node_param_idx: crate::dynamics::DYNAMICS_PARAM_LOW_CUT_HZ as u32,
+                        node_param_span: 1,
                         host_control: None,
                     }
                 },
@@ -1339,6 +1642,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_DRIVE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1351,6 +1655,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_OUTPUT_DB as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1363,6 +1668,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::dynamics::DYNAMICS_PARAM_MIX as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 Self::enabled_param(crate::dynamics::DYNAMICS_PARAM_ENABLED as u32, 1.0),
@@ -1397,6 +1703,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_THRESHOLD_DB as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1407,6 +1714,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_RATIO as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1419,6 +1727,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_ATTACK_MS as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1431,6 +1740,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_RELEASE_MS as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1443,6 +1753,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_MAKEUP_DB as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1455,6 +1766,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::compressor::COMPRESSOR_PARAM_MIX as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 Self::enabled_param(crate::compressor::COMPRESSOR_PARAM_ENABLED as u32, 1.0),
@@ -1479,6 +1791,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::limiter::LIMITER_PARAM_INPUT_GAIN_DB as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1491,6 +1804,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::limiter::LIMITER_PARAM_CEILING_DB as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1503,6 +1817,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::limiter::LIMITER_PARAM_RELEASE_MS as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1515,6 +1830,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::limiter::LIMITER_PARAM_LOOKAHEAD_MS as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 Self::enabled_param(crate::limiter::LIMITER_PARAM_ENABLED as u32, 1.0),
@@ -1544,6 +1860,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 0,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1556,6 +1873,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 1,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1568,6 +1886,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 2,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1580,6 +1899,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: 3,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 Self::enabled_param(crate::sampler::SAMPLER_PARAM_ENABLED as u32, 1.0),
@@ -1591,6 +1911,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_REVERSE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1608,6 +1929,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_LOOP_MODE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1620,6 +1942,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_LOOP_XFADE_SAMPLES as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1632,6 +1955,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Exponential,
                     node_param_idx: crate::sampler::PARAM_SR_HZ as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1642,6 +1966,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Boolean,
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_WARP_ENABLED as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1654,6 +1979,7 @@ impl EffectDescriptor {
                     },
                     scaling: ParamScaling::Linear,
                     node_param_idx: crate::sampler::PARAM_WARP_MODE as u32,
+                    node_param_span: 1,
                     host_control: None,
                 },
                 ParamDescriptor {
@@ -1664,6 +1990,7 @@ impl EffectDescriptor {
                     kind: ParamKind::Continuous { unit: None },
                     scaling: ParamScaling::Linear,
                     node_param_idx: u32::MAX,
+                    node_param_span: 1,
                     host_control: None,
                 },
             ],
@@ -1714,6 +2041,7 @@ impl EffectDescriptor {
                 },
                 scaling: ParamScaling::Linear,
                 node_param_idx: (crate::lisp_effect::HEADER_SLOTS + p.cell_id) as u32,
+                node_param_span: p.cell_span as u32,
                 host_control: None,
             })
             .collect();
@@ -1810,11 +2138,14 @@ pub struct SlotParamDefaults {
 
 impl SlotParamDefaults {
     pub fn new_from_descriptor(desc: &EffectDescriptor) -> Self {
-        let data: Vec<AtomicU32> = desc
+        let mut data: Vec<AtomicU32> = desc
             .params
             .iter()
             .map(|p| AtomicU32::new(p.default.to_bits()))
             .collect();
+        data.resize_with(MAX_SLOT_PARAMS.max(data.len()), || {
+            AtomicU32::new(0.0_f32.to_bits())
+        });
         Self { data }
     }
 
@@ -1852,22 +2183,32 @@ pub struct EffectSlotState {
     pub defaults: SlotParamDefaults,
     pub num_params: AtomicU32,
     pub param_node_indices: Vec<AtomicU32>, // per-param: idx field for ParamMsg
+    pub param_node_spans: Vec<AtomicU32>,   // per-param: contiguous DGen cells updated by idx
 }
 
 impl EffectSlotState {
     pub fn new(desc: &EffectDescriptor, node_id: u32) -> Self {
         let num_params = desc.params.len();
-        let param_node_indices: Vec<AtomicU32> = desc
+        let capacity = MAX_SLOT_PARAMS.max(num_params);
+        let mut param_node_indices: Vec<AtomicU32> = desc
             .params
             .iter()
             .map(|p| AtomicU32::new(p.node_param_idx))
             .collect();
+        param_node_indices.resize_with(capacity, || AtomicU32::new(0));
+        let mut param_node_spans: Vec<AtomicU32> = desc
+            .params
+            .iter()
+            .map(|p| AtomicU32::new(p.node_param_span.max(1)))
+            .collect();
+        param_node_spans.resize_with(capacity, || AtomicU32::new(1));
         Self {
             node_id: AtomicU32::new(node_id),
-            plocks: SlotPLockData::new(MAX_SLOT_PARAMS),
+            plocks: SlotPLockData::new(capacity),
             defaults: SlotParamDefaults::new_from_descriptor(desc),
             num_params: AtomicU32::new(num_params as u32),
             param_node_indices,
+            param_node_spans,
         }
     }
 
@@ -1880,6 +2221,16 @@ impl EffectSlotState {
         }
     }
 
+    pub fn resolve_node_span(&self, param_idx: usize) -> u32 {
+        if param_idx < self.param_node_spans.len() {
+            self.param_node_spans[param_idx]
+                .load(Ordering::Relaxed)
+                .max(1)
+        } else {
+            1
+        }
+    }
+
     /// Create an empty slot (no effect loaded).
     pub fn empty() -> Self {
         Self {
@@ -1888,6 +2239,7 @@ impl EffectSlotState {
             defaults: SlotParamDefaults::new_zeroed(MAX_SLOT_PARAMS),
             num_params: AtomicU32::new(0),
             param_node_indices: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(0)).collect(),
+            param_node_spans: (0..MAX_SLOT_PARAMS).map(|_| AtomicU32::new(1)).collect(),
         }
     }
 
@@ -1900,6 +2252,9 @@ impl EffectSlotState {
             self.defaults.set(i, p.default);
             if i < self.param_node_indices.len() {
                 self.param_node_indices[i].store(p.node_param_idx, Ordering::Relaxed);
+            }
+            if i < self.param_node_spans.len() {
+                self.param_node_spans[i].store(p.node_param_span.max(1), Ordering::Relaxed);
             }
         }
     }
@@ -1939,6 +2294,70 @@ impl EffectSlotState {
         }
     }
 
+    /// Rebind this live slot using descriptor identity instead of param index.
+    ///
+    /// This is the correct path for generated instruments/effects whose param
+    /// order may change between edits. Runtime values are only carried across
+    /// when a parameter name is unique in both descriptors, the kind is
+    /// compatible, and the old value is already valid for the new range.
+    pub fn sync_descriptor_by_param_name(
+        &self,
+        old_desc: &EffectDescriptor,
+        new_desc: &EffectDescriptor,
+        node_id: u32,
+    ) {
+        let old_num_params = self.num_params.load(Ordering::Relaxed) as usize;
+        let mut migrated = Vec::new();
+
+        for (new_idx, new_param) in new_desc.params.iter().enumerate() {
+            let Some(old_idx) = unique_param_index_by_name(old_desc, &new_param.name) else {
+                continue;
+            };
+            if unique_param_index_by_name(new_desc, &new_param.name) != Some(new_idx) {
+                continue;
+            }
+            if old_idx >= old_num_params {
+                continue;
+            }
+            let Some(old_param) = old_desc.params.get(old_idx) else {
+                continue;
+            };
+
+            let default = self.defaults.get(old_idx);
+            let default = new_param
+                .accepts_migrated_value_from(old_param, default)
+                .then_some(default);
+
+            let mut plocks = Vec::new();
+            for step in 0..MAX_STEPS {
+                let Some(value) = self.plocks.get(step, old_idx) else {
+                    continue;
+                };
+                if new_param.accepts_migrated_value_from(old_param, value) {
+                    plocks.push((step, value));
+                }
+            }
+
+            migrated.push((new_idx, default, plocks));
+        }
+
+        self.apply_descriptor(new_desc, node_id);
+        for step in 0..MAX_STEPS {
+            for param_idx in 0..MAX_SLOT_PARAMS {
+                self.plocks.clear_param(step, param_idx);
+            }
+        }
+
+        for (new_idx, default, plocks) in migrated {
+            if let Some(value) = default {
+                self.defaults.set(new_idx, value);
+            }
+            for (step, value) in plocks {
+                self.plocks.set(step, new_idx, value);
+            }
+        }
+    }
+
     pub fn force_enabled_default(&self, desc: &EffectDescriptor) -> Option<usize> {
         let enabled_idx = desc
             .params
@@ -1956,6 +2375,9 @@ impl EffectSlotState {
             self.defaults.set(i, 0.0);
             if i < self.param_node_indices.len() {
                 self.param_node_indices[i].store(0, Ordering::Relaxed);
+            }
+            if i < self.param_node_spans.len() {
+                self.param_node_spans[i].store(1, Ordering::Relaxed);
             }
         }
         for step in 0..MAX_STEPS {
@@ -1975,6 +2397,17 @@ impl EffectSlotState {
     }
 }
 
+fn unique_param_index_by_name(desc: &EffectDescriptor, name: &str) -> Option<usize> {
+    let mut matches = desc
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(_, param)| param.name == name)
+        .map(|(idx, _)| idx);
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
+}
+
 // ── EffectSlotSnapshot (for pattern save/restore) ──
 
 #[derive(Clone, Debug)]
@@ -1984,6 +2417,7 @@ pub struct EffectSlotSnapshot {
     pub defaults: Vec<f32>,
     pub plocks: Vec<Vec<Option<f32>>>,
     pub param_node_indices: Vec<u32>,
+    pub param_node_spans: Vec<u32>,
 }
 
 impl EffectSlotSnapshot {
@@ -2007,11 +2441,17 @@ impl EffectSlotSnapshot {
         }
 
         let mut param_node_indices = Vec::with_capacity(np);
+        let mut param_node_spans = Vec::with_capacity(np);
         for i in 0..np {
             if i < slot.param_node_indices.len() {
                 param_node_indices.push(slot.param_node_indices[i].load(Ordering::Relaxed));
             } else {
                 param_node_indices.push(0);
+            }
+            if i < slot.param_node_spans.len() {
+                param_node_spans.push(slot.param_node_spans[i].load(Ordering::Relaxed).max(1));
+            } else {
+                param_node_spans.push(1);
             }
         }
 
@@ -2021,6 +2461,7 @@ impl EffectSlotSnapshot {
             defaults,
             plocks,
             param_node_indices,
+            param_node_spans,
         }
     }
 
@@ -2032,6 +2473,14 @@ impl EffectSlotSnapshot {
         for i in 0..np {
             if i < self.defaults.len() {
                 slot.defaults.set(i, self.defaults[i]);
+            }
+            if i < slot.param_node_indices.len() {
+                let idx = self.param_node_indices.get(i).copied().unwrap_or(0);
+                slot.param_node_indices[i].store(idx, Ordering::Relaxed);
+            }
+            if i < slot.param_node_spans.len() {
+                let span = self.param_node_spans.get(i).copied().unwrap_or(1).max(1);
+                slot.param_node_spans[i].store(span, Ordering::Relaxed);
             }
         }
 
@@ -2054,6 +2503,11 @@ impl EffectSlotSnapshot {
         let defaults: Vec<f32> = desc.params.iter().map(|p| p.default).collect();
         let plocks: Vec<Vec<Option<f32>>> = (0..MAX_STEPS).map(|_| vec![None; np]).collect();
         let param_node_indices: Vec<u32> = desc.params.iter().map(|p| p.node_param_idx).collect();
+        let param_node_spans: Vec<u32> = desc
+            .params
+            .iter()
+            .map(|p| p.node_param_span.max(1))
+            .collect();
 
         Self {
             node_id,
@@ -2061,6 +2515,7 @@ impl EffectSlotSnapshot {
             defaults,
             plocks,
             param_node_indices,
+            param_node_spans,
         }
     }
 
@@ -2071,6 +2526,7 @@ impl EffectSlotSnapshot {
             defaults: Vec::new(),
             plocks: (0..MAX_STEPS).map(|_| Vec::new()).collect(),
             param_node_indices: Vec::new(),
+            param_node_spans: Vec::new(),
         }
     }
 
@@ -2087,6 +2543,11 @@ impl EffectSlotSnapshot {
         self.num_params = new_np as u32;
         self.defaults = desc.params.iter().map(|p| p.default).collect();
         self.param_node_indices = desc.params.iter().map(|p| p.node_param_idx).collect();
+        self.param_node_spans = desc
+            .params
+            .iter()
+            .map(|p| p.node_param_span.max(1))
+            .collect();
         self.plocks = (0..MAX_STEPS).map(|_| vec![None; new_np]).collect();
 
         let preserve = old_defaults.len().min(new_np);

@@ -336,6 +336,57 @@
               (rgba 0.2 0.35 0.8 1)
               (smoothstep -0.02 0.02 d-bar))))))))
 
+(defwidget agent-instrument-stub-bg
+  :width 70 :height 1
+  :paint-margin 0.2
+  :shader
+  (let ((drift (* itime 0.11))
+        (pulse (+ 0.5 (* 0.5 (sin (* itime 0.72)))))
+        (sx (+ (* x 0.17) drift))
+        (sy (+ (* y aspect 0.92) (* (sin (* itime 0.19)) 0.36)))
+        (ix (floor sx))
+        (iy (floor sy))
+        (fx (fract sx))
+        (fy (fract sy))
+        (ux (smoothstep 0.0 1.0 fx))
+        (uy (smoothstep 0.0 1.0 fy))
+        (h00 (fract (* (sin (+ (* ix 127.1) (* iy 311.7))) 43758.5453)))
+        (h10 (fract (* (sin (+ (* (+ ix 1.0) 127.1) (* iy 311.7))) 43758.5453)))
+        (h01 (fract (* (sin (+ (* ix 127.1) (* (+ iy 1.0) 311.7))) 43758.5453)))
+        (h11 (fract (* (sin (+ (* (+ ix 1.0) 127.1) (* (+ iy 1.0) 311.7))) 43758.5453)))
+        (n0 (mix h00 h10 ux))
+        (n1 (mix h01 h11 ux))
+        (cloud-a (mix n0 n1 uy))
+        (sx2 (+ (* x 0.39) (* (sin (* itime 0.13)) 0.8)))
+        (sy2 (- (* y aspect 1.8) (* itime 0.17)))
+        (ix2 (floor sx2))
+        (iy2 (floor sy2))
+        (fx2 (fract sx2))
+        (fy2 (fract sy2))
+        (ux2 (smoothstep 0.0 1.0 fx2))
+        (uy2 (smoothstep 0.0 1.0 fy2))
+        (k00 (fract (* (sin (+ (* ix2 269.5) (* iy2 183.3))) 24634.6345)))
+        (k10 (fract (* (sin (+ (* (+ ix2 1.0) 269.5) (* iy2 183.3))) 24634.6345)))
+        (k01 (fract (* (sin (+ (* ix2 269.5) (* (+ iy2 1.0) 183.3))) 24634.6345)))
+        (k11 (fract (* (sin (+ (* (+ ix2 1.0) 269.5) (* (+ iy2 1.0) 183.3))) 24634.6345)))
+        (m0 (mix k00 k10 ux2))
+        (m1 (mix k01 k11 ux2))
+        (cloud-b (mix m0 m1 uy2))
+        (cloud (smoothstep 0.18 0.92 (+ (* cloud-a 0.68) (* cloud-b 0.32))))
+        (body (rgba 0.055 0.060 0.072 1.0))
+        (blue (rgba 0.05 0.30 0.48 1.0))
+        (violet (rgba 0.48 0.20 0.56 1.0))
+        (cyan (rgba 0.15 0.78 0.92 1.0))
+        (magenta (rgba 0.96 0.34 0.74 1.0)))
+    (sdf/layer
+      (sdf/fill
+        (sdf/rect width height)
+        (material :color
+          (mix
+            (mix body (mix blue violet pulse) 0.30)
+            (mix cyan magenta pulse)
+            (* cloud 0.42)))))))
+
 (def fx-set-instrument-value (p v)
   (do
     (fx-clear-selected-effect)
@@ -351,6 +402,9 @@
     (host-command
       (if (seq-has-selection?) "set-instrument-plock-option" "set-instrument-param-option")
       (dict :param-idx (get p :idx) :label label))))
+
+(def custom-ui-option-index (options label)
+  (nth (filter |idx| (= (nth options idx) label) (range (len options))) 0))
 
 (def fx-set-effect-value (fx p v)
   (do
@@ -870,10 +924,12 @@
 (def ui-lego-gap () 0.25)
 (def ui-lego-small-h () 1.95)
 (def ui-lego-medium-h () 4.08)
+(def ui-lego-dense-h () 3.08)
 (def ui-lego-full-h ()
   (+ (ui-lego-medium-h) (ui-lego-small-h) (ui-lego-small-h)
      (ui-lego-gap) (ui-lego-gap)))
 (def ui-lego-col-w () 24.0)
+(def ui-lego-strip-w () 7.2)
 
 (def ui-lego-title (title accent)
   (box :width :fill :height 0.48 :h-align :start :v-align :center :padding 0.08
@@ -899,6 +955,35 @@
     (v-stack :width :fill :height :fill :gap 0.18
       (ui-lego-title title accent)
       (box :width :fill :flex 1 :padding 0.12 body))))
+
+(def ui-lego-surface-width-s (title width height accent section surface body)
+  (box :width width :height height
+       :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
+       :corner-radius 7
+       :border-width 1
+       :padding 0.20
+       :on-click (ui-section-select-callback section)
+    (v-stack :width :fill :height :fill :gap 0.12
+      (ui-lego-title title accent)
+      (box :width :fill :flex 1 :padding 0.06 body))))
+
+(def ui-lego-panel-s (height section surface body)
+  (box :width (ui-lego-col-w) :height height
+       :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
+       :corner-radius 7
+       :border-width 1
+       :padding 0.18
+       :on-click (ui-section-select-callback section)
+    (box :width :fill :height :fill :padding 0.04 body)))
+
+(def ui-lego-panel-width-s (width height section surface body)
+  (box :width width :height height
+       :background-color (if (= surface :instrument-group-bg) (ui-panel-bg section) surface)
+       :corner-radius 7
+       :border-width 1
+       :padding 0.18
+       :on-click (ui-section-select-callback section)
+    (box :width :fill :height :fill :padding 0.04 body)))
 
 (def ui-lego-plain-surface (height surface body)
   (box :width (ui-lego-col-w) :height height
@@ -950,6 +1035,18 @@
 (def ui-control-block-medium-s (title accent section body)
   (ui-lego-surface-s title (ui-lego-medium-h) accent section :instrument-group-bg body))
 
+(def ui-control-block-dense-s (title accent section body)
+  (ui-lego-surface-s title (ui-lego-dense-h) accent section :instrument-group-bg body))
+
+(def ui-control-panel-dense-s (section body)
+  (ui-lego-panel-s (ui-lego-dense-h) section :instrument-group-bg body))
+
+(def ui-control-panel-small-s (section body)
+  (ui-lego-panel-s (ui-lego-small-h) section :instrument-group-bg body))
+
+(def ui-control-panel-medium-s (section body)
+  (ui-lego-panel-s (ui-lego-medium-h) section :instrument-group-bg body))
+
 (def ui-control-block-full-s (title accent section body)
   (ui-lego-surface-s title (ui-lego-full-h) accent section :instrument-group-bg body))
 
@@ -958,6 +1055,18 @@
 
 (def ui-readout-block-small-s (title accent section body)
   (ui-lego-plain-surface-s (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-readout-block-dense-s (title accent section body)
+  (ui-lego-surface-s title (ui-lego-dense-h) accent section (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-readout-panel-small-s (section body)
+  (ui-lego-panel-s (ui-lego-small-h) section (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-readout-panel-dense-s (section body)
+  (ui-lego-panel-s (ui-lego-dense-h) section (rgba 0.055 0.058 0.064 1.0) body))
+
+(def ui-readout-panel-medium-s (section body)
+  (ui-lego-panel-s (ui-lego-medium-h) section (rgba 0.055 0.058 0.064 1.0) body))
 
 (def ui-readout-block-medium (title accent body)
   (ui-lego-surface title (ui-lego-medium-h) accent (rgba 0.055 0.058 0.064 1.0) body))
@@ -973,6 +1082,36 @@
 
 (def ui-lego-column-full (a)
   (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap) a))
+
+(def ui-lego-strip-s (title accent section body)
+  (ui-lego-surface-width-s title (ui-lego-strip-w) (ui-lego-full-h) accent section :instrument-group-bg body))
+
+(def ui-lego-strip-half-s (title accent section body)
+  (ui-lego-surface-width-s title (ui-lego-strip-w) (ui-lego-medium-h) accent section :instrument-group-bg body))
+
+(def ui-lego-strip-panel-s (section body)
+  (ui-lego-panel-width-s (ui-lego-strip-w) (ui-lego-full-h) section :instrument-group-bg body))
+
+(def ui-lego-badge (title width accent)
+  (box :width width :height 1.18 :v-align :end
+    (badge title
+      :width width :height 0.82 :padding 0 :font-size 9.2
+      :variant :secondary
+      :color accent)))
+
+(def ui-lego-badge-s (section title width accent)
+  (box :width width :height 1.18 :v-align :end
+    (badge title
+      :width width :height 0.82 :padding 0 :font-size 9.2
+      :variant :secondary
+      :color accent)))
+
+(def ui-lego-badge-dark (title width accent)
+  (box :width width :height 1.18 :v-align :end
+    (badge title
+      :width width :height 0.82 :padding 0 :font-size 9.2
+      :background-color :instrument-control-bg
+      :color accent)))
 
 (def ui-lego-knob (name title width accent decimals)
   (let ((p (custom-ui-current-param name)))
@@ -1033,6 +1172,92 @@
             :width width :height 0.68
             :on-change (custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-micro-num-s (section name title width decimals unit accent)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) "-" name)
+        (v-stack :width width :height 1.18 :gap 0.16 :align :start
+          (label title :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
+          (number-picker :value (fx-param-value p)
+            :min (get p :min) :max (get p :max) :decimals decimals
+            :unit unit
+            :noui true :font-size 9.0
+            :text-color accent :edit-color :yellow
+            :text-align :left
+            :width width :height 0.50
+            :on-change (custom-ui-param-change-callback-s section p))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+(def ui-lego-option (name title width options accent)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
+        (v-stack :width width :height 1.12 :gap 0.08 :align :start
+          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+          (dropdown :value-index (fx-param-value p)
+            :value-index-offset (get p :min)
+            :options options
+            :width width :height 0.78 :font-size 8.0
+            :on-change (lambda (v)
+              (custom-ui-set-param-in-scope
+                (custom-ui-current-scope)
+                p
+                (+ (get p :min) (custom-ui-option-index options v)))))))
+      (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-option-s (section name title width options accent)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
+        (v-stack :width width :height 1.12 :gap 0.08 :align :start
+          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+          (dropdown :value-index (fx-param-value p)
+            :value-index-offset (get p :min)
+            :options options
+            :width width :height 0.78 :font-size 8.0
+            :on-change (lambda (v)
+              (do
+                (custom-ui-select-section-in-scope (custom-ui-current-scope) section)
+                (custom-ui-set-param-in-scope
+                  (custom-ui-current-scope)
+                p
+                (+ (get p :min) (custom-ui-option-index options v))))))))
+      (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
+
+(def ui-lego-micro-option-s (section name title width options accent)
+  (let ((p (custom-ui-current-param name)))
+    (if p
+      (subtree :key (str "custom-ui-lego-micro-option-" (custom-ui-scope-name) "-" name)
+        (box :width width :height 1.18 :v-align :end
+          (dropdown :value-index (fx-param-value p)
+            :value-index-offset (get p :min)
+            :options options
+            :width width :height 0.92 :font-size 8.6
+            :on-change (lambda (v)
+              (do
+                (custom-ui-select-section-in-scope (custom-ui-current-scope) section)
+                (custom-ui-set-param-in-scope
+                  (custom-ui-current-scope)
+                  p
+                  (+ (get p :min) (custom-ui-option-index options v))))))))
+      (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
+
+(def ui-lego-micro-base-note-s (section width accent)
+  (let ((p (custom-ui-current-base-note-param)))
+    (if p
+      (subtree :key (str "custom-ui-lego-micro-base-note-" (custom-ui-scope-name))
+        (v-stack :width width :height 1.18 :gap 0.16 :align :start
+          (label "note" :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
+          (number-picker :value (fx-param-value p)
+            :min (get p :min) :max (get p :max) :decimals 0
+            :step 1
+            :noui true :font-size 9.0
+            :text-color accent :edit-color :yellow
+            :text-align :left
+            :width width :height 0.50
+            :on-change (custom-ui-param-change-callback p))))
+      (label "missing: base_note" :font-size 8 :color :red :bg :transparent))))
 
 (def ui-lego-row (name title decimals unit accent)
   (let ((p (custom-ui-current-param name)))
@@ -1175,6 +1400,48 @@
   (if (= custom-ui-selected-section section-b)
     (ui-adsr title-b attack-b decay-b sustain-b release-b)
     (ui-adsr title-a attack-a decay-a sustain-a release-a)))
+
+(def ui-detail-adsr-s (section title attack decay sustain release)
+  (let ((scope (custom-ui-current-scope)))
+    (ui-readout-panel-medium-s section
+      (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+        (adsr-editor
+          :attack (ui-param-bound-value attack 5)
+          :decay (ui-param-bound-value decay 120)
+          :sustain (ui-param-bound-value sustain 0.7)
+          :release (ui-param-bound-value release 120)
+          :width 13.2 :height :fill
+          :background-color :instrument-control-bg
+          :on-change (lambda (env)
+            (do
+              (custom-ui-select-section-in-scope scope section)
+              (custom-ui-set-param-by-name-in-scope scope attack (get env :attack))
+              (custom-ui-set-param-by-name-in-scope scope decay (get env :decay))
+              (custom-ui-set-param-by-name-in-scope scope sustain (get env :sustain))
+              (custom-ui-set-param-by-name-in-scope scope release (get env :release)))))
+        (v-stack :width 8.2 :height :fill :gap 0.10 :align :start
+          (ui-lego-badge-dark title 7.7 (ui-accent-blue))
+          (h-stack :gap 0.14 :align :start
+            (ui-lego-micro-num-s section attack "atk" 3.7 0 "ms" (ui-accent-blue))
+            (ui-lego-micro-num-s section decay "dec" 3.7 0 "ms" (ui-accent-blue)))
+          (h-stack :gap 0.14 :align :start
+            (ui-lego-micro-num-s section sustain "sus" 3.7 2 false (ui-accent-blue))
+            (ui-lego-micro-num-s section release "rel" 3.7 0 "ms" (ui-accent-blue))))))))
+
+(def ui-detail-adsr-switch-s (section-a title-a attack-a decay-a sustain-a release-a
+                              section-b title-b attack-b decay-b sustain-b release-b)
+  (if (= custom-ui-selected-section section-b)
+    (ui-detail-adsr-s section-b title-b attack-b decay-b sustain-b release-b)
+    (ui-detail-adsr-s section-a title-a attack-a decay-a sustain-a release-a)))
+
+(def ui-adsr-compact-s (section title attack decay sustain release)
+  (ui-detail-adsr-s section title attack decay sustain release))
+
+(def ui-adsr-compact-switch-s (section-a title-a attack-a decay-a sustain-a release-a
+                               section-b title-b attack-b decay-b sustain-b release-b)
+  (ui-detail-adsr-switch-s
+    section-a title-a attack-a decay-a sustain-a release-a
+    section-b title-b attack-b decay-b sustain-b release-b))
 
 ;; ui-rack — auto-arrange a flat list of panels into columns based on mode.
 ;;   mode          :breathe (2 panels per column) or :compact (4 panels per col)

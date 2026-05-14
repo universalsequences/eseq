@@ -186,6 +186,7 @@ fn push_param(
         kind,
         scaling,
         node_param_idx: MOD_PARAM_BASE + idx as u32,
+        node_param_span: 1,
         host_control: None,
     });
 }

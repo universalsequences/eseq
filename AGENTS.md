@@ -19,6 +19,10 @@ For saved instrument names, the probe resolves local assets from the saved instr
 
 When changing Lisp UI structure or widget wrapper argument order, do not stop at parse/render-tree tests. Add or run a layout test that proves expected text/debug nodes have finite, nonzero measured rects inside the visible panel; regressions often look like "the panel exists, but its children measured to zero or disappeared."
 
+## Render loop ownership
+
+When changing animation cadence, redraw scheduling, frame pacing, or FPS diagnostics, first identify which binary owns the active event/render loop. Shared backends such as `crates/eseqlisp/src/ui/metal_backend.rs` perform drawing, but app binaries may decide when drawing happens. In particular, `metal_seq` owns its render loop in `crates/sequencer/src/bin/metal_seq/main.rs`; changes to `eseqlisp::run_metal` do not affect `metal_seq`. If a backend log appears but loop-level logs or frame pacing changes do not, check for a binary-specific loop before continuing.
+
 >> EXTREMELY IMPORTANT <<<
 NO HACKS. The user is EXTREMELY concerned about code quality, much more so than immediate results. If they ask you to build something and, while doing so, you hit a wall, and realize that the only way to ship the requested feature is to
 IMMEDIATELLY. Either fix the underlying flaw that blocked you in a ROBUST, WELL

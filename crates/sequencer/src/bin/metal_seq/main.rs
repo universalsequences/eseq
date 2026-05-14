@@ -50,7 +50,10 @@ use eseqlisp::editor::ViewMode;
 use eseqlisp::vm::Value;
 use eseqlisp::{BufferMode, Editor, HostCommand, HostEvent, Runtime};
 
-use sequencer::effects::ParamKind;
+use sequencer::agent::actions::{
+    AgentInstrumentParamSchema, AgentInstrumentPresetSchema, AgentSessionContext,
+};
+use sequencer::effects::{ParamKind, ParamScaling};
 use sequencer::engine;
 use sequencer::sequencer::{
     KeyboardTrigger, MidiFxPosition, SequencerState, StepParam, SwingResolution, Timebase,
@@ -133,6 +136,182 @@ fn track_button_state_snapshot(state: &Arc<SequencerState>) -> Vec<(bool, bool)>
             (params.is_muted(), params.is_solo())
         })
         .collect()
+}
+
+fn param_unit(param: &sequencer::effects::ParamDescriptor) -> Option<String> {
+    match &param.kind {
+        ParamKind::Continuous { unit } => unit.clone(),
+        _ => None,
+    }
+}
+
+fn param_enum_labels(param: &sequencer::effects::ParamDescriptor) -> Vec<String> {
+    match &param.kind {
+        ParamKind::Enum { labels } => labels.clone(),
+        _ => Vec::new(),
+    }
+}
+
+fn param_scaling(param: &sequencer::effects::ParamDescriptor) -> String {
+    match param.scaling {
+        ParamScaling::Linear => "linear".to_string(),
+        ParamScaling::Exponential => "exponential".to_string(),
+    }
+}
+
+fn runtime_usize_state(editor: &mut Editor, name: &str) -> Option<usize> {
+    match editor.runtime_mut().eval_str(name).ok().flatten() {
+        Some(Value::Number(value)) if value >= 0.0 => Some(value as usize),
+        _ => None,
+    }
+}
+
+fn metal_agent_session_context(
+    app: &ui::App,
+    editor: &mut Editor,
+    current_track: &Arc<AtomicUsize>,
+) -> AgentSessionContext {
+    let track = current_track_for_snapshot(app, current_track);
+    let current_track_name = track.and_then(|track| app.tracks.get(track).cloned());
+    let current_instrument_name = track.and_then(|track| {
+        if app.graph.track_instrument_types.get(track)
+            != Some(&sequencer::sequencer::InstrumentType::Custom)
+        {
+            return None;
+        }
+        current_custom_instrument_name(app, track)
+    });
+    let current_instrument_source = current_instrument_name
+        .as_deref()
+        .and_then(|name| sequencer::lisp_effect::load_instrument_source(name).ok());
+    let current_instrument_preset_schema =
+        metal_agent_instrument_preset_schema(app, track, current_instrument_name.as_deref());
+
+    let current_effect_slot = runtime_usize_state(editor, "selected-fx-slot")
+        .filter(|slot| *slot >= sequencer::effects::BUILTIN_SLOT_COUNT);
+    let current_effect_name = track.and_then(|track| {
+        current_effect_slot.and_then(|slot| {
+            app.graph
+                .effect_descriptors
+                .get(track)
+                .and_then(|descs| descs.get(slot))
+                .map(|desc| desc.name.clone())
+        })
+    });
+    let current_effect_source = current_effect_name
+        .as_deref()
+        .and_then(|name| sequencer::lisp_effect::load_effect_source(name).ok());
+
+    AgentSessionContext {
+        has_tracks: !app.tracks.is_empty(),
+        current_track_name,
+        current_track_index: track,
+        can_apply_effect_to_current_track: app.next_free_custom_slot().is_some(),
+        current_effect_name,
+        current_effect_source: current_effect_source.clone(),
+        current_effect_slot,
+        can_update_current_effect: current_effect_source.is_some(),
+        current_instrument_name,
+        current_instrument_source: current_instrument_source.clone(),
+        can_update_current_instrument: current_instrument_source.is_some(),
+        current_instrument_preset_schema,
+    }
+}
+
+fn current_track_for_snapshot(app: &ui::App, current_track: &Arc<AtomicUsize>) -> Option<usize> {
+    if app.tracks.is_empty() {
+        return None;
+    }
+    let stored = current_track.load(Ordering::Relaxed);
+    if stored < app.tracks.len() {
+        Some(stored)
+    } else {
+        Some(app.tracks.len() - 1)
+    }
+}
+
+fn metal_agent_instrument_preset_schema(
+    app: &ui::App,
+    track: Option<usize>,
+    instrument_name: Option<&str>,
+) -> Option<AgentInstrumentPresetSchema> {
+    let track = track?;
+    let instrument_name = instrument_name?;
+    let desc = app.graph.instrument_descriptors.get(track)?;
+    let slot = app.state.pattern.instrument_slots.get(track)?;
+    let existing_presets = sequencer::lisp_effect::load_instrument_presets(instrument_name)
+        .map(|presets| presets.into_iter().map(|preset| preset.name).collect())
+        .unwrap_or_default();
+
+    let mut params = Vec::new();
+    for (idx, param) in desc.params.iter().enumerate() {
+        let group = if param.node_param_idx >= 1_000_000 {
+            "source"
+        } else if param.name.starts_with("mod ") {
+            "mod"
+        } else {
+            "synth"
+        };
+        params.push(AgentInstrumentParamSchema {
+            name: param.name.clone(),
+            group: group.to_string(),
+            min: param.min,
+            max: param.max,
+            default: param.default,
+            current_value: Some(slot.defaults.get(idx)),
+            unit: param_unit(param),
+            enum_labels: param_enum_labels(param),
+            scaling: param_scaling(param),
+        });
+    }
+
+    Some(AgentInstrumentPresetSchema {
+        instrument_name: instrument_name.to_string(),
+        source_file: sequencer::lisp_effect::instrument_source_path(instrument_name)
+            .ok()
+            .map(|path| path.display().to_string()),
+        base_note_offset: f32::from_bits(
+            app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
+        ),
+        existing_presets,
+        params,
+    })
+}
+
+#[derive(Default)]
+struct StubAnimationRenderCache {
+    frame: Option<eseqlisp::backend::TiledRenderFrame>,
+    size: Option<(usize, usize)>,
+}
+
+impl StubAnimationRenderCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn reset(&mut self) {
+        self.frame = None;
+        self.size = None;
+    }
+
+    fn update_size(&mut self, size: (usize, usize)) {
+        if self.size != Some(size) {
+            self.reset();
+        }
+    }
+
+    fn store(&mut self, size: (usize, usize), frame: eseqlisp::backend::TiledRenderFrame) {
+        self.size = Some(size);
+        self.frame = Some(frame);
+    }
+
+    fn is_active(&self, size: (usize, usize), stub_visible: bool) -> bool {
+        stub_visible && self.size == Some(size) && self.frame.is_some()
+    }
+
+    fn frame(&self) -> Option<&eseqlisp::backend::TiledRenderFrame> {
+        self.frame.as_ref()
+    }
 }
 
 fn map_number(
@@ -273,6 +452,131 @@ fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     }
 }
 
+const AGENT_INSTRUMENT_STUB_DSP: &str = r#"; Provisional silent instrument used while Agent Mode is designing the real patch.
+(def gate (in 1 @name gate))
+(def pitch (in 2 @name pitch))
+(def velocity (in 3 @name velocity))
+(def trigger (in 4 @name trigger))
+
+(param enabled @default 1 @min 0 @max 1)
+
+(out 0 1 @name audio)
+"#;
+
+const AGENT_INSTRUMENT_STUB_UI: &str = r#"(defsynth-ui
+  (box :width 70 :height :fill :padding 0 :debug-name "agent-instrument-stub-skeleton"
+    (agent-instrument-stub-bg :width 70 :height :fill)))
+"#;
+
+fn ensure_agent_instrument_stub_track(
+    app: &mut ui::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    track_pan_ids: &Arc<Mutex<Vec<i32>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &[f64],
+    cached_bus_peak_levels: &[f64],
+    ui_epoch: &Arc<AtomicUsize>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    conv_id: sequencer::agent::store::ConvId,
+) -> Result<usize, String> {
+    let snapshot = app
+        .agent_store
+        .snapshot(conv_id)
+        .ok_or_else(|| format!("Agent conversation {conv_id} not found"))?;
+    if let Some(target) = snapshot.state.accepted_instrument_target {
+        return Ok(target.track_index);
+    }
+    if let Some(target) = snapshot.state.stub_instrument_target {
+        sequencer::lisp_effect::save_instrument(&target.instrument_name, AGENT_INSTRUMENT_STUB_DSP)
+            .map_err(|error| format!("Failed to refresh agent stub dsp.lisp: {error}"))?;
+        sequencer::lisp_effect::save_instrument_ui(
+            &target.instrument_name,
+            AGENT_INSTRUMENT_STUB_UI,
+        )
+        .map_err(|error| format!("Failed to refresh agent stub ui.lisp: {error}"))?;
+        if target.track_index < app.tracks.len()
+            && app.graph.track_instrument_types.get(target.track_index)
+                == Some(&sequencer::sequencer::InstrumentType::Custom)
+        {
+            app.replace_custom_instrument_track_sync(
+                target.track_index,
+                &target.instrument_name,
+                AGENT_INSTRUMENT_STUB_DSP,
+            )
+            .map_err(|error| format!("Failed to refresh agent stub track: {error}"))?;
+            reload_custom_instrument_ui(editor);
+            sync_after_agent_instrument_apply(
+                app,
+                editor,
+                state,
+                target.track_index,
+                current_track,
+                track_names,
+                track_pan_ids,
+                record_armed,
+                selected_steps,
+                accumulator_names,
+                cached_track_peak_levels,
+                cached_bus_peak_levels,
+                ui_epoch,
+                lg_raw,
+            );
+            return Ok(target.track_index);
+        }
+    }
+
+    let inst_name = format!("agent-draft-{conv_id}/");
+    sequencer::lisp_effect::save_instrument(&inst_name, AGENT_INSTRUMENT_STUB_DSP)
+        .map_err(|error| format!("Failed to save agent stub dsp.lisp: {error}"))?;
+    sequencer::lisp_effect::save_instrument_ui(&inst_name, AGENT_INSTRUMENT_STUB_UI)
+        .map_err(|error| format!("Failed to save agent stub ui.lisp: {error}"))?;
+
+    let idx = app
+        .add_saved_instrument_track_sync(&inst_name)
+        .map_err(|error| format!("Failed to create agent stub track: {error}"))?;
+    let _ = app.force_instrument_enabled(idx);
+    reload_custom_instrument_ui(editor);
+
+    app.agent_store
+        .set_stub_instrument_target(
+            conv_id,
+            sequencer::agent::store::AcceptedInstrumentTarget {
+                track_index: idx,
+                instrument_name: inst_name,
+            },
+        )
+        .map_err(|error| format!("Failed to record agent stub target: {error}"))?;
+    app.agent_store
+        .push_system_message(
+            conv_id,
+            format!("Created working instrument track {}", idx + 1),
+        )
+        .map_err(|error| format!("Failed to record agent stub message: {error}"))?;
+
+    sync_after_agent_instrument_apply(
+        app,
+        editor,
+        state,
+        idx,
+        current_track,
+        track_names,
+        track_pan_ids,
+        record_armed,
+        selected_steps,
+        accumulator_names,
+        cached_track_peak_levels,
+        cached_bus_peak_levels,
+        ui_epoch,
+        lg_raw,
+    );
+    Ok(idx)
+}
+
 fn apply_agent_draft_to_owned_instrument(
     app: &mut ui::App,
     editor: &mut Editor,
@@ -298,7 +602,10 @@ fn apply_agent_draft_to_owned_instrument(
         .draft
         .ok_or_else(|| format!("Agent conversation {conv_id} has no compiled draft"))?;
 
-    let target = snapshot.state.accepted_instrument_target;
+    let target = snapshot
+        .state
+        .accepted_instrument_target
+        .or(snapshot.state.stub_instrument_target);
     let inst_name = target
         .as_ref()
         .map(|target| target.instrument_name.clone())
@@ -553,7 +860,11 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::reconciled_track_index;
+    use super::{
+        build_custom_instrument_ui_source_with_overlay, reconciled_track_index, Runtime, Value,
+        AGENT_INSTRUMENT_STUB_UI,
+    };
+    use eseqlisp::parser::{ASTParser, Parser};
 
     #[test]
     fn reconciles_stale_current_track_against_track_count() {
@@ -561,6 +872,67 @@ mod tests {
         assert_eq!(reconciled_track_index(7, 1, 4), Some(1));
         assert_eq!(reconciled_track_index(7, 9, 4), Some(3));
         assert_eq!(reconciled_track_index(0, 0, 0), None);
+    }
+
+    #[test]
+    fn agent_instrument_stub_ui_parses() {
+        let tokens = Parser::new(AGENT_INSTRUMENT_STUB_UI.to_string())
+            .parse()
+            .expect("stub UI should tokenize");
+        ASTParser::new(tokens)
+            .parse()
+            .expect("stub UI should parse");
+    }
+
+    #[test]
+    fn agent_instrument_stub_ui_registers_as_custom_synth_ui() {
+        const LEGACY_AGENT_INSTRUMENT_STUB_UI: &str = r#"(defwidget agent-instrument-stub-bg-legacy
+  :width 70 :height 8.2
+  :shader
+  (sdf/fill
+    (sdf/rounded-rect width height 0.45)
+    (material :color (rgba (+ 0.1 (* 0.1 (sin itime))) 0.2 0.4 1.0))))
+
+(defsynth-ui
+  (box :width 70 :height 8.2 :padding 0 :debug-name "agent-instrument-stub-skeleton"
+    (agent-instrument-stub-bg-legacy)))
+"#;
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "agent-draft-1/".to_string(),
+            "instruments/agent-draft-1/ui.lisp".to_string(),
+            LEGACY_AGENT_INSTRUMENT_STUB_UI.to_string(),
+        )));
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"(def synth-ui-current-inst false)
+                (def synth-ui-current-name "")
+                (def custom-ui-current-kind "instrument")
+                (def custom-ui-selected-section 0)
+                (def custom-ui-selected-section-for-current-scope () 0)
+                (def agent-instrument-stub-bg ()
+                    (box :width 70 :height 8.2
+                      (label "stub" :font-size 10 :color :gray :bg :transparent)))"#,
+            )
+            .expect("install stub widget test double");
+        runtime
+            .eval_str(&custom_ui_source)
+            .expect("stub custom UI should evaluate");
+        let rendered = runtime
+            .eval_str(
+                r#"(custom-instrument-synth-ui
+                     (dict :name "agent-draft-1/"
+                           :synth (list (dict :name "base_note"
+                                              :control "base-note"
+                                              :value 0
+                                              :min -48
+                                              :max 48))))"#,
+            )
+            .expect("stub custom UI should render");
+        assert!(
+            !matches!(rendered, Some(Value::Bool(false)) | None),
+            "stub instrument should dispatch to its custom skeleton UI"
+        );
     }
 }
 
@@ -649,8 +1021,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut editor, mut backend) = create_editor_and_backend(runtime, &app)?;
 
     // 5. Metal event loop
-    let frame_interval = Duration::from_secs_f64(1.0 / 30.0);
-    let mut last_render_at = Instant::now() - frame_interval;
+    let idle_frame_interval = Duration::from_secs_f64(1.0 / 30.0);
+    let animation_frame_interval = Duration::from_secs_f64(1.0 / 60.0);
+    let mut last_render_at = Instant::now() - idle_frame_interval;
+    let mut stub_animation_cache = StubAnimationRenderCache::new();
     let mut pending_drag: Option<(Event, (f32, f32))> = None;
     let mut scroll_accum_y: f32 = 0.0;
     let mut scroll_accum_x: f32 = 0.0;
@@ -723,54 +1097,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             editor.refresh_visible_layouts_for_buffer_named("*agent*");
             editor.refresh_visible_layouts_for_buffer_named("*agent-artifacts*");
             editor.mark_needs_redraw();
-
-            let ready_agent_drafts = app
-                .agent_store
-                .list()
-                .into_iter()
-                .filter(|id| {
-                    app.agent_store.snapshot(*id).is_some_and(|snapshot| {
-                        snapshot.state.kind == sequencer::agent::store::AgentKind::Instrument
-                            && snapshot.state.status == sequencer::agent::store::AgentStatus::Idle
-                            && snapshot.state.draft.is_some()
-                    })
-                })
-                .collect::<Vec<_>>();
-            for conv_id in ready_agent_drafts {
-                eprintln!("[agent-ui] applying ready agent draft conv={conv_id}");
-                match apply_agent_draft_to_owned_instrument(
-                    &mut app,
-                    &mut editor,
-                    &state,
-                    &current_track,
-                    &mut track_names,
-                    &track_pan_ids,
-                    &record_armed,
-                    &selected_steps,
-                    &accumulator_names,
-                    &cached_track_peak_levels,
-                    &cached_bus_peak_levels,
-                    &ui_epoch,
-                    lg_raw,
-                    conv_id,
-                ) {
-                    Ok(result) => {
-                        let verb = if result.created_track {
-                            "Created"
-                        } else {
-                            "Updated"
-                        };
-                        editor.handle_host_event(HostEvent::Status(format!(
-                            "{verb} agent instrument on track {}",
-                            result.track_index + 1
-                        )));
-                    }
-                    Err(error) => {
-                        eprintln!("[agent-ui] auto-accept failed conv={conv_id}: {error}");
-                        editor.handle_host_event(HostEvent::Error(error));
-                    }
-                }
-            }
         }
         let (cols, rows) = backend.viewport_size();
         let (cell_w, cell_h) = backend.cell_dimensions();
@@ -779,10 +1105,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         editor.update_tile_rects(cols as u16, rows as u16);
         editor.sync_reactive_bindings_for_visible_layouts();
+        app.agent_store
+            .set_session_context(metal_agent_session_context(
+                &app,
+                &mut editor,
+                &current_track,
+            ));
         if log_voice_counts && last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL {
             log_active_voice_counts(&state, &track_names);
             last_voice_count_log_at = Instant::now();
         }
+
+        let viewport_size = (cols, rows);
+        let stub_animation_active = stub_animation_cache.is_active(
+            viewport_size,
+            backend.agent_instrument_stub_animation_visible(),
+        );
+        let frame_interval = if stub_animation_active {
+            animation_frame_interval
+        } else {
+            idle_frame_interval
+        };
 
         let sdf_animation_active =
             eseqlisp::widget_render::sdf_widget::sdf_visual_animations_active(
@@ -4451,6 +4794,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "agent-ensure-instrument-stub" => {
+                        let conv_id = match payload {
+                            Value::Number(id) if id >= 1.0 => id as sequencer::agent::store::ConvId,
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "agent-ensure-instrument-stub: expected conversation id"
+                                        .to_string(),
+                                ));
+                                continue;
+                            }
+                        };
+                        match ensure_agent_instrument_stub_track(
+                            &mut app,
+                            &mut editor,
+                            &state,
+                            &current_track,
+                            &mut track_names,
+                            &track_pan_ids,
+                            &record_armed,
+                            &selected_steps,
+                            &accumulator_names,
+                            &cached_track_peak_levels,
+                            &cached_bus_peak_levels,
+                            &ui_epoch,
+                            lg_raw,
+                            conv_id,
+                        ) {
+                            Ok(track_index) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Created working instrument track {}",
+                                    track_index + 1
+                                )));
+                            }
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Error(error));
+                            }
+                        }
+                    }
                     "agent-finalize" => {
                         let Value::Map(map) = payload else {
                             editor.handle_host_event(HostEvent::Error(
@@ -6032,7 +6413,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             editor.mark_needs_redraw();
         }
 
+        stub_animation_cache.update_size(viewport_size);
+
         // Render
+        if last_render_at.elapsed() >= frame_interval {
+            if stub_animation_active && !editor.needs_redraw() && !sdf_animation_active {
+                if let Some(tiled_frame) = stub_animation_cache.frame() {
+                    let render_started = Instant::now();
+                    backend
+                        .render_tiled(tiled_frame)
+                        .map_err(|_| "render failed")?;
+                    ui_loop_stats.note_frame(Duration::ZERO, render_started.elapsed());
+                    last_render_at = Instant::now();
+                    continue;
+                }
+            }
+        }
+
         if editor.needs_redraw() && last_render_at.elapsed() >= frame_interval {
             let frame_build_started = Instant::now();
             let tiled_frame =
@@ -6045,6 +6442,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let render_elapsed = render_started.elapsed();
             ui_loop_stats.note_frame(frame_build_elapsed, render_elapsed);
             editor.clear_needs_redraw();
+            if backend.agent_instrument_stub_animation_visible() {
+                stub_animation_cache.store(viewport_size, tiled_frame);
+            } else {
+                stub_animation_cache.reset();
+            }
             last_render_at = Instant::now();
         }
 

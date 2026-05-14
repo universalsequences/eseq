@@ -315,6 +315,7 @@ fn insert_string_prop(
 
 fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDescriptor) -> bool {
     matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. })
+        || matches!(pdesc.kind, sequencer::effects::ParamKind::Enum { .. })
         || pdesc.name.eq_ignore_ascii_case("enabled")
 }
 
@@ -2369,10 +2370,8 @@ pub(crate) fn build_instrument_panel_value(
                 Rc::new(RefCell::new(Value::Bool(true))),
             );
         }
-        if options.is_none() {
-            if let Some(value_field) = value_field {
-                insert_string_prop(&mut pmap, "value-field", value_field);
-            }
+        if let Some(value_field) = value_field {
+            insert_string_prop(&mut pmap, "value-field", value_field);
         }
         out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
@@ -3502,6 +3501,43 @@ mod tests {
     use super::*;
     use eseqlisp::parser::{ASTParser, Parser, ParserError, Token};
 
+    fn agent_test_string_list(values: &[&str]) -> Value {
+        Value::List(
+            values
+                .iter()
+                .map(|value| Rc::new(RefCell::new(Value::String((*value).to_string()))))
+                .collect(),
+        )
+    }
+
+    fn register_agent_test_natives(runtime: &mut Runtime) {
+        runtime.register_native("agent/new", |_args, _ctx| Ok(Value::Number(1.0)));
+        runtime.register_native("agent/send", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/cancel", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/discard", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/finalize", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/status", |_args, _ctx| {
+            Ok(Value::Symbol("idle".to_string()))
+        });
+        runtime.register_native("agent/model", |_args, _ctx| {
+            Ok(Value::String("gpt-5.5".to_string()))
+        });
+        runtime.register_native("agent/set-model", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/models", |_args, _ctx| {
+            Ok(agent_test_string_list(&["gpt-5.5", "gemini-2.5-pro"]))
+        });
+        runtime.register_native("agent/messages", |_args, _ctx| Ok(Value::List(vec![])));
+        runtime.register_native("agent/draft-source", |_args, _ctx| Ok(Value::Nil));
+        runtime.register_native("agent/artifact", |_args, _ctx| {
+            let mut map = std::collections::HashMap::new();
+            map.insert(
+                "exists".to_string(),
+                Rc::new(RefCell::new(Value::Bool(false))),
+            );
+            Ok(Value::Map(map))
+        });
+    }
+
     fn parse_expression_at(tokens: &[Token], pos: &mut usize) -> Result<(), ParserError> {
         match tokens.get(*pos) {
             Some(Token::LeftParen) => {
@@ -3643,6 +3679,7 @@ mod tests {
     fn metal_seq_agent_lisp_creates_agent_buffer_tree() {
         let mut editor =
             eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        register_agent_test_natives(editor.runtime_mut());
         editor.runtime_mut().register_reactive(
             "AGENT",
             vec![("generation", Value::Number(0.0))],
@@ -3712,6 +3749,7 @@ mod tests {
             eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         editor.set_layout_viewport(92, 24);
+        register_agent_test_natives(editor.runtime_mut());
         editor.runtime_mut().register_reactive(
             "AGENT",
             vec![("generation", Value::Number(0.0))],
@@ -3746,8 +3784,10 @@ mod tests {
             .expect("agent prompt input");
         let actions = find_layout_node_by_stable_key(&layout, "agent-composer-actions")
             .expect("agent action row");
-        let send = find_button_by_text(&layout, "Send").expect("Send button");
-        let cancel = find_button_by_text(&layout, "Cancel").expect("Cancel button");
+        let model_select = find_layout_node_by_stable_key(&layout, "agent-model-select")
+            .expect("agent model selector");
+        let submit = find_layout_node_by_stable_key(&layout, "agent-submit")
+            .expect("agent submit affordance");
 
         assert!(
             input.rect.row + input.rect.height <= actions.rect.row,
@@ -3756,17 +3796,17 @@ mod tests {
             actions.rect
         );
         assert!(
-            input.rect.width > send.rect.width + cancel.rect.width,
-            "agent prompt should have the wide row instead of sharing width with buttons; input={:?}, send={:?}, cancel={:?}",
+            input.rect.width > model_select.rect.width + submit.rect.width,
+            "agent prompt should have the wide row instead of sharing width with controls; input={:?}, model={:?}, submit={:?}",
             input.rect,
-            send.rect,
-            cancel.rect
+            model_select.rect,
+            submit.rect
         );
         assert!(
-            send.rect.col + send.rect.width <= cancel.rect.col,
-            "agent composer buttons should not overlap; send={:?}, cancel={:?}",
-            send.rect,
-            cancel.rect
+            model_select.rect.col + model_select.rect.width <= submit.rect.col,
+            "agent composer controls should not overlap; model={:?}, submit={:?}",
+            model_select.rect,
+            submit.rect
         );
     }
 
@@ -4303,8 +4343,8 @@ mod tests {
             "stretch-aligned side-by-side layout should render instrument rows; rendered:\n{stretched_rendered}"
         );
         assert!(
-            stretched_scroll.col + stretched_scroll.width > 220.0,
-            "unwrapped stretch side-by-side diagnostic should reproduce horizontal overflow; scroll={stretched_scroll:?}"
+            stretched_scroll.col + stretched_scroll.width <= 220.0,
+            "stretch-aligned side-by-side layout should keep instrument scroll inside viewport; scroll={stretched_scroll:?}"
         );
         assert!(
             fixed_scroll.height > 10.0,
@@ -4593,6 +4633,17 @@ mod tests {
         param
     }
 
+    fn test_base_note_param_map(
+        idx: usize,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut param = test_param_map("base_note", idx, 0.0, -48.0, 48.0);
+        param.insert(
+            "control".to_string(),
+            Rc::new(RefCell::new(Value::String("base-note".to_string()))),
+        );
+        param
+    }
+
     fn test_filter_params() -> Vec<Value> {
         vec![
             Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
@@ -4861,6 +4912,80 @@ mod tests {
         inst.insert(
             "sources".to_string(),
             Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst
+    }
+
+    fn mod_fm_messui_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>>
+    {
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("mod-fm-messui/".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("mod-fm-messui".to_string()))),
+        );
+
+        let params = [
+            ("amp_attack", 4.0, 1.0, 2000.0),
+            ("amp_decay", 220.0, 1.0, 4000.0),
+            ("amp_sustain", 0.65, 0.0, 1.0),
+            ("amp_release", 180.0, 1.0, 5000.0),
+            ("mod_attack", 2.0, 1.0, 2000.0),
+            ("mod_decay", 380.0, 1.0, 5000.0),
+            ("mod_sustain", 0.18, 0.0, 1.0),
+            ("mod_release", 140.0, 1.0, 5000.0),
+            ("op1_ratio", 0.25, 0.25, 16.0),
+            ("op2_ratio", 2.0, 0.25, 16.0),
+            ("op3_ratio", 1.5, 0.25, 16.0),
+            ("op1_detune", 1.0, -1200.0, 1200.0),
+            ("op2_detune", 0.0, -1200.0, 1200.0),
+            ("op3_detune", 3.0, -1200.0, 1200.0),
+            ("op1_level", 0.43, 0.0, 1.0),
+            ("op2_level", 0.44, 0.0, 1.0),
+            ("op3_level", 0.15, 0.0, 1.0),
+            ("op2_to_op1", 1.0, 0.0, 12.0),
+            ("op3_to_op1", 0.37, 0.0, 12.0),
+            ("op3_to_op2", 2.0, 0.0, 12.0),
+            ("mod_env_to_op2", 1.0, -4.0, 8.0),
+            ("mod_env_to_op3", -3.2, -4.0, 8.0),
+            ("lfo_rate", 3.05, 0.02, 30.0),
+            ("lfo_to_index", 0.13, 0.0, 6.0),
+            ("lfo_to_pitch", 0.0, 0.0, 48.0),
+            ("filter_route", 1.0, 1.0, 5.0),
+            ("f1_mode", 0.0, 0.0, 5.0),
+            ("f2_mode", 0.0, 0.0, 5.0),
+            ("f1_cutoff", 1517.0, 40.0, 16000.0),
+            ("f2_cutoff", 535.0, 40.0, 16000.0),
+            ("f1_resonance", 2.05, 0.5, 6.0),
+            ("f2_resonance", 0.75, 0.5, 6.0),
+            ("f1_drive", 0.37, 0.2, 8.0),
+            ("f2_drive", 0.20, 0.2, 8.0),
+            ("f1_env_amt", 4671.0, -8000.0, 8000.0),
+            ("f2_env_amt", -483.0, -8000.0, 8000.0),
+            ("f1_lfo_amt", 15.0, -4000.0, 4000.0),
+            ("f2_lfo_amt", 2.0, -4000.0, 4000.0),
+            ("filter_blend", 1.0, 0.0, 1.0),
+            ("fold", 0.18, 0.0, 1.0),
+            ("drive", 1.25, 0.2, 8.0),
+            ("gain", 0.28, 0.0, 1.0),
+        ];
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(
+                std::iter::once(Value::Map(test_base_note_param_map(0)))
+                    .chain(
+                        params
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, (name, value, min, max))| {
+                                Value::Map(test_param_map(name, idx + 1, *value, *min, *max))
+                            }),
+                    )
+                    .collect(),
+            ))),
         );
         inst
     }
@@ -6886,6 +7011,99 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_lisp_lays_out_agent_instrument_stub_skeleton() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "agent-draft-1/".to_string(),
+            "instruments/agent-draft-1/ui.lisp".to_string(),
+            super::AGENT_INSTRUMENT_STUB_UI.to_string(),
+        )));
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("agent-draft-1/".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("agent-draft-1".to_string()))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(120, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load agent stub custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("agent stub fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("agent stub fx layout");
+        let body = find_layout_node_by_debug_name(&layout, "instrument-content-box")
+            .expect("instrument panel content body should be present");
+        let skeleton = find_layout_node_by_debug_name(&layout, "agent-instrument-stub-skeleton")
+            .expect("agent stub skeleton should be present in the measured layout");
+        assert!(
+            skeleton.rect.width.is_finite()
+                && skeleton.rect.height.is_finite()
+                && skeleton.rect.width > 1.0
+                && skeleton.rect.height > 1.0,
+            "agent stub skeleton should have a finite visible rect, got {:?}",
+            skeleton.rect
+        );
+        assert!(
+            skeleton.rect.height >= body.rect.height - 1.0,
+            "agent stub skeleton should fill the instrument panel body height, body={:?} skeleton={:?}",
+            body.rect,
+            skeleton.rect
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "base_note").is_none(),
+            "agent stub should not fall back to the generic base_note instrument panel"
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_lays_out_real_korg1_custom_instrument_ui() {
         fn assert_finite_layout(node: &eseqlisp::layout::LayoutNode) {
             assert!(
@@ -7018,6 +7236,295 @@ mod tests {
             osc_mix.rect,
             instrument_panel.rect
         );
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_analog_bread_and_butter_lfo_column() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let analog_ui = std::fs::read_to_string("instruments/analog-bread-and-butter/ui.lisp")
+            .expect("read analog bread-and-butter ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/analog-bread-and-butter/ui.lisp".to_string(),
+            analog_ui,
+        )));
+        let mut analog_inst = test_instrument_map();
+        analog_inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("lfo2_wave", 0, 1.0, 0.0, 3.0)),
+                Value::Map(test_param_map("lfo2_rate_hz", 1, 0.21, 0.03, 18.0)),
+                Value::Map(test_param_map("lfo2_to_f1", 2, 35.0, 0.0, 2200.0)),
+                Value::Map(test_param_map("lfo2_to_f2", 3, 15.0, 0.0, 2200.0)),
+                Value::Map(test_param_map("output_gain", 4, 0.28, 0.0, 1.0)),
+                Value::Map(test_param_map("glide_ms", 5, 0.0, 0.0, 500.0)),
+                Value::Map(test_param_map("vibrato", 6, 0.0, 0.0, 0.12)),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(analog_inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load analog custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("analog bread-and-butter fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("analog bread-and-butter layout should build");
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        assert!(
+            instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
+            "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        let adsr_editor =
+            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
+        assert!(
+            adsr_editor.rect.width > 8.0
+                && adsr_editor.rect.height > 2.0
+                && adsr_editor.rect.height <= 4.0,
+            "ADSR editor should stay constrained in the medium detail panel, got {:?}",
+            adsr_editor.rect
+        );
+        assert!(
+            adsr_editor.rect.row >= instrument_panel.rect.row
+                && adsr_editor.rect.row + adsr_editor.rect.height
+                    <= instrument_panel.rect.row + instrument_panel.rect.height,
+            "ADSR editor should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+            adsr_editor.rect,
+            instrument_panel.rect
+        );
+
+        for suffix in ["lfo2_rate_hz", "lfo2_to_f2", "output_gain"] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present in layout"));
+            assert!(
+                node.rect.width > 1.0 && node.rect.height > 0.0,
+                "{suffix} should have a finite nonzero rect, got {:?}",
+                node.rect
+            );
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_mod_fm_messui_dense_controls() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let ui =
+            std::fs::read_to_string("instruments/mod-fm-messui/ui.lisp").expect("read mod FM ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "mod-fm-messui/".to_string(),
+            "instruments/mod-fm-messui/ui.lisp".to_string(),
+            ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(mod_fm_messui_test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load mod FM custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("mod FM custom instrument fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("mod FM layout should build");
+        let rendered = render_layout_cells(&layout, 180, 18);
+        assert!(
+            !rendered.contains("missing:"),
+            "mod FM dense UI should not render missing-param diagnostics:\n{rendered}"
+        );
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        let adsr_editor =
+            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
+        assert!(
+            adsr_editor.rect.width > 8.0
+                && adsr_editor.rect.height > 2.0
+                && adsr_editor.rect.height <= 4.0,
+            "mod FM ADSR editor should stay constrained in the dense detail panel, got {:?}",
+            adsr_editor.rect
+        );
+
+        let op1_ratio = find_stable_key_suffix(&layout, "op1_ratio").expect("op1 ratio control");
+        let op1_level = find_stable_key_suffix(&layout, "op1_level").expect("op1 level knob");
+        let op3_level = find_stable_key_suffix(&layout, "op3_level").expect("op3 level knob");
+        let f1_mode = find_stable_key_suffix(&layout, "f1_mode").expect("filter mode dropdown");
+        let f1_cutoff = find_stable_key_suffix(&layout, "f1_cutoff").expect("filter cutoff knob");
+
+        assert!(
+            op1_ratio.rect.width > 1.0
+                && op1_level.rect.width > 1.0
+                && op3_level.rect.width > 1.0
+                && f1_mode.rect.width > 1.0
+                && f1_cutoff.rect.width > 1.0,
+            "dense controls should have visible measured rects: op1_ratio={:?} op1_level={:?} op3_level={:?} f1_mode={:?} f1_cutoff={:?}",
+            op1_ratio.rect,
+            op1_level.rect,
+            op3_level.rect,
+            f1_mode.rect,
+            f1_cutoff.rect
+        );
+        assert!(
+            op1_ratio.rect.col + op1_ratio.rect.width <= op1_level.rect.col
+                && op1_level.rect.col + op1_level.rect.width <= op3_level.rect.col
+                && f1_mode.rect.col + f1_mode.rect.width <= f1_cutoff.rect.col,
+            "dense micro clusters should end before the knob lanes; op1_ratio={:?} op1_level={:?} op3_level={:?} f1_mode={:?} f1_cutoff={:?}",
+            op1_ratio.rect,
+            op1_level.rect,
+            op3_level.rect,
+            f1_mode.rect,
+            f1_cutoff.rect
+        );
+
+        for suffix in [
+            "op3_level",
+            "f1_cutoff",
+            "f2_resonance",
+            "filter_route",
+            "gain",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present"));
+            assert!(
+                node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
     }
 
     #[test]
@@ -7180,28 +7687,6 @@ mod tests {
         assert!(
             value_contains_string(&selected_tree, "FILTER ENV"),
             "using filter controls should select the filter envelope; sections={sections:?}; tree={selected_tree:?}"
-        );
-
-        let mixer_panel = find_clickable_node_containing(&layout, "MIXER").unwrap_or_else(|| {
-            panic!("MIXER panel should be clickable; layout={layout_summaries:#?}")
-        });
-        let click = mixer_panel
-            .props
-            .get("on-click")
-            .cloned()
-            .expect("MIXER on-click");
-        editor
-            .runtime_mut()
-            .invoke(click, vec![Value::Bool(false)])
-            .expect("invoke MIXER panel click");
-        let amp_tree = editor
-            .runtime_mut()
-            .eval_str("(custom-instrument-synth-ui (nth SEQ.instrument-panel 0))")
-            .expect("render amp-selected minimoog-lad2 UI")
-            .expect("amp-selected UI value");
-        assert!(
-            value_contains_string(&amp_tree, "AMP ENV"),
-            "clicking a non-filter panel should return the ADSR to AMP ENV"
         );
     }
 

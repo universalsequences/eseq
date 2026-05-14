@@ -2,13 +2,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
+
+use super::actions::AgentAppAction;
 use super::audition::{audition_feedback, audition_loaded_instrument};
-use super::network::AgentNetworkClient;
+use super::dsp_validate::validate_instrument_dsp_source;
+use super::network::{AgentNetworkClient, AgentTurnResult};
 use super::parse::{instrument_artifacts, last_dgenlisp_block, InstrumentArtifacts};
+use super::protocol::ToolCall;
 use super::providers::{AgentMessage, AgentMessageRole};
 use super::store::{
-    bump, push_message, AgentKind, AgentStatus, ConvId, ConversationState, ConversationStore,
-    InstrumentDraft, Role, RunningTask,
+    bump, push_message, push_message_with_reasoning, AgentKind, AgentStatus, ConvId,
+    ConversationState, ConversationStore, InstrumentDraft, Role, RunningTask,
 };
 use super::ui_validate::validate_instrument_ui_source;
 
@@ -90,7 +95,8 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
             request.messages.len()
         );
         let system_prompt = system_prompt_for(request.kind);
-        let response = match execute_text_turn_with_retries(
+        let turn = match execute_tool_turn_with_retries(
+            &store,
             request.provider,
             &request.model,
             system_prompt,
@@ -98,16 +104,16 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
             id,
             &cancel,
         ) {
-            Ok(text) => {
-                let has_dsp = last_dgenlisp_block(&text).is_some();
-                let has_artifacts = instrument_artifacts(&text).is_ok();
+            Ok(turn) => {
+                let has_dsp = last_dgenlisp_block(&turn.text).is_some();
+                let has_artifacts = instrument_artifacts(&turn.text).is_ok();
                 eprintln!(
                     "[agent] request ok conv={id} response_len={} has_dgenlisp_block={} has_required_artifacts={}",
-                    text.len(),
+                    turn.text.len(),
                     has_dsp,
                     has_artifacts
                 );
-                text
+                turn
             }
             Err(error) => {
                 eprintln!("[agent] request failed conv={id}: {error}");
@@ -125,10 +131,29 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
             let Some(state) = inner.get_mut(&id) else {
                 return;
             };
-            push_message(state, Role::Assistant, response.clone());
+            if !turn.text.trim().is_empty() {
+                push_message_with_reasoning(
+                    state,
+                    Role::Assistant,
+                    turn.text.clone(),
+                    turn.reasoning_content.clone(),
+                );
+            }
+            for outcome in &turn.tool_outcomes {
+                push_message(
+                    state,
+                    Role::System,
+                    format!(
+                        "tool {} [{}]\n{}",
+                        outcome.name,
+                        if outcome.ok { "ok" } else { "error" },
+                        outcome.summary
+                    ),
+                );
+            }
         }
 
-        match run_post_turn_pipeline(&store, id, &response) {
+        match run_pending_action_pipeline(&store, id, turn.pending_actions) {
             PipelineOutcome::Done => {
                 eprintln!("[agent] turn done conv={id}");
                 store.task_handles().lock().unwrap().remove(&id);
@@ -152,14 +177,15 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
     }
 }
 
-fn execute_text_turn_with_retries(
+fn execute_tool_turn_with_retries(
+    store: &ConversationStore,
     provider: super::providers::AgentProviderKind,
     model: &str,
     system_prompt: &str,
     messages: &[AgentMessage],
     id: ConvId,
     cancel: &AtomicBool,
-) -> Result<String, String> {
+) -> Result<AgentTurnResult, String> {
     let client = AgentNetworkClient::load_default()?;
     let mut last_error = None::<String>;
 
@@ -169,14 +195,27 @@ fn execute_text_turn_with_retries(
         }
 
         let result = client
-            .execute_text_turn(provider, model, system_prompt, messages)
+            .execute_turn_with_progress(
+                provider,
+                model,
+                system_prompt,
+                messages,
+                store.session_context(),
+                Some(&|call| {
+                    let message = tool_progress_message(call);
+                    eprintln!("[agent] tool progress conv={id}: {message}");
+                    if let Err(error) = store.push_tool_message(id, message) {
+                        eprintln!("[agent] failed to record tool progress conv={id}: {error}");
+                    }
+                }),
+            )
             .map_err(|error| error.message);
         match result {
-            Ok(text) => {
+            Ok(turn) => {
                 if attempt > 1 {
                     eprintln!("[agent] request retry succeeded conv={id} attempt={attempt}");
                 }
-                return Ok(text);
+                return Ok(turn);
             }
             Err(error) => {
                 let retryable = is_retryable_request_error(&error);
@@ -197,6 +236,104 @@ fn execute_text_turn_with_retries(
 
 fn request_retry_delay(attempt: u8) -> Duration {
     Duration::from_millis(750 * attempt as u64)
+}
+
+fn tool_progress_message(call: &ToolCall) -> String {
+    match call.name.as_str() {
+        "lookup_dgen_docs" => {
+            let queries = string_list_arg(&call.arguments, "queries")
+                .or_else(|| string_arg(&call.arguments, "query").map(|query| vec![query]));
+            match queries {
+                Some(queries) if !queries.is_empty() => {
+                    format!("Looking up DGenLisp docs for {}.", backtick_join(&queries))
+                }
+                _ => "Looking up DGenLisp docs.".to_string(),
+            }
+        }
+        "list_examples" => match string_arg(&call.arguments, "kind") {
+            Some(kind) => format!("Listing {kind} examples."),
+            None => "Listing examples.".to_string(),
+        },
+        "read_example" => match string_arg(&call.arguments, "name") {
+            Some(name) => format!("Reading example `{name}`."),
+            None => "Reading an example.".to_string(),
+        },
+        "read_patch_source" => {
+            let kind = string_arg(&call.arguments, "kind").unwrap_or_else(|| "patch".to_string());
+            match string_arg(&call.arguments, "name") {
+                Some(name) => format!("Reading {kind} source `{name}`."),
+                None => format!("Reading {kind} source."),
+            }
+        }
+        "list_instruments" => "Listing saved instruments.".to_string(),
+        "read_instrument_source" | "read_current_instrument_source" => {
+            match string_arg(&call.arguments, "name") {
+                Some(name) => format!("Reading instrument `{name}`."),
+                None => "Reading the current instrument source.".to_string(),
+            }
+        }
+        "list_effects" => "Listing saved effects.".to_string(),
+        "read_effect_source" | "read_current_effect_source" => {
+            match string_arg(&call.arguments, "name") {
+                Some(name) => format!("Reading effect `{name}`."),
+                None => "Reading the current effect source.".to_string(),
+            }
+        }
+        "create_instrument_artifact" => match string_arg(&call.arguments, "name") {
+            Some(name) => format!("Creating draft instrument artifact `{name}`."),
+            None => "Creating a draft instrument artifact.".to_string(),
+        },
+        "create_instrument_track" => match string_arg(&call.arguments, "name") {
+            Some(name) => format!("Creating instrument track `{name}`."),
+            None => "Creating an instrument track.".to_string(),
+        },
+        "update_current_instrument" => match string_arg(&call.arguments, "name") {
+            Some(name) => format!("Updating current instrument as `{name}`."),
+            None => "Updating the current instrument.".to_string(),
+        },
+        "inspect_current_instrument_preset_schema" => {
+            "Inspecting the current instrument preset schema.".to_string()
+        }
+        "create_current_instrument_presets" => "Creating instrument presets.".to_string(),
+        "apply_effect_to_current_track" => match string_arg(&call.arguments, "name") {
+            Some(name) => format!("Applying effect `{name}` to the current track."),
+            None => "Applying an effect to the current track.".to_string(),
+        },
+        "update_current_effect" => match string_arg(&call.arguments, "name") {
+            Some(name) => format!("Updating current effect as `{name}`."),
+            None => "Updating the current effect.".to_string(),
+        },
+        other => format!("Calling tool `{other}`."),
+    }
+}
+
+fn string_arg(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn string_list_arg(value: &Value, key: &str) -> Option<Vec<String>> {
+    let items = value.get(key)?.as_array()?;
+    let strings = items
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    (!strings.is_empty()).then_some(strings)
+}
+
+fn backtick_join(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| format!("`{value}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn is_retryable_request_error(error: &str) -> bool {
@@ -246,14 +383,19 @@ fn build_request(store: &ConversationStore, id: ConvId) -> Result<TurnRequest, S
         messages: state
             .messages
             .iter()
-            .map(|message| AgentMessage {
-                role: match message.role {
+            .filter_map(|message| {
+                let role = match message.role {
                     Role::User => AgentMessageRole::User,
                     Role::Assistant => AgentMessageRole::Assistant,
                     Role::System => AgentMessageRole::System,
-                },
-                content: message.text.clone(),
-                tool_name: None,
+                    Role::Tool => return None,
+                };
+                Some(AgentMessage {
+                    role,
+                    content: message.text.clone(),
+                    tool_name: None,
+                    reasoning_content: message.reasoning_content.clone(),
+                })
             })
             .collect(),
     })
@@ -263,6 +405,136 @@ enum PipelineOutcome {
     Done,
     Retry,
     Stop,
+}
+
+fn run_pending_action_pipeline(
+    store: &ConversationStore,
+    id: ConvId,
+    actions: Vec<AgentAppAction>,
+) -> PipelineOutcome {
+    if actions.is_empty() {
+        let inner = store.inner();
+        let mut inner = inner.lock().unwrap();
+        if let Some(state) = inner.get_mut(&id) {
+            state.retries_this_turn = 0;
+            state.status = AgentStatus::Idle;
+            bump(state);
+        }
+        return PipelineOutcome::Done;
+    }
+
+    for action in actions {
+        match apply_agent_action(store, id, action) {
+            Ok(message) => {
+                let inner = store.inner();
+                let mut inner = inner.lock().unwrap();
+                if let Some(state) = inner.get_mut(&id) {
+                    push_message(state, Role::System, message);
+                }
+            }
+            Err(error) => {
+                return retry_or_fail(store, id, error, |state, text| {
+                    state.last_compile_error = Some(text)
+                });
+            }
+        }
+    }
+
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    if let Some(state) = inner.get_mut(&id) {
+        state.retries_this_turn = 0;
+        state.status = AgentStatus::Idle;
+        bump(state);
+    }
+    PipelineOutcome::Done
+}
+
+fn apply_agent_action(
+    store: &ConversationStore,
+    id: ConvId,
+    action: AgentAppAction,
+) -> Result<String, String> {
+    match action {
+        AgentAppAction::CreateInstrumentArtifact {
+            name,
+            dsp_source,
+            ui_source,
+        } => create_instrument_artifact(store, id, name, dsp_source, ui_source),
+        other => Err(format!(
+            "Tool returned unsupported action for this agent panel: {other:?}"
+        )),
+    }
+}
+
+fn create_instrument_artifact(
+    store: &ConversationStore,
+    id: ConvId,
+    name: String,
+    dsp_source: String,
+    ui_source: String,
+) -> Result<String, String> {
+    if let Err(error) = validate_instrument_dsp_source(&dsp_source) {
+        log_failed_instrument_sources(id, "dsp validation", &error, &dsp_source, &ui_source);
+        return Err(format!("dsp.lisp validation error:\n{error}"));
+    }
+
+    let compile_result =
+        match crate::lisp_effect::compile_and_load_instrument(&dsp_source, store.sample_rate()) {
+            Ok(result) => result,
+            Err(error) => {
+                log_failed_instrument_sources(id, "dsp compile", &error, &dsp_source, &ui_source);
+                return Err(format!("compile error:\n{error}"));
+            }
+        };
+
+    if let Err(error) = validate_instrument_ui_source(&ui_source, &compile_result.manifest) {
+        log_failed_instrument_sources(id, "ui validation", &error, &dsp_source, &ui_source);
+        return Err(format!("ui.lisp validation error:\n{error}"));
+    }
+
+    let audition = match audition_loaded_instrument(&compile_result, store.sample_rate()) {
+        Ok(audition) => audition,
+        Err(error) => {
+            log_failed_instrument_sources(id, "audition", &error, &dsp_source, &ui_source);
+            return Err(format!("audition failed:\n{error}"));
+        }
+    };
+    let feedback = audition_feedback(&audition);
+    if audition.silent || audition.clipped {
+        return Err(feedback);
+    }
+
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    let state = inner
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+    state.draft = Some(InstrumentDraft {
+        dsp_source,
+        ui_source,
+    });
+    state.last_audition = Some(audition);
+    state.last_compile_error = None;
+    state.finalized_instrument_name = None;
+    state.status = AgentStatus::Idle;
+    bump(state);
+    Ok(format!(
+        "Created validated draft instrument artifact '{}'. {feedback}",
+        name
+    ))
+}
+
+fn log_failed_instrument_sources(
+    id: ConvId,
+    stage: &str,
+    error: &str,
+    dsp_source: &str,
+    ui_source: &str,
+) {
+    eprintln!(
+        "[agent] instrument artifact failed conv={id} stage={stage}: {error}\n[agent-source failed conv={id} dsp.lisp BEGIN]\n{dsp_source}\n[agent-source failed conv={id} dsp.lisp END]\n[agent-source failed conv={id} ui.lisp BEGIN]\n{ui_source}\n[agent-source failed conv={id} ui.lisp END]"
+    );
 }
 
 fn run_post_turn_pipeline(
@@ -323,6 +595,19 @@ fn run_instrument_pipeline(
     id: ConvId,
     artifacts: InstrumentArtifacts,
 ) -> PipelineOutcome {
+    if let Err(error) = validate_instrument_dsp_source(&artifacts.dsp_source) {
+        eprintln!(
+            "[agent] dsp validation failed conv={id}: {error}\n[agent-source failed conv={id} BEGIN]\n{}\n[agent-source failed conv={id} END]",
+            artifacts.dsp_source
+        );
+        return retry_or_fail(
+            store,
+            id,
+            format!("dsp.lisp validation error:\n{error}"),
+            |state, text| state.last_compile_error = Some(text),
+        );
+    }
+
     let compile_result = match crate::lisp_effect::compile_and_load_instrument(
         &artifacts.dsp_source,
         store.sample_rate(),
@@ -441,8 +726,9 @@ where
         "[agent] retry_or_fail conv={id} retry={}/{} message={:?}",
         state.retries_this_turn, MAX_RETRIES_PER_TURN, message
     );
-    record_error(state, message.clone());
-    push_message(state, Role::System, message);
+    let retry_message = message_with_retry_guidance(&message);
+    record_error(state, retry_message.clone());
+    push_message(state, Role::System, retry_message);
     if state.retries_this_turn < MAX_RETRIES_PER_TURN {
         state.retries_this_turn += 1;
         bump(state);
@@ -453,6 +739,23 @@ where
         bump(state);
         PipelineOutcome::Stop
     }
+}
+
+fn message_with_retry_guidance(message: &str) -> String {
+    if !is_artifact_repair_error(message) {
+        return message.to_string();
+    }
+
+    format!(
+        "{message}\n\nRetry instruction: repair the exact full artifact you just generated and call `create_instrument_artifact` again. Do not call `list_examples`, `read_example`, or `read_instrument_source` again for this direct validator/compiler error unless the error is about unknown syntax/operator and does not already provide the replacement. Do not reread an example you already read in this conversation."
+    )
+}
+
+fn is_artifact_repair_error(message: &str) -> bool {
+    message.starts_with("dsp.lisp validation error:")
+        || message.starts_with("compile error:")
+        || message.starts_with("ui.lisp validation error:")
+        || message.starts_with("audition failed:")
 }
 
 fn set_error(store: &ConversationStore, id: ConvId, message: String) {
@@ -485,7 +788,13 @@ fn system_prompt_for(kind: AgentKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable_request_error;
+    use super::{
+        build_request, is_retryable_request_error, message_with_retry_guidance,
+        tool_progress_message,
+    };
+    use crate::agent::protocol::ToolCall;
+    use crate::agent::store::{ConversationStore, Role};
+    use serde_json::json;
 
     #[test]
     fn request_retry_classifier_skips_bad_request_schema_errors() {
@@ -502,5 +811,54 @@ mod tests {
         assert!(is_retryable_request_error(
             "OpenAI Responses request failed: HTTP 503 Service Unavailable",
         ));
+    }
+
+    #[test]
+    fn tool_progress_message_names_read_example() {
+        let message = tool_progress_message(&ToolCall {
+            name: "read_example".to_string(),
+            arguments: json!({ "name": "emulations/prophet-5" }),
+        });
+        assert_eq!(message, "Reading example `emulations/prophet-5`.");
+    }
+
+    #[test]
+    fn build_request_filters_tool_progress_messages() {
+        let store = ConversationStore::new(48_000);
+        let id = store.new_conversation(crate::agent::store::AgentKind::Instrument);
+        {
+            let inner = store.inner();
+            let mut inner = inner.lock().unwrap();
+            let state = inner.get_mut(&id).unwrap();
+            crate::agent::store::push_message(state, Role::User, "make a bass".to_string());
+            crate::agent::store::push_message(
+                state,
+                Role::Tool,
+                "Reading example `minimoog`.".to_string(),
+            );
+            crate::agent::store::push_message(state, Role::System, "compile error".to_string());
+        }
+
+        let request = build_request(&store, id).unwrap();
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].content, "make a bass");
+        assert_eq!(request.messages[1].content, "compile error");
+    }
+
+    #[test]
+    fn artifact_errors_include_direct_repair_guidance() {
+        let message = message_with_retry_guidance(
+            "ui.lisp validation error:\nUnknownVariable(\"ui-accent-magenta\")",
+        );
+        assert!(message.contains("repair the exact full artifact"));
+        assert!(message.contains(
+            "Do not call `list_examples`, `read_example`, or `read_instrument_source` again"
+        ));
+    }
+
+    #[test]
+    fn non_artifact_errors_do_not_include_repair_guidance() {
+        let message = message_with_retry_guidance("request failed: HTTP 503");
+        assert_eq!(message, "request failed: HTTP 503");
     }
 }

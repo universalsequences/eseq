@@ -121,6 +121,61 @@ impl AgentToolRuntime {
                 }),
             },
             ToolSpec {
+                name: "list_instruments".to_string(),
+                description: "List saved local DGenLisp instruments.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            ToolSpec {
+                name: "read_instrument_source".to_string(),
+                description:
+                    "Read a saved local DGenLisp instrument by name, including optional ui.lisp."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Saved instrument name, e.g. emulations/minimoog/ or korg1." }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            ToolSpec {
+                name: "list_effects".to_string(),
+                description: "List saved local DGenLisp effects.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+            ToolSpec {
+                name: "read_effect_source".to_string(),
+                description: "Read a saved local DGenLisp effect by name.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Saved effect name." }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            ToolSpec {
+                name: "create_instrument_artifact".to_string(),
+                description:
+                    "Create and validate a draft instrument artifact from complete dsp.lisp and ui.lisp source. Does not apply it to a track."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Short artifact/instrument name." },
+                        "dsp_source": { "type": "string", "description": "Complete DGenLisp instrument dsp.lisp source." },
+                        "ui_source": { "type": "string", "description": "Complete eseqlisp ui.lisp source containing exactly one defsynth-ui form." }
+                    },
+                    "required": ["name", "dsp_source", "ui_source"]
+                }),
+            },
+            ToolSpec {
                 name: "create_instrument_track".to_string(),
                 description:
                     "Create a new instrument track from generated DGenLisp instrument source."
@@ -242,6 +297,13 @@ impl AgentToolRuntime {
             "list_examples" => self.execute_list_examples(&call.arguments),
             "read_example" => self.execute_read_example(&call.arguments),
             "read_patch_source" => self.execute_read_patch_source(&call.arguments),
+            "list_instruments" => self.execute_list_instruments(),
+            "read_instrument_source" => self.execute_read_instrument_source(&call.arguments),
+            "list_effects" => self.execute_list_effects(),
+            "read_effect_source" => self.execute_read_effect_source(&call.arguments),
+            "create_instrument_artifact" => {
+                self.execute_create_instrument_artifact(&call.arguments)
+            }
             "create_instrument_track" => self.execute_create_instrument_track(&call.arguments),
             "read_current_instrument_source" => {
                 self.execute_read_current_instrument_source(session)
@@ -306,6 +368,77 @@ impl AgentToolRuntime {
         }
         let name = required_string(arguments, "name")?;
         self.registry.read_patch_source(kind, name)
+    }
+
+    fn execute_list_instruments(&self) -> Result<ToolResult, String> {
+        let names = crate::lisp_effect::list_saved_instruments();
+        Ok(ToolResult {
+            summary: format!("Listed {} saved instrument(s).", names.len()),
+            content: if names.is_empty() {
+                "No saved instruments found.".to_string()
+            } else {
+                names.join("\n")
+            },
+            pending_actions: Vec::new(),
+        })
+    }
+
+    fn execute_read_instrument_source(&self, arguments: &Value) -> Result<ToolResult, String> {
+        let name = required_string(arguments, "name")?;
+        let dsp_source = crate::lisp_effect::load_instrument_source(name)
+            .map_err(|error| format!("Failed to read instrument '{name}' dsp source: {error}"))?;
+        let ui_source = crate::lisp_effect::load_instrument_ui_source(name).ok();
+        let content = match ui_source {
+            Some(ui_source) => {
+                format!("instrument: {name}\n\n[dsp.lisp]\n{dsp_source}\n\n[ui.lisp]\n{ui_source}")
+            }
+            None => format!("instrument: {name}\n\n[dsp.lisp]\n{dsp_source}"),
+        };
+        Ok(ToolResult {
+            summary: format!("Loaded instrument source for '{name}'."),
+            content,
+            pending_actions: Vec::new(),
+        })
+    }
+
+    fn execute_list_effects(&self) -> Result<ToolResult, String> {
+        let names = crate::lisp_effect::list_saved_effects();
+        Ok(ToolResult {
+            summary: format!("Listed {} saved effect(s).", names.len()),
+            content: if names.is_empty() {
+                "No saved effects found.".to_string()
+            } else {
+                names.join("\n")
+            },
+            pending_actions: Vec::new(),
+        })
+    }
+
+    fn execute_read_effect_source(&self, arguments: &Value) -> Result<ToolResult, String> {
+        let name = required_string(arguments, "name")?;
+        let source = crate::lisp_effect::load_effect_source(name)
+            .map_err(|error| format!("Failed to read effect '{name}' source: {error}"))?;
+        Ok(ToolResult {
+            summary: format!("Loaded effect source for '{name}'."),
+            content: format!("effect: {name}\n\n{source}"),
+            pending_actions: Vec::new(),
+        })
+    }
+
+    fn execute_create_instrument_artifact(&self, arguments: &Value) -> Result<ToolResult, String> {
+        let name =
+            normalize_patch_name(required_string(arguments, "name")?, "generated-instrument");
+        let dsp_source = required_string(arguments, "dsp_source")?;
+        let ui_source = required_string(arguments, "ui_source")?;
+        Ok(ToolResult {
+            summary: format!("Queued draft instrument artifact '{}'.", name),
+            content: format!("Create draft instrument artifact '{}'.", name),
+            pending_actions: vec![AgentAppAction::CreateInstrumentArtifact {
+                name,
+                dsp_source: dsp_source.to_string(),
+                ui_source: ui_source.to_string(),
+            }],
+        })
     }
 
     fn execute_create_instrument_track(&self, arguments: &Value) -> Result<ToolResult, String> {
@@ -778,6 +911,9 @@ mod tests {
         let names: Vec<String> = runtime.specs().into_iter().map(|spec| spec.name).collect();
         assert!(names.contains(&"lookup_dgen_docs".to_string()));
         assert!(names.contains(&"read_example".to_string()));
+        assert!(names.contains(&"list_instruments".to_string()));
+        assert!(names.contains(&"read_instrument_source".to_string()));
+        assert!(names.contains(&"create_instrument_artifact".to_string()));
         assert!(names.contains(&"inspect_current_instrument_preset_schema".to_string()));
         assert!(names.contains(&"create_current_instrument_presets".to_string()));
     }
@@ -823,6 +959,54 @@ mod tests {
         );
         assert!(!outcome.ok);
         assert!(outcome.summary.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn list_instruments_returns_saved_instruments() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let outcome = runtime.execute(
+            ToolCall {
+                name: "list_instruments".to_string(),
+                arguments: json!({}),
+            },
+            &empty_session(),
+        );
+        assert!(outcome.ok);
+        assert!(outcome.content.contains("korg1"));
+    }
+
+    #[test]
+    fn read_instrument_source_returns_dsp_and_ui() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let outcome = runtime.execute(
+            ToolCall {
+                name: "read_instrument_source".to_string(),
+                arguments: json!({ "name": "korg1" }),
+            },
+            &empty_session(),
+        );
+        assert!(outcome.ok);
+        assert!(outcome.content.contains("[dsp.lisp]"));
+        assert!(outcome.content.contains("[ui.lisp]"));
+    }
+
+    #[test]
+    fn create_instrument_artifact_queues_draft_action() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let outcome = runtime.execute(
+            ToolCall {
+                name: "create_instrument_artifact".to_string(),
+                arguments: json!({
+                    "name": "Glass Draft",
+                    "dsp_source": "(out 0 1 @name audio)",
+                    "ui_source": "(defsynth-ui (label \"ok\"))"
+                }),
+            },
+            &empty_session(),
+        );
+        assert!(outcome.ok);
+        assert_eq!(outcome.pending_actions.len(), 1);
+        assert!(outcome.summary.contains("glass-draft"));
     }
 
     #[test]

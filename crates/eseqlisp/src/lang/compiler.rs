@@ -110,6 +110,7 @@ fn is_widget_name(name: &str) -> bool {
         name,
         "label"
             | "button"
+            | "badge"
             | "slider"
             | "hslider"
             | "vslider"

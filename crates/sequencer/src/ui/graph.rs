@@ -2303,6 +2303,7 @@ impl GraphController<'_> {
                 },
                 scaling: crate::effects::ParamScaling::Linear,
                 node_param_idx: (lisp_effect::HEADER_SLOTS + dest.source_cell_id) as u32,
+                node_param_span: 1,
                 host_control: None,
             });
             inst_desc.params.push(crate::effects::ParamDescriptor {
@@ -2325,13 +2326,18 @@ impl GraphController<'_> {
                 },
                 scaling: crate::effects::ParamScaling::Linear,
                 node_param_idx: (lisp_effect::HEADER_SLOTS + dest.depth_cell_id) as u32,
+                node_param_span: 1,
                 host_control: None,
             });
         }
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
         if preserve_runtime_values {
             let node_id = inst_slot.node_id.load(Ordering::Relaxed);
-            inst_slot.sync_descriptor(&inst_desc, node_id);
+            if let Some(old_desc) = self.app.graph.instrument_descriptors.get(track) {
+                inst_slot.sync_descriptor_by_param_name(old_desc, &inst_desc, node_id);
+            } else {
+                inst_slot.sync_descriptor(&inst_desc, node_id);
+            }
         } else {
             inst_slot
                 .num_params

@@ -166,7 +166,7 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
 impl WidgetDefinition for ButtonWidget {
     fn names(&self) -> &'static [&'static str] {
-        &["button", "button-icon"]
+        &["button", "button-icon", "badge"]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -228,6 +228,9 @@ impl WidgetDefinition for ButtonWidget {
         _gesture: Option<&Value>,
         modifiers: KeyModifiers,
     ) -> MouseEventOutcome {
+        if node.widget_type == "badge" {
+            return MouseEventOutcome::Ignore;
+        }
         if matches!(node.props.get("disabled"), Some(Value::Bool(true))) {
             return MouseEventOutcome::Consume;
         }
@@ -240,6 +243,9 @@ impl WidgetDefinition for ButtonWidget {
     }
 
     fn key_event(&self, node: &LayoutNode, key: super::WidgetKeyEvent) -> Option<WidgetEvent> {
+        if node.widget_type == "badge" {
+            return None;
+        }
         if matches!(node.props.get("disabled"), Some(Value::Bool(true))) {
             return None;
         }
@@ -250,6 +256,9 @@ impl WidgetDefinition for ButtonWidget {
     }
 
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
+        if node.widget_type == "badge" {
+            return None;
+        }
         let WidgetEvent::Activate(modifiers) = event else {
             return None;
         };

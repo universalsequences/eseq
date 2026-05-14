@@ -186,6 +186,19 @@ mod tests {
         props.insert("v-align".to_string(), Value::Keyword("end".to_string()));
         assert_eq!(label_text_row(&props, rect), 4.0);
     }
+
+    #[test]
+    fn label_text_row_centers_inside_sub_cell_height_rects() {
+        let rect = Rect {
+            row: 2.0,
+            col: 0.0,
+            width: 8.0,
+            height: 0.82,
+        };
+        let props = HashMap::from([("v-align".to_string(), Value::Keyword("center".to_string()))]);
+
+        assert!((label_text_row(&props, rect) - 1.91).abs() < 0.0001);
+    }
 }
 
 fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) {
@@ -228,10 +241,10 @@ fn tui_render(props: &HashMap<String, Value>, rect: Rect, buf: &mut CellBuffer) 
 pub fn label_text_row(props: &HashMap<String, Value>, rect: Rect) -> f32 {
     match props.get("v-align") {
         Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "center" => {
-            rect.row + (rect.height - 1.0).max(0.0) * 0.5
+            rect.row + (rect.height - 1.0) * 0.5
         }
         Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "end" => {
-            rect.row + (rect.height - 1.0).max(0.0)
+            rect.row + rect.height - 1.0
         }
         _ => rect.row,
     }

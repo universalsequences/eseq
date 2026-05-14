@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use eseqlisp::Editor;
@@ -82,6 +83,9 @@ fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     match expr {
         Expression::List(items) if !items.is_empty() => {
             if let Expression::Symbol(head) = &items[0] {
+                if head == "defwidget" {
+                    return expr_to_lisp(expr);
+                }
                 if head == "tabs" {
                     let mut out = Vec::new();
                     let mut i = 0;
@@ -137,6 +141,9 @@ fn transform_midi_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     match expr {
         Expression::List(items) if !items.is_empty() => {
             if let Expression::Symbol(head) = &items[0] {
+                if head == "defwidget" {
+                    return expr_to_lisp(expr);
+                }
                 if head == "midi-fx-param" {
                     if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
                         return format!(
@@ -176,6 +183,9 @@ fn transform_audio_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     match expr {
         Expression::List(items) if !items.is_empty() => {
             if let Expression::Symbol(head) = &items[0] {
+                if head == "defwidget" {
+                    return expr_to_lisp(expr);
+                }
                 if matches!(head.as_str(), "effect-param" | "fx-param" | "param") {
                     if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
                         return format!(
@@ -215,6 +225,64 @@ fn safe_lisp_ident(value: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
+}
+
+fn local_helper_names(exprs: &[eseqlisp::parser::Expression]) -> BTreeSet<String> {
+    use eseqlisp::parser::Expression;
+
+    exprs
+        .iter()
+        .filter_map(|expr| match expr {
+            Expression::List(items)
+                if matches!(
+                    items.first(),
+                    Some(Expression::Symbol(head))
+                        if matches!(head.as_str(), "def" | "defmacro" | "defwidget")
+                ) =>
+            {
+                match items.get(1) {
+                    Some(Expression::Symbol(name)) => Some(name.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn namespace_local_helpers(
+    expr: &eseqlisp::parser::Expression,
+    helpers: &BTreeSet<String>,
+    prefix: &str,
+) -> eseqlisp::parser::Expression {
+    use eseqlisp::parser::Expression;
+
+    let rename_symbol = |name: &str| {
+        if helpers.contains(name) {
+            format!("{prefix}{}", safe_lisp_ident(name))
+        } else {
+            name.to_string()
+        }
+    };
+
+    match expr {
+        Expression::Symbol(name) => Expression::Symbol(rename_symbol(name)),
+        Expression::Keyword(value) => Expression::Keyword(value.clone()),
+        Expression::String(value) => Expression::String(value.clone()),
+        Expression::QuoteSymbol(value) => Expression::QuoteSymbol(value.clone()),
+        Expression::QuoteList(items) => Expression::QuoteList(items.clone()),
+        Expression::Number(value) => Expression::Number(*value),
+        Expression::Quasiquote(inner) => Expression::Quasiquote(inner.clone()),
+        Expression::Unquote(inner) => {
+            Expression::Unquote(Box::new(namespace_local_helpers(inner, helpers, prefix)))
+        }
+        Expression::List(items) => Expression::List(
+            items
+                .iter()
+                .map(|item| namespace_local_helpers(item, helpers, prefix))
+                .collect(),
+        ),
+    }
 }
 
 pub(crate) fn build_custom_instrument_ui_source_with_overlay(
@@ -282,17 +350,20 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
                 continue;
             }
         };
+        let helper_prefix = format!("custom_ui_{}__", safe_lisp_ident(&instrument_name));
+        let helper_names = local_helper_names(&exprs);
         let mut body = None;
         let mut helpers = Vec::new();
         for expr in &exprs {
-            if let Expression::List(items) = expr {
+            let expr = namespace_local_helpers(expr, &helper_names, &helper_prefix);
+            if let Expression::List(items) = &expr {
                 if matches!(items.first(), Some(Expression::Symbol(head)) if head == "defsynth-ui")
                 {
                     body = items.get(1).map(transform_synth_ui_expr);
                     continue;
                 }
             }
-            helpers.push(transform_synth_ui_expr(expr));
+            helpers.push(transform_synth_ui_expr(&expr));
         }
         let Some(body) = body else {
             eprintln!(
@@ -388,17 +459,20 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
                 continue;
             }
         };
+        let helper_prefix = format!("custom_ui_midi_{}__", safe_lisp_ident(&fx_name));
+        let helper_names = local_helper_names(&exprs);
         let mut body = None;
         let mut helpers = Vec::new();
         for expr in &exprs {
-            if let Expression::List(items) = expr {
+            let expr = namespace_local_helpers(expr, &helper_names, &helper_prefix);
+            if let Expression::List(items) = &expr {
                 if matches!(items.first(), Some(Expression::Symbol(head)) if head == "def-midi-fx-ui")
                 {
                     body = items.get(1).map(transform_midi_fx_ui_expr);
                     continue;
                 }
             }
-            helpers.push(transform_midi_fx_ui_expr(expr));
+            helpers.push(transform_midi_fx_ui_expr(&expr));
         }
         let Some(body) = body else {
             continue;
@@ -481,17 +555,20 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
                 continue;
             }
         };
+        let helper_prefix = format!("custom_ui_audio_{}__", safe_lisp_ident(&fx_name));
+        let helper_names = local_helper_names(&exprs);
         let mut body = None;
         let mut helpers = Vec::new();
         for expr in &exprs {
-            if let Expression::List(items) = expr {
+            let expr = namespace_local_helpers(expr, &helper_names, &helper_prefix);
+            if let Expression::List(items) = &expr {
                 if matches!(items.first(), Some(Expression::Symbol(head)) if head == "defeffect-ui")
                 {
                     body = items.get(1).map(transform_audio_fx_ui_expr);
                     continue;
                 }
             }
-            helpers.push(transform_audio_fx_ui_expr(expr));
+            helpers.push(transform_audio_fx_ui_expr(&expr));
         }
         let Some(body) = body else {
             eprintln!(
@@ -539,6 +616,42 @@ pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) {
         if let Err(err) = editor.runtime_mut().eval_str(&custom_audio_fx_source) {
             eprintln!("custom audio effect UI load error: {err:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_custom_instrument_ui_source_with_overlay;
+
+    #[test]
+    fn instrument_ui_injection_namespaces_local_helpers() {
+        let source = build_custom_instrument_ui_source_with_overlay(Some((
+            "agent-draft-1/".to_string(),
+            "instruments/agent-draft-1/ui.lisp".to_string(),
+            r#"
+            (def tune-block ()
+              (ui-control-block-small-s "TUNE" (ui-accent-blue) 0
+                (ui-lego-num-s 0 "op1_ratio" "r1" 4.1 2 false (ui-accent-cyan))))
+
+            (defsynth-ui
+              (ui-lego-column-full
+                (tune-block)))
+            "#
+            .to_string(),
+        )));
+
+        assert!(
+            source.contains("(def custom_ui_agent_draft_1___tune_block"),
+            "{source}"
+        );
+        assert!(
+            source.contains("(custom_ui_agent_draft_1___tune_block)"),
+            "{source}"
+        );
+        assert!(
+            !source.contains("(def tune-block"),
+            "local helper should not be injected under its unqualified name:\n{source}"
+        );
     }
 }
 

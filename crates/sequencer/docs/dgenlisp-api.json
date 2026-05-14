@@ -2506,6 +2506,62 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "preamble",
+        "name": "polyblep_saw",
+        "signatures": [
+          "(polyblep_saw phase freq)"
+        ],
+        "summary": "Anti-aliased saw oscillator helper. Pass a phasor phase in 0..1 and frequency in Hz."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 3
+        },
+        "attributes": [],
+        "category": "preamble",
+        "name": "polyblep_pulse",
+        "signatures": [
+          "(polyblep_pulse phase width freq)"
+        ],
+        "summary": "Anti-aliased pulse oscillator helper. Width is clipped internally and should usually stay around 0.05..0.95."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 4,
+          "minimum": 4
+        },
+        "attributes": [],
+        "category": "preamble",
+        "name": "svf",
+        "signatures": [
+          "(svf input cutoff q mode)"
+        ],
+        "summary": "State-variable filter helper. Cutoff is Hz, q is resonance, mode is 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 4,
+          "minimum": 4
+        },
+        "attributes": [],
+        "category": "preamble",
+        "name": "ladder",
+        "signatures": [
+          "(ladder input cutoff res drive)"
+        ],
+        "summary": "Moog-style 4-pole low-pass helper with drive and resonance compensation. Cutoff is Hz, resonance is 0..1, drive is pre-filter saturation."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": 3,
           "minimum": 3
         },

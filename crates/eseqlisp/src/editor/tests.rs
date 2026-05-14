@@ -2246,6 +2246,59 @@ fn mouse_click_toggle_via_bind_shorthand_round_trips_bool_state() {
 }
 
 #[test]
+fn box_pointer_handlers_receive_clicks_through_noninteractive_sdf_child() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(8, 4);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def armed (state false))
+                (def toggled (state false))
+                (defwidget visual-dot
+                  :width 2 :height 2
+                  :shader (sdf/layer
+                            (sdf/fill (sdf/circle 0.7) :accent)))
+                (effect
+                  (box :width 4 :height 2 :align :center
+                    :on-mouse-down (lambda (evt) (set! armed true))
+                    :on-mouse-up (lambda (evt)
+                      (if armed
+                        (set! toggled true)
+                        nil))
+                    (visual-dot)))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(8, 4);
+
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1),
+        1,
+        1,
+        8,
+        4,
+    );
+    editor.handle_mouse(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 1),
+        1,
+        1,
+        8,
+        4,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("armed").unwrap(),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(
+        editor.runtime.eval_str("toggled").unwrap(),
+        Some(Value::Bool(true))
+    );
+}
+
+#[test]
 fn knob_updates_shared_label_state_from_each_binding() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());
