@@ -1117,7 +1117,6 @@ impl Runtime {
                     width,
                     height,
                 ));
-
                 register_sdf_widget(SdfWidgetDef {
                     name: name.clone(),
                     shader_source: compiled.output.shader_source,
@@ -1357,6 +1356,7 @@ impl Runtime {
         for widget in [
             "label",
             "button",
+            "badge",
             "slider",
             "hslider",
             "vslider",

@@ -1564,9 +1564,6 @@ fragment float4 waveform_frag(
         pub fn render_tiled(&mut self, tiled: &TiledRenderFrame) -> Result<(), BackendError> {
             crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
             let render_time_seconds = self.elapsed_time_seconds();
-            let log_anim_render =
-                crate::widget_render::sdf_widget::sdf_visual_animations_active(render_time_seconds);
-            let render_started = Instant::now();
             self.sync_window_theme();
             let mut widget_scene_build_time = Duration::ZERO;
             let mut metal_prep_time = Duration::ZERO;
@@ -1585,17 +1582,9 @@ fragment float4 waveform_frag(
             }) else {
                 return Ok(());
             };
-            let drawable_started = Instant::now();
             let Some(drawable) = self.layer.nextDrawable() else {
                 return Ok(());
             };
-            if log_anim_render {
-                eprintln!(
-                    "[anim-render] t={:.3} next-drawable dt={:.3}",
-                    render_time_seconds,
-                    drawable_started.elapsed().as_secs_f32()
-                );
-            }
             let texture = drawable.texture();
             let vp_w = texture.width() as f32;
             let vp_h = texture.height() as f32;
@@ -2435,16 +2424,7 @@ fragment float4 waveform_frag(
 
             enc.endEncoding();
             cmdbuf.presentDrawable(objc2::runtime::ProtocolObject::from_ref(&*drawable));
-            let commit_started = Instant::now();
             cmdbuf.commit();
-            if log_anim_render {
-                eprintln!(
-                    "[anim-render] t={:.3} commit dt={:.3} total dt={:.3}",
-                    render_time_seconds,
-                    commit_started.elapsed().as_secs_f32(),
-                    render_started.elapsed().as_secs_f32()
-                );
-            }
             self.stats
                 .note_frame(0, 0, 0, widget_scene_build_time, metal_prep_time);
             Ok(())

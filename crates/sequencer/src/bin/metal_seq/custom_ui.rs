@@ -82,6 +82,9 @@ fn transform_synth_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     match expr {
         Expression::List(items) if !items.is_empty() => {
             if let Expression::Symbol(head) = &items[0] {
+                if head == "defwidget" {
+                    return expr_to_lisp(expr);
+                }
                 if head == "tabs" {
                     let mut out = Vec::new();
                     let mut i = 0;
@@ -137,6 +140,9 @@ fn transform_midi_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     match expr {
         Expression::List(items) if !items.is_empty() => {
             if let Expression::Symbol(head) = &items[0] {
+                if head == "defwidget" {
+                    return expr_to_lisp(expr);
+                }
                 if head == "midi-fx-param" {
                     if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
                         return format!(
@@ -176,6 +182,9 @@ fn transform_audio_fx_ui_expr(expr: &eseqlisp::parser::Expression) -> String {
     match expr {
         Expression::List(items) if !items.is_empty() => {
             if let Expression::Symbol(head) = &items[0] {
+                if head == "defwidget" {
+                    return expr_to_lisp(expr);
+                }
                 if matches!(head.as_str(), "effect-param" | "fx-param" | "param") {
                     if let Some(name) = items.get(1).and_then(custom_ui_param_name) {
                         return format!(

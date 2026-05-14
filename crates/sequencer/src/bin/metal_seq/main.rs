@@ -273,6 +273,131 @@ fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     }
 }
 
+const AGENT_INSTRUMENT_STUB_DSP: &str = r#"; Provisional silent instrument used while Agent Mode is designing the real patch.
+(def gate (in 1 @name gate))
+(def pitch (in 2 @name pitch))
+(def velocity (in 3 @name velocity))
+(def trigger (in 4 @name trigger))
+
+(param enabled @default 1 @min 0 @max 1)
+
+(out 0 1 @name audio)
+"#;
+
+const AGENT_INSTRUMENT_STUB_UI: &str = r#"(defsynth-ui
+  (box :width 70 :height :fill :padding 0 :debug-name "agent-instrument-stub-skeleton"
+    (agent-instrument-stub-bg :width 70 :height :fill)))
+"#;
+
+fn ensure_agent_instrument_stub_track(
+    app: &mut ui::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    track_pan_ids: &Arc<Mutex<Vec<i32>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &[f64],
+    cached_bus_peak_levels: &[f64],
+    ui_epoch: &Arc<AtomicUsize>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    conv_id: sequencer::agent::store::ConvId,
+) -> Result<usize, String> {
+    let snapshot = app
+        .agent_store
+        .snapshot(conv_id)
+        .ok_or_else(|| format!("Agent conversation {conv_id} not found"))?;
+    if let Some(target) = snapshot.state.accepted_instrument_target {
+        return Ok(target.track_index);
+    }
+    if let Some(target) = snapshot.state.stub_instrument_target {
+        sequencer::lisp_effect::save_instrument(&target.instrument_name, AGENT_INSTRUMENT_STUB_DSP)
+            .map_err(|error| format!("Failed to refresh agent stub dsp.lisp: {error}"))?;
+        sequencer::lisp_effect::save_instrument_ui(
+            &target.instrument_name,
+            AGENT_INSTRUMENT_STUB_UI,
+        )
+        .map_err(|error| format!("Failed to refresh agent stub ui.lisp: {error}"))?;
+        if target.track_index < app.tracks.len()
+            && app.graph.track_instrument_types.get(target.track_index)
+                == Some(&sequencer::sequencer::InstrumentType::Custom)
+        {
+            app.replace_custom_instrument_track_sync(
+                target.track_index,
+                &target.instrument_name,
+                AGENT_INSTRUMENT_STUB_DSP,
+            )
+            .map_err(|error| format!("Failed to refresh agent stub track: {error}"))?;
+            reload_custom_instrument_ui(editor);
+            sync_after_agent_instrument_apply(
+                app,
+                editor,
+                state,
+                target.track_index,
+                current_track,
+                track_names,
+                track_pan_ids,
+                record_armed,
+                selected_steps,
+                accumulator_names,
+                cached_track_peak_levels,
+                cached_bus_peak_levels,
+                ui_epoch,
+                lg_raw,
+            );
+            return Ok(target.track_index);
+        }
+    }
+
+    let inst_name = format!("agent-draft-{conv_id}/");
+    sequencer::lisp_effect::save_instrument(&inst_name, AGENT_INSTRUMENT_STUB_DSP)
+        .map_err(|error| format!("Failed to save agent stub dsp.lisp: {error}"))?;
+    sequencer::lisp_effect::save_instrument_ui(&inst_name, AGENT_INSTRUMENT_STUB_UI)
+        .map_err(|error| format!("Failed to save agent stub ui.lisp: {error}"))?;
+
+    let idx = app
+        .add_saved_instrument_track_sync(&inst_name)
+        .map_err(|error| format!("Failed to create agent stub track: {error}"))?;
+    let _ = app.force_instrument_enabled(idx);
+    reload_custom_instrument_ui(editor);
+
+    app.agent_store
+        .set_stub_instrument_target(
+            conv_id,
+            sequencer::agent::store::AcceptedInstrumentTarget {
+                track_index: idx,
+                instrument_name: inst_name,
+            },
+        )
+        .map_err(|error| format!("Failed to record agent stub target: {error}"))?;
+    app.agent_store
+        .push_system_message(
+            conv_id,
+            format!("Created working instrument track {}", idx + 1),
+        )
+        .map_err(|error| format!("Failed to record agent stub message: {error}"))?;
+
+    sync_after_agent_instrument_apply(
+        app,
+        editor,
+        state,
+        idx,
+        current_track,
+        track_names,
+        track_pan_ids,
+        record_armed,
+        selected_steps,
+        accumulator_names,
+        cached_track_peak_levels,
+        cached_bus_peak_levels,
+        ui_epoch,
+        lg_raw,
+    );
+    Ok(idx)
+}
+
 fn apply_agent_draft_to_owned_instrument(
     app: &mut ui::App,
     editor: &mut Editor,
@@ -298,7 +423,10 @@ fn apply_agent_draft_to_owned_instrument(
         .draft
         .ok_or_else(|| format!("Agent conversation {conv_id} has no compiled draft"))?;
 
-    let target = snapshot.state.accepted_instrument_target;
+    let target = snapshot
+        .state
+        .accepted_instrument_target
+        .or(snapshot.state.stub_instrument_target);
     let inst_name = target
         .as_ref()
         .map(|target| target.instrument_name.clone())
@@ -553,7 +681,11 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::reconciled_track_index;
+    use super::{
+        build_custom_instrument_ui_source_with_overlay, reconciled_track_index, Runtime, Value,
+        AGENT_INSTRUMENT_STUB_UI,
+    };
+    use eseqlisp::parser::{ASTParser, Parser};
 
     #[test]
     fn reconciles_stale_current_track_against_track_count() {
@@ -561,6 +693,67 @@ mod tests {
         assert_eq!(reconciled_track_index(7, 1, 4), Some(1));
         assert_eq!(reconciled_track_index(7, 9, 4), Some(3));
         assert_eq!(reconciled_track_index(0, 0, 0), None);
+    }
+
+    #[test]
+    fn agent_instrument_stub_ui_parses() {
+        let tokens = Parser::new(AGENT_INSTRUMENT_STUB_UI.to_string())
+            .parse()
+            .expect("stub UI should tokenize");
+        ASTParser::new(tokens)
+            .parse()
+            .expect("stub UI should parse");
+    }
+
+    #[test]
+    fn agent_instrument_stub_ui_registers_as_custom_synth_ui() {
+        const LEGACY_AGENT_INSTRUMENT_STUB_UI: &str = r#"(defwidget agent-instrument-stub-bg-legacy
+  :width 70 :height 8.2
+  :shader
+  (sdf/fill
+    (sdf/rounded-rect width height 0.45)
+    (material :color (rgba (+ 0.1 (* 0.1 (sin itime))) 0.2 0.4 1.0))))
+
+(defsynth-ui
+  (box :width 70 :height 8.2 :padding 0 :debug-name "agent-instrument-stub-skeleton"
+    (agent-instrument-stub-bg-legacy)))
+"#;
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "agent-draft-1/".to_string(),
+            "instruments/agent-draft-1/ui.lisp".to_string(),
+            LEGACY_AGENT_INSTRUMENT_STUB_UI.to_string(),
+        )));
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str(
+                r#"(def synth-ui-current-inst false)
+                (def synth-ui-current-name "")
+                (def custom-ui-current-kind "instrument")
+                (def custom-ui-selected-section 0)
+                (def custom-ui-selected-section-for-current-scope () 0)
+                (def agent-instrument-stub-bg ()
+                    (box :width 70 :height 8.2
+                      (label "stub" :font-size 10 :color :gray :bg :transparent)))"#,
+            )
+            .expect("install stub widget test double");
+        runtime
+            .eval_str(&custom_ui_source)
+            .expect("stub custom UI should evaluate");
+        let rendered = runtime
+            .eval_str(
+                r#"(custom-instrument-synth-ui
+                     (dict :name "agent-draft-1/"
+                           :synth (list (dict :name "base_note"
+                                              :control "base-note"
+                                              :value 0
+                                              :min -48
+                                              :max 48))))"#,
+            )
+            .expect("stub custom UI should render");
+        assert!(
+            !matches!(rendered, Some(Value::Bool(false)) | None),
+            "stub instrument should dispatch to its custom skeleton UI"
+        );
     }
 }
 
@@ -4396,6 +4589,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 editor.handle_host_event(HostEvent::Status(format!(
                                     "{verb} {}",
                                     result.track_index + 1
+                                )));
+                            }
+                            Err(error) => {
+                                editor.handle_host_event(HostEvent::Error(error));
+                            }
+                        }
+                    }
+                    "agent-ensure-instrument-stub" => {
+                        let conv_id = match payload {
+                            Value::Number(id) if id >= 1.0 => id as sequencer::agent::store::ConvId,
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "agent-ensure-instrument-stub: expected conversation id"
+                                        .to_string(),
+                                ));
+                                continue;
+                            }
+                        };
+                        match ensure_agent_instrument_stub_track(
+                            &mut app,
+                            &mut editor,
+                            &state,
+                            &current_track,
+                            &mut track_names,
+                            &track_pan_ids,
+                            &record_armed,
+                            &selected_steps,
+                            &accumulator_names,
+                            &cached_track_peak_levels,
+                            &cached_bus_peak_levels,
+                            &ui_epoch,
+                            lg_raw,
+                            conv_id,
+                        ) {
+                            Ok(track_index) => {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Created working instrument track {}",
+                                    track_index + 1
                                 )));
                             }
                             Err(error) => {

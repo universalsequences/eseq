@@ -192,14 +192,6 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         // Update tile rects once per iteration (not per-event)
         editor.update_tile_rects(cols as u16, rows as u16);
         let now_seconds = backend.time_seconds();
-        if let Some((total, active, remaining)) =
-            crate::widget_render::sdf_widget::sdf_visual_animation_debug_status(now_seconds)
-        {
-            eprintln!(
-                "[anim-check] t={:.3} total={} active={} remaining={:.3}",
-                now_seconds, total, active, remaining
-            );
-        }
         let sdf_animation_active =
             crate::widget_render::sdf_widget::sdf_visual_animations_active(now_seconds);
         if sdf_animation_active {
@@ -210,37 +202,6 @@ pub fn run_metal() -> Result<(), backend::BackendError> {
         } else {
             idle_frame_interval
         };
-
-        if sdf_animation_active {
-            let elapsed = last_render_at.elapsed();
-            eprintln!(
-                "[anim-loop] t={:.3} due_in={:.3}",
-                backend.time_seconds(),
-                frame_interval.saturating_sub(elapsed).as_secs_f32()
-            );
-            if elapsed < frame_interval {
-                std::thread::sleep(frame_interval - elapsed);
-            }
-            eprintln!("[anim-loop] t={:.3} render-start", backend.time_seconds());
-            let (cols, rows) = backend.viewport_size();
-            let build_started = Instant::now();
-            let tiled_frame = frame::build_tiled_render_frame_borderless(&mut editor, cols, rows);
-            eprintln!(
-                "[anim-loop] t={:.3} frame-built dt={:.3}",
-                backend.time_seconds(),
-                build_started.elapsed().as_secs_f32()
-            );
-            let render_started = Instant::now();
-            backend.render_tiled(&tiled_frame)?;
-            eprintln!(
-                "[anim-loop] t={:.3} render-done dt={:.3}",
-                backend.time_seconds(),
-                render_started.elapsed().as_secs_f32()
-            );
-            editor.clear_needs_redraw();
-            last_render_at = Instant::now();
-            continue;
-        }
 
         let timeout = frame_interval.saturating_sub(last_render_at.elapsed());
         match backend.poll_event(timeout) {

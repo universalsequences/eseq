@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
-use super::providers::{default_model_presets, AgentProviderKind};
+use super::providers::{AgentProviderKind, AgentProviderState};
 
 pub type ConvId = u64;
 
@@ -29,12 +29,14 @@ pub enum Role {
     User,
     Assistant,
     System,
+    Tool,
 }
 
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
     pub text: String,
+    pub reasoning_content: Option<String>,
     pub ts: SystemTime,
 }
 
@@ -76,6 +78,7 @@ pub struct ConversationState {
     pub messages: Vec<Message>,
     pub draft: Option<InstrumentDraft>,
     pub draft_handle: Option<DraftSlot>,
+    pub stub_instrument_target: Option<AcceptedInstrumentTarget>,
     pub accepted_instrument_target: Option<AcceptedInstrumentTarget>,
     pub finalized_instrument_name: Option<String>,
     pub last_compile_error: Option<String>,
@@ -129,15 +132,12 @@ impl ConversationStore {
 
     pub fn new_conversation(&self, kind: AgentKind) -> ConvId {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let preset = default_model_presets()
-            .into_iter()
-            .find(|preset| preset.provider == AgentProviderKind::OpenAi)
-            .unwrap_or_else(|| super::providers::AgentModelPreset {
-                id: "gpt-5.5".to_string(),
-                display_name: "GPT-5.5".to_string(),
-                provider: AgentProviderKind::OpenAi,
-                capability: super::providers::ModelCapability::Balanced,
-            });
+        let provider_state = AgentProviderState::from_env();
+        let provider = provider_state.selected_provider;
+        let model = provider_state
+            .selected_model()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| "gpt-5.5".to_string());
         let mut inner = self.inner.lock().unwrap();
         inner.insert(
             id,
@@ -148,6 +148,7 @@ impl ConversationStore {
                 messages: Vec::new(),
                 draft: None,
                 draft_handle: None,
+                stub_instrument_target: None,
                 accepted_instrument_target: None,
                 finalized_instrument_name: None,
                 last_compile_error: None,
@@ -155,8 +156,8 @@ impl ConversationStore {
                 retries_this_turn: 0,
                 generation: 1,
                 created_at: SystemTime::now(),
-                provider: preset.provider,
-                model: preset.id,
+                provider,
+                model,
             },
         );
         id
@@ -221,6 +222,15 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub fn push_tool_message(&self, id: ConvId, text: impl Into<String>) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let state = inner
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+        push_message(state, Role::Tool, text.into());
+        Ok(())
+    }
+
     pub fn set_accepted_instrument_target(
         &self,
         id: ConvId,
@@ -231,7 +241,22 @@ impl ConversationStore {
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent conversation {id}"))?;
         state.accepted_instrument_target = Some(target);
+        state.stub_instrument_target = None;
         state.finalized_instrument_name = None;
+        bump(state);
+        Ok(())
+    }
+
+    pub fn set_stub_instrument_target(
+        &self,
+        id: ConvId,
+        target: AcceptedInstrumentTarget,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let state = inner
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+        state.stub_instrument_target = Some(target);
         bump(state);
         Ok(())
     }
@@ -275,9 +300,19 @@ pub(crate) fn bump(state: &mut ConversationState) {
 }
 
 pub(crate) fn push_message(state: &mut ConversationState, role: Role, text: String) {
+    push_message_with_reasoning(state, role, text, None);
+}
+
+pub(crate) fn push_message_with_reasoning(
+    state: &mut ConversationState,
+    role: Role,
+    text: String,
+    reasoning_content: Option<String>,
+) {
     state.messages.push(Message {
         role,
         text,
+        reasoning_content,
         ts: SystemTime::now(),
     });
     bump(state);

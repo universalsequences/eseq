@@ -2118,7 +2118,7 @@ fn register_agent_mode_natives(
     });
 
     let s = store.clone();
-    runtime.register_native("agent/send", move |args, _ctx| {
+    runtime.register_native("agent/send", move |args, ctx| {
         let id = conv_id_arg(args.first())?;
         let prompt = match args.get(1) {
             Some(Value::String(value)) => value.clone(),
@@ -2129,6 +2129,20 @@ fn register_agent_mode_natives(
             prompt.len(),
             prompt
         );
+        if let Some(snapshot) = s.snapshot(id) {
+            let state = snapshot.state;
+            if state.kind == sequencer::agent::store::AgentKind::Instrument
+                && state.draft.is_none()
+                && state.stub_instrument_target.is_none()
+                && state.accepted_instrument_target.is_none()
+                && state.finalized_instrument_name.is_none()
+            {
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "agent-ensure-instrument-stub".to_string(),
+                    payload: Value::Number(id as f64),
+                });
+            }
+        }
         s.send(id, prompt)?;
         Ok(Value::Nil)
     });
@@ -2361,6 +2375,7 @@ fn agent_role_symbol(role: sequencer::agent::store::Role) -> &'static str {
         sequencer::agent::store::Role::User => "user",
         sequencer::agent::store::Role::Assistant => "assistant",
         sequencer::agent::store::Role::System => "system",
+        sequencer::agent::store::Role::Tool => "tool",
     }
 }
 
@@ -2453,6 +2468,10 @@ fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Va
         .accepted_instrument_target
         .as_ref()
         .map(|target| target.instrument_name.clone());
+    let stub_name = state
+        .stub_instrument_target
+        .as_ref()
+        .map(|target| target.instrument_name.clone());
     let draft_name = state
         .draft
         .as_ref()
@@ -2461,7 +2480,8 @@ fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Va
         .finalized_instrument_name
         .clone()
         .or(target_name)
-        .or(draft_name);
+        .or(draft_name)
+        .or(stub_name);
 
     let mut map = std::collections::HashMap::new();
     let exists = instrument_name.is_some();
@@ -2493,6 +2513,8 @@ fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Va
         "applied"
     } else if state.draft.is_some() {
         "ready"
+    } else if state.stub_instrument_target.is_some() {
+        "working"
     } else {
         "none"
     };
@@ -2506,6 +2528,7 @@ fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Va
             state
                 .accepted_instrument_target
                 .as_ref()
+                .or(state.stub_instrument_target.as_ref())
                 .map(|target| Value::Number((target.track_index + 1) as f64))
                 .unwrap_or(Value::Nil),
         )),

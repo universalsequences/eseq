@@ -315,6 +315,7 @@ fn insert_string_prop(
 
 fn param_supports_value_binding(pdesc: &sequencer::effects::ParamDescriptor) -> bool {
     matches!(pdesc.kind, sequencer::effects::ParamKind::Continuous { .. })
+        || matches!(pdesc.kind, sequencer::effects::ParamKind::Enum { .. })
         || pdesc.name.eq_ignore_ascii_case("enabled")
 }
 
@@ -2369,10 +2370,8 @@ pub(crate) fn build_instrument_panel_value(
                 Rc::new(RefCell::new(Value::Bool(true))),
             );
         }
-        if options.is_none() {
-            if let Some(value_field) = value_field {
-                insert_string_prop(&mut pmap, "value-field", value_field);
-            }
+        if let Some(value_field) = value_field {
+            insert_string_prop(&mut pmap, "value-field", value_field);
         }
         out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
@@ -6886,6 +6885,99 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_lisp_lays_out_agent_instrument_stub_skeleton() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "agent-draft-1/".to_string(),
+            "instruments/agent-draft-1/ui.lisp".to_string(),
+            super::AGENT_INSTRUMENT_STUB_UI.to_string(),
+        )));
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("agent-draft-1/".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("agent-draft-1".to_string()))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(120, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load agent stub custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("agent stub fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("agent stub fx layout");
+        let body = find_layout_node_by_debug_name(&layout, "instrument-content-box")
+            .expect("instrument panel content body should be present");
+        let skeleton = find_layout_node_by_debug_name(&layout, "agent-instrument-stub-skeleton")
+            .expect("agent stub skeleton should be present in the measured layout");
+        assert!(
+            skeleton.rect.width.is_finite()
+                && skeleton.rect.height.is_finite()
+                && skeleton.rect.width > 1.0
+                && skeleton.rect.height > 1.0,
+            "agent stub skeleton should have a finite visible rect, got {:?}",
+            skeleton.rect
+        );
+        assert!(
+            skeleton.rect.height >= body.rect.height - 1.0,
+            "agent stub skeleton should fill the instrument panel body height, body={:?} skeleton={:?}",
+            body.rect,
+            skeleton.rect
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "base_note").is_none(),
+            "agent stub should not fall back to the generic base_note instrument panel"
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_lays_out_real_korg1_custom_instrument_ui() {
         fn assert_finite_layout(node: &eseqlisp::layout::LayoutNode) {
             assert!(
@@ -7119,6 +7211,24 @@ mod tests {
         assert!(
             instrument_panel.rect.width > 70.0 && instrument_panel.rect.height > 8.0,
             "instrument panel should occupy visible measured space, got {:?}",
+            instrument_panel.rect
+        );
+
+        let adsr_editor =
+            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
+        assert!(
+            adsr_editor.rect.width > 8.0
+                && adsr_editor.rect.height > 2.0
+                && adsr_editor.rect.height <= 4.0,
+            "ADSR editor should stay constrained in the medium detail panel, got {:?}",
+            adsr_editor.rect
+        );
+        assert!(
+            adsr_editor.rect.row >= instrument_panel.rect.row
+                && adsr_editor.rect.row + adsr_editor.rect.height
+                    <= instrument_panel.rect.row + instrument_panel.rect.height,
+            "ADSR editor should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+            adsr_editor.rect,
             instrument_panel.rect
         );
 
