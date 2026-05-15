@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use super::{Align, WidgetDefinition, resolve_align};
 use crate::layout::{
@@ -178,7 +179,8 @@ fn visible_range(
 }
 
 fn debug_virtual_vstack_enabled() -> bool {
-    std::env::var_os("ESEQLISP_DEBUG_VIRTUAL_VSTACK").is_some()
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("ESEQLISP_DEBUG_VIRTUAL_VSTACK").is_some())
 }
 
 impl WidgetDefinition for VirtualVStackWidget {
@@ -285,6 +287,7 @@ impl WidgetDefinition for VirtualVStackWidget {
             aspect: 1.0,
         };
 
+        let mut visible_sizes = Vec::with_capacity(range.len());
         let mut measured_updates = Vec::new();
         for index in range.clone() {
             let size = measure_child(&children[index], inner_constraints).unwrap_or(Size {
@@ -292,6 +295,7 @@ impl WidgetDefinition for VirtualVStackWidget {
                 height: estimated,
             });
             heights[index] = size.height;
+            visible_sizes.push((index, size));
             measured_updates.push((keys[index].clone(), size.height));
         }
 
@@ -300,13 +304,10 @@ impl WidgetDefinition for VirtualVStackWidget {
         }
 
         let tops = cumulative_tops(&heights, gap, pad_y);
-        range
-            .map(|index| {
+        visible_sizes
+            .into_iter()
+            .map(|(index, size)| {
                 let child = &children[index];
-                let size = measure_child(child, inner_constraints).unwrap_or(Size {
-                    width: inner_width,
-                    height: heights[index],
-                });
                 let child_width =
                     if align == Align::Stretch || prop_is_keyword(child, "width", "fill") {
                         inner_width
