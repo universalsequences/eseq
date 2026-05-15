@@ -2346,7 +2346,8 @@ fragment float4 waveform_frag(
                     height: vp_h as usize,
                 });
                 if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
-                    let cables = build_mod_patch_cables(&mod_patch_ports, vp_w, vp_h);
+                    let cursor_px = (self.cursor_pos.0 * cell_w, self.cursor_pos.1 * cell_h);
+                    let cables = build_mod_patch_cables(&mod_patch_ports, vp_w, vp_h, cursor_px);
                     draw_patch_cable_instances(&enc, &self.device, &cable_pipeline, &cables);
                 }
             }
@@ -4124,8 +4125,11 @@ fragment float4 waveform_frag(
         direction: ModPatchPortDirection,
         track: usize,
         input: usize,
+        active: bool,
+        pending: bool,
         center_px: (f32, f32),
         connected_sources: Vec<usize>,
+        selected_sources: Vec<usize>,
     }
 
     fn collect_mod_patch_ports(
@@ -4150,8 +4154,11 @@ fragment float4 waveform_frag(
                         direction,
                         track,
                         input: layout_node_usize_prop(node, "input").unwrap_or(0),
+                        active: layout_node_bool_prop(node, "active"),
+                        pending: layout_node_bool_prop(node, "pending"),
                         center_px,
                         connected_sources: layout_node_usize_list_prop(node, "connected-sources"),
+                        selected_sources: layout_node_usize_list_prop(node, "selected-sources"),
                     });
                 }
             }
@@ -4212,10 +4219,11 @@ fragment float4 waveform_frag(
         ports: &[ModPatchPort],
         vp_w: f32,
         vp_h: f32,
+        cursor_px: (f32, f32),
     ) -> Vec<PatchCableInstance> {
         let mut outputs = HashMap::new();
         for port in ports {
-            if port.direction == ModPatchPortDirection::Out {
+            if port.direction == ModPatchPortDirection::Out && port.active {
                 outputs.insert(port.track, port.center_px);
             }
         }
@@ -4224,6 +4232,10 @@ fragment float4 waveform_frag(
         let base_color = Color::rgba(0.10, 0.58, 1.0, 0.92);
         let highlight_color = Color::rgba(0.78, 0.94, 1.0, 0.38);
         let shadow_color = Color::rgba(0.0, 0.0, 0.0, 0.34);
+        let selected_color = Color::rgba(1.0, 0.16, 0.10, 0.96);
+        let selected_highlight_color = Color::rgba(1.0, 0.66, 0.58, 0.42);
+        let preview_color = Color::rgba(0.42, 0.84, 1.0, 0.84);
+        let preview_highlight_color = Color::rgba(0.88, 0.98, 1.0, 0.36);
         let tension = 0.30;
         for port in ports {
             if port.direction != ModPatchPortDirection::In {
@@ -4244,11 +4256,19 @@ fragment float4 waveform_frag(
                     tension,
                 );
                 let lane_tint = (port.input as f32 * 0.08).min(0.24);
-                let color = Color {
-                    r: (base_color.r + lane_tint).min(1.0),
-                    g: (base_color.g + lane_tint * 0.35).min(1.0),
-                    b: base_color.b,
-                    a: base_color.a,
+                let is_selected = port
+                    .selected_sources
+                    .iter()
+                    .any(|selected| selected == source);
+                let color = if is_selected {
+                    selected_color
+                } else {
+                    Color {
+                        r: (base_color.r + lane_tint).min(1.0),
+                        g: (base_color.g + lane_tint * 0.35).min(1.0),
+                        b: base_color.b,
+                        a: base_color.a,
+                    }
                 };
                 push_mod_patch_cable_instance(
                     start,
@@ -4264,7 +4284,11 @@ fragment float4 waveform_frag(
                     (start.0, start.1 - 0.7),
                     (port.center_px.0, port.center_px.1 - 0.7),
                     0.55,
-                    highlight_color,
+                    if is_selected {
+                        selected_highlight_color
+                    } else {
+                        highlight_color
+                    },
                     &mut cables,
                     vp_w,
                     vp_h,
@@ -4272,7 +4296,69 @@ fragment float4 waveform_frag(
                 );
             }
         }
+        if let Some(source_port) = ports.iter().find(|port| {
+            port.direction == ModPatchPortDirection::Out && port.active && port.pending
+        }) {
+            let end = nearest_mod_input_port(ports, source_port.track, cursor_px)
+                .map(|port| port.center_px)
+                .unwrap_or(cursor_px);
+            push_mod_patch_cable_instance(
+                (source_port.center_px.0 + 1.4, source_port.center_px.1 + 2.2),
+                (end.0 + 1.4, end.1 + 2.2),
+                3.6,
+                shadow_color,
+                &mut cables,
+                vp_w,
+                vp_h,
+                tension,
+            );
+            push_mod_patch_cable_instance(
+                source_port.center_px,
+                end,
+                1.85,
+                preview_color,
+                &mut cables,
+                vp_w,
+                vp_h,
+                tension,
+            );
+            push_mod_patch_cable_instance(
+                (source_port.center_px.0, source_port.center_px.1 - 0.7),
+                (end.0, end.1 - 0.7),
+                0.55,
+                preview_highlight_color,
+                &mut cables,
+                vp_w,
+                vp_h,
+                tension,
+            );
+        }
         cables
+    }
+
+    fn nearest_mod_input_port<'a>(
+        ports: &'a [ModPatchPort],
+        source_track: usize,
+        cursor_px: (f32, f32),
+    ) -> Option<&'a ModPatchPort> {
+        ports
+            .iter()
+            .filter(|port| {
+                port.direction == ModPatchPortDirection::In
+                    && port.active
+                    && port.track != source_track
+            })
+            .min_by(|a, b| {
+                let da = squared_distance_px(a.center_px, cursor_px);
+                let db = squared_distance_px(b.center_px, cursor_px);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
+    fn squared_distance_px(a: (f32, f32), b: (f32, f32)) -> f32 {
+        let dx = a.0 - b.0;
+        let dy = a.1 - b.1;
+        dx * dx + dy * dy
     }
 
     fn push_mod_patch_cable_instance(

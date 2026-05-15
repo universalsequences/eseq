@@ -19,6 +19,233 @@ fn is_slider_widget(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "hslider" | "vslider" | "slider")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PatchPortDirection {
+    In,
+    Out,
+}
+
+#[derive(Clone)]
+struct PatchPortLayout {
+    direction: PatchPortDirection,
+    track: usize,
+    input: usize,
+    active: bool,
+    pending: bool,
+    center: (f32, f32),
+    connected_sources: Vec<usize>,
+    on_cable_click: Option<Value>,
+    on_patch_drop: Option<Value>,
+}
+
+fn patch_port_direction(node: &LayoutNode) -> Option<PatchPortDirection> {
+    match node.props.get("direction") {
+        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "in" => {
+            Some(PatchPortDirection::In)
+        }
+        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "out" => {
+            Some(PatchPortDirection::Out)
+        }
+        _ => None,
+    }
+}
+
+fn node_bool_prop(node: &LayoutNode, key: &str) -> bool {
+    matches!(node.props.get(key), Some(Value::Bool(true)))
+}
+
+fn node_usize_prop(node: &LayoutNode, key: &str) -> Option<usize> {
+    match node.props.get(key) {
+        Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => Some(*value as usize),
+        _ => None,
+    }
+}
+
+fn node_usize_list_prop(node: &LayoutNode, key: &str) -> Vec<usize> {
+    let Some(Value::List(values)) = node.props.get(key) else {
+        return Vec::new();
+    };
+    values
+        .iter()
+        .filter_map(|value| match &*value.borrow() {
+            Value::Number(value) if value.is_finite() && *value >= 0.0 => Some(*value as usize),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout>) {
+    if node_bool_prop(node, "patch-port") {
+        if let (Some(direction), Some(track)) =
+            (patch_port_direction(node), node_usize_prop(node, "track"))
+        {
+            ports.push(PatchPortLayout {
+                direction,
+                track,
+                input: node_usize_prop(node, "input").unwrap_or(0),
+                active: node_bool_prop(node, "active"),
+                pending: node_bool_prop(node, "pending"),
+                center: (
+                    node.rect.col + node.rect.width * 0.5,
+                    node.rect.row + node.rect.height * 0.5,
+                ),
+                connected_sources: node_usize_list_prop(node, "connected-sources"),
+                on_cable_click: node.props.get("on-cable-click").cloned(),
+                on_patch_drop: node.props.get("on-patch-drop").cloned(),
+            });
+        }
+    }
+    for child in &node.children {
+        collect_patch_port_layouts(child, ports);
+    }
+}
+
+fn patch_cable_click_output(
+    layout: &LayoutNode,
+    layout_col: f32,
+    layout_row: f32,
+) -> Option<crate::widget_render::EventOutput> {
+    let mut ports = Vec::new();
+    collect_patch_port_layouts(layout, &mut ports);
+    if ports.is_empty() {
+        return None;
+    }
+    let outputs: std::collections::HashMap<usize, (f32, f32)> = ports
+        .iter()
+        .filter(|port| port.direction == PatchPortDirection::Out)
+        .map(|port| (port.track, port.center))
+        .collect();
+
+    let mut best: Option<(f32, usize, usize, usize, Value)> = None;
+    for port in ports
+        .iter()
+        .filter(|port| port.direction == PatchPortDirection::In)
+    {
+        let Some(callback) = port.on_cable_click.clone() else {
+            continue;
+        };
+        for source in &port.connected_sources {
+            let Some(start) = outputs.get(source).copied() else {
+                continue;
+            };
+            let distance =
+                distance_to_patch_cable_cells(start, port.center, (layout_col, layout_row));
+            if distance > 0.32 {
+                continue;
+            }
+            match best {
+                Some((best_distance, ..)) if best_distance <= distance => {}
+                _ => best = Some((distance, *source, port.track, port.input, callback.clone())),
+            }
+        }
+    }
+
+    let (_, source, dest, input, callback) = best?;
+    Some(crate::widget_render::EventOutput {
+        callback,
+        args: vec![
+            Value::Number(source as f64),
+            Value::Number(dest as f64),
+            Value::Number(input as f64),
+        ],
+    })
+}
+
+fn patch_drop_output(
+    layout: &LayoutNode,
+    layout_col: f32,
+    layout_row: f32,
+) -> Option<crate::widget_render::EventOutput> {
+    let mut ports = Vec::new();
+    collect_patch_port_layouts(layout, &mut ports);
+    let source = ports
+        .iter()
+        .find(|port| port.direction == PatchPortDirection::Out && port.active && port.pending)?;
+    if squared_distance(source.center, (layout_col, layout_row)) < 2.25 {
+        return None;
+    }
+    let dest = ports
+        .iter()
+        .filter(|port| {
+            port.direction == PatchPortDirection::In
+                && port.active
+                && port.track != source.track
+                && port.on_patch_drop.is_some()
+        })
+        .min_by(|a, b| {
+            let da = squared_distance(a.center, (layout_col, layout_row));
+            let db = squared_distance(b.center, (layout_col, layout_row));
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })?;
+
+    Some(crate::widget_render::EventOutput {
+        callback: dest.on_patch_drop.clone()?,
+        args: vec![
+            Value::Number(source.track as f64),
+            Value::Number(dest.track as f64),
+            Value::Number(dest.input as f64),
+        ],
+    })
+}
+
+fn distance_to_patch_cable_cells(start: (f32, f32), end: (f32, f32), point: (f32, f32)) -> f32 {
+    let dx = end.0 - start.0;
+    let dy = end.1 - start.1;
+    let distance = (dx * dx + dy * dy).sqrt();
+    let slack = 0.70;
+    let sag = ((2.15 + distance * 0.22) * slack).clamp(1.3, 6.3);
+    let handle_x = dx.abs().clamp(3.2, 14.0) * (0.30 + 0.14 * slack);
+    let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
+    let c1 = (start.0 + handle_x * direction, start.1 + sag);
+    let c2 = (end.0 - handle_x * direction, end.1 + sag);
+
+    let mut best = f32::MAX;
+    let mut prev = start;
+    for i in 1..=28 {
+        let t = i as f32 / 28.0;
+        let current = cubic_bezier_point(start, c1, c2, end, t);
+        best = best.min(distance_to_segment(point, prev, current));
+        prev = current;
+    }
+    best
+}
+
+fn cubic_bezier_point(
+    p0: (f32, f32),
+    p1: (f32, f32),
+    p2: (f32, f32),
+    p3: (f32, f32),
+    t: f32,
+) -> (f32, f32) {
+    let mt = 1.0 - t;
+    let a = mt * mt * mt;
+    let b = 3.0 * mt * mt * t;
+    let c = 3.0 * mt * t * t;
+    let d = t * t * t;
+    (
+        a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0,
+        a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1,
+    )
+}
+
+fn distance_to_segment(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let ab = (b.0 - a.0, b.1 - a.1);
+    let ap = (point.0 - a.0, point.1 - a.1);
+    let len_sq = ab.0 * ab.0 + ab.1 * ab.1;
+    if len_sq <= f32::EPSILON {
+        return ((point.0 - a.0).powi(2) + (point.1 - a.1).powi(2)).sqrt();
+    }
+    let t = ((ap.0 * ab.0 + ap.1 * ab.1) / len_sq).clamp(0.0, 1.0);
+    let closest = (a.0 + ab.0 * t, a.1 + ab.1 * t);
+    ((point.0 - closest.0).powi(2) + (point.1 - closest.1).powi(2)).sqrt()
+}
+
+fn squared_distance(a: (f32, f32), b: (f32, f32)) -> f32 {
+    let dx = a.0 - b.0;
+    let dy = a.1 - b.1;
+    dx * dx + dy * dy
+}
+
 impl Editor {
     fn dispatch_slider_drag_to_node(
         &mut self,
@@ -144,6 +371,29 @@ impl Editor {
         }
 
         let gen_before = widget_render::widget_state_generation();
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+        ) {
+            if let Some(layout) = self.runtime.current_layout.as_ref() {
+                let layout_pos = (
+                    local_col + self.active_leaf().widget_scroll_left,
+                    local_row + self.widget_scroll_top() + self.active_buffer().scroll_top as f32,
+                );
+                let output = match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        patch_cable_click_output(layout, layout_pos.0, layout_pos.1)
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        patch_drop_output(layout, layout_pos.0, layout_pos.1)
+                    }
+                    _ => None,
+                };
+                if let Some(output) = output {
+                    return self.apply_widget_output(Some(output));
+                }
+            }
+        }
         let output = {
             let Some(node) = self.widget_node_at_local(local_col, local_row) else {
                 return false;

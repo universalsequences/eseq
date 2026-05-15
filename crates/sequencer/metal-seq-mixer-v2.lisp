@@ -73,6 +73,9 @@
     (set! selected-bus i)))
 
 (defstate mixer-v2-pending-mod-source -1)
+(defstate mixer-v2-selected-mod-source -1)
+(defstate mixer-v2-selected-mod-dest -1)
+(defstate mixer-v2-selected-mod-input -1)
 
 (def mixer-v2-track-modulator? (i)
   (and (< i (len SEQ.track-instrument-types))
@@ -103,40 +106,107 @@
 (def mixer-v2-mod-route-sources (dest input)
   (mixer-v2-mod-route-sources-at dest input 0 (list)))
 
+(def mixer-v2-clear-selected-mod-route ()
+  (do
+    (set! mixer-v2-selected-mod-source -1)
+    (set! mixer-v2-selected-mod-dest -1)
+    (set! mixer-v2-selected-mod-input -1)))
+
+(def mixer-v2-select-mod-route (source dest input)
+  (do
+    (set! mixer-v2-selected-mod-source source)
+    (set! mixer-v2-selected-mod-dest dest)
+    (set! mixer-v2-selected-mod-input input)
+    (status (str "Selected mod route: track " (+ source 1) " out -> track " (+ dest 1) " Ext" (+ input 1)))))
+
+(def mixer-v2-selected-mod-route? (source dest input)
+  (and (= mixer-v2-selected-mod-source source)
+    (= mixer-v2-selected-mod-dest dest)
+    (= mixer-v2-selected-mod-input input)))
+
+(def mixer-v2-selected-mod-sources-at (dest input idx acc)
+  (if (>= idx (len SEQ.mod-routes))
+    acc
+    (let ((route (nth SEQ.mod-routes idx)))
+      (mixer-v2-selected-mod-sources-at dest input (+ idx 1)
+        (if (mixer-v2-selected-mod-route? (get route :source) dest input)
+          (append acc (list (get route :source)))
+          acc)))))
+
+(def mixer-v2-selected-mod-sources (dest input)
+  (mixer-v2-selected-mod-sources-at dest input 0 (list)))
+
+(def mixer-v2-select-first-mod-source (dest input sources)
+  (if (> (len sources) 0)
+    (mixer-v2-select-mod-route (nth sources 0) dest input)
+    false))
+
+(def mixer-v2-delete-selected-mod-route ()
+  (if (mixer-v2-mod-route-exists?
+      mixer-v2-selected-mod-source
+      mixer-v2-selected-mod-dest
+      mixer-v2-selected-mod-input)
+    (do
+      (host-command "delete-mod-route"
+        (dict
+          :source mixer-v2-selected-mod-source
+          :dest mixer-v2-selected-mod-dest
+          :input mixer-v2-selected-mod-input))
+      (mixer-v2-clear-selected-mod-route)
+      true)
+    (do
+      (mixer-v2-clear-selected-mod-route)
+      false)))
+
 (def mixer-v2-mod-out-click (track)
   (if (mixer-v2-track-modulator? track)
     (do
       (set! mixer-v2-pending-mod-source track)
+      (mixer-v2-clear-selected-mod-route)
       (status (str "Mod out: track " (+ track 1))))
     (status "Only modulator tracks expose mod out in v1")))
 
+(def mixer-v2-connect-mod-route (source track input)
+  (if (= source track)
+    (status "Mod self-routes are not allowed")
+    (if (mixer-v2-mod-route-exists? source track input)
+      (status "Mod route already connected")
+      (host-command "set-mod-route"
+        (dict :source source :dest track :input input)))))
+
 (def mixer-v2-mod-in-click (track input)
   (if (< mixer-v2-pending-mod-source 0)
-    (status "Select a mod out first")
-    (if (= mixer-v2-pending-mod-source track)
-      (do
-        (set! mixer-v2-pending-mod-source -1)
-        (status "Mod self-routes are not allowed"))
-      (do
-        (if (mixer-v2-mod-route-exists? mixer-v2-pending-mod-source track input)
-          (status "Mod route already connected")
-          (host-command "set-mod-route"
-            (dict :source mixer-v2-pending-mod-source :dest track :input input)))
-        (set! mixer-v2-pending-mod-source -1)))))
+    (mixer-v2-select-first-mod-source track input (mixer-v2-mod-route-sources track input))
+    (do
+      (mixer-v2-connect-mod-route mixer-v2-pending-mod-source track input)
+      (set! mixer-v2-pending-mod-source -1))))
 
 (defwidget mixer-v2-mod-port
   :width 1.05 :height 1.05
   :paint-margin 0.12
-  :state (active pending)
+  :state (active pending output selected)
   :shader
-  (sdf/layer
-    (sdf/fill (sdf/circle 0.82)
-      (material
-        :color (if active
-          (if pending (rgba 0.25 0.72 1.0 1.0) (rgba 0.93 0.48 0.16 1.0))
-          (rgba 0.12 0.13 0.15 1.0))))
-    (sdf/fill (sdf/circle 0.43)
-      (material :color (rgba 0.02 0.025 0.03 1.0)))))
+  (let ((outer (if active
+          (if selected
+            (rgba 1.0 0.18 0.12 1.0)
+            (if output
+              (if pending (rgba 0.48 0.86 1.0 1.0) (rgba 0.10 0.58 1.0 1.0))
+              (rgba 1.0 0.52 0.16 1.0)))
+          (rgba 0.10 0.11 0.13 1.0)))
+        (inner (if active
+          (if output (rgba 0.015 0.035 0.055 1.0) (rgba 0.035 0.018 0.006 1.0))
+          (rgba 0.02 0.025 0.03 1.0))))
+    (sdf/layer
+      (sdf/fill (sdf/circle 0.82)
+        (material :color outer))
+      (sdf/fill (sdf/circle 0.43)
+        (material :color inner)))))
+
+(def mixer-v2-mod-output-style
+  (ui/style
+    :hover (dict
+      :brightness 1.45
+      :transition (dict :brightness 0.08 :ease :smoothstep))))
 
 (def mixer-v2-mod-port-row (track)
   (h-stack :key (str "mixer-v2-mod-ports-" track)
@@ -148,20 +218,36 @@
       :track track
       :active (mixer-v2-track-modulator? track)
       :pending (= mixer-v2-pending-mod-source track)
+      :output true
+      :selected false
+      :style (if (mixer-v2-track-modulator? track) mixer-v2-mod-output-style nil)
       :on-click |x y r| (mixer-v2-mod-out-click track)
       :on-mouse-down |x y r| (mixer-v2-mod-out-click track))
-    (each (range 0 4) |input|
-      (mixer-v2-mod-port
-        :key (str "mixer-v2-mod-in-" track "-" input)
-        :patch-port true
-        :direction :in
-        :track track
-        :input input
-        :connected-sources (mixer-v2-mod-route-sources track input)
-        :active true
-        :pending false
-        :on-click |x y r| (mixer-v2-mod-in-click track input)
-        :on-mouse-up |x y r| (mixer-v2-mod-in-click track input)))))
+    (if (mixer-v2-track-modulator? track)
+      (each (range 0 4) |input|
+        (box :key (str "mixer-v2-mod-in-spacer-" track "-" input)
+          :width 1.05 :height 1.05))
+      (each (range 0 4) |input|
+        (mixer-v2-mod-port
+          :key (str "mixer-v2-mod-in-" track "-" input)
+          :patch-port true
+          :direction :in
+          :track track
+          :input input
+          :connected-sources (mixer-v2-mod-route-sources track input)
+          :selected-sources (mixer-v2-selected-mod-sources track input)
+          :active true
+          :pending false
+          :output false
+          :selected (> (len (mixer-v2-selected-mod-sources track input)) 0)
+          :on-patch-drop (lambda (source dest input)
+            (do
+              (mixer-v2-connect-mod-route source dest input)
+              (set! mixer-v2-pending-mod-source -1)))
+          :on-cable-click (lambda (source dest input)
+            (mixer-v2-select-mod-route source dest input))
+          :on-click |x y r| (mixer-v2-mod-in-click track input)
+          :on-mouse-up |x y r| (mixer-v2-mod-in-click track input))))))
 
 (defwidget mixer-v2-volume-triangle
   :width 1.35 :height 4.24
@@ -385,7 +471,11 @@
     (mixer-v2-select-prev-channel)
     (if (= key "RIGHT")
       (mixer-v2-select-next-channel)
-      false)))
+      (if (= key "BS")
+        (mixer-v2-delete-selected-mod-route)
+        (if (= key "Delete")
+          (mixer-v2-delete-selected-mod-route)
+          false)))))
 
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
