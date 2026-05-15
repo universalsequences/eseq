@@ -1,0 +1,92 @@
+(def in_l (in 1 @name left))
+(def in_r (in 2 @name right))
+
+(param shift @default 12.0 @min -24.0 @max 24.0 @unit semitones)
+(param fine @default 0.0 @min -50.0 @max 50.0 @unit cents)
+(param window_ms @default 90.0 @min 25.0 @max 220.0 @unit ms)
+(param delay_ms @default 360.0 @min 20.0 @max 1400.0 @unit ms)
+(param feedback @default 0.42 @min 0.0 @max 0.88)
+(param damping @default 8500.0 @min 900.0 @max 18000.0 @unit Hz)
+(param width @default 0.85 @min 0.0 @max 1.4)
+(param shimmer @default 1.0 @min 0.0 @max 1.0)
+(param mix @default 0.42 @min 0.0 @max 1.0)
+(param output @default 1.0 @min 0.25 @max 2.0)
+
+(def window_samps (* window_ms 48.0))
+(def base_samps 64.0)
+(def echo_samps (* delay_ms 48.0))
+
+(def shift_l (+ shift fine))
+(def shift_r (- shift fine))
+(def ratio_l (pow 2.0 (/ shift_l 12.0)))
+(def ratio_r (pow 2.0 (/ shift_r 12.0)))
+
+(def diff_l (max (- ratio_l 1.0) (- 1.0 ratio_l)))
+(def diff_r (max (- ratio_r 1.0) (- 1.0 ratio_r)))
+(def rate_l (max 0.001 (/ (* 1000.0 diff_l) window_ms)))
+(def rate_r (max 0.001 (/ (* 1000.0 diff_r) window_ms)))
+
+(def pos_l (min 1.0 (max 0.0 (* 1000.0 (- ratio_l 1.0)))))
+(def neg_l (min 1.0 (max 0.0 (* 1000.0 (- 1.0 ratio_l)))))
+(def zero_l (- 1.0 (max pos_l neg_l)))
+(def pos_r (min 1.0 (max 0.0 (* 1000.0 (- ratio_r 1.0)))))
+(def neg_r (min 1.0 (max 0.0 (* 1000.0 (- 1.0 ratio_r)))))
+(def zero_r (- 1.0 (max pos_r neg_r)))
+
+(make-history fb_l)
+(make-history fb_r)
+
+(def echo_l (delay (read-history fb_l) echo_samps))
+(def echo_r (delay (read-history fb_r) echo_samps))
+(def damp_l (biquad echo_l damping 0.707 1 0))
+(def damp_r (biquad echo_r damping 0.707 1 0))
+
+(def mono_damp (* 0.5 (+ damp_l damp_r)))
+(def fb_wide_l (+ (* mono_damp (- 1.0 width)) (* damp_l width)))
+(def fb_wide_r (+ (* mono_damp (- 1.0 width)) (* damp_r width)))
+(def fb_in_l (tanh (+ in_l (* feedback fb_wide_l))))
+(def fb_in_r (tanh (+ in_r (* feedback fb_wide_r))))
+
+(def ph_l (phasor rate_l))
+(def ph_l_b (wrap (+ ph_l 0.5) 0.0 1.0))
+(def ph_r (phasor rate_r))
+(def ph_r_b (wrap (+ ph_r 0.5) 0.0 1.0))
+
+(def env_l_a (sin (* (/ twopi 2.0) ph_l)))
+(def env_l_b (sin (* (/ twopi 2.0) ph_l_b)))
+(def env_r_a (sin (* (/ twopi 2.0) ph_r)))
+(def env_r_b (sin (* (/ twopi 2.0) ph_r_b)))
+
+(def up_l_a (delay fb_in_l (+ base_samps (* window_samps (- 1.0 ph_l)))))
+(def up_l_b (delay fb_in_l (+ base_samps (* window_samps (- 1.0 ph_l_b)))))
+(def dn_l_a (delay fb_in_l (+ base_samps (* window_samps ph_l))) )
+(def dn_l_b (delay fb_in_l (+ base_samps (* window_samps ph_l_b))) )
+(def up_r_a (delay fb_in_r (+ base_samps (* window_samps (- 1.0 ph_r)))))
+(def up_r_b (delay fb_in_r (+ base_samps (* window_samps (- 1.0 ph_r_b)))))
+(def dn_r_a (delay fb_in_r (+ base_samps (* window_samps ph_r))) )
+(def dn_r_b (delay fb_in_r (+ base_samps (* window_samps ph_r_b))) )
+
+(def up_l (/ (+ (* up_l_a env_l_a) (* up_l_b env_l_b)) (+ env_l_a env_l_b 0.0001)))
+(def dn_l (/ (+ (* dn_l_a env_l_a) (* dn_l_b env_l_b)) (+ env_l_a env_l_b 0.0001)))
+(def up_r (/ (+ (* up_r_a env_r_a) (* up_r_b env_r_b)) (+ env_r_a env_r_b 0.0001)))
+(def dn_r (/ (+ (* dn_r_a env_r_a) (* dn_r_b env_r_b)) (+ env_r_a env_r_b 0.0001)))
+
+(def pitch_l (+ (* zero_l fb_in_l) (* pos_l up_l) (* neg_l dn_l)))
+(def pitch_r (+ (* zero_r fb_in_r) (* pos_r up_r) (* neg_r dn_r)))
+(def shifted_l (+ (* fb_in_l (- 1.0 shimmer)) (* pitch_l shimmer)))
+(def shifted_r (+ (* fb_in_r (- 1.0 shimmer)) (* pitch_r shimmer)))
+
+(def stored_l (write-history fb_l (tanh shifted_l)))
+(def stored_r (write-history fb_r (tanh shifted_r)))
+
+(def wet_l (biquad echo_l damping 0.707 1 0))
+(def wet_r (biquad echo_r damping 0.707 1 0))
+(def wet_m (* 0.5 (+ wet_l wet_r)))
+(def wide_l (+ (* wet_m (- 1.0 width)) (* wet_l width)))
+(def wide_r (+ (* wet_m (- 1.0 width)) (* wet_r width)))
+
+(def out_l (* output (+ (* in_l (- 1.0 mix)) (* wide_l mix))))
+(def out_r (* output (+ (* in_r (- 1.0 mix)) (* wide_r mix))))
+
+(out out_l 1 @name left)
+(out out_r 2 @name right)
