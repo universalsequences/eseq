@@ -152,7 +152,8 @@ Critical syntax rules:
   example `(wrap (+ base_phase phase_offset) 0 1)`.
 - Use `(out signal 1 @name audio)` for the final mono output.
 - Use valid operators and preamble macros from local examples such as `def`,
-  `defmacro`, `param`, `in`, `out`, `adsr`, `phasor`, `sin`, `tanh`, `noise`,
+  `defmacro`, `param`, `in`, `out`, `adsr`, `phasor`, `sin`, `cos`, `tan`,
+  `atan`, `atan2`, `tanh`, `noise`,
   `polyblep`, `polyblep_saw`, `polyblep_pulse`, `svf`, `ladder`, `biquad`, `clip`,
   `wrap`, `%`, `+`, `-`, `*`, `/`, `exp`, `log`, `pow`, `min`, `max`.
 - Prefer the preamble PolyBLEP oscillator helpers for bright saw and pulse
@@ -224,6 +225,10 @@ Mandatory ui.lisp rules:
   instruments. Do not use the legacy helpers `ui-panel`, `ui-panel-c`,
   `ui-section`, `ui-rack`, `ui-param-control`, `ui-param-knob`,
   `ui-param-knob-c`, `base-note`, or `base-note-c`.
+- Default to a simple standard lego UI unless the user explicitly asks for a
+  complex hardware-style panel. A simple instrument should usually be 2-3
+  columns of `ui-control-block-medium-s` and `ui-readout-block-small-s` blocks
+  with `ui-lego-knob-s` and `ui-lego-num-s` controls.
 - Sprawl horizontally in 2-4 lego columns, like a compact hardware synth
   panel. Put columns in a root `h-stack`.
 - Choose one of two lego layout families:
@@ -241,6 +246,7 @@ Mandatory ui.lisp rules:
 - Use `(ui-lego-column block-a block-b block-c)` for a three-block column,
   `(ui-lego-column-2 block-a block-b)` for a two-block column, and
   `(ui-lego-column-full block)` for a single full-height block.
+  Never call `ui-lego-column` with one or two blocks.
 - Each control block should be one of:
   `(ui-control-block-medium-s "TITLE" (ui-accent-cyan) section (h-stack ...))`,
   `(ui-control-block-small-s "TITLE" (ui-accent-orange) section (h-stack ...))`,
@@ -326,6 +332,11 @@ Mandatory ui.lisp rules:
   functions, or `:on-change` callbacks for normal option params.
 - Use `ui-adsr-switch` inside a `(ui-lego-column-full (box ...))` when there are
   two contextual envelopes, or `ui-lego-adsr-s` for a single envelope column.
+- `ui-adsr-switch` supports exactly two envelopes. Do not pass amp, filter, and
+  modulation envelopes to the same switch. If an instrument has three envelope
+  groups, put the two most important envelopes in `ui-adsr-switch` and expose
+  the third with ordinary lego controls, or use a separate valid ADSR helper if
+  the layout has room.
 - ABSOLUTE UI RULE: NEVER PASS `""`, `" "`, OR `false` AS PLACEHOLDER PARAMETER
   NAMES TO `ui-adsr-switch`, `ui-lego-adsr-s`, OR ANY PARAM CONTROL. Every
   parameter-name argument must be the exact name of a real DSP `(param ...)`.

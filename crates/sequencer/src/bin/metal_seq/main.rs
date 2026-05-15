@@ -201,6 +201,9 @@ fn metal_agent_session_context(
     let current_effect_source = current_effect_name
         .as_deref()
         .and_then(|name| sequencer::lisp_effect::load_effect_source(name).ok());
+    let current_effect_ui_source = current_effect_name
+        .as_deref()
+        .and_then(|name| sequencer::lisp_effect::load_effect_ui_source(name).ok());
 
     AgentSessionContext {
         has_tracks: !app.tracks.is_empty(),
@@ -209,6 +212,7 @@ fn metal_agent_session_context(
         can_apply_effect_to_current_track: app.next_free_custom_slot().is_some(),
         current_effect_name,
         current_effect_source: current_effect_source.clone(),
+        current_effect_ui_source,
         current_effect_slot,
         can_update_current_effect: current_effect_source.is_some(),
         current_instrument_name,
@@ -355,6 +359,17 @@ struct AgentDraftApplyResult {
 struct AgentFinalizeResult {
     track_index: usize,
     instrument_name: String,
+}
+
+struct AgentEffectApplyResult {
+    track_index: usize,
+    slot_index: usize,
+}
+
+struct AgentEffectFinalizeResult {
+    track_index: Option<usize>,
+    slot_index: Option<usize>,
+    effect_name: String,
 }
 
 fn sync_after_agent_instrument_apply(
@@ -703,6 +718,13 @@ fn finalized_instrument_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
     )
 }
 
+fn finalized_effect_storage_paths(slug: &str) -> (PathBuf, PathBuf) {
+    (
+        Path::new("effects").join(slug),
+        Path::new("effects").join(format!("{slug}.lisp")),
+    )
+}
+
 fn display_instrument_name(name: &str) -> String {
     let trimmed = name.trim_end_matches('/');
     Path::new(trimmed)
@@ -736,6 +758,171 @@ fn cleanup_agent_draft_storage(name: &str) {
             );
         }
     }
+}
+
+fn cleanup_agent_effect_draft_storage(name: &str) {
+    let slug = name.trim_end_matches('/');
+    if !slug.starts_with("agent-effect-draft-") {
+        return;
+    }
+    let dir = Path::new("effects").join(slug);
+    if dir.is_dir() {
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            eprintln!(
+                "[agent-ui] finalized {name:?} but failed to remove draft effect directory {}: {error}",
+                dir.display()
+            );
+        }
+    }
+    let legacy_file = Path::new("effects").join(format!("{slug}.lisp"));
+    if legacy_file.exists() {
+        if let Err(error) = std::fs::remove_file(&legacy_file) {
+            eprintln!(
+                "[agent-ui] finalized {name:?} but failed to remove legacy draft effect file {}: {error}",
+                legacy_file.display()
+            );
+        }
+    }
+}
+
+fn save_effect_with_ui_rollback(
+    name: &str,
+    dsp_source: &str,
+    ui_source: &str,
+) -> Result<(), String> {
+    let previous_source = sequencer::lisp_effect::load_effect_source(name).ok();
+    let previous_ui = sequencer::lisp_effect::load_effect_ui_source(name).ok();
+    sequencer::lisp_effect::save_effect(name, dsp_source)
+        .map_err(|error| format!("Failed to save effect dsp.lisp: {error}"))?;
+    if let Err(error) = sequencer::lisp_effect::save_effect_ui(name, ui_source) {
+        restore_effect_files(name, previous_source.as_deref(), previous_ui.as_deref());
+        return Err(format!("Failed to save effect ui.lisp: {error}"));
+    }
+    Ok(())
+}
+
+fn restore_effect_files(name: &str, source: Option<&str>, ui_source: Option<&str>) {
+    match source {
+        Some(source) => {
+            let _ = sequencer::lisp_effect::save_effect(name, source);
+        }
+        None => {
+            let _ = std::fs::remove_file(sequencer::lisp_effect::effect_source_path(name));
+        }
+    }
+    match ui_source {
+        Some(ui_source) => {
+            let _ = sequencer::lisp_effect::save_effect_ui(name, ui_source);
+        }
+        None => {
+            let _ = std::fs::remove_file(sequencer::lisp_effect::effect_ui_path(name));
+        }
+    }
+}
+
+fn apply_agent_draft_to_effect_slot(
+    app: &mut ui::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    track_pan_ids: &Arc<Mutex<Vec<i32>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &[f64],
+    cached_bus_peak_levels: &[f64],
+    ui_epoch: &Arc<AtomicUsize>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    conv_id: sequencer::agent::store::ConvId,
+) -> Result<AgentEffectApplyResult, String> {
+    if app.tracks.is_empty() {
+        return Err("No current track is available for the effect artifact.".to_string());
+    }
+    let snapshot = app
+        .agent_store
+        .snapshot(conv_id)
+        .ok_or_else(|| format!("Agent conversation {conv_id} not found"))?;
+    let draft = snapshot
+        .state
+        .effect_draft
+        .ok_or_else(|| format!("Agent conversation {conv_id} has no validated effect draft"))?;
+
+    let existing_target = snapshot.state.accepted_effect_target;
+    let track_index = existing_target
+        .as_ref()
+        .map(|target| target.track_index)
+        .unwrap_or(app.ui.cursor_track);
+    if track_index >= app.tracks.len() {
+        return Err("The target track for this effect artifact no longer exists.".to_string());
+    }
+    let slot_index = match existing_target.as_ref() {
+        Some(target) => target.slot_index,
+        None => app
+            .next_free_custom_slot()
+            .ok_or_else(|| "The current track has no free custom effect slot.".to_string())?,
+    };
+    let effect_name = existing_target
+        .as_ref()
+        .map(|target| target.effect_name.clone())
+        .unwrap_or_else(|| format!("agent-effect-draft-{conv_id}/"));
+
+    let previous_source = sequencer::lisp_effect::load_effect_source(&effect_name).ok();
+    let previous_ui = sequencer::lisp_effect::load_effect_ui_source(&effect_name).ok();
+    save_effect_with_ui_rollback(&effect_name, &draft.dsp_source, &draft.ui_source)?;
+    if let Err(error) = app.load_saved_effect_to_slot_sync(track_index, slot_index, &effect_name) {
+        restore_effect_files(
+            &effect_name,
+            previous_source.as_deref(),
+            previous_ui.as_deref(),
+        );
+        return Err(format!("Failed to apply agent effect artifact: {error}"));
+    }
+    reload_custom_instrument_ui(editor);
+    editor.refresh_visible_layouts_for_buffer_named("*fx*");
+
+    app.agent_store
+        .set_accepted_effect_target(
+            conv_id,
+            sequencer::agent::store::AcceptedEffectTarget {
+                track_index,
+                slot_index,
+                effect_name: effect_name.clone(),
+            },
+        )
+        .map_err(|error| format!("Failed to record effect target: {error}"))?;
+    app.agent_store
+        .push_system_message(
+            conv_id,
+            format!(
+                "Applied effect artifact to track {} slot {}",
+                track_index + 1,
+                slot_index + 1
+            ),
+        )
+        .map_err(|error| format!("Failed to record effect apply message: {error}"))?;
+
+    sync_after_agent_instrument_apply(
+        app,
+        editor,
+        state,
+        track_index,
+        current_track,
+        track_names,
+        track_pan_ids,
+        record_armed,
+        selected_steps,
+        accumulator_names,
+        cached_track_peak_levels,
+        cached_bus_peak_levels,
+        ui_epoch,
+        lg_raw,
+    );
+
+    Ok(AgentEffectApplyResult {
+        track_index,
+        slot_index,
+    })
 }
 
 fn finalize_agent_instrument(
@@ -844,6 +1031,117 @@ fn finalize_agent_instrument(
     Ok(AgentFinalizeResult {
         track_index: target.track_index,
         instrument_name: final_name,
+    })
+}
+
+fn finalize_agent_effect(
+    app: &mut ui::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    track_pan_ids: &Arc<Mutex<Vec<i32>>>,
+    record_armed: &Arc<Mutex<Vec<bool>>>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    accumulator_names: &Arc<Mutex<Vec<String>>>,
+    cached_track_peak_levels: &[f64],
+    cached_bus_peak_levels: &[f64],
+    ui_epoch: &Arc<AtomicUsize>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    conv_id: sequencer::agent::store::ConvId,
+    requested_name: &str,
+) -> Result<AgentEffectFinalizeResult, String> {
+    let final_slug = sequencer::agent::actions::normalize_patch_name(
+        requested_name,
+        &format!("agent-effect-{conv_id}"),
+    );
+    let final_name = format!("{final_slug}/");
+    let (final_dir, legacy_file) = finalized_effect_storage_paths(&final_slug);
+    if final_dir.exists() || legacy_file.exists() {
+        return Err(format!("Effect '{final_slug}' already exists."));
+    }
+
+    let snapshot = app
+        .agent_store
+        .snapshot(conv_id)
+        .ok_or_else(|| format!("Agent conversation {conv_id} not found"))?;
+    let target = snapshot.state.accepted_effect_target;
+    let (dsp_source, ui_source) = if let Some(target) = target.as_ref() {
+        (
+            sequencer::lisp_effect::load_effect_source(&target.effect_name)
+                .map_err(|error| format!("Failed to read draft effect dsp.lisp: {error}"))?,
+            sequencer::lisp_effect::load_effect_ui_source(&target.effect_name)
+                .map_err(|error| format!("Failed to read draft effect ui.lisp: {error}"))?,
+        )
+    } else {
+        let draft = snapshot
+            .state
+            .effect_draft
+            .ok_or_else(|| "No effect artifact is available to finalize.".to_string())?;
+        (draft.dsp_source, draft.ui_source)
+    };
+
+    save_effect_with_ui_rollback(&final_name, &dsp_source, &ui_source)?;
+
+    if let Some(target) = target.as_ref() {
+        if target.track_index >= app.tracks.len() {
+            let _ = std::fs::remove_dir_all(&final_dir);
+            return Err("The applied effect artifact target track no longer exists.".to_string());
+        }
+        if let Err(error) =
+            app.load_saved_effect_to_slot_sync(target.track_index, target.slot_index, &final_name)
+        {
+            let _ = std::fs::remove_dir_all(&final_dir);
+            return Err(format!("Failed to load finalized effect: {error}"));
+        }
+        reload_custom_instrument_ui(editor);
+        editor.refresh_visible_layouts_for_buffer_named("*fx*");
+        app.agent_store
+            .set_accepted_effect_target(
+                conv_id,
+                sequencer::agent::store::AcceptedEffectTarget {
+                    track_index: target.track_index,
+                    slot_index: target.slot_index,
+                    effect_name: final_name.clone(),
+                },
+            )
+            .map_err(|error| format!("Failed to update effect artifact target: {error}"))?;
+        sync_after_agent_instrument_apply(
+            app,
+            editor,
+            state,
+            target.track_index,
+            current_track,
+            track_names,
+            track_pan_ids,
+            record_armed,
+            selected_steps,
+            accumulator_names,
+            cached_track_peak_levels,
+            cached_bus_peak_levels,
+            ui_epoch,
+            lg_raw,
+        );
+        cleanup_agent_effect_draft_storage(&target.effect_name);
+    }
+
+    app.agent_store
+        .set_finalized_effect_name(conv_id, final_name.clone())
+        .map_err(|error| format!("Failed to mark effect finalized: {error}"))?;
+    app.agent_store
+        .push_system_message(
+            conv_id,
+            format!(
+                "Saved effect artifact as {}",
+                display_instrument_name(&final_name)
+            ),
+        )
+        .map_err(|error| format!("Failed to record effect finalize message: {error}"))?;
+
+    Ok(AgentEffectFinalizeResult {
+        track_index: target.as_ref().map(|target| target.track_index),
+        slot_index: target.as_ref().map(|target| target.slot_index),
+        effect_name: final_name,
     })
 }
 
@@ -4756,35 +5054,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                         };
-                        match apply_agent_draft_to_owned_instrument(
-                            &mut app,
-                            &mut editor,
-                            &state,
-                            &current_track,
-                            &mut track_names,
-                            &track_pan_ids,
-                            &record_armed,
-                            &selected_steps,
-                            &accumulator_names,
-                            &cached_track_peak_levels,
-                            &cached_bus_peak_levels,
-                            &ui_epoch,
-                            lg_raw,
-                            conv_id,
-                        ) {
-                            Ok(result) => {
-                                let verb = if result.created_track {
-                                    "Accepted agent draft as track"
-                                } else {
-                                    "Updated agent draft on track"
-                                };
-                                editor.handle_host_event(HostEvent::Status(format!(
-                                    "{verb} {}",
-                                    result.track_index + 1
-                                )));
+                        let snapshot = app.agent_store.snapshot(conv_id);
+                        let apply_as_effect =
+                            match snapshot.as_ref().map(|snapshot| &snapshot.state) {
+                                Some(state) => match state.kind {
+                                    sequencer::agent::store::AgentKind::Effect => true,
+                                    sequencer::agent::store::AgentKind::Instrument => false,
+                                    sequencer::agent::store::AgentKind::General => {
+                                        state.effect_draft.is_some()
+                                            || state.accepted_effect_target.is_some()
+                                    }
+                                },
+                                None => false,
+                            };
+                        if !apply_as_effect {
+                            match apply_agent_draft_to_owned_instrument(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                &current_track,
+                                &mut track_names,
+                                &track_pan_ids,
+                                &record_armed,
+                                &selected_steps,
+                                &accumulator_names,
+                                &cached_track_peak_levels,
+                                &cached_bus_peak_levels,
+                                &ui_epoch,
+                                lg_raw,
+                                conv_id,
+                            ) {
+                                Ok(result) => {
+                                    let verb = if result.created_track {
+                                        "Accepted agent draft as track"
+                                    } else {
+                                        "Updated agent draft on track"
+                                    };
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "{verb} {}",
+                                        result.track_index + 1
+                                    )));
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(error));
+                                }
                             }
-                            Err(error) => {
-                                editor.handle_host_event(HostEvent::Error(error));
+                        } else {
+                            match apply_agent_draft_to_effect_slot(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                &current_track,
+                                &mut track_names,
+                                &track_pan_ids,
+                                &record_armed,
+                                &selected_steps,
+                                &accumulator_names,
+                                &cached_track_peak_levels,
+                                &cached_bus_peak_levels,
+                                &ui_epoch,
+                                lg_raw,
+                                conv_id,
+                            ) {
+                                Ok(result) => {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Accepted agent effect as track {} slot {}",
+                                        result.track_index + 1,
+                                        result.slot_index + 1
+                                    )));
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(error));
+                                }
                             }
                         }
                     }
@@ -4928,38 +5269,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Some(Value::String(name)) if !name.trim().is_empty() => name,
                             _ => {
                                 editor.handle_host_event(HostEvent::Error(
-                                    "agent-finalize: expected non-empty instrument name"
-                                        .to_string(),
+                                    "agent-finalize: expected non-empty artifact name".to_string(),
                                 ));
                                 continue;
                             }
                         };
-                        match finalize_agent_instrument(
-                            &mut app,
-                            &mut editor,
-                            &state,
-                            &current_track,
-                            &mut track_names,
-                            &track_pan_ids,
-                            &record_armed,
-                            &selected_steps,
-                            &accumulator_names,
-                            &cached_track_peak_levels,
-                            &cached_bus_peak_levels,
-                            &ui_epoch,
-                            lg_raw,
-                            conv_id,
-                            &requested_name,
-                        ) {
-                            Ok(result) => {
-                                editor.handle_host_event(HostEvent::Status(format!(
-                                    "Saved agent artifact {} as track {}",
-                                    display_instrument_name(&result.instrument_name),
-                                    result.track_index + 1
-                                )));
+                        let snapshot = app.agent_store.snapshot(conv_id);
+                        let finalize_as_effect =
+                            match snapshot.as_ref().map(|snapshot| &snapshot.state) {
+                                Some(state) => match state.kind {
+                                    sequencer::agent::store::AgentKind::Effect => true,
+                                    sequencer::agent::store::AgentKind::Instrument => false,
+                                    sequencer::agent::store::AgentKind::General => {
+                                        state.effect_draft.is_some()
+                                            || state.accepted_effect_target.is_some()
+                                    }
+                                },
+                                None => false,
+                            };
+                        if !finalize_as_effect {
+                            match finalize_agent_instrument(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                &current_track,
+                                &mut track_names,
+                                &track_pan_ids,
+                                &record_armed,
+                                &selected_steps,
+                                &accumulator_names,
+                                &cached_track_peak_levels,
+                                &cached_bus_peak_levels,
+                                &ui_epoch,
+                                lg_raw,
+                                conv_id,
+                                &requested_name,
+                            ) {
+                                Ok(result) => {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Saved agent artifact {} as track {}",
+                                        display_instrument_name(&result.instrument_name),
+                                        result.track_index + 1
+                                    )));
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(error));
+                                }
                             }
-                            Err(error) => {
-                                editor.handle_host_event(HostEvent::Error(error));
+                        } else {
+                            match finalize_agent_effect(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                &current_track,
+                                &mut track_names,
+                                &track_pan_ids,
+                                &record_armed,
+                                &selected_steps,
+                                &accumulator_names,
+                                &cached_track_peak_levels,
+                                &cached_bus_peak_levels,
+                                &ui_epoch,
+                                lg_raw,
+                                conv_id,
+                                &requested_name,
+                            ) {
+                                Ok(result) => {
+                                    let target = match (result.track_index, result.slot_index) {
+                                        (Some(track), Some(slot)) => {
+                                            format!(" on track {} slot {}", track + 1, slot + 1)
+                                        }
+                                        _ => String::new(),
+                                    };
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Saved agent effect artifact {}{}",
+                                        display_instrument_name(&result.effect_name),
+                                        target
+                                    )));
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(error));
+                                }
                             }
                         }
                     }

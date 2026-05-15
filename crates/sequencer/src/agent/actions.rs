@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use super::store::AgentKind;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentInstrumentParamSchema {
     pub name: String,
@@ -38,6 +40,7 @@ pub struct AgentSessionContext {
     pub can_apply_effect_to_current_track: bool,
     pub current_effect_name: Option<String>,
     pub current_effect_source: Option<String>,
+    pub current_effect_ui_source: Option<String>,
     pub current_effect_slot: Option<usize>,
     pub can_update_current_effect: bool,
     pub current_instrument_name: Option<String>,
@@ -48,10 +51,26 @@ pub struct AgentSessionContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentAppAction {
+    SetAgentIntent {
+        kind: AgentKind,
+    },
     CreateInstrumentArtifact {
         name: String,
         dsp_source: String,
         ui_source: String,
+    },
+    CreateEffectArtifact {
+        name: String,
+        dsp_source: String,
+        ui_source: String,
+    },
+    UpdateEffectArtifact {
+        name: Option<String>,
+        dsp_source: String,
+        ui_source: String,
+    },
+    FinalizeEffectArtifact {
+        name: String,
     },
     CreateInstrumentTrack {
         name: String,

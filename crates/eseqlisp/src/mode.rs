@@ -258,6 +258,8 @@ const DGENLISP_BUILTINS: &[(&str, &str, &str)] = &[
         "Dynamics processor.",
     ),
     ("cos", "(cos x)", "Cosine."),
+    ("atan", "(atan x)", "One-argument arctangent."),
+    ("atan2", "(atan2 y x)", "Two-argument arctangent."),
     ("delay", "(delay signal time-in-samples)", "Delay line."),
     ("eq", "(eq a b)", "Equality comparison."),
     ("exp", "(exp x)", "Exponential."),

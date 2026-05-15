@@ -5,11 +5,14 @@ use std::thread::JoinHandle;
 use std::time::SystemTime;
 
 use super::providers::{AgentProviderKind, AgentProviderState};
+use serde::{Deserialize, Serialize};
 
 pub type ConvId = u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentKind {
+    General,
     Instrument,
     Effect,
 }
@@ -47,6 +50,13 @@ pub struct InstrumentDraft {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct EffectDraft {
+    pub name: String,
+    pub dsp_source: String,
+    pub ui_source: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct DraftSlot {
     pub conv_id: ConvId,
     pub kind: AgentKind,
@@ -60,6 +70,13 @@ pub struct AcceptedInstrumentTarget {
     pub instrument_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedEffectTarget {
+    pub track_index: usize,
+    pub slot_index: usize,
+    pub effect_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct AuditionResult {
     pub ran: bool,
@@ -68,6 +85,8 @@ pub struct AuditionResult {
     pub clipped: bool,
     pub duration_ms: u32,
     pub silent: bool,
+    pub differs_from_input: Option<bool>,
+    pub diff_rms_db: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,10 +96,14 @@ pub struct ConversationState {
     pub status: AgentStatus,
     pub messages: Vec<Message>,
     pub draft: Option<InstrumentDraft>,
+    pub effect_draft: Option<EffectDraft>,
     pub draft_handle: Option<DraftSlot>,
     pub stub_instrument_target: Option<AcceptedInstrumentTarget>,
     pub accepted_instrument_target: Option<AcceptedInstrumentTarget>,
+    pub accepted_effect_target: Option<AcceptedEffectTarget>,
+    pub effect_draft_applied: bool,
     pub finalized_instrument_name: Option<String>,
+    pub finalized_effect_name: Option<String>,
     pub last_compile_error: Option<String>,
     pub last_audition: Option<AuditionResult>,
     pub retries_this_turn: u8,
@@ -147,10 +170,14 @@ impl ConversationStore {
                 status: AgentStatus::Idle,
                 messages: Vec::new(),
                 draft: None,
+                effect_draft: None,
                 draft_handle: None,
                 stub_instrument_target: None,
                 accepted_instrument_target: None,
+                accepted_effect_target: None,
+                effect_draft_applied: false,
                 finalized_instrument_name: None,
+                finalized_effect_name: None,
                 last_compile_error: None,
                 last_audition: None,
                 retries_this_turn: 0,
@@ -206,7 +233,9 @@ impl ConversationStore {
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent conversation {id}"))?;
         state.draft = None;
+        state.effect_draft = None;
         state.draft_handle = None;
+        state.effect_draft_applied = false;
         state.last_compile_error = None;
         state.last_audition = None;
         bump(state);
@@ -261,6 +290,22 @@ impl ConversationStore {
         Ok(())
     }
 
+    pub fn set_accepted_effect_target(
+        &self,
+        id: ConvId,
+        target: AcceptedEffectTarget,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let state = inner
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+        state.accepted_effect_target = Some(target);
+        state.effect_draft_applied = true;
+        state.finalized_effect_name = None;
+        bump(state);
+        Ok(())
+    }
+
     pub fn set_finalized_instrument_name(
         &self,
         id: ConvId,
@@ -271,6 +316,22 @@ impl ConversationStore {
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent conversation {id}"))?;
         state.finalized_instrument_name = Some(instrument_name.into());
+        bump(state);
+        Ok(())
+    }
+
+    pub fn set_finalized_effect_name(
+        &self,
+        id: ConvId,
+        effect_name: impl Into<String>,
+    ) -> Result<(), String> {
+        let mut inner = self.inner.lock().unwrap();
+        let state = inner
+            .get_mut(&id)
+            .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+        state.effect_draft = None;
+        state.effect_draft_applied = false;
+        state.finalized_effect_name = Some(effect_name.into());
         bump(state);
         Ok(())
     }
@@ -346,5 +407,34 @@ mod tests {
             .unwrap();
         let after = store.snapshot(id).unwrap().state.generation;
         assert!(after > before);
+    }
+
+    #[test]
+    fn finalized_effect_consumes_draft_state() {
+        let store = ConversationStore::new(44_100);
+        let id = store.new_conversation(AgentKind::Effect);
+        {
+            let inner = store.inner();
+            let mut inner = inner.lock().unwrap();
+            let state = inner.get_mut(&id).unwrap();
+            state.effect_draft = Some(super::EffectDraft {
+                name: "draft".to_string(),
+                dsp_source: "(def in_l (in 1 @name left))".to_string(),
+                ui_source: "(defeffect-ui (label \"draft\"))".to_string(),
+            });
+            state.effect_draft_applied = false;
+        }
+
+        store
+            .set_finalized_effect_name(id, "saved-effect/")
+            .expect("finalize effect");
+
+        let snapshot = store.snapshot(id).unwrap();
+        assert_eq!(
+            snapshot.state.finalized_effect_name.as_deref(),
+            Some("saved-effect/")
+        );
+        assert!(snapshot.state.effect_draft.is_none());
+        assert!(!snapshot.state.effect_draft_applied);
     }
 }

@@ -5,6 +5,8 @@ use super::actions::{
     normalize_patch_name, AgentAppAction, AgentInstrumentPresetDraft, AgentInstrumentPresetSchema,
     AgentSessionContext,
 };
+use super::dsp_validate::validate_effect_dsp_source;
+use super::store::AgentKind;
 use super::tools::{AgentToolRegistry, ExampleKind, ToolResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +54,23 @@ impl AgentToolRuntime {
 
     pub fn specs(&self) -> Vec<ToolSpec> {
         vec![
+            ToolSpec {
+                name: "set_agent_intent".to_string(),
+                description:
+                    "Select the focused agent intent for this conversation before doing any artifact work."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "intent": {
+                            "type": "string",
+                            "enum": ["instrument", "effect"],
+                            "description": "The artifact kind the user wants to create, edit, apply, save, or discuss."
+                        }
+                    },
+                    "required": ["intent"]
+                }),
+            },
             ToolSpec {
                 name: "lookup_dgen_docs".to_string(),
                 description: "Look up DGenLisp operators, attributes, and related examples."
@@ -176,6 +195,50 @@ impl AgentToolRuntime {
                 }),
             },
             ToolSpec {
+                name: "create_effect_artifact".to_string(),
+                description:
+                    "Create and validate a draft audio effect artifact from complete dsp.lisp and ui.lisp source. Does not apply it to a track. Effect dsp_source must be raw top-level DGenLisp forms; never wrap it in `(defeffect ...)`."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Short artifact/effect name." },
+                        "dsp_source": { "type": "string", "description": "Complete DGenLisp stereo audio effect dsp.lisp source. Must start with top-level forms such as `(def in_l (in 1 @name left))`, `(def in_r (in 2 @name right))`, `(param ...)`, and `(out ...)`; must not contain a `(defeffect ...)` wrapper." },
+                        "ui_source": { "type": "string", "description": "Complete eseqlisp ui.lisp source containing exactly one `(defeffect-ui ...)` form. Do not pass an effect name to `defeffect-ui`; use lego UI helpers such as `ui-control-block-*` and `ui-lego-knob-s`, not legacy `group`/`vgroup`/`hgroup`/`knob` wrappers." }
+                    },
+                    "required": ["name", "dsp_source", "ui_source"]
+                }),
+            },
+            ToolSpec {
+                name: "update_effect_artifact".to_string(),
+                description:
+                    "Replace the current draft effect artifact's complete source and validate it. Does not apply it to a track. Effect dsp_source must be raw top-level DGenLisp forms; never wrap it in `(defeffect ...)`."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": { "type": "string", "description": "Current effect artifact id, if known." },
+                        "name": { "type": "string", "description": "Optional replacement effect name." },
+                        "dsp_source": { "type": "string", "description": "Complete replacement DGenLisp stereo audio effect dsp.lisp source. Must start with top-level forms such as `(def in_l (in 1 @name left))`, `(def in_r (in 2 @name right))`, `(param ...)`, and `(out ...)`; must not contain a `(defeffect ...)` wrapper." },
+                        "ui_source": { "type": "string", "description": "Complete replacement eseqlisp ui.lisp source containing exactly one `(defeffect-ui ...)` form. Do not pass an effect name to `defeffect-ui`; use lego UI helpers such as `ui-control-block-*` and `ui-lego-knob-s`, not legacy `group`/`vgroup`/`hgroup`/`knob` wrappers." }
+                    },
+                    "required": ["dsp_source", "ui_source"]
+                }),
+            },
+            ToolSpec {
+                name: "finalize_effect_artifact".to_string(),
+                description: "Save the current effect artifact as a finalized folder-style saved effect."
+                    .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": { "type": "string", "description": "Current effect artifact id, if known." },
+                        "name": { "type": "string", "description": "Final saved effect name." }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            ToolSpec {
                 name: "create_instrument_track".to_string(),
                 description:
                     "Create a new instrument track from generated DGenLisp instrument source."
@@ -291,8 +354,47 @@ impl AgentToolRuntime {
         ]
     }
 
+    pub fn specs_for_kind(&self, kind: AgentKind) -> Vec<ToolSpec> {
+        let allowed = match kind {
+            AgentKind::General => &["set_agent_intent"][..],
+            AgentKind::Instrument => &[
+                "lookup_dgen_docs",
+                "list_examples",
+                "read_example",
+                "read_patch_source",
+                "list_instruments",
+                "read_instrument_source",
+                "create_instrument_artifact",
+                "create_instrument_track",
+                "read_current_instrument_source",
+                "inspect_current_instrument_preset_schema",
+                "create_current_instrument_presets",
+                "update_current_instrument",
+            ][..],
+            AgentKind::Effect => &[
+                "lookup_dgen_docs",
+                "list_examples",
+                "read_example",
+                "read_patch_source",
+                "list_effects",
+                "read_effect_source",
+                "create_effect_artifact",
+                "update_effect_artifact",
+                "finalize_effect_artifact",
+                "read_current_effect_source",
+                "apply_effect_to_current_track",
+                "update_current_effect",
+            ][..],
+        };
+        self.specs()
+            .into_iter()
+            .filter(|spec| allowed.contains(&spec.name.as_str()))
+            .collect()
+    }
+
     pub fn execute(&self, call: ToolCall, session: &AgentSessionContext) -> ToolCallOutcome {
         let result = match call.name.as_str() {
+            "set_agent_intent" => self.execute_set_agent_intent(&call.arguments),
             "lookup_dgen_docs" => self.execute_lookup_docs(&call.arguments),
             "list_examples" => self.execute_list_examples(&call.arguments),
             "read_example" => self.execute_read_example(&call.arguments),
@@ -304,6 +406,9 @@ impl AgentToolRuntime {
             "create_instrument_artifact" => {
                 self.execute_create_instrument_artifact(&call.arguments)
             }
+            "create_effect_artifact" => self.execute_create_effect_artifact(&call.arguments),
+            "update_effect_artifact" => self.execute_update_effect_artifact(&call.arguments),
+            "finalize_effect_artifact" => self.execute_finalize_effect_artifact(&call.arguments),
             "create_instrument_track" => self.execute_create_instrument_track(&call.arguments),
             "read_current_instrument_source" => {
                 self.execute_read_current_instrument_source(session)
@@ -341,6 +446,20 @@ impl AgentToolRuntime {
                 pending_actions: Vec::new(),
             },
         }
+    }
+
+    fn execute_set_agent_intent(&self, arguments: &Value) -> Result<ToolResult, String> {
+        let intent = required_string(arguments, "intent")?;
+        let kind = match intent {
+            "instrument" => AgentKind::Instrument,
+            "effect" => AgentKind::Effect,
+            other => return Err(format!("Unknown agent intent '{other}'.")),
+        };
+        Ok(ToolResult {
+            summary: format!("Selected {intent} intent."),
+            content: format!("Intent set to {intent}."),
+            pending_actions: vec![AgentAppAction::SetAgentIntent { kind }],
+        })
     }
 
     fn execute_lookup_docs(&self, arguments: &Value) -> Result<ToolResult, String> {
@@ -416,11 +535,18 @@ impl AgentToolRuntime {
 
     fn execute_read_effect_source(&self, arguments: &Value) -> Result<ToolResult, String> {
         let name = required_string(arguments, "name")?;
-        let source = crate::lisp_effect::load_effect_source(name)
+        let dsp_source = crate::lisp_effect::load_effect_source(name)
             .map_err(|error| format!("Failed to read effect '{name}' source: {error}"))?;
+        let ui_source = crate::lisp_effect::load_effect_ui_source(name).ok();
+        let content = match ui_source {
+            Some(ui_source) => {
+                format!("effect: {name}\n\n[dsp.lisp]\n{dsp_source}\n\n[ui.lisp]\n{ui_source}")
+            }
+            None => format!("effect: {name}\n\n[dsp.lisp]\n{dsp_source}"),
+        };
         Ok(ToolResult {
             summary: format!("Loaded effect source for '{name}'."),
-            content: format!("effect: {name}\n\n{source}"),
+            content,
             pending_actions: Vec::new(),
         })
     }
@@ -438,6 +564,50 @@ impl AgentToolRuntime {
                 dsp_source: dsp_source.to_string(),
                 ui_source: ui_source.to_string(),
             }],
+        })
+    }
+
+    fn execute_create_effect_artifact(&self, arguments: &Value) -> Result<ToolResult, String> {
+        let name = normalize_patch_name(required_string(arguments, "name")?, "generated-effect");
+        let dsp_source = required_string(arguments, "dsp_source")?;
+        let ui_source = required_string(arguments, "ui_source")?;
+        validate_effect_dsp_source(dsp_source)
+            .map_err(|error| format!("dsp_source structural validation failed:\n{error}"))?;
+        Ok(ToolResult {
+            summary: format!("Queued draft effect artifact '{}'.", name),
+            content: format!("Create draft effect artifact '{}'.", name),
+            pending_actions: vec![AgentAppAction::CreateEffectArtifact {
+                name,
+                dsp_source: dsp_source.to_string(),
+                ui_source: ui_source.to_string(),
+            }],
+        })
+    }
+
+    fn execute_update_effect_artifact(&self, arguments: &Value) -> Result<ToolResult, String> {
+        let name = optional_string(arguments, "name")
+            .map(|name| normalize_patch_name(name, "generated-effect"));
+        let dsp_source = required_string(arguments, "dsp_source")?;
+        let ui_source = required_string(arguments, "ui_source")?;
+        validate_effect_dsp_source(dsp_source)
+            .map_err(|error| format!("dsp_source structural validation failed:\n{error}"))?;
+        Ok(ToolResult {
+            summary: "Queued effect artifact update.".to_string(),
+            content: "Update the current draft effect artifact.".to_string(),
+            pending_actions: vec![AgentAppAction::UpdateEffectArtifact {
+                name,
+                dsp_source: dsp_source.to_string(),
+                ui_source: ui_source.to_string(),
+            }],
+        })
+    }
+
+    fn execute_finalize_effect_artifact(&self, arguments: &Value) -> Result<ToolResult, String> {
+        let name = normalize_patch_name(required_string(arguments, "name")?, "generated-effect");
+        Ok(ToolResult {
+            summary: format!("Queued effect artifact finalization as '{}'.", name),
+            content: format!("Finalize the current effect artifact as '{}'.", name),
+            pending_actions: vec![AgentAppAction::FinalizeEffectArtifact { name }],
         })
     }
 
@@ -649,9 +819,15 @@ impl AgentToolRuntime {
             .current_effect_source
             .as_deref()
             .ok_or_else(|| format!("Current effect '{}' does not have readable source.", name))?;
+        let content = match session.current_effect_ui_source.as_deref() {
+            Some(ui_source) => {
+                format!("effect: {name}\n\n[dsp.lisp]\n{source}\n\n[ui.lisp]\n{ui_source}")
+            }
+            None => format!("effect: {name}\n\n[dsp.lisp]\n{source}"),
+        };
         Ok(ToolResult {
             summary: format!("Loaded current effect source for '{}'.", name),
-            content: source.to_string(),
+            content,
             pending_actions: Vec::new(),
         })
     }
@@ -690,6 +866,14 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| format!("Missing required string field '{key}'."))
+}
+
+fn optional_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn optional_usize(value: &Value, key: &str) -> Option<usize> {
@@ -849,7 +1033,10 @@ mod tests {
     use serde_json::json;
 
     use super::{AgentSessionContext, AgentToolRuntime, ToolCall};
-    use crate::agent::actions::{AgentInstrumentParamSchema, AgentInstrumentPresetSchema};
+    use crate::agent::actions::{
+        AgentAppAction, AgentInstrumentParamSchema, AgentInstrumentPresetSchema,
+    };
+    use crate::agent::store::AgentKind;
 
     fn empty_session() -> AgentSessionContext {
         AgentSessionContext::default()
@@ -909,13 +1096,74 @@ mod tests {
     fn specs_include_lookup_docs() {
         let runtime = AgentToolRuntime::load_default().expect("load runtime");
         let names: Vec<String> = runtime.specs().into_iter().map(|spec| spec.name).collect();
+        assert!(names.contains(&"set_agent_intent".to_string()));
         assert!(names.contains(&"lookup_dgen_docs".to_string()));
         assert!(names.contains(&"read_example".to_string()));
         assert!(names.contains(&"list_instruments".to_string()));
         assert!(names.contains(&"read_instrument_source".to_string()));
         assert!(names.contains(&"create_instrument_artifact".to_string()));
+        assert!(names.contains(&"create_effect_artifact".to_string()));
+        assert!(names.contains(&"update_effect_artifact".to_string()));
+        assert!(names.contains(&"finalize_effect_artifact".to_string()));
         assert!(names.contains(&"inspect_current_instrument_preset_schema".to_string()));
         assert!(names.contains(&"create_current_instrument_presets".to_string()));
+    }
+
+    #[test]
+    fn general_specs_only_expose_intent_router() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let names: Vec<String> = runtime
+            .specs_for_kind(AgentKind::General)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(names, vec!["set_agent_intent".to_string()]);
+    }
+
+    #[test]
+    fn focused_specs_separate_instruments_and_effects() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let instrument_names: Vec<String> = runtime
+            .specs_for_kind(AgentKind::Instrument)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+        let effect_names: Vec<String> = runtime
+            .specs_for_kind(AgentKind::Effect)
+            .into_iter()
+            .map(|spec| spec.name)
+            .collect();
+
+        assert!(instrument_names.contains(&"create_instrument_artifact".to_string()));
+        assert!(instrument_names.contains(&"read_instrument_source".to_string()));
+        assert!(!instrument_names.contains(&"create_effect_artifact".to_string()));
+        assert!(!instrument_names.contains(&"read_effect_source".to_string()));
+
+        assert!(effect_names.contains(&"create_effect_artifact".to_string()));
+        assert!(effect_names.contains(&"read_effect_source".to_string()));
+        assert!(!effect_names.contains(&"create_instrument_artifact".to_string()));
+        assert!(!effect_names.contains(&"read_instrument_source".to_string()));
+    }
+
+    #[test]
+    fn set_agent_intent_queues_focused_kind_action() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let outcome = runtime.execute(
+            ToolCall {
+                name: "set_agent_intent".to_string(),
+                arguments: json!({ "intent": "effect" }),
+            },
+            &empty_session(),
+        );
+
+        assert!(outcome.ok);
+        assert_eq!(outcome.pending_actions.len(), 1);
+        assert!(matches!(
+            outcome.pending_actions[0],
+            AgentAppAction::SetAgentIntent {
+                kind: AgentKind::Effect
+            }
+        ));
     }
 
     #[test]
@@ -1010,6 +1258,62 @@ mod tests {
     }
 
     #[test]
+    fn create_effect_artifact_queues_draft_action() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let outcome = runtime.execute(
+            ToolCall {
+                name: "create_effect_artifact".to_string(),
+                arguments: json!({
+                    "name": "Wide Chorus",
+                    "dsp_source": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(out in_l 1 @name left)\n(out in_r 2 @name right)",
+                    "ui_source": "(defeffect-ui (label \"ok\"))"
+                }),
+            },
+            &empty_session(),
+        );
+        assert!(outcome.ok);
+        assert_eq!(outcome.pending_actions.len(), 1);
+        assert!(outcome.summary.contains("wide-chorus"));
+    }
+
+    #[test]
+    fn create_effect_artifact_rejects_wrapped_defeffect_before_queueing() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let outcome = runtime.execute(
+            ToolCall {
+                name: "create_effect_artifact".to_string(),
+                arguments: json!({
+                    "name": "Bad Wrapped Effect",
+                    "dsp_source": "(defeffect bad (in 1 @name left) (in 2 @name right) (out 0 1 @name left) (out 0 2 @name right))",
+                    "ui_source": "(defeffect-ui (label \"ok\"))"
+                }),
+            },
+            &empty_session(),
+        );
+        assert!(!outcome.ok);
+        assert!(outcome.pending_actions.is_empty());
+        assert!(outcome
+            .content
+            .contains("must not use a `(defeffect ...)` wrapper"));
+    }
+
+    #[test]
+    fn read_effect_source_returns_folder_dsp_and_ui() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let outcome = runtime.execute(
+            ToolCall {
+                name: "read_effect_source".to_string(),
+                arguments: json!({ "name": "dimension-d-chorus" }),
+            },
+            &empty_session(),
+        );
+        assert!(outcome.ok);
+        assert!(outcome.content.contains("[dsp.lisp]"));
+        assert!(outcome.content.contains("[ui.lisp]"));
+        assert!(outcome.content.contains("(defeffect-ui"));
+    }
+
+    #[test]
     fn apply_effect_requires_existing_track() {
         let runtime = AgentToolRuntime::load_default().expect("load runtime");
         let outcome = runtime.execute(
@@ -1041,6 +1345,7 @@ mod tests {
                 can_apply_effect_to_current_track: true,
                 current_effect_name: None,
                 current_effect_source: None,
+                current_effect_ui_source: None,
                 current_effect_slot: None,
                 can_update_current_effect: false,
                 current_instrument_name: None,

@@ -11,12 +11,14 @@ use super::providers::{
     build_openai_responses_payload, AgentMessage, AgentMessageRole, AgentProviderKind,
     AgentTurnRequest,
 };
+use super::store::AgentKind;
 
 const OPENAI_CHAT_COMPLETIONS_URL: &str = "https://api.openai.com/v1/chat/completions";
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 const DEEPSEEK_CHAT_COMPLETIONS_URL: &str = "https://api.deepseek.com/chat/completions";
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_TOOL_ROUNDS: usize = 8;
+const MAX_READ_ONLY_TOOL_CALLS: usize = 4;
 const MAX_REPEAT_TOOL_FAILURES: usize = 2;
 const MAX_REPEAT_TOOL_CALL_ROUNDS: usize = 2;
 
@@ -122,11 +124,53 @@ impl AgentNetworkClient {
         session_context: AgentSessionContext,
         progress: Option<&ToolProgressCallback<'_>>,
     ) -> Result<AgentTurnResult, AgentTurnError> {
+        self.execute_turn_with_progress_scoped(
+            provider,
+            model,
+            system_prompt,
+            messages,
+            session_context,
+            self.tools.specs(),
+            progress,
+        )
+    }
+
+    pub fn execute_turn_with_progress_for_kind(
+        &self,
+        provider: AgentProviderKind,
+        model: &str,
+        system_prompt: &str,
+        messages: &[AgentMessage],
+        session_context: AgentSessionContext,
+        kind: AgentKind,
+        progress: Option<&ToolProgressCallback<'_>>,
+    ) -> Result<AgentTurnResult, AgentTurnError> {
+        self.execute_turn_with_progress_scoped(
+            provider,
+            model,
+            system_prompt,
+            messages,
+            session_context,
+            self.tools.specs_for_kind(kind),
+            progress,
+        )
+    }
+
+    fn execute_turn_with_progress_scoped(
+        &self,
+        provider: AgentProviderKind,
+        model: &str,
+        system_prompt: &str,
+        messages: &[AgentMessage],
+        session_context: AgentSessionContext,
+        tools: Vec<ToolSpec>,
+        progress: Option<&ToolProgressCallback<'_>>,
+    ) -> Result<AgentTurnResult, AgentTurnError> {
         let request = AgentTurnRequest {
             model: model.to_string(),
             system_prompt: system_prompt.to_string(),
             messages: messages.to_vec(),
-            tools: self.tools.specs(),
+            tools,
             session_context,
         };
 
@@ -232,6 +276,8 @@ impl AgentNetworkClient {
         let mut repeated_failure_rounds = 0usize;
         let mut last_tool_signature = None::<String>;
         let mut repeated_tool_call_rounds = 0usize;
+        let mut read_only_tool_calls = 0usize;
+        let enforce_read_only_budget = has_artifact_action_tools(&request.tools);
 
         for round in 1..=MAX_TOOL_ROUNDS {
             let payload = openai_compatible_chat_payload(provider, request, &messages, &tools);
@@ -353,7 +399,16 @@ impl AgentNetworkClient {
                     if let Some(progress) = progress {
                         progress(&call);
                     }
-                    let outcome = self.tools.execute(call, &request.session_context);
+                    let outcome = if enforce_read_only_budget && is_read_only_tool(&call.name) {
+                        read_only_tool_calls += 1;
+                        if read_only_tool_calls > MAX_READ_ONLY_TOOL_CALLS {
+                            read_only_tool_budget_outcome(&call.name)
+                        } else {
+                            self.tools.execute(call, &request.session_context)
+                        }
+                    } else {
+                        self.tools.execute(call, &request.session_context)
+                    };
                     eprintln!(
                         "[agent-net] {} tool finish round={} name={} ok={} pending_actions={}",
                         provider.display_name(),
@@ -438,6 +493,8 @@ impl AgentNetworkClient {
         let mut repeated_failure_rounds = 0usize;
         let mut last_tool_signature = None::<String>;
         let mut repeated_tool_call_rounds = 0usize;
+        let mut read_only_tool_calls = 0usize;
+        let enforce_read_only_budget = has_artifact_action_tools(&request.tools);
 
         for round in 1..=MAX_TOOL_ROUNDS {
             let payload = json!({
@@ -552,7 +609,16 @@ impl AgentNetworkClient {
                 if let Some(progress) = progress {
                     progress(&call);
                 }
-                let outcome = self.tools.execute(call, &request.session_context);
+                let outcome = if enforce_read_only_budget && is_read_only_tool(&call.name) {
+                    read_only_tool_calls += 1;
+                    if read_only_tool_calls > MAX_READ_ONLY_TOOL_CALLS {
+                        read_only_tool_budget_outcome(&call.name)
+                    } else {
+                        self.tools.execute(call, &request.session_context)
+                    }
+                } else {
+                    self.tools.execute(call, &request.session_context)
+                };
                 eprintln!(
                     "[agent-net] Gemini tool finish round={} name={} ok={} pending_actions={}",
                     round,
@@ -857,6 +923,45 @@ fn repeated_failure_signature(outcomes: &[ToolCallOutcome]) -> Option<String> {
     )
 }
 
+fn has_artifact_action_tools(tools: &[ToolSpec]) -> bool {
+    tools.iter().any(|tool| {
+        matches!(
+            tool.name.as_str(),
+            "create_instrument_artifact"
+                | "create_effect_artifact"
+                | "update_effect_artifact"
+                | "finalize_effect_artifact"
+        )
+    })
+}
+
+fn is_read_only_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "lookup_dgen_docs"
+            | "list_examples"
+            | "read_example"
+            | "read_patch_source"
+            | "list_instruments"
+            | "read_instrument_source"
+            | "read_current_instrument_source"
+            | "inspect_current_instrument_preset_schema"
+            | "list_effects"
+            | "read_effect_source"
+            | "read_current_effect_source"
+    )
+}
+
+fn read_only_tool_budget_outcome(name: &str) -> ToolCallOutcome {
+    ToolCallOutcome {
+        name: name.to_string(),
+        ok: false,
+        summary: "Read-only tool budget exhausted.".to_string(),
+        content: "Read-only tool budget exhausted for this turn. Stop calling lookup/list/read tools. If the user asked to create or update an artifact, call the matching artifact create/update tool now with complete source. If the user only asked a read-only question, answer now in plain text using the context already gathered.".to_string(),
+        pending_actions: Vec::new(),
+    }
+}
+
 fn openai_tool_call_signature(tool_calls: &[OpenAiToolCall]) -> String {
     tool_calls
         .iter()
@@ -1033,10 +1138,12 @@ mod tests {
 
     use super::{
         extract_gemini_function_calls, extract_gemini_text, gemini_tool_call_signature,
-        openai_assistant_tool_message, openai_compatible_chat_payload, openai_messages,
-        openai_tool_call_json, openai_tool_call_type, openai_tools, repeated_failure_signature,
-        sanitize_gemini_schema, sanitize_openai_schema, GeminiFunctionCall, GeminiPart,
-        OpenAiCompatibleProvider, OpenAiToolCall, OpenAiToolFunction,
+        has_artifact_action_tools, is_read_only_tool, openai_assistant_tool_message,
+        openai_compatible_chat_payload, openai_messages, openai_tool_call_json,
+        openai_tool_call_type, openai_tools, read_only_tool_budget_outcome,
+        repeated_failure_signature, sanitize_gemini_schema, sanitize_openai_schema,
+        GeminiFunctionCall, GeminiPart, OpenAiCompatibleProvider, OpenAiToolCall,
+        OpenAiToolFunction,
     };
     use crate::agent::actions::AgentSessionContext;
     use crate::agent::protocol::AgentToolRuntime;
@@ -1301,6 +1408,7 @@ mod tests {
                 can_apply_effect_to_current_track: false,
                 current_effect_name: None,
                 current_effect_source: None,
+                current_effect_ui_source: None,
                 current_effect_slot: None,
                 can_update_current_effect: false,
                 current_instrument_name: None,
@@ -1348,6 +1456,39 @@ mod tests {
             },
         ];
         assert!(repeated_failure_signature(&outcomes).is_some());
+    }
+
+    #[test]
+    fn read_only_tool_budget_only_applies_to_artifact_capable_turns() {
+        let artifact_tools = vec![ToolSpec {
+            name: "create_effect_artifact".to_string(),
+            description: "create".to_string(),
+            input_schema: json!({}),
+        }];
+        let routing_tools = vec![ToolSpec {
+            name: "set_agent_intent".to_string(),
+            description: "route".to_string(),
+            input_schema: json!({}),
+        }];
+
+        assert!(has_artifact_action_tools(&artifact_tools));
+        assert!(!has_artifact_action_tools(&routing_tools));
+        assert!(is_read_only_tool("lookup_dgen_docs"));
+        assert!(is_read_only_tool("list_examples"));
+        assert!(!is_read_only_tool("create_effect_artifact"));
+    }
+
+    #[test]
+    fn read_only_tool_budget_outcome_forces_artifact_or_plain_text() {
+        let outcome = read_only_tool_budget_outcome("list_examples");
+
+        assert!(!outcome.ok);
+        assert_eq!(outcome.name, "list_examples");
+        assert!(outcome
+            .content
+            .contains("Stop calling lookup/list/read tools"));
+        assert!(outcome.content.contains("artifact create/update tool"));
+        assert!(outcome.pending_actions.is_empty());
     }
 
     #[test]
