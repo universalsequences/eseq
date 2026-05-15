@@ -348,6 +348,27 @@ impl PatternSnapshot {
         }
     }
 
+    pub fn capture_with_mod_connections(
+        state: &SequencerState,
+        num_tracks: usize,
+        track_buffer_ids: &[i32],
+        track_sample_rates: &[u32],
+        track_names: &[String],
+        instrument_types: &[InstrumentType],
+        mod_connections: Vec<ModConnection>,
+    ) -> Self {
+        let mut snapshot = Self::capture(
+            state,
+            num_tracks,
+            track_buffer_ids,
+            track_sample_rates,
+            track_names,
+            instrument_types,
+        );
+        snapshot.mod_connections = mod_connections;
+        snapshot
+    }
+
     pub fn restore(&self, state: &SequencerState) {
         let num_tracks = self.track_bits.len();
         let mut track_sound_state = state.pattern.track_sound_state.lock().unwrap();
@@ -878,6 +899,34 @@ const TOPOLOGY_EDIT_NONE: u32 = 0;
 const TOPOLOGY_EDIT_DELETE_TRACK: u32 = 1;
 
 impl SequencerState {
+    pub fn capture_current_pattern_snapshot(
+        &self,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> PatternSnapshot {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let mod_connections = self
+            .pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|snapshot| snapshot.mod_connections.clone())
+            .unwrap_or_default();
+        PatternSnapshot::capture_with_mod_connections(
+            self,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            mod_connections,
+        )
+    }
+
     pub fn new(num_tracks: usize, initial_chains: Vec<Vec<EffectSlotState>>) -> Self {
         let patterns: Vec<TrackPattern> = (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
         let step_data: Vec<StepData> = (0..MAX_TRACKS).map(|_| StepData::new()).collect();
@@ -1337,8 +1386,7 @@ impl SequencerState {
         }
 
         let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mut current_snapshot = PatternSnapshot::capture(
-            self,
+        let mut current_snapshot = self.capture_current_pattern_snapshot(
             old_count,
             buffer_ids,
             sample_rates,
@@ -1532,16 +1580,15 @@ impl SequencerState {
         if new_idx == cur || new_idx >= bank.len() {
             return None;
         }
-        let current_mod_connections = bank[cur].mod_connections.clone();
-        let mut current_snapshot = PatternSnapshot::capture(
+        let current_snapshot = PatternSnapshot::capture_with_mod_connections(
             self,
             num_tracks,
             buffer_ids,
             sample_rates,
             names,
             instrument_types,
+            bank[cur].mod_connections.clone(),
         );
-        current_snapshot.mod_connections = current_mod_connections;
         bank[cur] = current_snapshot;
         bank[new_idx].restore(self);
         self.pattern
@@ -1563,13 +1610,14 @@ impl SequencerState {
     ) -> usize {
         let mut bank = self.pattern.pattern_bank.lock().unwrap();
         let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        bank[cur] = PatternSnapshot::capture(
+        bank[cur] = PatternSnapshot::capture_with_mod_connections(
             self,
             num_tracks,
             buffer_ids,
             sample_rates,
             names,
             instrument_types,
+            bank[cur].mod_connections.clone(),
         );
         let cloned = bank[cur].clone();
         bank.push(cloned);
@@ -1598,13 +1646,14 @@ impl SequencerState {
             return None;
         }
         let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        bank[cur] = PatternSnapshot::capture(
+        bank[cur] = PatternSnapshot::capture_with_mod_connections(
             self,
             num_tracks,
             buffer_ids,
             sample_rates,
             names,
             instrument_types,
+            bank[cur].mod_connections.clone(),
         );
         bank.remove(cur);
         let new_idx = cur.min(bank.len() - 1);
@@ -1635,13 +1684,14 @@ impl SequencerState {
         if cur >= bank.len() || track >= num_tracks {
             return false;
         }
-        bank[cur] = PatternSnapshot::capture(
+        bank[cur] = PatternSnapshot::capture_with_mod_connections(
             self,
             num_tracks,
             buffer_ids,
             sample_rates,
             names,
             instrument_types,
+            bank[cur].mod_connections.clone(),
         );
         let source = bank[cur].clone();
         for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
@@ -2493,6 +2543,65 @@ mod tests {
                 .map(|_| default_empty_effect_chain())
                 .collect(),
         )
+    }
+
+    #[test]
+    fn clone_pattern_preserves_mod_connections_on_source_and_clone() {
+        let state = make_state_with_tracks(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 2,
+        };
+        state.pattern.pattern_bank.lock().unwrap()[0]
+            .mod_connections
+            .push(route);
+
+        let cloned_idx = state.clone_pattern(
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+
+        let bank = state.pattern.pattern_bank.lock().unwrap();
+        assert_eq!(cloned_idx, 1);
+        assert_eq!(bank[0].mod_connections, vec![route]);
+        assert_eq!(bank[1].mod_connections, vec![route]);
+    }
+
+    #[test]
+    fn delete_pattern_preserves_remaining_pattern_mod_connections() {
+        let state = make_state_with_tracks(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 1,
+        };
+        state.pattern.pattern_bank.lock().unwrap()[0]
+            .mod_connections
+            .push(route);
+        state.clone_pattern(
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+
+        let sample_ids = state.delete_pattern(
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+
+        assert!(sample_ids.is_some());
+        let bank = state.pattern.pattern_bank.lock().unwrap();
+        assert_eq!(bank.len(), 1);
+        assert_eq!(bank[0].mod_connections, vec![route]);
     }
 
     fn populate_step(state: &SequencerState, track: usize, step: usize) {

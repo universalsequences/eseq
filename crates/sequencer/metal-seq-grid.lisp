@@ -46,7 +46,9 @@
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
 (def seq-apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)
-  (set-layout (seq-lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height)))
+  (do
+    (set-layout (seq-lower-panel-layout-spec lower-buffer lower-ratio lower-min-height lower-max-height))
+    (host-command "refresh-mixer-ui" (dict))))
 
 (def seq-apply-fx-layout ()
   (seq-apply-lower-panel-layout "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height))

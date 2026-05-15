@@ -44,8 +44,9 @@ mod inner {
     use crate::audio::sample::get_registered_sample;
     use crate::backend::{Backend, BackendError, Color, RenderFrame, TiledRenderFrame};
     use crate::glyph_atlas::{GlyphAtlas, ProportionalGlyphAtlas, SizedFontCache};
-    use crate::layout::{Rect, TextMeasurer};
+    use crate::layout::{LayoutNode, Rect, TextMeasurer};
     use crate::theme;
+    use crate::vm::Value;
     use crate::widget_render::{self, WidgetInstance, WidgetViewport};
 
     /// Lightweight TextMeasurer that delegates to `SizedFontCache` for font
@@ -227,6 +228,120 @@ fragment float4 image_frag(
     }
     color.a *= in.opacity;
     return color;
+}
+"#;
+
+    const PATCH_CABLE_SHADER_SRC: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct PatchCableInstance {
+    packed_float2 ndc_min;
+    packed_float2 ndc_max;
+    packed_float2 bounds_min;
+    packed_float2 bounds_max;
+    packed_float2 start;
+    packed_float2 control1;
+    packed_float2 control2;
+    packed_float2 end;
+    float4 color;
+    float radius_px;
+    float pad0;
+    float pad1;
+    float pad2;
+};
+
+struct PatchCableVaryings {
+    float4 position [[position]];
+    float2 pixel_pos;
+    float2 start;
+    float2 control1;
+    float2 control2;
+    float2 end;
+    float4 color;
+    float radius_px;
+};
+
+float2 patch_cable_quad_corner(uint vid) {
+    switch (vid) {
+        case 0: return float2(0.0, 0.0);
+        case 1: return float2(0.0, 1.0);
+        case 2: return float2(1.0, 0.0);
+        case 3: return float2(1.0, 0.0);
+        case 4: return float2(0.0, 1.0);
+        default: return float2(1.0, 1.0);
+    }
+}
+
+vertex PatchCableVaryings patch_cable_vert(
+    uint vid [[vertex_id]],
+    uint iid [[instance_id]],
+    device const PatchCableInstance* instances [[buffer(0)]])
+{
+    PatchCableInstance cable = instances[iid];
+    float2 uv = patch_cable_quad_corner(vid);
+    PatchCableVaryings out;
+    float2 ndc_pos = mix(float2(cable.ndc_min), float2(cable.ndc_max), uv);
+    out.position = float4(ndc_pos, 0.0, 1.0);
+    out.pixel_pos = mix(float2(cable.bounds_min), float2(cable.bounds_max), uv);
+    out.start = float2(cable.start);
+    out.control1 = float2(cable.control1);
+    out.control2 = float2(cable.control2);
+    out.end = float2(cable.end);
+    out.color = cable.color;
+    out.radius_px = cable.radius_px;
+    return out;
+}
+
+float2 patch_cable_bezier(float2 p0, float2 p1, float2 p2, float2 p3, float t) {
+    float u = 1.0 - t;
+    float tt = t * t;
+    float uu = u * u;
+    return (uu * u) * p0
+        + (3.0 * uu * t) * p1
+        + (3.0 * u * tt) * p2
+        + (tt * t) * p3;
+}
+
+float patch_cable_segment_distance(float2 p, float2 a, float2 b) {
+    float2 ab = b - a;
+    float denom = max(dot(ab, ab), 0.0001);
+    float h = clamp(dot(p - a, ab) / denom, 0.0, 1.0);
+    return length(p - (a + ab * h));
+}
+
+float patch_cable_curve_distance(
+    float2 p,
+    float2 p0,
+    float2 p1,
+    float2 p2,
+    float2 p3)
+{
+    float min_dist = 1.0e6;
+    float2 prev = p0;
+    for (int i = 1; i <= 32; i++) {
+        float t = float(i) / 32.0;
+        float2 next = patch_cable_bezier(p0, p1, p2, p3, t);
+        min_dist = min(min_dist, patch_cable_segment_distance(p, prev, next));
+        prev = next;
+    }
+    return min_dist;
+}
+
+fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
+{
+    float dist = patch_cable_curve_distance(
+        in.pixel_pos,
+        in.start,
+        in.control1,
+        in.control2,
+        in.end);
+    float aa = max(fwidth(dist), 0.75);
+    float alpha = smoothstep(in.radius_px + aa, in.radius_px - aa, dist);
+    if (alpha <= 0.001) {
+        discard_fragment();
+    }
+    return float4(in.color.rgb, in.color.a * alpha);
 }
 "#;
 
@@ -678,6 +793,22 @@ fragment float4 waveform_frag(
         border_color: [f32; 4],
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PatchCableInstance {
+        ndc_min: [f32; 2],
+        ndc_max: [f32; 2],
+        bounds_min: [f32; 2],
+        bounds_max: [f32; 2],
+        start: [f32; 2],
+        control1: [f32; 2],
+        control2: [f32; 2],
+        end: [f32; 2],
+        color: [f32; 4],
+        radius_px: f32,
+        _pad: [f32; 3],
+    }
+
     struct WaveformGpuResource {
         bucket_count: u32,
         buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -812,6 +943,7 @@ fragment float4 waveform_frag(
         sdf_widget_pipeline_registry_generation: u64,
         waveform_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         image_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
+        patch_cable_pipeline: Option<Retained<ProtocolObject<dyn MTLRenderPipelineState>>>,
         waveform_buffers: HashMap<(String, u32), WaveformGpuResource>,
         image_textures: HashMap<PathBuf, ImageTextureResource>,
         image_decode_tx: mpsc::Sender<ImageDecodeJob>,
@@ -888,6 +1020,7 @@ fragment float4 waveform_frag(
                 sdf_widget_pipeline_registry_generation: 0,
                 waveform_pipeline: None,
                 image_pipeline: None,
+                patch_cable_pipeline: None,
                 waveform_buffers: HashMap::new(),
                 image_textures: HashMap::new(),
                 image_decode_tx,
@@ -1608,6 +1741,7 @@ fragment float4 waveform_frag(
             let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
             let to_rgba = |c: Color| [c.r, c.g, c.b, c.a];
             let has_multiple_tiles = tiled.tiles.len() > 1;
+            let mut mod_patch_ports = Vec::new();
 
             // ── Render pass setup ────────────────────────────────────────────
             let desc = MTLRenderPassDescriptor::new();
@@ -1806,6 +1940,15 @@ fragment float4 waveform_frag(
                     let widget_scroll = tile.frame.widget_scroll_top;
                     let widget_col_off = content_col - tile.frame.widget_scroll_left;
                     let widget_row_off = content_row - text_scroll - widget_scroll;
+                    collect_mod_patch_ports(
+                        layout,
+                        widget_col_off,
+                        widget_row_off,
+                        cell_w,
+                        cell_h,
+                        content_scissor,
+                        &mut mod_patch_ports,
+                    );
                     let content_width_cells =
                         ((content_right_px - content_left_px) / cell_w).max(0.0);
                     let fill_extra_cols = (content_width_cells - layout.rect.width).max(0.0);
@@ -2189,6 +2332,22 @@ fragment float4 waveform_frag(
                         vp_h,
                     );
                     draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &bverts);
+                }
+            }
+
+            // ── Global patch cables (no tile scissor) ───────────────────────
+            // These are collected from visible mod-port widget rects and drawn
+            // after tiles so cables can cross channel strips and tile bounds.
+            if !mod_patch_ports.is_empty() {
+                enc.setScissorRect(MTLScissorRect {
+                    x: 0,
+                    y: 0,
+                    width: vp_w as usize,
+                    height: vp_h as usize,
+                });
+                if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
+                    let cables = build_mod_patch_cables(&mod_patch_ports, vp_w, vp_h);
+                    draw_patch_cable_instances(&enc, &self.device, &cable_pipeline, &cables);
                 }
             }
 
@@ -2589,6 +2748,45 @@ fragment float4 waveform_frag(
                     self.device
                         .newRenderPipelineStateWithDescriptor_error(&image_desc)
                         .map_err(|_| BackendError::MetalError)?,
+                );
+            }
+
+            // ── Patch cable pipeline ────────────────────────────────────────
+            {
+                let cable_lib = self
+                    .device
+                    .newLibraryWithSource_options_error(
+                        &NSString::from_str(PATCH_CABLE_SHADER_SRC),
+                        None,
+                    )
+                    .map_err(|err| {
+                        eprintln!("Metal patch cable shader compile failed: {err:?}");
+                        BackendError::MetalError
+                    })?;
+                let cable_vert = cable_lib
+                    .newFunctionWithName(&NSString::from_str("patch_cable_vert"))
+                    .ok_or(BackendError::MetalError)?;
+                let cable_frag = cable_lib
+                    .newFunctionWithName(&NSString::from_str("patch_cable_frag"))
+                    .ok_or(BackendError::MetalError)?;
+                let cable_desc = MTLRenderPipelineDescriptor::new();
+                cable_desc.setVertexFunction(Some(&cable_vert));
+                cable_desc.setFragmentFunction(Some(&cable_frag));
+                let cable_attach =
+                    unsafe { cable_desc.colorAttachments().objectAtIndexedSubscript(0) };
+                cable_attach.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+                cable_attach.setBlendingEnabled(true);
+                cable_attach.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+                cable_attach.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                cable_attach.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+                cable_attach.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+                self.patch_cable_pipeline = Some(
+                    self.device
+                        .newRenderPipelineStateWithDescriptor_error(&cable_desc)
+                        .map_err(|err| {
+                            eprintln!("Metal patch cable pipeline creation failed: {err:?}");
+                            BackendError::MetalError
+                        })?,
                 );
             }
 
@@ -3915,6 +4113,213 @@ fragment float4 waveform_frag(
             .collect()
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ModPatchPortDirection {
+        In,
+        Out,
+    }
+
+    #[derive(Clone, Debug)]
+    struct ModPatchPort {
+        direction: ModPatchPortDirection,
+        track: usize,
+        input: usize,
+        center_px: (f32, f32),
+        connected_sources: Vec<usize>,
+    }
+
+    fn collect_mod_patch_ports(
+        node: &LayoutNode,
+        col_off: f32,
+        row_off: f32,
+        cell_w: f32,
+        cell_h: f32,
+        _visible_scissor: MTLScissorRect,
+        out: &mut Vec<ModPatchPort>,
+    ) {
+        if layout_node_bool_prop(node, "patch-port") {
+            if let (Some(direction), Some(track)) = (
+                mod_patch_port_direction(node),
+                layout_node_usize_prop(node, "track"),
+            ) {
+                let center_col = col_off + node.rect.col + node.rect.width * 0.5;
+                let center_row = row_off + node.rect.row + node.rect.height * 0.5;
+                let center_px = (center_col * cell_w, center_row * cell_h);
+                if center_px.0.is_finite() && center_px.1.is_finite() {
+                    out.push(ModPatchPort {
+                        direction,
+                        track,
+                        input: layout_node_usize_prop(node, "input").unwrap_or(0),
+                        center_px,
+                        connected_sources: layout_node_usize_list_prop(node, "connected-sources"),
+                    });
+                }
+            }
+        }
+
+        for child in &node.children {
+            collect_mod_patch_ports(
+                child,
+                col_off,
+                row_off,
+                cell_w,
+                cell_h,
+                _visible_scissor,
+                out,
+            );
+        }
+    }
+
+    fn mod_patch_port_direction(node: &LayoutNode) -> Option<ModPatchPortDirection> {
+        match node.props.get("direction") {
+            Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "in" => {
+                Some(ModPatchPortDirection::In)
+            }
+            Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "out" => {
+                Some(ModPatchPortDirection::Out)
+            }
+            _ => None,
+        }
+    }
+
+    fn layout_node_usize_prop(node: &LayoutNode, key: &str) -> Option<usize> {
+        match node.props.get(key) {
+            Some(Value::Number(value)) if value.is_finite() && *value >= 0.0 => {
+                Some(*value as usize)
+            }
+            _ => None,
+        }
+    }
+
+    fn layout_node_bool_prop(node: &LayoutNode, key: &str) -> bool {
+        matches!(node.props.get(key), Some(Value::Bool(true)))
+    }
+
+    fn layout_node_usize_list_prop(node: &LayoutNode, key: &str) -> Vec<usize> {
+        let Some(Value::List(values)) = node.props.get(key) else {
+            return Vec::new();
+        };
+        values
+            .iter()
+            .filter_map(|value| match &*value.borrow() {
+                Value::Number(n) if n.is_finite() && *n >= 0.0 => Some(*n as usize),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn build_mod_patch_cables(
+        ports: &[ModPatchPort],
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<PatchCableInstance> {
+        let mut outputs = HashMap::new();
+        for port in ports {
+            if port.direction == ModPatchPortDirection::Out {
+                outputs.insert(port.track, port.center_px);
+            }
+        }
+
+        let mut cables = Vec::new();
+        let base_color = Color::rgba(0.10, 0.58, 1.0, 0.92);
+        let highlight_color = Color::rgba(0.78, 0.94, 1.0, 0.38);
+        let shadow_color = Color::rgba(0.0, 0.0, 0.0, 0.34);
+        let tension = 0.30;
+        for port in ports {
+            if port.direction != ModPatchPortDirection::In {
+                continue;
+            }
+            for source in &port.connected_sources {
+                let Some(start) = outputs.get(source).copied() else {
+                    continue;
+                };
+                push_mod_patch_cable_instance(
+                    (start.0 + 1.4, start.1 + 2.2),
+                    (port.center_px.0 + 1.4, port.center_px.1 + 2.2),
+                    3.6,
+                    shadow_color,
+                    &mut cables,
+                    vp_w,
+                    vp_h,
+                    tension,
+                );
+                let lane_tint = (port.input as f32 * 0.08).min(0.24);
+                let color = Color {
+                    r: (base_color.r + lane_tint).min(1.0),
+                    g: (base_color.g + lane_tint * 0.35).min(1.0),
+                    b: base_color.b,
+                    a: base_color.a,
+                };
+                push_mod_patch_cable_instance(
+                    start,
+                    port.center_px,
+                    1.85,
+                    color,
+                    &mut cables,
+                    vp_w,
+                    vp_h,
+                    tension,
+                );
+                push_mod_patch_cable_instance(
+                    (start.0, start.1 - 0.7),
+                    (port.center_px.0, port.center_px.1 - 0.7),
+                    0.55,
+                    highlight_color,
+                    &mut cables,
+                    vp_w,
+                    vp_h,
+                    tension,
+                );
+            }
+        }
+        cables
+    }
+
+    fn push_mod_patch_cable_instance(
+        start: (f32, f32),
+        end: (f32, f32),
+        radius_px: f32,
+        color: Color,
+        cables: &mut Vec<PatchCableInstance>,
+        vp_w: f32,
+        vp_h: f32,
+        tension: f32,
+    ) {
+        let dx = end.0 - start.0;
+        let dy = end.1 - start.1;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let horizontal = dx.abs();
+        let slack = (1.0 - tension).clamp(0.0, 1.0);
+        let sag = ((28.0 + distance * 0.22) * slack).clamp(18.0, 98.0);
+        let handle_x = horizontal.clamp(42.0, 190.0) * (0.30 + 0.14 * slack);
+        let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
+        let c1 = (start.0 + handle_x * direction, start.1 + sag);
+        let c2 = (end.0 - handle_x * direction, end.1 + sag);
+        let padding = radius_px + sag * 0.12 + 8.0;
+        let min_x = start.0.min(end.0).min(c1.0).min(c2.0) - padding;
+        let max_x = start.0.max(end.0).max(c1.0).max(c2.0) + padding;
+        let min_y = start.1.min(end.1).min(c1.1).min(c2.1) - padding;
+        let max_y = start.1.max(end.1).max(c1.1).max(c2.1) + padding;
+        if min_x >= vp_w || max_x <= 0.0 || min_y >= vp_h || max_y <= 0.0 {
+            return;
+        }
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        cables.push(PatchCableInstance {
+            ndc_min: [ndc_x(min_x), ndc_y(min_y)],
+            ndc_max: [ndc_x(max_x), ndc_y(max_y)],
+            bounds_min: [min_x, min_y],
+            bounds_max: [max_x, max_y],
+            start: [start.0, start.1],
+            control1: [c1.0, c1.1],
+            control2: [c2.0, c2.1],
+            end: [end.0, end.1],
+            color: color.to_rgba(),
+            radius_px,
+            _pad: [0.0; 3],
+        });
+    }
+
     fn image_vertices(
         image: &widget_render::MetalImagePrimitive,
         image_w: u32,
@@ -4460,6 +4865,37 @@ fragment float4 waveform_frag(
         device: &ProtocolObject<dyn MTLDevice>,
         pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
         instances: &[WidgetInstance],
+    ) {
+        if instances.is_empty() {
+            return;
+        }
+        let byte_len = std::mem::size_of_val(instances);
+        let Some(buffer) = (unsafe {
+            device.newBufferWithBytes_length_options(
+                NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                byte_len,
+                MTLResourceOptions(0),
+            )
+        }) else {
+            return;
+        };
+        enc.setRenderPipelineState(pipeline);
+        unsafe {
+            enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                6,
+                instances.len() as _,
+            );
+        }
+    }
+
+    fn draw_patch_cable_instances(
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        device: &ProtocolObject<dyn MTLDevice>,
+        pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+        instances: &[PatchCableInstance],
     ) {
         if instances.is_empty() {
             return;

@@ -1215,8 +1215,11 @@ impl App {
             self.graph.track_node_ids.len()
         );
         self.state.publish_scheduler_snapshot();
-        self.graph_controller()
-            .apply_sample_ids(&current_sample_ids);
+        {
+            let mut graph = self.graph_controller();
+            graph.apply_sample_ids(&current_sample_ids);
+            graph.sync_current_pattern_mod_routes();
+        }
         {
             let track_count = self.tracks.len();
             let mut graph = self.graph_controller();

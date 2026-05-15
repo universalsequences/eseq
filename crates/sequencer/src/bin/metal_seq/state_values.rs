@@ -6130,7 +6130,25 @@ mod tests {
                     "track-instrument-types",
                     test_list(vec![Value::String("modulator".to_string())]),
                 ),
-                ("mod-routes", test_list(vec![])),
+                (
+                    "mod-routes",
+                    test_list(vec![Value::Map({
+                        let mut map = std::collections::HashMap::new();
+                        map.insert(
+                            "source".to_string(),
+                            Rc::new(RefCell::new(Value::Number(0.0))),
+                        );
+                        map.insert(
+                            "dest".to_string(),
+                            Rc::new(RefCell::new(Value::Number(0.0))),
+                        );
+                        map.insert(
+                            "input".to_string(),
+                            Rc::new(RefCell::new(Value::Number(2.0))),
+                        );
+                        map
+                    })]),
+                ),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
                 ("track-pans", test_list(vec![Value::Number(0.0)])),
                 (
@@ -8869,6 +8887,20 @@ mod tests {
                 node.rect
             );
         }
+        let ext3_in =
+            find_node_by_stable_key(&layout, "mixer-v2-mod-in-0-2").expect("Ext3 mod in port");
+        let Value::List(sources) = ext3_in
+            .props
+            .get("connected-sources")
+            .expect("Ext3 input should expose connected sources")
+        else {
+            panic!(
+                "Ext3 connected-sources prop should be a list: {:?}",
+                ext3_in.props.get("connected-sources")
+            );
+        };
+        assert_eq!(sources.len(), 1);
+        assert_eq!(*sources[0].borrow(), Value::Number(0.0));
         assert!(
             mod_out.rect.width > 0.0
                 && mod_out.rect.height > 0.0

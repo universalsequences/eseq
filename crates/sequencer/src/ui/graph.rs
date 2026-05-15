@@ -1273,8 +1273,7 @@ impl GraphController<'_> {
             .pattern
             .current_pattern
             .load(Ordering::Relaxed) as usize;
-        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
-            &self.app.state,
+        let current_snapshot = self.app.state.capture_current_pattern_snapshot(
             self.app.tracks.len(),
             &self.app.graph.track_buffer_ids,
             &self.app.graph.track_sample_rates,

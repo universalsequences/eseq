@@ -90,6 +90,19 @@
 (def mixer-v2-mod-route-exists? (source dest input)
   (mixer-v2-mod-route-exists-at source dest input 0))
 
+(def mixer-v2-mod-route-sources-at (dest input idx acc)
+  (if (>= idx (len SEQ.mod-routes))
+    acc
+    (let ((route (nth SEQ.mod-routes idx)))
+      (mixer-v2-mod-route-sources-at dest input (+ idx 1)
+        (if (and (= (get route :dest) dest)
+              (= (get route :input) input))
+          (append acc (list (get route :source)))
+          acc)))))
+
+(def mixer-v2-mod-route-sources (dest input)
+  (mixer-v2-mod-route-sources-at dest input 0 (list)))
+
 (def mixer-v2-mod-out-click (track)
   (if (mixer-v2-track-modulator? track)
     (do
@@ -106,8 +119,7 @@
         (status "Mod self-routes are not allowed"))
       (do
         (if (mixer-v2-mod-route-exists? mixer-v2-pending-mod-source track input)
-          (host-command "delete-mod-route"
-            (dict :source mixer-v2-pending-mod-source :dest track :input input))
+          (status "Mod route already connected")
           (host-command "set-mod-route"
             (dict :source mixer-v2-pending-mod-source :dest track :input input)))
         (set! mixer-v2-pending-mod-source -1)))))
@@ -131,6 +143,7 @@
     :width 9.8 :height 1.15 :gap 0.42 :align :center
     (mixer-v2-mod-port
       :key (str "mixer-v2-mod-out-" track)
+      :patch-port true
       :direction :out
       :track track
       :active (mixer-v2-track-modulator? track)
@@ -140,9 +153,11 @@
     (each (range 0 4) |input|
       (mixer-v2-mod-port
         :key (str "mixer-v2-mod-in-" track "-" input)
+        :patch-port true
         :direction :in
         :track track
         :input input
+        :connected-sources (mixer-v2-mod-route-sources track input)
         :active true
         :pending false
         :on-click |x y r| (mixer-v2-mod-in-click track input)
@@ -370,9 +385,7 @@
     (mixer-v2-select-prev-channel)
     (if (= key "RIGHT")
       (mixer-v2-select-next-channel)
-      (if (or (= key "BS") (= key "Delete"))
-        (mixer-v2-delete-selected-track)
-        false))))
+      false)))
 
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
@@ -420,6 +433,4 @@
 (define-mode "seq-mixer-mode" :read-only true :on-key "mixer-v2-handle-key")
 (mode-bind-key "seq-mixer-mode" "LEFT" "mixer-v2-select-prev-channel")
 (mode-bind-key "seq-mixer-mode" "RIGHT" "mixer-v2-select-next-channel")
-(mode-bind-key "seq-mixer-mode" "BS" "mixer-v2-delete-selected-track")
-(mode-bind-key "seq-mixer-mode" "Delete" "mixer-v2-delete-selected-track")
 (set-buffer-mode-for "*mixer*" "seq-mixer-mode")

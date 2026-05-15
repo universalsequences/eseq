@@ -2968,6 +2968,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "refresh-mixer-ui" => {
+                        let rt = editor.runtime_mut();
+                        sync_track_mixer_state(rt, &app, &state);
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                    }
                     "set-track-bus-send" => {
                         if let Value::Map(ref map) = payload {
                             let bus_idx = map.get("bus").and_then(|cell| match &*cell.borrow() {
@@ -5012,6 +5020,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let started = Instant::now();
                                     editor.refresh_runtime_side_effects();
                                     side_effects_elapsed = started.elapsed();
+                                    if editor_has_visible_buffer(&editor, "*mixer*") {
+                                        editor.refresh_visible_layouts_for_buffer_named("*mixer*");
+                                    }
                                     prev_pattern_epoch =
                                         state.transport.pattern_epoch.load(Ordering::Relaxed);
                                     prev_snapshot_version = state.scheduler_snapshot_version();
@@ -5096,6 +5107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &app.tracks,
                             &app.graph.track_instrument_types,
                         );
+                        app.graph_controller().sync_current_pattern_mod_routes();
                         app.clone_bus_pattern_from_to(source_pattern, new_idx);
                         let rt = editor.runtime_mut();
                         sync_pattern_state(rt, &state);
@@ -5121,6 +5133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             &app.graph.track_instrument_types,
                         ) {
                             app.graph_controller().apply_sample_ids(&sample_ids);
+                            app.graph_controller().sync_current_pattern_mod_routes();
                             app.push_all_restored_defaults();
                             let new_pattern =
                                 app.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
@@ -6675,6 +6688,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             prev_current_track_playhead_visible = current_track_playhead_visible;
             let mut profile_pattern_reactive_cycle = false;
+            let mut refresh_visible_sequencer_after_cycle = false;
+            let mut refresh_visible_mixer_after_cycle = false;
             if (epoch != prev_pattern_epoch || snap_ver != prev_snapshot_version)
                 && !app.tracks.is_empty()
             {
@@ -6765,10 +6780,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 prev_snapshot_version = snap_ver;
                 prev_track_button_states = track_button_state_snapshot(&state);
                 needs_reactive_cycle = true;
+                refresh_visible_mixer_after_cycle |= mixer_visible;
                 profile_pattern_reactive_cycle = profile_switch;
             }
-            let mut refresh_visible_sequencer_after_cycle = false;
-            let mut refresh_visible_mixer_after_cycle = false;
             let ui_ep = ui_epoch.load(Ordering::Relaxed);
             if ui_ep != prev_ui_epoch {
                 pull_shared_bus_state(&mut app, &bus_state);
@@ -6831,7 +6845,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 refresh_visible_sequencer_after_cycle = sequencer_visible;
-                refresh_visible_mixer_after_cycle =
+                refresh_visible_mixer_after_cycle |=
                     mixer_visible && (record_armed_changed || track_buttons_changed);
                 prev_track_button_states = track_button_states;
                 prev_ui_epoch = ui_ep;
