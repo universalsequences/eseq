@@ -104,10 +104,16 @@ fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout
     }
 }
 
+fn node_is_patch_port(node: &LayoutNode) -> bool {
+    node_bool_prop(node, "patch-port")
+}
+
 fn patch_cable_click_output(
     layout: &LayoutNode,
     layout_col: f32,
     layout_row: f32,
+    cell_w: f32,
+    cell_h: f32,
 ) -> Option<crate::widget_render::EventOutput> {
     let mut ports = Vec::new();
     collect_patch_port_layouts(layout, &mut ports);
@@ -117,8 +123,9 @@ fn patch_cable_click_output(
     let outputs: std::collections::HashMap<usize, (f32, f32)> = ports
         .iter()
         .filter(|port| port.direction == PatchPortDirection::Out)
-        .map(|port| (port.track, port.center))
+        .map(|port| (port.track, (port.center.0 * cell_w, port.center.1 * cell_h)))
         .collect();
+    let point_px = (layout_col * cell_w, layout_row * cell_h);
 
     let mut best: Option<(f32, usize, usize, usize, Value)> = None;
     for port in ports
@@ -132,9 +139,9 @@ fn patch_cable_click_output(
             let Some(start) = outputs.get(source).copied() else {
                 continue;
             };
-            let distance =
-                distance_to_patch_cable_cells(start, port.center, (layout_col, layout_row));
-            if distance > 0.32 {
+            let end = (port.center.0 * cell_w, port.center.1 * cell_h);
+            let distance = distance_to_patch_cable_px(start, end, point_px);
+            if distance > 7.0 {
                 continue;
             }
             match best {
@@ -221,21 +228,21 @@ fn has_pending_patch_drag(layout: &LayoutNode) -> bool {
         .any(|port| port.direction == PatchPortDirection::Out && port.active && port.pending)
 }
 
-fn distance_to_patch_cable_cells(start: (f32, f32), end: (f32, f32), point: (f32, f32)) -> f32 {
+fn distance_to_patch_cable_px(start: (f32, f32), end: (f32, f32), point: (f32, f32)) -> f32 {
     let dx = end.0 - start.0;
     let dy = end.1 - start.1;
     let distance = (dx * dx + dy * dy).sqrt();
     let slack = 0.70;
-    let sag = ((2.15 + distance * 0.22) * slack).clamp(1.3, 6.3);
-    let handle_x = dx.abs().clamp(3.2, 14.0) * (0.30 + 0.14 * slack);
+    let sag = ((28.0 + distance * 0.22) * slack).clamp(18.0, 98.0);
+    let handle_x = dx.abs().clamp(42.0, 190.0) * (0.30 + 0.14 * slack);
     let direction = if dx >= 0.0 { 1.0 } else { -1.0 };
     let c1 = (start.0 + handle_x * direction, start.1 + sag);
     let c2 = (end.0 - handle_x * direction, end.1 + sag);
 
     let mut best = f32::MAX;
     let mut prev = start;
-    for i in 1..=28 {
-        let t = i as f32 / 28.0;
+    for i in 1..=48 {
+        let t = i as f32 / 48.0;
         let current = cubic_bezier_point(start, c1, c2, end, t);
         best = best.min(distance_to_segment(point, prev, current));
         prev = current;
@@ -461,8 +468,17 @@ impl Editor {
                 );
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some(output) =
-                            patch_cable_click_output(layout, layout_pos.0, layout_pos.1)
+                        let hit_patch_port = hit_test_layout(layout, layout_pos.1, layout_pos.0)
+                            .is_some_and(node_is_patch_port);
+                        let (cell_w, cell_h) = self.runtime.layout_cell_dims();
+                        if !hit_patch_port
+                            && let Some(output) = patch_cable_click_output(
+                                layout,
+                                layout_pos.0,
+                                layout_pos.1,
+                                cell_w,
+                                cell_h,
+                            )
                         {
                             return self.apply_widget_output(Some(output));
                         }
