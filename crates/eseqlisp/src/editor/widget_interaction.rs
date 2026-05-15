@@ -213,6 +213,14 @@ fn patch_drop_output(
     })
 }
 
+fn has_pending_patch_drag(layout: &LayoutNode) -> bool {
+    let mut ports = Vec::new();
+    collect_patch_port_layouts(layout, &mut ports);
+    ports
+        .iter()
+        .any(|port| port.direction == PatchPortDirection::Out && port.active && port.pending)
+}
+
 fn distance_to_patch_cable_cells(start: (f32, f32), end: (f32, f32), point: (f32, f32)) -> f32 {
     let dx = end.0 - start.0;
     let dy = end.1 - start.1;
@@ -272,6 +280,52 @@ fn squared_distance(a: (f32, f32), b: (f32, f32)) -> f32 {
 }
 
 impl Editor {
+    pub(super) fn active_layout_has_pending_patch_drag(&self) -> bool {
+        self.runtime
+            .current_layout
+            .as_ref()
+            .is_some_and(|layout| has_pending_patch_drag(layout))
+    }
+
+    pub(super) fn handle_active_patch_drag_mouse(
+        &mut self,
+        mouse: MouseEvent,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> bool {
+        let Some(layout) = self.runtime.current_layout.as_ref() else {
+            return false;
+        };
+        if !has_pending_patch_drag(layout) {
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved => {
+                self.mark_needs_redraw();
+                true
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some((local_col, local_row)) =
+                    hit::to_local(precise_col, precise_row, content_col, content_row)
+                else {
+                    return false;
+                };
+                let layout_pos = (
+                    local_col + self.active_leaf().widget_scroll_left,
+                    local_row + self.widget_scroll_top() + self.active_buffer().scroll_top as f32,
+                );
+                let output = patch_drop_output(layout, layout_pos.0, layout_pos.1);
+                let handled = output.is_some();
+                let _ = self.apply_widget_output(output);
+                self.mark_needs_redraw();
+                handled
+            }
+            _ => false,
+        }
+    }
+
     fn dispatch_slider_drag_to_node(
         &mut self,
         node: &LayoutNode,
