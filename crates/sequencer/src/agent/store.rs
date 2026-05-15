@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::SystemTime;
 
-use super::actions::AgentSessionContext;
 use super::providers::{AgentProviderKind, AgentProviderState};
 
 pub type ConvId = u64;
@@ -105,7 +104,6 @@ pub(crate) struct RunningTask {
 pub struct ConversationStore {
     inner: Arc<Mutex<HashMap<ConvId, ConversationState>>>,
     task_handles: Arc<Mutex<HashMap<ConvId, RunningTask>>>,
-    session_context: Arc<Mutex<AgentSessionContext>>,
     next_id: Arc<AtomicU64>,
     sample_rate: u32,
 }
@@ -115,7 +113,6 @@ impl ConversationStore {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             task_handles: Arc::new(Mutex::new(HashMap::new())),
-            session_context: Arc::new(Mutex::new(AgentSessionContext::default())),
             next_id: Arc::new(AtomicU64::new(1)),
             sample_rate,
         }
@@ -123,14 +120,6 @@ impl ConversationStore {
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
-    }
-
-    pub fn set_session_context(&self, context: AgentSessionContext) {
-        *self.session_context.lock().unwrap() = context;
-    }
-
-    pub(crate) fn session_context(&self) -> AgentSessionContext {
-        self.session_context.lock().unwrap().clone()
     }
 
     pub(crate) fn inner(&self) -> Arc<Mutex<HashMap<ConvId, ConversationState>>> {

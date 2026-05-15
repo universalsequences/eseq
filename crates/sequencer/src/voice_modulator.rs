@@ -1,8 +1,7 @@
 use std::os::raw::{c_int, c_void};
 
 use crate::audiograph::NodeVTable;
-use crate::effects::{ParamDescriptor, ParamKind, ParamScaling};
-use crate::sequencer::SYNC_RESOLUTIONS;
+use crate::effects::{ParamDescriptor, ParamKind, ParamScaling, SyncDivision};
 
 pub const NUM_OUTPUTS: usize = 6;
 pub const MOD_PARAM_BASE: u32 = 1_000_000;
@@ -74,10 +73,9 @@ const ENV_STAGE_SUSTAIN: f32 = 3.0;
 const ENV_STAGE_RELEASE: f32 = 4.0;
 
 fn sync_labels() -> Vec<String> {
-    SYNC_RESOLUTIONS
+    SyncDivision::ALL
         .iter()
-        .skip(1)
-        .map(|(_, label)| (*label).to_string())
+        .map(|division| division.label().to_string())
         .collect()
 }
 
@@ -116,9 +114,15 @@ fn shape_value(shape: usize, phase: f32, pulse_width: f32) -> f32 {
 }
 
 fn synced_rate_hz(div_idx: usize, bpm: f32) -> f32 {
-    let idx = div_idx.clamp(0, SYNC_RESOLUTIONS.len().saturating_sub(2));
-    let beats = SYNC_RESOLUTIONS[idx + 1].0 as f32;
-    (bpm / 60.0) / beats.max(0.0001)
+    let beats = SyncDivision::from_index(div_idx).to_beats() as f32;
+    (bpm.max(20.0) / 60.0) / beats.max(0.0001)
+}
+
+fn sync_division_index(division: SyncDivision) -> f32 {
+    SyncDivision::ALL
+        .iter()
+        .position(|candidate| *candidate == division)
+        .unwrap_or(0) as f32
 }
 
 unsafe fn init_param_defaults(s: *mut f32) {
@@ -127,21 +131,21 @@ unsafe fn init_param_defaults(s: *mut f32) {
 
     *s.add(PARAM_LFO1_RATE_HZ) = 5.0;
     *s.add(PARAM_LFO1_SYNC) = 0.0;
-    *s.add(PARAM_LFO1_DIV) = 2.0;
+    *s.add(PARAM_LFO1_DIV) = sync_division_index(SyncDivision::Quarter);
     *s.add(PARAM_LFO1_SHAPE) = SHAPE_TRIANGLE as f32;
     *s.add(PARAM_LFO1_PW) = 0.5;
     *s.add(PARAM_LFO1_RETRIGGER) = 0.0;
 
     *s.add(PARAM_LFO2_RATE_HZ) = 1.7;
     *s.add(PARAM_LFO2_SYNC) = 0.0;
-    *s.add(PARAM_LFO2_DIV) = 3.0;
+    *s.add(PARAM_LFO2_DIV) = sync_division_index(SyncDivision::Half);
     *s.add(PARAM_LFO2_SHAPE) = SHAPE_TRIANGLE as f32;
     *s.add(PARAM_LFO2_PW) = 0.5;
     *s.add(PARAM_LFO2_RETRIGGER) = 0.0;
 
     *s.add(PARAM_LFO3_RATE_HZ) = 0.37;
     *s.add(PARAM_LFO3_SYNC) = 0.0;
-    *s.add(PARAM_LFO3_DIV) = 4.0;
+    *s.add(PARAM_LFO3_DIV) = sync_division_index(SyncDivision::Whole);
     *s.add(PARAM_LFO3_SHAPE) = SHAPE_TRIANGLE as f32;
     *s.add(PARAM_LFO3_PW) = 0.5;
     *s.add(PARAM_LFO3_RETRIGGER) = 0.0;
@@ -153,12 +157,12 @@ unsafe fn init_param_defaults(s: *mut f32) {
 
     *s.add(PARAM_RAND_RATE_HZ) = 3.0;
     *s.add(PARAM_RAND_SYNC) = 0.0;
-    *s.add(PARAM_RAND_DIV) = 4.0;
+    *s.add(PARAM_RAND_DIV) = sync_division_index(SyncDivision::Whole);
     *s.add(PARAM_RAND_SLEW) = 0.0;
 
     *s.add(PARAM_DRIFT_RATE) = 0.00035;
     *s.add(PARAM_DRIFT_SYNC) = 0.0;
-    *s.add(PARAM_DRIFT_DIV) = 5.0;
+    *s.add(PARAM_DRIFT_DIV) = sync_division_index(SyncDivision::Whole);
 
     *s.add(PARAM_MOD1_DEPTH) = 1.0;
     *s.add(PARAM_MOD2_DEPTH) = 1.0;
@@ -217,7 +221,7 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
             PARAM_LFO1_RETRIGGER,
             "mod_lfo1",
             5.0,
-            2.0,
+            sync_division_index(SyncDivision::Quarter),
             0.0,
         ),
         (
@@ -229,7 +233,7 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
             PARAM_LFO2_RETRIGGER,
             "mod_lfo2",
             1.7,
-            3.0,
+            sync_division_index(SyncDivision::Half),
             0.0,
         ),
         (
@@ -241,7 +245,7 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
             PARAM_LFO3_RETRIGGER,
             "mod_lfo3",
             0.37,
-            4.0,
+            sync_division_index(SyncDivision::Whole),
             0.0,
         ),
     ] {
@@ -389,7 +393,7 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
         "mod_rand_div",
         0.0,
         (sync_div_labels.len() - 1) as f32,
-        4.0,
+        sync_division_index(SyncDivision::Whole),
         ParamKind::Enum {
             labels: sync_div_labels.clone(),
         },
@@ -434,7 +438,7 @@ pub fn param_descriptors() -> Vec<ParamDescriptor> {
         "mod_drift_div",
         0.0,
         (sync_div_labels.len() - 1) as f32,
-        5.0,
+        sync_division_index(SyncDivision::Whole),
         ParamKind::Enum {
             labels: sync_div_labels,
         },
@@ -488,7 +492,7 @@ pub fn ui_param_descriptors() -> Vec<ParamDescriptor> {
         PARAM_LFO1_PW,
         PARAM_LFO1_RETRIGGER,
         5.0,
-        2.0,
+        sync_division_index(SyncDivision::Quarter),
         0.0,
     )] {
         push_param(
@@ -635,7 +639,7 @@ pub fn ui_param_descriptors() -> Vec<ParamDescriptor> {
         "division",
         0.0,
         (sync_div_labels.len() - 1) as f32,
-        4.0,
+        sync_division_index(SyncDivision::Whole),
         ParamKind::Enum {
             labels: sync_div_labels.clone(),
         },
@@ -680,7 +684,7 @@ pub fn ui_param_descriptors() -> Vec<ParamDescriptor> {
         "division",
         0.0,
         (sync_div_labels.len() - 1) as f32,
-        5.0,
+        sync_division_index(SyncDivision::Whole),
         ParamKind::Enum {
             labels: sync_div_labels.clone(),
         },
@@ -707,7 +711,7 @@ pub fn ui_param_descriptors() -> Vec<ParamDescriptor> {
             PARAM_LFO2_PW,
             PARAM_LFO2_RETRIGGER,
             1.7,
-            3.0,
+            sync_division_index(SyncDivision::Half),
             0.0,
         ),
         (
@@ -718,7 +722,7 @@ pub fn ui_param_descriptors() -> Vec<ParamDescriptor> {
             PARAM_LFO3_PW,
             PARAM_LFO3_RETRIGGER,
             0.37,
-            4.0,
+            sync_division_index(SyncDivision::Whole),
             0.0,
         ),
     ] {
@@ -1048,12 +1052,22 @@ mod tests {
     fn synced_lfo_divisions_are_calibrated_to_quarter_note_beats() {
         let bpm = 120.0;
 
-        // div index 0 maps to 1/16 = 0.25 beats, so one cycle is 0.125s at 120 BPM.
-        assert!((synced_rate_hz(0, bpm) - 8.0).abs() < f32::EPSILON);
-        // div index 3 maps to 1/2 bar = 2 beats, so one cycle is 1s at 120 BPM.
-        assert!((synced_rate_hz(3, bpm) - 1.0).abs() < f32::EPSILON);
-        // div index 4 maps to 1 bar = 4 beats, so one cycle is 2s at 120 BPM.
-        assert!((synced_rate_hz(4, bpm) - 0.5).abs() < f32::EPSILON);
+        assert!(
+            (synced_rate_hz(SyncDivision::ThirtySecond as usize, bpm) - 16.0).abs() < f32::EPSILON
+        );
+        assert!((synced_rate_hz(SyncDivision::Quarter as usize, bpm) - 2.0).abs() < f32::EPSILON);
+        assert!((synced_rate_hz(SyncDivision::Whole as usize, bpm) - 0.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn sync_labels_match_builtin_effect_division_indices() {
+        let labels = sync_labels();
+
+        assert_eq!(labels[SyncDivision::Quarter as usize], "1/4");
+        assert_eq!(
+            sync_division_index(SyncDivision::Quarter),
+            SyncDivision::Quarter as usize as f32
+        );
     }
 
     #[test]

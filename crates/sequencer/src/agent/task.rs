@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::actions::AgentAppAction;
+use super::actions::{AgentAppAction, AgentSessionContext};
 use super::audition::{audition_feedback, audition_loaded_instrument};
 use super::dsp_validate::validate_instrument_dsp_source;
 use super::network::{AgentNetworkClient, AgentTurnResult};
@@ -22,6 +22,15 @@ const MAX_REQUEST_ATTEMPTS: u8 = 3;
 
 impl ConversationStore {
     pub fn send(&self, id: ConvId, prompt: impl Into<String>) -> Result<(), String> {
+        self.send_with_context(id, prompt, AgentSessionContext::default())
+    }
+
+    pub fn send_with_context(
+        &self,
+        id: ConvId,
+        prompt: impl Into<String>,
+        session_context: AgentSessionContext,
+    ) -> Result<(), String> {
         let prompt = prompt.into();
         eprintln!(
             "[agent] send requested conv={id} prompt_len={} prompt={:?}",
@@ -62,7 +71,7 @@ impl ConversationStore {
         let store = self.clone();
         let handle = std::thread::spawn(move || {
             eprintln!("[agent] worker started conv={id}");
-            run_conversation_turn(store, id, task_cancel);
+            run_conversation_turn(store, id, session_context, task_cancel);
             eprintln!("[agent] worker exited conv={id}");
         });
         self.task_handles()
@@ -73,7 +82,12 @@ impl ConversationStore {
     }
 }
 
-fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<AtomicBool>) {
+fn run_conversation_turn(
+    store: ConversationStore,
+    id: ConvId,
+    session_context: AgentSessionContext,
+    cancel: Arc<AtomicBool>,
+) {
     loop {
         if cancel.load(Ordering::Acquire) {
             eprintln!("[agent] worker observed cancellation conv={id}");
@@ -97,6 +111,7 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
         let system_prompt = system_prompt_for(request.kind);
         let turn = match execute_tool_turn_with_retries(
             &store,
+            &session_context,
             request.provider,
             &request.model,
             system_prompt,
@@ -179,6 +194,7 @@ fn run_conversation_turn(store: ConversationStore, id: ConvId, cancel: Arc<Atomi
 
 fn execute_tool_turn_with_retries(
     store: &ConversationStore,
+    session_context: &AgentSessionContext,
     provider: super::providers::AgentProviderKind,
     model: &str,
     system_prompt: &str,
@@ -200,7 +216,7 @@ fn execute_tool_turn_with_retries(
                 model,
                 system_prompt,
                 messages,
-                store.session_context(),
+                session_context.clone(),
                 Some(&|call| {
                     let message = tool_progress_message(call);
                     eprintln!("[agent] tool progress conv={id}: {message}");

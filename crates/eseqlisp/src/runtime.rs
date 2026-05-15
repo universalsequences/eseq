@@ -1483,6 +1483,10 @@ impl Runtime {
         self.invalidate_symbol_cache();
     }
 
+    pub fn global_value(&self, name: &str) -> Option<Value> {
+        self.vm.global_value(name)
+    }
+
     pub fn register_reactive(&mut self, name: &str, fields: Vec<(&str, Value)>, writable: bool) {
         let map = self.reactive_registry.register(name, fields, writable);
         self.vm.set_global_value(name, map);

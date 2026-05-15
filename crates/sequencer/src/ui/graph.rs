@@ -1557,6 +1557,16 @@ impl GraphController<'_> {
                     engine_id, v
                 ));
             }
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.app.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::voice_modulator::PARAM_BPM as u64,
+                        logical_id: mod_id as u64,
+                        fvalue: self.app.state.transport.bpm.load(Ordering::Relaxed) as f32,
+                    },
+                );
+            }
 
             let slot_id = engine_id * MAX_VOICES + v;
             lisp_effect::set_dgen_instrument_fn(slot_id, lib.process_fn);

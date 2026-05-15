@@ -2129,21 +2129,22 @@ fn register_agent_mode_natives(
             prompt.len(),
             prompt
         );
-        if let Some(snapshot) = s.snapshot(id) {
-            let state = snapshot.state;
-            if state.kind == sequencer::agent::store::AgentKind::Instrument
-                && state.draft.is_none()
-                && state.stub_instrument_target.is_none()
-                && state.accepted_instrument_target.is_none()
-                && state.finalized_instrument_name.is_none()
-            {
-                ctx.enqueue_command(HostCommand::Custom {
-                    name: "agent-ensure-instrument-stub".to_string(),
-                    payload: Value::Number(id as f64),
-                });
-            }
+        if s.snapshot(id).is_none() {
+            return Err(format!("unknown agent conversation {id}"));
         }
-        s.send(id, prompt)?;
+        let mut payload = std::collections::HashMap::new();
+        payload.insert(
+            "id".to_string(),
+            Rc::new(RefCell::new(Value::Number(id as f64))),
+        );
+        payload.insert(
+            "prompt".to_string(),
+            Rc::new(RefCell::new(Value::String(prompt))),
+        );
+        ctx.enqueue_command(HostCommand::Custom {
+            name: "agent-send".to_string(),
+            payload: Value::Map(payload),
+        });
         Ok(Value::Nil)
     });
 

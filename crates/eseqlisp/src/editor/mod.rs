@@ -2384,6 +2384,10 @@ impl Editor {
         &mut self.runtime
     }
 
+    pub fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+
     pub fn into_runtime(self) -> Runtime {
         self.runtime
     }

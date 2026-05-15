@@ -159,8 +159,8 @@ fn param_scaling(param: &sequencer::effects::ParamDescriptor) -> String {
     }
 }
 
-fn runtime_usize_state(editor: &mut Editor, name: &str) -> Option<usize> {
-    match editor.runtime_mut().eval_str(name).ok().flatten() {
+fn runtime_usize_state(editor: &Editor, name: &str) -> Option<usize> {
+    match editor.runtime().global_value(name) {
         Some(Value::Number(value)) if value >= 0.0 => Some(value as usize),
         _ => None,
     }
@@ -168,7 +168,7 @@ fn runtime_usize_state(editor: &mut Editor, name: &str) -> Option<usize> {
 
 fn metal_agent_session_context(
     app: &ui::App,
-    editor: &mut Editor,
+    editor: &Editor,
     current_track: &Arc<AtomicUsize>,
 ) -> AgentSessionContext {
     let track = current_track_for_snapshot(app, current_track);
@@ -1105,12 +1105,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         editor.update_tile_rects(cols as u16, rows as u16);
         editor.sync_reactive_bindings_for_visible_layouts();
-        app.agent_store
-            .set_session_context(metal_agent_session_context(
-                &app,
-                &mut editor,
-                &current_track,
-            ));
         if log_voice_counts && last_voice_count_log_at.elapsed() >= VOICE_COUNT_LOG_INTERVAL {
             log_active_voice_counts(&state, &track_names);
             last_voice_count_log_at = Instant::now();
@@ -4792,6 +4786,85 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(error) => {
                                 editor.handle_host_event(HostEvent::Error(error));
                             }
+                        }
+                    }
+                    "agent-send" => {
+                        let Value::Map(map) = payload else {
+                            editor.handle_host_event(HostEvent::Error(
+                                "agent-send: expected payload map".to_string(),
+                            ));
+                            continue;
+                        };
+                        let conv_id = match map.get("id").map(|cell| cell.borrow().clone()) {
+                            Some(Value::Number(id)) if id >= 1.0 => {
+                                id as sequencer::agent::store::ConvId
+                            }
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "agent-send: expected conversation id".to_string(),
+                                ));
+                                continue;
+                            }
+                        };
+                        let prompt = match map.get("prompt").map(|cell| cell.borrow().clone()) {
+                            Some(Value::String(prompt)) => prompt,
+                            _ => {
+                                editor.handle_host_event(HostEvent::Error(
+                                    "agent-send: expected prompt string".to_string(),
+                                ));
+                                continue;
+                            }
+                        };
+
+                        let needs_stub = app
+                            .agent_store
+                            .snapshot(conv_id)
+                            .map(|snapshot| {
+                                let state = snapshot.state;
+                                state.kind == sequencer::agent::store::AgentKind::Instrument
+                                    && state.draft.is_none()
+                                    && state.stub_instrument_target.is_none()
+                                    && state.accepted_instrument_target.is_none()
+                                    && state.finalized_instrument_name.is_none()
+                            })
+                            .unwrap_or(false);
+                        if needs_stub {
+                            match ensure_agent_instrument_stub_track(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                &current_track,
+                                &mut track_names,
+                                &track_pan_ids,
+                                &record_armed,
+                                &selected_steps,
+                                &accumulator_names,
+                                &cached_track_peak_levels,
+                                &cached_bus_peak_levels,
+                                &ui_epoch,
+                                lg_raw,
+                                conv_id,
+                            ) {
+                                Ok(track_index) => {
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Created working instrument track {}",
+                                        track_index + 1
+                                    )));
+                                }
+                                Err(error) => {
+                                    editor.handle_host_event(HostEvent::Error(error));
+                                    continue;
+                                }
+                            }
+                        }
+
+                        let session_context =
+                            metal_agent_session_context(&app, &editor, &current_track);
+                        if let Err(error) =
+                            app.agent_store
+                                .send_with_context(conv_id, prompt, session_context)
+                        {
+                            editor.handle_host_event(HostEvent::Error(error));
                         }
                     }
                     "agent-ensure-instrument-stub" => {
