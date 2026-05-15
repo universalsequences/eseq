@@ -3715,6 +3715,51 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_agent_open_starts_general_conversation() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<Value>>::new()));
+        let mut editor =
+            eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        register_agent_test_natives(editor.runtime_mut());
+        let captured_calls = calls.clone();
+        editor
+            .runtime_mut()
+            .register_native("agent/new", move |args, _ctx| {
+                captured_calls.lock().unwrap().push(args.to_vec());
+                Ok(Value::Number(1.0))
+            });
+        editor.runtime_mut().register_reactive(
+            "AGENT",
+            vec![("generation", Value::Number(0.0))],
+            false,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "mac-osx-dark.lisp")"#)
+            .expect("load theme");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "metal-seq-agent.lisp")"#)
+            .expect("load agent lisp");
+
+        editor
+            .runtime_mut()
+            .eval_str("(agent-open)")
+            .expect("open agent panel");
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "agent-open should create one conversation");
+        assert!(
+            matches!(
+                calls[0].as_slice(),
+                [Value::Keyword(kind), Value::Symbol(agent_kind)]
+                    if kind == "kind" && agent_kind == "general"
+            ),
+            "agent-open should request a general conversation, got {:?}",
+            calls[0]
+        );
+    }
+
+    #[test]
     fn metal_seq_agent_composer_keeps_actions_below_full_width_input() {
         use eseqlisp::layout::LayoutNode;
 
@@ -5526,6 +5571,20 @@ mod tests {
             &selected_steps,
             &step_clipboard,
         ));
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("delete-count").unwrap(),
+            Some(Value::Number(0.0))
+        );
+
+        selected_steps.lock().unwrap().insert(3);
         assert!(handle_metal_command_shortcut(
             &mut editor,
             &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),

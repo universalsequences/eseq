@@ -486,8 +486,9 @@ pub(crate) fn build_custom_midi_fx_ui_source_with_overlay(
             lisp_string_literal(&fx_name)
         ));
         dispatch = format!(
-            "(if (= (get fx :name) {}) ({fn_name} fx) {dispatch})",
-            lisp_string_literal(&fx_name)
+            "(if (or (= (get fx :name) {}) (= (get fx :name) {})) ({fn_name} fx) {dispatch})",
+            lisp_string_literal(&fx_name),
+            lisp_string_literal(&format!("{}/", fx_name.trim_end_matches('/')))
         );
     }
 
@@ -585,8 +586,9 @@ pub(crate) fn build_custom_audio_fx_ui_source_with_overlay(
             lisp_string_literal(&fx_name)
         ));
         dispatch = format!(
-            "(if (= (get fx :name) {}) ({fn_name} fx) {dispatch})",
-            lisp_string_literal(&fx_name)
+            "(if (or (= (get fx :name) {}) (= (get fx :name) {})) ({fn_name} fx) {dispatch})",
+            lisp_string_literal(&fx_name),
+            lisp_string_literal(&format!("{}/", fx_name.trim_end_matches('/')))
         );
     }
 
@@ -621,7 +623,10 @@ pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) {
 
 #[cfg(test)]
 mod tests {
-    use super::build_custom_instrument_ui_source_with_overlay;
+    use super::{
+        build_custom_audio_fx_ui_source_with_overlay,
+        build_custom_instrument_ui_source_with_overlay,
+    };
 
     #[test]
     fn instrument_ui_injection_namespaces_local_helpers() {
@@ -651,6 +656,30 @@ mod tests {
         assert!(
             !source.contains("(def tune-block"),
             "local helper should not be injected under its unqualified name:\n{source}"
+        );
+    }
+
+    #[test]
+    fn audio_effect_ui_dispatch_matches_folder_names_with_trailing_slash() {
+        let source = build_custom_audio_fx_ui_source_with_overlay(Some((
+            "agent-effect-draft-1".to_string(),
+            "effects/agent-effect-draft-1/ui.lisp".to_string(),
+            r#"
+            (defeffect-ui
+              (ui-lego-column-full
+                (ui-control-block-small-s "MIX" (ui-accent-blue) 0
+                  (ui-lego-knob-s 0 "mix" "mix" 4.8 (ui-accent-blue) 2))))
+            "#
+            .to_string(),
+        )));
+
+        assert!(
+            source.contains(r#"(= (get fx :name) "agent-effect-draft-1")"#),
+            "{source}"
+        );
+        assert!(
+            source.contains(r#"(= (get fx :name) "agent-effect-draft-1/")"#),
+            "{source}"
         );
     }
 }

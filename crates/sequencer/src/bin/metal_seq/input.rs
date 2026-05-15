@@ -426,6 +426,9 @@ pub(crate) fn handle_metal_command_shortcut(
                 return true;
             }
             (KeyCode::Backspace | KeyCode::Delete, KeyModifiers::NONE) => {
+                if selected_steps.lock().unwrap().is_empty() {
+                    return false;
+                }
                 let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");
                 editor.refresh_runtime_side_effects();
                 return true;

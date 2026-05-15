@@ -2100,8 +2100,7 @@ fn register_agent_mode_natives(
 ) {
     let s = store.clone();
     runtime.register_native("agent/new", move |args, _ctx| {
-        let kind =
-            parse_agent_kind(&args).unwrap_or(sequencer::agent::store::AgentKind::Instrument);
+        let kind = parse_agent_kind(&args).unwrap_or(sequencer::agent::store::AgentKind::General);
         let id = s.new_conversation(kind);
         eprintln!("[agent-ui] agent/new kind={kind:?} conv={id}");
         Ok(Value::Number(id as f64))
@@ -2245,6 +2244,11 @@ fn register_agent_mode_natives(
         Ok(state
             .draft
             .map(|draft| Value::String(draft.dsp_source))
+            .or_else(|| {
+                state
+                    .effect_draft
+                    .map(|draft| Value::String(draft.dsp_source))
+            })
             .unwrap_or(Value::Nil))
     });
 
@@ -2254,6 +2258,11 @@ fn register_agent_mode_natives(
         Ok(state
             .draft
             .map(|draft| Value::String(draft.ui_source))
+            .or_else(|| {
+                state
+                    .effect_draft
+                    .map(|draft| Value::String(draft.ui_source))
+            })
             .unwrap_or(Value::Nil))
     });
 
@@ -2349,12 +2358,14 @@ fn parse_agent_kind(args: &[Value]) -> Option<sequencer::agent::store::AgentKind
     match candidate.trim_start_matches(':') {
         "instrument" => Some(sequencer::agent::store::AgentKind::Instrument),
         "effect" => Some(sequencer::agent::store::AgentKind::Effect),
+        "general" => Some(sequencer::agent::store::AgentKind::General),
         _ => None,
     }
 }
 
 fn agent_kind_symbol(kind: sequencer::agent::store::AgentKind) -> &'static str {
     match kind {
+        sequencer::agent::store::AgentKind::General => "general",
         sequencer::agent::store::AgentKind::Instrument => "instrument",
         sequencer::agent::store::AgentKind::Effect => "effect",
     }
@@ -2483,9 +2494,23 @@ fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Va
         .or(target_name)
         .or(draft_name)
         .or(stub_name);
+    let effect_name = state
+        .finalized_effect_name
+        .clone()
+        .or_else(|| state.effect_draft.as_ref().map(|draft| draft.name.clone()));
+    let artifact_name = match state.kind {
+        sequencer::agent::store::AgentKind::Instrument => instrument_name.clone(),
+        sequencer::agent::store::AgentKind::Effect => effect_name.clone(),
+        sequencer::agent::store::AgentKind::General => {
+            instrument_name.clone().or_else(|| effect_name.clone())
+        }
+    };
+    let unapplied_effect_draft = state.effect_draft.is_some()
+        && !state.effect_draft_applied
+        && state.finalized_effect_name.is_none();
 
     let mut map = std::collections::HashMap::new();
-    let exists = instrument_name.is_some();
+    let exists = artifact_name.is_some();
     map.insert(
         "exists".to_string(),
         Rc::new(RefCell::new(Value::Bool(exists))),
@@ -2493,7 +2518,7 @@ fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Va
     map.insert(
         "name".to_string(),
         Rc::new(RefCell::new(
-            instrument_name
+            artifact_name
                 .clone()
                 .map(Value::String)
                 .unwrap_or(Value::Nil),
@@ -2502,22 +2527,56 @@ fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Va
     map.insert(
         "display-name".to_string(),
         Rc::new(RefCell::new(
-            instrument_name
+            artifact_name
                 .as_ref()
                 .map(|name| Value::String(display_name(name)))
                 .unwrap_or(Value::Nil),
         )),
     );
-    let status = if state.finalized_instrument_name.is_some() {
-        "saved"
-    } else if state.accepted_instrument_target.is_some() {
-        "applied"
-    } else if state.draft.is_some() {
-        "ready"
-    } else if state.stub_instrument_target.is_some() {
-        "working"
-    } else {
-        "none"
+    let status = match state.kind {
+        sequencer::agent::store::AgentKind::Instrument => {
+            if state.finalized_instrument_name.is_some() {
+                "saved"
+            } else if state.accepted_instrument_target.is_some() {
+                "applied"
+            } else if state.draft.is_some() {
+                "ready"
+            } else if state.stub_instrument_target.is_some() {
+                "working"
+            } else {
+                "none"
+            }
+        }
+        sequencer::agent::store::AgentKind::Effect => {
+            if state.finalized_effect_name.is_some() {
+                "saved"
+            } else if unapplied_effect_draft && state.accepted_effect_target.is_some() {
+                "updated"
+            } else if unapplied_effect_draft {
+                "ready"
+            } else if state.accepted_effect_target.is_some() {
+                "applied"
+            } else {
+                "none"
+            }
+        }
+        sequencer::agent::store::AgentKind::General => {
+            if state.finalized_instrument_name.is_some() || state.finalized_effect_name.is_some() {
+                "saved"
+            } else if unapplied_effect_draft && state.accepted_effect_target.is_some() {
+                "updated"
+            } else if state.draft.is_some() || unapplied_effect_draft {
+                "ready"
+            } else if state.accepted_instrument_target.is_some()
+                || state.accepted_effect_target.is_some()
+            {
+                "applied"
+            } else if state.stub_instrument_target.is_some() {
+                "working"
+            } else {
+                "none"
+            }
+        }
     };
     map.insert(
         "status".to_string(),
@@ -2525,23 +2584,83 @@ fn agent_artifact_value(state: sequencer::agent::store::ConversationState) -> Va
     );
     map.insert(
         "track".to_string(),
-        Rc::new(RefCell::new(
-            state
+        Rc::new(RefCell::new(match state.kind {
+            sequencer::agent::store::AgentKind::Instrument => state
                 .accepted_instrument_target
                 .as_ref()
                 .or(state.stub_instrument_target.as_ref())
                 .map(|target| Value::Number((target.track_index + 1) as f64))
                 .unwrap_or(Value::Nil),
-        )),
+            sequencer::agent::store::AgentKind::Effect => state
+                .accepted_effect_target
+                .as_ref()
+                .map(|target| Value::Number((target.track_index + 1) as f64))
+                .unwrap_or(Value::Nil),
+            sequencer::agent::store::AgentKind::General => state
+                .accepted_instrument_target
+                .as_ref()
+                .or(state.stub_instrument_target.as_ref())
+                .map(|target| Value::Number((target.track_index + 1) as f64))
+                .or_else(|| {
+                    state
+                        .accepted_effect_target
+                        .as_ref()
+                        .map(|target| Value::Number((target.track_index + 1) as f64))
+                })
+                .unwrap_or(Value::Nil),
+        })),
     );
     map.insert(
         "has-draft".to_string(),
-        Rc::new(RefCell::new(Value::Bool(state.draft.is_some()))),
+        Rc::new(RefCell::new(Value::Bool(
+            state.draft.is_some() || state.effect_draft.is_some(),
+        ))),
     );
     map.insert(
         "can-finalize".to_string(),
-        Rc::new(RefCell::new(Value::Bool(
-            state.accepted_instrument_target.is_some() && state.finalized_instrument_name.is_none(),
+        Rc::new(RefCell::new(Value::Bool(match state.kind {
+            sequencer::agent::store::AgentKind::Instrument => {
+                state.accepted_instrument_target.is_some()
+                    && state.finalized_instrument_name.is_none()
+            }
+            sequencer::agent::store::AgentKind::Effect => {
+                (state.effect_draft.is_some() || state.accepted_effect_target.is_some())
+                    && state.finalized_effect_name.is_none()
+            }
+            sequencer::agent::store::AgentKind::General => {
+                (state.accepted_instrument_target.is_some()
+                    && state.finalized_instrument_name.is_none())
+                    || ((state.effect_draft.is_some() || state.accepted_effect_target.is_some())
+                        && state.finalized_effect_name.is_none())
+            }
+        }))),
+    );
+    map.insert(
+        "can-apply".to_string(),
+        Rc::new(RefCell::new(Value::Bool(match state.kind {
+            sequencer::agent::store::AgentKind::Instrument => {
+                state.draft.is_some()
+                    && state.accepted_instrument_target.is_none()
+                    && state.finalized_instrument_name.is_none()
+            }
+            sequencer::agent::store::AgentKind::Effect => unapplied_effect_draft,
+            sequencer::agent::store::AgentKind::General => {
+                (state.draft.is_some()
+                    && state.accepted_instrument_target.is_none()
+                    && state.finalized_instrument_name.is_none())
+                    || unapplied_effect_draft
+            }
+        }))),
+    );
+    map.insert(
+        "apply-label".to_string(),
+        Rc::new(RefCell::new(Value::String(
+            if unapplied_effect_draft && state.accepted_effect_target.is_some() {
+                "Update artifact"
+            } else {
+                "Apply artifact"
+            }
+            .to_string(),
         ))),
     );
     Value::Map(map)
@@ -2568,6 +2687,28 @@ fn agent_audition_value(audition: sequencer::agent::store::AuditionResult) -> Va
     map.insert(
         "duration-ms".to_string(),
         Rc::new(RefCell::new(Value::Number(audition.duration_ms as f64))),
+    );
+    map.insert(
+        "silent".to_string(),
+        Rc::new(RefCell::new(Value::Bool(audition.silent))),
+    );
+    map.insert(
+        "differs-from-input".to_string(),
+        Rc::new(RefCell::new(
+            audition
+                .differs_from_input
+                .map(Value::Bool)
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    map.insert(
+        "diff-rms-db".to_string(),
+        Rc::new(RefCell::new(
+            audition
+                .diff_rms_db
+                .map(|value| Value::Number(value as f64))
+                .unwrap_or(Value::Nil),
+        )),
     );
     Value::Map(map)
 }
@@ -2860,6 +3001,86 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn map_bool(value: &Value, key: &str) -> bool {
+        let Value::Map(map) = value else {
+            panic!("expected map value");
+        };
+        match map.get(key).map(|cell| cell.borrow().clone()) {
+            Some(Value::Bool(value)) => value,
+            other => panic!("expected bool field {key}, got {other:?}"),
+        }
+    }
+
+    fn map_symbol(value: &Value, key: &str) -> String {
+        let Value::Map(map) = value else {
+            panic!("expected map value");
+        };
+        match map.get(key).map(|cell| cell.borrow().clone()) {
+            Some(Value::Symbol(value)) => value,
+            other => panic!("expected symbol field {key}, got {other:?}"),
+        }
+    }
+
+    fn map_string(value: &Value, key: &str) -> String {
+        let Value::Map(map) = value else {
+            panic!("expected map value");
+        };
+        match map.get(key).map(|cell| cell.borrow().clone()) {
+            Some(Value::String(value)) => value,
+            other => panic!("expected string field {key}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn applied_general_effect_artifact_can_finalize_but_not_apply_again() {
+        let store = sequencer::agent::store::ConversationStore::new(44_100);
+        let id = store.new_conversation(sequencer::agent::store::AgentKind::General);
+        let mut state = store.snapshot(id).unwrap().state;
+        state.effect_draft = Some(sequencer::agent::store::EffectDraft {
+            name: "simple-tape-delay".to_string(),
+            dsp_source: "(def in_l (in 1 @name left))".to_string(),
+            ui_source: "(defeffect-ui (label \"ok\"))".to_string(),
+        });
+        state.accepted_effect_target = Some(sequencer::agent::store::AcceptedEffectTarget {
+            track_index: 0,
+            slot_index: 0,
+            effect_name: "agent-effect-draft-1/".to_string(),
+        });
+        state.effect_draft_applied = true;
+
+        let artifact = agent_artifact_value(state);
+
+        assert_eq!(map_symbol(&artifact, "status"), "applied");
+        assert!(!map_bool(&artifact, "can-apply"));
+        assert!(map_bool(&artifact, "can-finalize"));
+        assert!(map_bool(&artifact, "has-draft"));
+    }
+
+    #[test]
+    fn updated_applied_effect_artifact_can_apply_again() {
+        let store = sequencer::agent::store::ConversationStore::new(44_100);
+        let id = store.new_conversation(sequencer::agent::store::AgentKind::Effect);
+        let mut state = store.snapshot(id).unwrap().state;
+        state.effect_draft = Some(sequencer::agent::store::EffectDraft {
+            name: "simple-tape-delay".to_string(),
+            dsp_source: "(def in_l (in 1 @name left))".to_string(),
+            ui_source: "(defeffect-ui (label \"ok\"))".to_string(),
+        });
+        state.accepted_effect_target = Some(sequencer::agent::store::AcceptedEffectTarget {
+            track_index: 0,
+            slot_index: 0,
+            effect_name: "agent-effect-draft-1/".to_string(),
+        });
+        state.effect_draft_applied = false;
+
+        let artifact = agent_artifact_value(state);
+
+        assert_eq!(map_symbol(&artifact, "status"), "updated");
+        assert!(map_bool(&artifact, "can-apply"));
+        assert_eq!(map_string(&artifact, "apply-label"), "Update artifact");
+        assert!(map_bool(&artifact, "can-finalize"));
+    }
 
     #[test]
     fn agent_display_text_omits_fenced_source_blocks() {

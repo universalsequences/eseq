@@ -174,6 +174,10 @@ impl AgentToolRegistry {
                 ));
             }
 
+            if let Some(guidance) = effect_authoring_guidance(query) {
+                lines.push(guidance.to_string());
+            }
+
             if lines.is_empty() {
                 lines.push(format!("No DGenLisp docs matched '{query}'."));
             }
@@ -242,12 +246,22 @@ impl AgentToolRegistry {
             .find(|example| example.name == name)
             .ok_or_else(|| format!("No example named '{name}'."))?;
 
-        let source = std::fs::read_to_string(Path::new(&example.path))
+        let path = Path::new(&example.path);
+        let source = std::fs::read_to_string(path)
             .map_err(|error| format!("Failed to read '{}': {error}", example.path))?;
+        let content = if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
+            let ui_path = path.with_file_name("ui.lisp");
+            match std::fs::read_to_string(&ui_path) {
+                Ok(ui_source) => format!("[dsp.lisp]\n{source}\n\n[ui.lisp]\n{ui_source}"),
+                Err(_) => format!("[dsp.lisp]\n{source}"),
+            }
+        } else {
+            source
+        };
 
         Ok(ToolResult {
             summary: format!("Loaded example '{}' from {}.", example.name, example.path),
-            content: source,
+            content,
             pending_actions: Vec::new(),
         })
     }
@@ -260,12 +274,27 @@ impl AgentToolRegistry {
                 return Err("read_patch_source requires an explicit example kind.".to_string())
             }
         };
-        let path = Path::new(dir).join(format!("{name}.lisp"));
+        let flat_path = Path::new(dir).join(format!("{name}.lisp"));
+        let folder_dsp_path = Path::new(dir).join(name).join("dsp.lisp");
+        let path = if flat_path.exists() {
+            flat_path
+        } else {
+            folder_dsp_path
+        };
         let source = std::fs::read_to_string(&path)
             .map_err(|error| format!("Failed to read '{}': {error}", path.display()))?;
+        let content = if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
+            let ui_path = path.with_file_name("ui.lisp");
+            match std::fs::read_to_string(&ui_path) {
+                Ok(ui_source) => format!("[dsp.lisp]\n{source}\n\n[ui.lisp]\n{ui_source}"),
+                Err(_) => format!("[dsp.lisp]\n{source}"),
+            }
+        } else {
+            source
+        };
         Ok(ToolResult {
             summary: format!("Loaded source from {}.", path.display()),
-            content: source,
+            content,
             pending_actions: Vec::new(),
         })
     }
@@ -283,7 +312,7 @@ impl AgentToolRegistry {
                 continue;
             }
 
-            let mut paths = collect_lisp_files(base)?;
+            let mut paths = collect_patch_source_files(base)?;
             paths.sort();
 
             for path in paths {
@@ -294,13 +323,40 @@ impl AgentToolRegistry {
     }
 }
 
-fn collect_lisp_files(base: &Path) -> Result<Vec<PathBuf>, String> {
+fn effect_authoring_guidance(query: &str) -> Option<&'static str> {
+    let normalized = query.trim().to_ascii_lowercase();
+    if normalized.contains("defeffect")
+        || normalized.contains("effect boilerplate")
+        || normalized.contains("effect wrapper")
+    {
+        return Some(
+            "effect authoring - There is no top-level `defeffect` DSP wrapper. Effect dsp.lisp files are top-level `(def ...)`, `(defmacro ...)`, `(param ...)`, `(in ...)`, and `(out ...)` forms. Use `(defeffect-ui ...)` only in ui.lisp.",
+        );
+    }
+
+    match normalized.as_str() {
+        "group" | "vgroup" | "hgroup" | "knob" | "slider" | "ui" | "ui-control-block"
+        | "ui-control-block-header" | "ui-control-block-grid" | "ui-control-block-param"
+        | "ui-readout-block" | "ui-readout-block-param" | "@accent" => Some(
+            "custom effect UI authoring - Generated ui.lisp should use exactly one `(defeffect-ui <body>)` form with concrete lego helpers. Use `(ui-control-block-medium-s \"TITLE\" (ui-accent-blue) section body)`, `(ui-readout-block-small-s \"TITLE\" (ui-accent-orange) section body)`, and controls like `(ui-lego-knob-s section \"param_name\" \"label\" 4.8 (ui-accent-cyan) decimals)`. Column helpers have fixed arity: `ui-lego-column` takes three blocks, `ui-lego-column-2` takes two blocks, and `ui-lego-column-full` takes one block. Do not put two blocks inside `ui-lego-column-full`. Do not use legacy or invented wrappers such as `group`, `vgroup`, `hgroup`, `knob`, `slider`, `ui-control-block`, `ui-control-block-header`, `ui-control-block-grid`, or `ui-control-block-param`. Do not use `@accent`; accents are positional helper arguments.",
+        ),
+        _ => None,
+    }
+}
+
+fn collect_patch_source_files(base: &Path) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
-    collect_lisp_files_into(base, &mut paths)?;
+    collect_patch_source_files_into(base, &mut paths)?;
     Ok(paths)
 }
 
-fn collect_lisp_files_into(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_patch_source_files_into(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
+    let dsp_path = dir.join("dsp.lisp");
+    if dsp_path.exists() {
+        paths.push(dsp_path);
+        return Ok(());
+    }
+
     for entry in std::fs::read_dir(dir)
         .map_err(|error| format!("Failed to read '{}': {error}", dir.display()))?
     {
@@ -308,7 +364,7 @@ fn collect_lisp_files_into(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), S
             .map_err(|error| format!("Failed to read entry in '{}': {error}", dir.display()))?
             .path();
         if path.is_dir() {
-            collect_lisp_files_into(&path, paths)?;
+            collect_patch_source_files_into(&path, paths)?;
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("lisp") {
             paths.push(path);
         }
@@ -336,11 +392,7 @@ fn build_live_example(path: PathBuf, kind: &str) -> Result<DocExample, String> {
         .join("\n");
 
     Ok(DocExample {
-        name: path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| format!("Invalid example path '{}'.", path.display()))?
-            .to_string(),
+        name: example_name_for_path(&path)?,
         kind: kind.to_string(),
         path: path.to_string_lossy().into_owned(),
         params,
@@ -348,6 +400,21 @@ fn build_live_example(path: PathBuf, kind: &str) -> Result<DocExample, String> {
         modulator_count,
         preview,
     })
+}
+
+fn example_name_for_path(path: &Path) -> Result<String, String> {
+    if path.file_name().and_then(|name| name.to_str()) == Some("dsp.lisp") {
+        return path
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| format!("Invalid folder-style example path '{}'.", path.display()));
+    }
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("Invalid example path '{}'.", path.display()))
 }
 
 fn parse_param_name(line: &str) -> Option<String> {
@@ -428,6 +495,34 @@ mod tests {
     }
 
     #[test]
+    fn lookup_docs_explains_effect_wrapper_shape() {
+        let tools = AgentToolRegistry::load_default().expect("load tools");
+        let result = tools.lookup_dgen_docs(&["defeffect".to_string()], 3);
+        assert!(result.content.contains("no top-level `defeffect`"));
+        assert!(result
+            .content
+            .contains("Use `(defeffect-ui ...)` only in ui.lisp"));
+    }
+
+    #[test]
+    fn lookup_docs_explains_generated_effect_ui_helpers() {
+        let tools = AgentToolRegistry::load_default().expect("load tools");
+        let result = tools.lookup_dgen_docs(
+            &[
+                "vgroup".to_string(),
+                "knob".to_string(),
+                "ui-control-block-param".to_string(),
+                "@accent".to_string(),
+            ],
+            3,
+        );
+        assert!(result.content.contains("ui-lego-knob-s"));
+        assert!(result.content.contains("Do not use legacy"));
+        assert!(result.content.contains("Do not use `@accent`"));
+        assert!(result.content.contains("ui-lego-column-2"));
+    }
+
+    #[test]
     fn list_instrument_examples_returns_known_example() {
         let tools = AgentToolRegistry::load_default().expect("load tools");
         let result = tools.list_examples(ExampleKind::Instrument, 200);
@@ -440,5 +535,32 @@ mod tests {
         let tools = AgentToolRegistry::load_default().expect("load tools");
         let result = tools.read_example("prophet-5").expect("read example");
         assert!(result.content.contains("(param"));
+    }
+
+    #[test]
+    fn effect_examples_are_named_by_folder_and_include_ui() {
+        let tools = AgentToolRegistry::load_default().expect("load tools");
+        let listed = tools.list_examples(ExampleKind::Effect, 200);
+        assert!(listed.content.contains("stereo-tremolo (effect)"));
+        assert!(!listed.content.contains("ui (effect)"));
+        assert!(!listed.content.contains("dsp (effect)"));
+
+        let result = tools
+            .read_example("stereo-tremolo")
+            .expect("read effect example");
+        assert!(result.content.contains("[dsp.lisp]"));
+        assert!(result.content.contains("[ui.lisp]"));
+        assert!(result.content.contains("(defeffect-ui"));
+    }
+
+    #[test]
+    fn read_patch_source_supports_folder_style_effects() {
+        let tools = AgentToolRegistry::load_default().expect("load tools");
+        let result = tools
+            .read_patch_source(ExampleKind::Effect, "dualdelaymod")
+            .expect("read folder effect");
+        assert!(result.content.contains("[dsp.lisp]"));
+        assert!(result.content.contains("[ui.lisp]"));
+        assert!(result.content.contains("ui-lego-column-2"));
     }
 }

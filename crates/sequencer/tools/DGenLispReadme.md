@@ -162,7 +162,8 @@ All arithmetic respects type promotion:
 #### Unary
 
 ```lisp
-(sin x)      (cos x)      (tan x)      (tanh x)
+(sin x)      (cos x)      (tan x)      (atan x)
+(tanh x)
 (exp x)      (log x)      (sqrt x)     (abs x)
 (sign x)     (floor x)    (ceil x)     (round x)
 (relu x)     (sigmoid x)  (log10 x)

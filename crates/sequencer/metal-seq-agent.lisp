@@ -27,13 +27,16 @@
           (- (min left right) 0.045))
         (material :color fg-col)))))
 
-(def agent-open-instrument ()
+(def agent-open ()
   (do
     (if (= agent-current-conv 0)
-      (set! agent-current-conv (agent/new :kind 'instrument))
+      (set! agent-current-conv (agent/new :kind 'general))
       nil)
     (set-window-buffer-for "*track*" "*agent-artifacts*")
     (switch-to-buffer "*agent*")))
+
+(def agent-open-instrument ()
+  (agent-open))
 
 (def agent-close-panel ()
   (do
@@ -42,7 +45,7 @@
 
 (def agent-new-conversation ()
   (do
-    (set! agent-current-conv (agent/new :kind 'instrument))
+    (set! agent-current-conv (agent/new :kind 'general))
     (set! agent-finalize-name "")))
 
 (def agent-send-current ()
@@ -110,21 +113,21 @@
 (def agent-message-list ()
   (if (= agent-current-conv 0)
     (box :width :fill :flex 1 :align :center
-      (button "Ask agent for an instrument"
+      (button "Ask agent"
         :variant :primary
         :height 1.5
-        :on-click |x y r| (agent-open-instrument)))
+        :on-click |x y r| (agent-open)))
     (let ((messages (agent/messages agent-current-conv)))
       (if (= (len messages) 0)
         (box :width :fill :flex 1 :align :center :padding 1.0
           (v-stack :gap 0.65 :align :center
-            (label "Describe an instrument to generate"
+            (label "Describe an instrument, effect, or edit"
               :font-size 13
               :color :white
               :bg :transparent)
-            (button "glassy FM pad with slow attack"
+            (button "tape delay effect"
               :variant :ghost
-              :on-click |x y r| (set! agent-prompt "a glassy FM pad with slow attack"))))
+              :on-click |x y r| (set! agent-prompt "create a tape delay effect"))))
         (scroll :key (str "agent-scroll-" agent-current-conv)
                 :width :fill
                 :flex 1
@@ -134,16 +137,19 @@
               (agent-message-card (nth messages i) i))))))))
 
 (def agent-draft-actions ()
-  (if (and (> agent-current-conv 0) (agent/draft-source agent-current-conv))
-    (h-stack :width :fill :gap 0.5 :align :center
-      (button "Accept as new track"
-        :variant :primary
-        :height 1.25
-        :on-click |x y r| (agent/accept agent-current-conv))
-      (button "Discard"
-        :variant :danger
-        :height 1.25
-        :on-click |x y r| (agent/discard agent-current-conv)))
+  (if (> agent-current-conv 0)
+    (let ((artifact (agent/artifact agent-current-conv)))
+      (if (get artifact :can-apply)
+        (h-stack :width :fill :gap 0.5 :align :center
+          (button (str (get artifact :apply-label))
+            :variant :primary
+            :height 1.25
+            :on-click |x y r| (agent/accept agent-current-conv))
+          (button "Discard"
+            :variant :danger
+            :height 1.25
+            :on-click |x y r| (agent/discard agent-current-conv)))
+        (box :height 0.1)))
     (box :height 0.1)))
 
 (def agent-artifact-finalize-name (artifact)
@@ -218,7 +224,7 @@
               :font-size 12
               :color :white
               :bg :transparent)
-            (label "No instrument artifact yet"
+            (label "No artifact yet"
               :font-size 11
               :color :gray
               :wrap true
@@ -259,7 +265,7 @@
           (textbox
             :key "agent-prompt-input"
             :value agent-prompt
-            :placeholder "Describe an instrument..."
+            :placeholder "Describe an instrument, effect, or change..."
             :width :fill
             :min-lines 2
             :max-lines 7
@@ -302,4 +308,4 @@
   (let ((agent-generation AGENT.generation))
     (agent-artifact-panel)))
 
-(bind-key "C-g" "agent-open-instrument")
+(bind-key "C-g" "agent-open")

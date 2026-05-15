@@ -5,20 +5,22 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::actions::{AgentAppAction, AgentSessionContext};
-use super::audition::{audition_feedback, audition_loaded_instrument};
-use super::dsp_validate::validate_instrument_dsp_source;
+use super::audition::{audition_feedback, audition_loaded_effect, audition_loaded_instrument};
+use super::dsp_validate::{validate_effect_dsp_source, validate_instrument_dsp_source};
 use super::network::{AgentNetworkClient, AgentTurnResult};
 use super::parse::{instrument_artifacts, last_dgenlisp_block, InstrumentArtifacts};
-use super::protocol::ToolCall;
+use super::protocol::{ToolCall, ToolCallOutcome};
 use super::providers::{AgentMessage, AgentMessageRole};
+use super::store::EffectDraft;
 use super::store::{
     bump, push_message, push_message_with_reasoning, AgentKind, AgentStatus, ConvId,
     ConversationState, ConversationStore, InstrumentDraft, Role, RunningTask,
 };
-use super::ui_validate::validate_instrument_ui_source;
+use super::ui_validate::{validate_effect_ui_source, validate_instrument_ui_source};
 
 const MAX_RETRIES_PER_TURN: u8 = 3;
 const MAX_REQUEST_ATTEMPTS: u8 = 3;
+const TOOL_CONTEXT_MAX_CHARS: usize = 1_600;
 
 impl ConversationStore {
     pub fn send(&self, id: ConvId, prompt: impl Into<String>) -> Result<(), String> {
@@ -112,6 +114,7 @@ fn run_conversation_turn(
         let turn = match execute_tool_turn_with_retries(
             &store,
             &session_context,
+            request.kind,
             request.provider,
             &request.model,
             system_prompt,
@@ -154,18 +157,7 @@ fn run_conversation_turn(
                     turn.reasoning_content.clone(),
                 );
             }
-            for outcome in &turn.tool_outcomes {
-                push_message(
-                    state,
-                    Role::System,
-                    format!(
-                        "tool {} [{}]\n{}",
-                        outcome.name,
-                        if outcome.ok { "ok" } else { "error" },
-                        outcome.summary
-                    ),
-                );
-            }
+            push_tool_outcomes_as_context(state, &turn.tool_outcomes);
         }
 
         match run_pending_action_pipeline(&store, id, turn.pending_actions) {
@@ -195,6 +187,7 @@ fn run_conversation_turn(
 fn execute_tool_turn_with_retries(
     store: &ConversationStore,
     session_context: &AgentSessionContext,
+    kind: AgentKind,
     provider: super::providers::AgentProviderKind,
     model: &str,
     system_prompt: &str,
@@ -210,22 +203,21 @@ fn execute_tool_turn_with_retries(
             return Err("request cancelled".to_string());
         }
 
-        let result = client
-            .execute_turn_with_progress(
-                provider,
-                model,
-                system_prompt,
-                messages,
-                session_context.clone(),
-                Some(&|call| {
-                    let message = tool_progress_message(call);
-                    eprintln!("[agent] tool progress conv={id}: {message}");
-                    if let Err(error) = store.push_tool_message(id, message) {
-                        eprintln!("[agent] failed to record tool progress conv={id}: {error}");
-                    }
-                }),
-            )
-            .map_err(|error| error.message);
+        let result = client.execute_turn_with_progress_for_kind(
+            provider,
+            model,
+            system_prompt,
+            messages,
+            session_context.clone(),
+            kind,
+            Some(&|call| {
+                let message = tool_progress_message(call);
+                eprintln!("[agent] tool progress conv={id}: {message}");
+                if let Err(error) = store.push_tool_message(id, message) {
+                    eprintln!("[agent] failed to record tool progress conv={id}: {error}");
+                }
+            }),
+        );
         match result {
             Ok(turn) => {
                 if attempt > 1 {
@@ -234,11 +226,19 @@ fn execute_tool_turn_with_retries(
                 return Ok(turn);
             }
             Err(error) => {
-                let retryable = is_retryable_request_error(&error);
+                if !error.tool_outcomes.is_empty() {
+                    let inner = store.inner();
+                    let mut inner = inner.lock().unwrap();
+                    if let Some(state) = inner.get_mut(&id) {
+                        push_tool_outcomes_as_context(state, &error.tool_outcomes);
+                    }
+                }
+                let retryable = is_retryable_request_error(&error.message);
                 eprintln!(
-                    "[agent] request attempt failed conv={id} attempt={attempt}/{MAX_REQUEST_ATTEMPTS} retryable={retryable}: {error}"
+                    "[agent] request attempt failed conv={id} attempt={attempt}/{MAX_REQUEST_ATTEMPTS} retryable={retryable}: {}",
+                    error.message
                 );
-                last_error = Some(error.clone());
+                last_error = Some(error.message.clone());
                 if !retryable || attempt == MAX_REQUEST_ATTEMPTS {
                     break;
                 }
@@ -250,12 +250,43 @@ fn execute_tool_turn_with_retries(
     Err(last_error.unwrap_or_else(|| "request failed".to_string()))
 }
 
+fn push_tool_outcomes_as_context(state: &mut ConversationState, outcomes: &[ToolCallOutcome]) {
+    for outcome in outcomes {
+        push_message(state, Role::System, tool_outcome_context_message(outcome));
+    }
+}
+
+fn tool_outcome_context_message(outcome: &ToolCallOutcome) -> String {
+    let status = if outcome.ok { "ok" } else { "error" };
+    let mut message = format!("tool {} [{status}]\n{}", outcome.name, outcome.summary);
+    let content = outcome.content.trim();
+    if !content.is_empty() && content != outcome.summary.trim() {
+        message.push_str("\nresult excerpt:\n");
+        message.push_str(&truncate_for_tool_context(content, TOOL_CONTEXT_MAX_CHARS));
+    }
+    message
+}
+
+fn truncate_for_tool_context(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let mut truncated = text.chars().take(max_chars).collect::<String>();
+    truncated.push_str("\n...[truncated]");
+    truncated
+}
+
 fn request_retry_delay(attempt: u8) -> Duration {
     Duration::from_millis(750 * attempt as u64)
 }
 
 fn tool_progress_message(call: &ToolCall) -> String {
     match call.name.as_str() {
+        "set_agent_intent" => match string_arg(&call.arguments, "intent") {
+            Some(intent) => format!("Routing this request to the {intent} agent."),
+            None => "Routing this request to a focused agent.".to_string(),
+        },
         "lookup_dgen_docs" => {
             let queries = string_list_arg(&call.arguments, "queries")
                 .or_else(|| string_arg(&call.arguments, "query").map(|query| vec![query]));
@@ -298,6 +329,16 @@ fn tool_progress_message(call: &ToolCall) -> String {
         "create_instrument_artifact" => match string_arg(&call.arguments, "name") {
             Some(name) => format!("Creating draft instrument artifact `{name}`."),
             None => "Creating a draft instrument artifact.".to_string(),
+        },
+        "create_effect_artifact" => match string_arg(&call.arguments, "name") {
+            Some(name) => format!("Creating draft effect artifact `{name}`."),
+            None => "Creating a draft effect artifact.".to_string(),
+        },
+        "update_effect_artifact" => "Updating the current draft effect artifact.".to_string(),
+        "apply_effect_artifact" => "Applying the current draft effect artifact.".to_string(),
+        "finalize_effect_artifact" => match string_arg(&call.arguments, "name") {
+            Some(name) => format!("Finalizing effect artifact as `{name}`."),
+            None => "Finalizing the current effect artifact.".to_string(),
         },
         "create_instrument_track" => match string_arg(&call.arguments, "name") {
             Some(name) => format!("Creating instrument track `{name}`."),
@@ -439,7 +480,11 @@ fn run_pending_action_pipeline(
         return PipelineOutcome::Done;
     }
 
+    let mut routed_intent = false;
     for action in actions {
+        if matches!(action, AgentAppAction::SetAgentIntent { .. }) {
+            routed_intent = true;
+        }
         match apply_agent_action(store, id, action) {
             Ok(message) => {
                 let inner = store.inner();
@@ -454,6 +499,10 @@ fn run_pending_action_pipeline(
                 });
             }
         }
+    }
+
+    if routed_intent {
+        return PipelineOutcome::Retry;
     }
 
     let inner = store.inner();
@@ -472,15 +521,213 @@ fn apply_agent_action(
     action: AgentAppAction,
 ) -> Result<String, String> {
     match action {
+        AgentAppAction::SetAgentIntent { kind } => set_agent_intent(store, id, kind),
         AgentAppAction::CreateInstrumentArtifact {
             name,
             dsp_source,
             ui_source,
         } => create_instrument_artifact(store, id, name, dsp_source, ui_source),
+        AgentAppAction::CreateEffectArtifact {
+            name,
+            dsp_source,
+            ui_source,
+        } => create_effect_artifact(store, id, name, dsp_source, ui_source),
+        AgentAppAction::UpdateEffectArtifact {
+            name,
+            dsp_source,
+            ui_source,
+        } => update_effect_artifact(store, id, name, dsp_source, ui_source),
+        AgentAppAction::FinalizeEffectArtifact { name } => finalize_effect_artifact(store, id, name),
+        AgentAppAction::ApplyEffectArtifact { .. } => Err(
+            "apply_effect_artifact requires the app-host agent path because applying mutates the live project graph. The artifact was not applied."
+                .to_string(),
+        ),
         other => Err(format!(
             "Tool returned unsupported action for this agent panel: {other:?}"
         )),
     }
+}
+
+fn set_agent_intent(
+    store: &ConversationStore,
+    id: ConvId,
+    kind: AgentKind,
+) -> Result<String, String> {
+    if kind == AgentKind::General {
+        return Err("General is not a focused agent intent.".to_string());
+    }
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    let state = inner
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+    state.kind = kind;
+    state.status = AgentStatus::Streaming;
+    state.last_compile_error = None;
+    bump(state);
+    Ok(match kind {
+        AgentKind::Instrument => {
+            "Intent selected: instrument. Continuing with the focused instrument agent.".to_string()
+        }
+        AgentKind::Effect => {
+            "Intent selected: effect. Continuing with the focused effect agent.".to_string()
+        }
+        AgentKind::General => unreachable!(),
+    })
+}
+
+fn create_effect_artifact(
+    store: &ConversationStore,
+    id: ConvId,
+    name: String,
+    dsp_source: String,
+    ui_source: String,
+) -> Result<String, String> {
+    validate_effect_artifact_sources(store, id, &name, &dsp_source, &ui_source)?;
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    let state = inner
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+    state.effect_draft = Some(EffectDraft {
+        name: name.clone(),
+        dsp_source,
+        ui_source,
+    });
+    state.effect_draft_applied = false;
+    state.last_compile_error = None;
+    state.finalized_effect_name = None;
+    state.status = AgentStatus::Idle;
+    bump(state);
+    Ok(format!(
+        "Created validated draft effect artifact 'fx-{id}' named '{name}'."
+    ))
+}
+
+fn update_effect_artifact(
+    store: &ConversationStore,
+    id: ConvId,
+    name: Option<String>,
+    dsp_source: String,
+    ui_source: String,
+) -> Result<String, String> {
+    let existing_name = store
+        .snapshot(id)
+        .and_then(|snapshot| snapshot.state.effect_draft.map(|draft| draft.name))
+        .ok_or_else(|| "No draft effect artifact exists to update.".to_string())?;
+    let name = name.unwrap_or(existing_name);
+    validate_effect_artifact_sources(store, id, &name, &dsp_source, &ui_source)?;
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    let state = inner
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+    state.effect_draft = Some(EffectDraft {
+        name: name.clone(),
+        dsp_source,
+        ui_source,
+    });
+    state.effect_draft_applied = false;
+    state.last_compile_error = None;
+    state.finalized_effect_name = None;
+    state.status = AgentStatus::Idle;
+    bump(state);
+    Ok(format!(
+        "Updated validated draft effect artifact 'fx-{id}' named '{name}'."
+    ))
+}
+
+fn validate_effect_artifact_sources(
+    store: &ConversationStore,
+    id: ConvId,
+    name: &str,
+    dsp_source: &str,
+    ui_source: &str,
+) -> Result<(), String> {
+    if let Err(error) = validate_effect_dsp_source(dsp_source) {
+        log_failed_effect_sources(id, "dsp validation", &error, dsp_source, ui_source);
+        return Err(format!("dsp.lisp validation error:\n{error}"));
+    }
+
+    let compile_result = match crate::lisp_effect::compile_and_load(dsp_source, store.sample_rate())
+    {
+        Ok(result) => result,
+        Err(error) => {
+            log_failed_effect_sources(id, "dsp compile", &error, dsp_source, ui_source);
+            return Err(format!("compile error:\n{error}"));
+        }
+    };
+
+    if let Err(error) = validate_effect_ui_source(ui_source, &compile_result.manifest) {
+        log_failed_effect_sources(id, "ui validation", &error, dsp_source, ui_source);
+        return Err(format!("ui.lisp validation error:\n{error}"));
+    }
+
+    let audition = match audition_loaded_effect(&compile_result, store.sample_rate()) {
+        Ok(audition) => audition,
+        Err(error) => {
+            log_failed_effect_sources(id, "audition", &error, dsp_source, ui_source);
+            return Err(format!("audition failed:\n{error}"));
+        }
+    };
+    let feedback = audition_feedback(&audition);
+    if audition.silent || audition.clipped || audition.differs_from_input == Some(false) {
+        return Err(feedback);
+    }
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    let state = inner
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+    state.last_audition = Some(audition);
+    push_message(
+        state,
+        Role::System,
+        format!("Validated effect artifact '{name}'. {feedback}"),
+    );
+    Ok(())
+}
+
+fn finalize_effect_artifact(
+    store: &ConversationStore,
+    id: ConvId,
+    name: String,
+) -> Result<String, String> {
+    let final_name = format!("{}/", name.trim_end_matches('/'));
+    let draft = store
+        .snapshot(id)
+        .and_then(|snapshot| snapshot.state.effect_draft)
+        .ok_or_else(|| "No draft effect artifact exists to finalize.".to_string())?;
+    validate_effect_artifact_sources(store, id, &final_name, &draft.dsp_source, &draft.ui_source)?;
+    if crate::lisp_effect::effect_source_path(&final_name).exists()
+        || crate::lisp_effect::effect_ui_path(&final_name).exists()
+    {
+        return Err(format!("Effect '{name}' already exists."));
+    }
+    crate::lisp_effect::save_effect(&final_name, &draft.dsp_source)
+        .map_err(|error| format!("Failed to save finalized effect dsp.lisp: {error}"))?;
+    if let Err(error) = crate::lisp_effect::save_effect_ui(&final_name, &draft.ui_source) {
+        let _ = std::fs::remove_file(crate::lisp_effect::effect_source_path(&final_name));
+        return Err(format!("Failed to save finalized effect ui.lisp: {error}"));
+    }
+    store
+        .set_finalized_effect_name(id, final_name.clone())
+        .map_err(|error| format!("Failed to mark effect finalized: {error}"))?;
+    Ok(format!(
+        "Finalized effect artifact 'fx-{id}' as '{final_name}'."
+    ))
+}
+
+fn log_failed_effect_sources(
+    id: ConvId,
+    stage: &str,
+    error: &str,
+    dsp_source: &str,
+    ui_source: &str,
+) {
+    eprintln!(
+        "[agent] effect artifact failed conv={id} stage={stage}: {error}\n[agent-source failed conv={id} effect dsp.lisp BEGIN]\n{dsp_source}\n[agent-source failed conv={id} effect dsp.lisp END]\n[agent-source failed conv={id} effect ui.lisp BEGIN]\n{ui_source}\n[agent-source failed conv={id} effect ui.lisp END]"
+    );
 }
 
 fn create_instrument_artifact(
@@ -593,6 +840,7 @@ fn run_post_turn_pipeline(
     };
 
     match kind {
+        AgentKind::General => run_instrument_pipeline(store, id, artifacts),
         AgentKind::Effect => {
             eprintln!("[agent] effect mode requested conv={id}; unsupported in V1");
             set_error(
@@ -763,7 +1011,7 @@ fn message_with_retry_guidance(message: &str) -> String {
     }
 
     format!(
-        "{message}\n\nRetry instruction: repair the exact full artifact you just generated and call `create_instrument_artifact` again. Do not call `list_examples`, `read_example`, or `read_instrument_source` again for this direct validator/compiler error unless the error is about unknown syntax/operator and does not already provide the replacement. Do not reread an example you already read in this conversation."
+        "{message}\n\nRetry instruction: repair the exact full artifact you just generated and call the matching artifact create/update tool again. Do not call `list_examples`, `read_example`, `read_instrument_source`, or `read_effect_source` again for this direct validator/compiler error unless the error is about unknown syntax/operator and does not already provide the replacement. Do not reread an example you already read in this conversation."
     )
 }
 
@@ -797,6 +1045,7 @@ fn set_idle(store: &ConversationStore, id: ConvId) {
 
 fn system_prompt_for(kind: AgentKind) -> &'static str {
     match kind {
+        AgentKind::General => include_str!("prompts/general.md"),
         AgentKind::Instrument => include_str!("prompts/instrument.md"),
         AgentKind::Effect => include_str!("prompts/effect.md"),
     }
@@ -806,10 +1055,12 @@ fn system_prompt_for(kind: AgentKind) -> &'static str {
 mod tests {
     use super::{
         build_request, is_retryable_request_error, message_with_retry_guidance,
-        tool_progress_message,
+        run_pending_action_pipeline, tool_outcome_context_message, tool_progress_message,
+        PipelineOutcome,
     };
-    use crate::agent::protocol::ToolCall;
-    use crate::agent::store::{ConversationStore, Role};
+    use crate::agent::actions::AgentAppAction;
+    use crate::agent::protocol::{ToolCall, ToolCallOutcome};
+    use crate::agent::store::{AgentKind, AgentStatus, ConversationStore, Role};
     use serde_json::json;
 
     #[test]
@@ -862,14 +1113,55 @@ mod tests {
     }
 
     #[test]
+    fn tool_context_keeps_bounded_result_excerpt_for_future_turns() {
+        let message = tool_outcome_context_message(&ToolCallOutcome {
+            name: "lookup_dgen_docs".to_string(),
+            ok: true,
+            summary: "Looked up docs: ui-lego-dropdown.".to_string(),
+            content: "ui-lego-dropdown was not found.\nUse ui-lego-knob-s for continuous controls."
+                .to_string(),
+            pending_actions: Vec::new(),
+        });
+
+        assert!(message.contains("tool lookup_dgen_docs [ok]"));
+        assert!(message.contains("Looked up docs: ui-lego-dropdown."));
+        assert!(message.contains("ui-lego-dropdown was not found"));
+        assert!(message.contains("ui-lego-knob-s"));
+    }
+
+    #[test]
+    fn intent_action_switches_general_conversation_to_focused_kind() {
+        let store = ConversationStore::new(48_000);
+        let id = store.new_conversation(AgentKind::General);
+
+        let outcome = run_pending_action_pipeline(
+            &store,
+            id,
+            vec![AgentAppAction::SetAgentIntent {
+                kind: AgentKind::Instrument,
+            }],
+        );
+
+        assert!(matches!(outcome, PipelineOutcome::Retry));
+        let snapshot = store.snapshot(id).expect("snapshot");
+        assert_eq!(snapshot.state.kind, AgentKind::Instrument);
+        assert_eq!(snapshot.state.status, AgentStatus::Streaming);
+        assert!(snapshot
+            .state
+            .messages
+            .iter()
+            .any(|message| message.text.contains("focused instrument agent")));
+    }
+
+    #[test]
     fn artifact_errors_include_direct_repair_guidance() {
         let message = message_with_retry_guidance(
             "ui.lisp validation error:\nUnknownVariable(\"ui-accent-magenta\")",
         );
         assert!(message.contains("repair the exact full artifact"));
-        assert!(message.contains(
-            "Do not call `list_examples`, `read_example`, or `read_instrument_source` again"
-        ));
+        assert!(message.contains("Do not call `list_examples`"));
+        assert!(message.contains("`read_instrument_source`"));
+        assert!(message.contains("`read_effect_source`"));
     }
 
     #[test]

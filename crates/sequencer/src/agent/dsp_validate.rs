@@ -95,6 +95,98 @@ pub fn validate_instrument_dsp_source(source: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_effect_dsp_source(source: &str) -> Result<(), String> {
+    let tokens = Parser::new(source.to_string())
+        .parse()
+        .map_err(|error| format!("dsp.lisp parse error: {error:?}"))?;
+    let exprs = ASTParser::new(tokens)
+        .parse()
+        .map_err(|error| format!("dsp.lisp AST error: {error:?}"))?;
+
+    let mut mod_accessor_params = Vec::new();
+    let mut direct_mod_refs = Vec::new();
+    let mut mod_metadata_params = Vec::new();
+    let mut modulator_inputs = Vec::new();
+    let mut inputs = Vec::new();
+    let mut outputs = Vec::new();
+
+    for expr in &exprs {
+        if let Some(error) = effect_wrapper_form_error(expr) {
+            return Err(error);
+        }
+        if let Some(error) = malformed_param_like_form_error(expr) {
+            return Err(error);
+        }
+        collect_mod_accessor_params(expr, &mut mod_accessor_params);
+        collect_direct_modulator_refs(expr, &mut direct_mod_refs);
+        collect_effect_mod_metadata_params(expr, &mut mod_metadata_params);
+        collect_effect_modulator_inputs(expr, &mut modulator_inputs);
+        if let Some(input) = effect_input_decl(expr) {
+            inputs.push(input);
+        }
+        if let Some(output) = effect_output_decl(expr) {
+            outputs.push(output);
+        }
+    }
+
+    mod_accessor_params.sort();
+    mod_accessor_params.dedup();
+    if !mod_accessor_params.is_empty() {
+        return Err(format!(
+            "effects cannot use `(mod param_name)` because effect parameters are not host-modulatable yet. Read these effect parameter(s) directly by name instead: {}.",
+            mod_accessor_params.join(", ")
+        ));
+    }
+
+    direct_mod_refs.sort();
+    direct_mod_refs.dedup();
+    if !direct_mod_refs.is_empty() {
+        return Err(format!(
+            "effects cannot read host modulation input(s): {}. Do not declare or use mod1..mod6 in effect DSP.",
+            direct_mod_refs.join(", ")
+        ));
+    }
+
+    mod_metadata_params.sort();
+    mod_metadata_params.dedup();
+    if !mod_metadata_params.is_empty() {
+        return Err(format!(
+            "effects cannot declare host-modulatable parameters yet. Remove `@mod true`/`@mod-mode` metadata from: {}.",
+            mod_metadata_params.join(", ")
+        ));
+    }
+
+    modulator_inputs.sort();
+    modulator_inputs.dedup();
+    if !modulator_inputs.is_empty() {
+        return Err(format!(
+            "effects cannot declare `@modulator` inputs. Remove modulation input declaration(s): {}.",
+            modulator_inputs.join(", ")
+        ));
+    }
+
+    require_named_channel(&inputs, 1, "left", "input")?;
+    require_named_channel(&inputs, 2, "right", "input")?;
+    require_named_channel(&outputs, 1, "left", "output")?;
+    require_named_channel(&outputs, 2, "right", "output")?;
+
+    Ok(())
+}
+
+fn effect_wrapper_form_error(expr: &Expression) -> Option<String> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if !matches!(items.first(), Some(Expression::Symbol(head)) if head == "defeffect") {
+        return None;
+    }
+
+    Some(
+        "effect dsp.lisp must not use a `(defeffect ...)` wrapper. DGenLisp effects are written as top-level forms: `(def in_l (in 1 @name left))`, `(def in_r (in 2 @name right))`, `(param ...)`, DSP `(def ...)` helpers, then `(out ... 1 @name left)` and `(out ... 2 @name right)`. Remove the outer `(defeffect name ... )` form and keep its body as top-level dsp_source."
+            .to_string(),
+    )
+}
+
 fn malformed_param_like_form_error(expr: &Expression) -> Option<String> {
     let Expression::List(items) = expr else {
         return None;
@@ -225,9 +317,127 @@ fn is_modulator_symbol(symbol: &str) -> bool {
     matches!(symbol, "mod1" | "mod2" | "mod3" | "mod4" | "mod5" | "mod6")
 }
 
+#[derive(Debug, Clone)]
+struct NamedChannel {
+    channel: usize,
+    name: Option<String>,
+}
+
+fn collect_effect_mod_metadata_params(expr: &Expression, params: &mut Vec<String>) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    if matches!(items.first(), Some(Expression::Symbol(head)) if head == "param") {
+        let name = match items.get(1) {
+            Some(Expression::Symbol(name)) => name.clone(),
+            _ => "<unnamed>".to_string(),
+        };
+        if items.iter().any(|item| {
+            matches!(
+                item,
+                Expression::Symbol(symbol) if symbol == "@mod" || symbol == "@mod-mode"
+            )
+        }) {
+            params.push(name);
+        }
+    }
+    for item in items {
+        collect_effect_mod_metadata_params(item, params);
+    }
+}
+
+fn collect_effect_modulator_inputs(expr: &Expression, inputs: &mut Vec<String>) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    if matches!(items.first(), Some(Expression::Symbol(head)) if head == "def") {
+        let name = match items.get(1) {
+            Some(Expression::Symbol(name)) => name.clone(),
+            _ => "<unnamed>".to_string(),
+        };
+        if expr_contains_symbol(expr, "@modulator") {
+            inputs.push(name);
+        }
+    }
+    for item in items {
+        collect_effect_modulator_inputs(item, inputs);
+    }
+}
+
+fn expr_contains_symbol(expr: &Expression, needle: &str) -> bool {
+    match expr {
+        Expression::Symbol(symbol) => symbol == needle,
+        Expression::List(items) => items.iter().any(|item| expr_contains_symbol(item, needle)),
+        _ => false,
+    }
+}
+
+fn effect_input_decl(expr: &Expression) -> Option<NamedChannel> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if !matches!(items.first(), Some(Expression::Symbol(head)) if head == "def") {
+        return None;
+    }
+    let Some(Expression::List(input_items)) = items.get(2) else {
+        return None;
+    };
+    if !matches!(input_items.first(), Some(Expression::Symbol(head)) if head == "in") {
+        return None;
+    }
+    named_channel(input_items)
+}
+
+fn effect_output_decl(expr: &Expression) -> Option<NamedChannel> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if !matches!(items.first(), Some(Expression::Symbol(head)) if head == "out") {
+        return None;
+    }
+    named_channel(&items[1..])
+}
+
+fn named_channel(items: &[Expression]) -> Option<NamedChannel> {
+    let channel = items.iter().find_map(expression_usize)?;
+    let name = items.windows(2).find_map(|window| match window {
+        [Expression::Symbol(attr), Expression::Symbol(name) | Expression::String(name)]
+            if attr == "@name" =>
+        {
+            Some(name.clone())
+        }
+        _ => None,
+    });
+    Some(NamedChannel { channel, name })
+}
+
+fn expression_usize(expr: &Expression) -> Option<usize> {
+    match expr {
+        Expression::Number(value) if *value >= 0.0 => Some(*value as usize),
+        _ => None,
+    }
+}
+
+fn require_named_channel(
+    channels: &[NamedChannel],
+    channel: usize,
+    name: &str,
+    kind: &str,
+) -> Result<(), String> {
+    if channels
+        .iter()
+        .any(|candidate| candidate.channel == channel && candidate.name.as_deref() == Some(name))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "effect DSP must declare stereo {kind} channel {channel} with `@name {name}`."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_instrument_dsp_source;
+    use super::{validate_effect_dsp_source, validate_instrument_dsp_source};
 
     #[test]
     fn allows_modulator_input_declarations_and_mod_accessor() {
@@ -249,6 +459,72 @@ mod tests {
             "#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn effect_validator_accepts_stereo_effect_shape() {
+        validate_effect_dsp_source(
+            r#"
+            (def in_l (in 1 @name left))
+            (def in_r (in 2 @name right))
+            (param rate @default 5 @min 0.1 @max 20)
+            (param depth @default 0.5 @min 0 @max 1)
+            (def p (phasor rate))
+            (def lfo (scale (triangle p 0.5) -1 1 (- 1 depth) 1))
+            (out (* in_l lfo) 1 @name left)
+            (out (* in_r lfo) 2 @name right)
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn effect_validator_rejects_host_modulation_forms() {
+        let err = validate_effect_dsp_source(
+            r#"
+            (def in_l (in 1 @name left))
+            (def in_r (in 2 @name right))
+            (param depth @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+            (out (* in_l (mod depth)) 1 @name left)
+            (out (* in_r mod1) 2 @name right)
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.contains("effects cannot use `(mod param_name)`"));
+    }
+
+    #[test]
+    fn effect_validator_rejects_missing_stereo_outputs() {
+        let err = validate_effect_dsp_source(
+            r#"
+            (def in_l (in 1 @name left))
+            (def in_r (in 2 @name right))
+            (param gain @default 1 @min 0 @max 2)
+            (out (* in_l gain) 1 @name left)
+            "#,
+        )
+        .unwrap_err();
+        assert!(err.contains("stereo output channel 2"));
+    }
+
+    #[test]
+    fn effect_validator_rejects_defeffect_wrapper_before_channel_errors() {
+        let err = validate_effect_dsp_source(
+            r#"
+            (defeffect bad-delay
+              (in 1 @name left)
+              (in 2 @name right)
+              (param mix @default 0.5 @min 0 @max 1)
+              (def l (in 1 @name left))
+              (def r (in 2 @name right))
+              (out l 1 @name left)
+              (out r 2 @name right))
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("must not use a `(defeffect ...)` wrapper"));
+        assert!(err.contains("keep its body as top-level dsp_source"));
     }
 
     #[test]

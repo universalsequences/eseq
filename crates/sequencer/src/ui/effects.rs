@@ -1240,7 +1240,7 @@ impl App {
         }
     }
 
-    pub(super) fn load_saved_effect_to_slot_sync(
+    pub fn load_saved_effect_to_slot_sync(
         &mut self,
         track: usize,
         slot_idx: usize,

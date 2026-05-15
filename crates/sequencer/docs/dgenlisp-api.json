@@ -920,6 +920,24 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 1,
+          "minimum": 1
+        },
+        "attributes": [],
+        "category": "math",
+        "implementation": {
+          "function": "evalUnaryMath",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "atan",
+        "signatures": [
+          "(atan x)"
+        ],
+        "summary": "One-argument arctangent."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": 2,
           "minimum": 2
         },

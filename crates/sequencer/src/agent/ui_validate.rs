@@ -9,6 +9,18 @@ pub fn validate_instrument_ui_source(
     ui_source: &str,
     manifest: &DGenManifest,
 ) -> Result<(), String> {
+    validate_ui_source(ui_source, manifest, UiRoot::Instrument)
+}
+
+pub fn validate_effect_ui_source(ui_source: &str, manifest: &DGenManifest) -> Result<(), String> {
+    validate_ui_source(ui_source, manifest, UiRoot::Effect)
+}
+
+fn validate_ui_source(
+    ui_source: &str,
+    manifest: &DGenManifest,
+    root: UiRoot,
+) -> Result<(), String> {
     let tokens = Parser::new(ui_source.to_string())
         .parse()
         .map_err(|error| format!("ui.lisp parse error: {error:?}"))?;
@@ -16,19 +28,23 @@ pub fn validate_instrument_ui_source(
         .parse()
         .map_err(|error| format!("ui.lisp AST error: {error:?}"))?;
 
-    let mut defsynth_ui_count = 0;
+    let mut root_count = 0;
     let mut referenced_params = BTreeSet::new();
     for expr in &exprs {
-        collect_ui_validation_refs(expr, &mut defsynth_ui_count, &mut referenced_params);
+        collect_ui_validation_refs(expr, root, &mut root_count, &mut referenced_params);
         validate_layout_contract(expr, UiContext::Root)?;
     }
 
-    if defsynth_ui_count == 0 {
-        return Err("ui.lisp must contain exactly one (defsynth-ui ...) form".to_string());
-    }
-    if defsynth_ui_count > 1 {
+    if root_count == 0 {
         return Err(format!(
-            "ui.lisp must contain exactly one (defsynth-ui ...) form, found {defsynth_ui_count}"
+            "ui.lisp must contain exactly one {} form",
+            root.form_name()
+        ));
+    }
+    if root_count > 1 {
+        return Err(format!(
+            "ui.lisp must contain exactly one {} form, found {root_count}",
+            root.form_name()
         ));
     }
 
@@ -64,14 +80,39 @@ pub fn validate_instrument_ui_source(
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UiRoot {
+    Instrument,
+    Effect,
+}
+
+impl UiRoot {
+    fn form_name(self) -> &'static str {
+        match self {
+            UiRoot::Instrument => "(defsynth-ui ...)",
+            UiRoot::Effect => "(defeffect-ui ...)",
+        }
+    }
+
+    fn symbol(self) -> &'static str {
+        match self {
+            UiRoot::Instrument => "defsynth-ui",
+            UiRoot::Effect => "defeffect-ui",
+        }
+    }
+}
+
 fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
     let mut runtime = Runtime::new();
     runtime
         .eval_str(
             r#"
             (def defsynth-ui (body) body)
+            (def defeffect-ui (body) body)
             (def synth-ui-current-inst (dict :synth '()))
             (def synth-ui-current-name "validation")
+            (def audio-fx-ui-current-fx (dict :params '()))
+            (def audio-fx-ui-current-name "validation")
             (def custom-ui-current-kind "instrument")
             (def custom-ui-selected-section 0)
             (def ui-section (title body) body)
@@ -145,6 +186,7 @@ fn validate_ui_evaluates(ui_source: &str) -> Result<(), String> {
             (def ui-lego-text-row-3 (a b c) (h-stack a b c))
             (def ui-lego-text-row-4 (a b c d) (h-stack a b c d))
             (def inst-param (inst name) (dict :name name :value 0 :min 0 :max 1))
+            (def effect-param (fx name) (dict :name name :value 0 :min 0 :max 1))
             (def inst-base-note-param (inst) (dict :name "base_note" :value 0 :min -48 :max 48))
             (def custom-ui-current-scope () (dict :kind custom-ui-current-kind :name synth-ui-current-name :inst synth-ui-current-inst))
             (def custom-ui-select-section-in-scope (scope section) section)
@@ -166,6 +208,14 @@ enum UiContext {
 }
 
 fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(), String> {
+    if let Expression::Symbol(symbol) = expr {
+        if symbol.starts_with('@') {
+            return Err(format!(
+                "ui.lisp uses invalid UI attribute `{symbol}`. Custom UI uses keyword attributes like `:width`/`:gap`, and helper arguments are positional. For accents, pass `(ui-accent-blue)`, `(ui-accent-cyan)`, `(ui-accent-orange)`, `(ui-accent-green)`, or `(ui-accent-violet)` as the positional accent argument; do not write `{symbol}`."
+            ));
+        }
+        return Ok(());
+    }
     let Expression::List(items) = expr else {
         return Ok(());
     };
@@ -173,12 +223,26 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
         Some(Expression::Symbol(head)) => head.as_str(),
         _ => "",
     };
+    validate_known_ui_helper_arity(head, items.len().saturating_sub(1))?;
 
     if head == "scroll" {
         return Err(
             "ui.lisp must not use scroll; custom synth UIs must fit the fixed-height rack panel"
                 .to_string(),
         );
+    }
+    if matches!(
+        head,
+        "ui-control-block"
+            | "ui-control-block-header"
+            | "ui-control-block-grid"
+            | "ui-control-block-param"
+            | "ui-readout-block"
+            | "ui-readout-block-param"
+    ) {
+        return Err(format!(
+            "ui.lisp uses invented UI helper `{head}`. Use the concrete lego helpers instead: `(ui-control-block-medium-s \"TITLE\" (ui-accent-blue) section body)`, `(ui-readout-block-small-s \"TITLE\" (ui-accent-orange) section body)`, and controls like `(ui-lego-knob-s section \"param_name\" \"label\" 4.8 (ui-accent-cyan) decimals)`."
+        ));
     }
     if matches!(
         head,
@@ -229,6 +293,138 @@ fn validate_layout_contract(expr: &Expression, context: UiContext) -> Result<(),
     Ok(())
 }
 
+fn validate_known_ui_helper_arity(head: &str, arg_count: usize) -> Result<(), String> {
+    match head {
+        "ui-lego-column" => require_ui_arity(
+            head,
+            arg_count,
+            3,
+            "Use `ui-lego-column-2` for two blocks, or `ui-lego-column-full` for one full-height block.",
+        ),
+        "ui-lego-column-2" => require_ui_arity(head, arg_count, 2, ""),
+        "ui-lego-column-full" => require_ui_arity(head, arg_count, 1, ""),
+        "ui-adsr-switch"
+        | "ui-adsr-switch-c"
+        | "ui-detail-adsr-switch-s"
+        | "ui-adsr-compact-switch-s" => {
+            if arg_count == 12 {
+                Ok(())
+            } else {
+                let envelope_note = if arg_count % 6 == 0 {
+                    format!(" It looks like {head} was given {} envelope slots.", arg_count / 6)
+                } else {
+                    String::new()
+                };
+                Err(format!(
+                    "ui.lisp calls `{head}` with {arg_count} argument(s), but it expects 12: exactly two envelope slots, each written as `section \"TITLE\" \"attack\" \"decay\" \"sustain\" \"release\"`.{envelope_note} Do not pass three envelopes to `{head}`; use two contextual envelopes, or expose the extra envelope with separate lego controls."
+                ))
+            }
+        }
+        "ui-lego-adsr-s" | "ui-detail-adsr-s" | "ui-adsr-compact-s" => require_ui_arity(
+            head,
+            arg_count,
+            6,
+            "Use `section \"TITLE\" \"attack\" \"decay\" \"sustain\" \"release\"`.",
+        ),
+        "ui-control-block-small" | "ui-control-block-medium" | "ui-control-block-full" => {
+            require_ui_arity(head, arg_count, 3, "Use `\"TITLE\" accent body`.")
+        }
+        "ui-control-block-small-s"
+        | "ui-control-block-medium-s"
+        | "ui-control-block-dense-s"
+        | "ui-control-block-full-s"
+        | "ui-lego-strip-s"
+        | "ui-lego-strip-half-s" => {
+            require_ui_arity(head, arg_count, 4, "Use `\"TITLE\" accent section body`.")
+        }
+        "ui-control-panel-dense-s"
+        | "ui-control-panel-small-s"
+        | "ui-control-panel-medium-s"
+        | "ui-readout-panel-small-s"
+        | "ui-readout-panel-dense-s"
+        | "ui-readout-panel-medium-s"
+        | "ui-lego-strip-panel-s" => require_ui_arity(head, arg_count, 2, "Use `section body`."),
+        "ui-readout-block-small" | "ui-readout-block-medium" | "ui-readout-block-full" => {
+            require_ui_arity(head, arg_count, 3, "Use `\"TITLE\" accent body`.")
+        }
+        "ui-readout-block-small-s" | "ui-readout-block-dense-s" => {
+            require_ui_arity(head, arg_count, 4, "Use `\"TITLE\" accent section body`.")
+        }
+        "ui-lego-knob" => require_ui_arity(
+            head,
+            arg_count,
+            5,
+            "Use `\"param_name\" \"label\" width accent decimals`.",
+        ),
+        "ui-lego-knob-s" => require_ui_arity(
+            head,
+            arg_count,
+            6,
+            "Use `section \"param_name\" \"label\" width accent decimals`.",
+        ),
+        "ui-lego-num" => require_ui_arity(
+            head,
+            arg_count,
+            6,
+            "Use `\"param_name\" \"label\" width decimals unit accent`.",
+        ),
+        "ui-lego-num-s" | "ui-lego-micro-num-s" => require_ui_arity(
+            head,
+            arg_count,
+            7,
+            "Use `section \"param_name\" \"label\" width decimals unit accent`.",
+        ),
+        "ui-lego-option" => require_ui_arity(
+            head,
+            arg_count,
+            5,
+            "Use `\"param_name\" \"label\" width '(\"opt0\" \"opt1\") accent`.",
+        ),
+        "ui-lego-option-s" | "ui-lego-micro-option-s" => require_ui_arity(
+            head,
+            arg_count,
+            6,
+            "Use `section \"param_name\" \"label\" width '(\"opt0\" \"opt1\") accent`.",
+        ),
+        "ui-lego-row" => require_ui_arity(
+            head,
+            arg_count,
+            5,
+            "Use `\"param_name\" \"label\" decimals unit accent`.",
+        ),
+        "ui-lego-base-note" => require_ui_arity(head, arg_count, 2, "Use `width accent`."),
+        "ui-lego-micro-base-note-s" => {
+            require_ui_arity(head, arg_count, 3, "Use `section width accent`.")
+        }
+        "ui-lego-badge" => require_ui_arity(head, arg_count, 3, "Use `\"TITLE\" width accent`."),
+        "ui-lego-badge-s" => {
+            require_ui_arity(head, arg_count, 4, "Use `section \"TITLE\" width accent`.")
+        }
+        "ui-lego-text-row-3" => require_ui_arity(head, arg_count, 3, ""),
+        "ui-lego-text-row-4" => require_ui_arity(head, arg_count, 4, ""),
+        _ => Ok(()),
+    }
+}
+
+fn require_ui_arity(
+    head: &str,
+    actual: usize,
+    expected: usize,
+    guidance: &str,
+) -> Result<(), String> {
+    if actual == expected {
+        return Ok(());
+    }
+    let guidance = if guidance.is_empty() {
+        String::new()
+    } else {
+        format!(" {guidance}")
+    };
+    Err(format!(
+        "ui.lisp calls `{head}` with {actual} argument(s), but it expects {expected}.{guidance}"
+    ))
+}
+
 const KNOWN_UI_ACCENTS: [&str; 5] = [
     "ui-accent-blue",
     "ui-accent-cyan",
@@ -243,7 +439,8 @@ fn is_known_ui_accent(name: &str) -> bool {
 
 fn collect_ui_validation_refs(
     expr: &Expression,
-    defsynth_ui_count: &mut usize,
+    root: UiRoot,
+    root_count: &mut usize,
     referenced_params: &mut BTreeSet<String>,
 ) {
     let Expression::List(items) = expr else {
@@ -251,13 +448,13 @@ fn collect_ui_validation_refs(
     };
     let Some(Expression::Symbol(head)) = items.first() else {
         for item in items {
-            collect_ui_validation_refs(item, defsynth_ui_count, referenced_params);
+            collect_ui_validation_refs(item, root, root_count, referenced_params);
         }
         return;
     };
 
     match head.as_str() {
-        "defsynth-ui" => *defsynth_ui_count += 1,
+        symbol if symbol == root.symbol() => *root_count += 1,
         "param" | "ui-param-control" | "ui-param-knob" | "ui-param-knob-c" | "ui-lego-knob"
         | "ui-lego-num" | "ui-lego-option" | "ui-lego-row" => {
             if let Some(name) = items.get(1).and_then(ui_param_ref_name) {
@@ -307,6 +504,11 @@ fn collect_ui_validation_refs(
                 referenced_params.insert(name);
             }
         }
+        "effect-param" => {
+            if let Some(name) = items.get(2).and_then(ui_param_ref_name) {
+                referenced_params.insert(name);
+            }
+        }
         "custom-ui-current-param" => {
             if let Some(name) = items.get(1).and_then(ui_param_ref_name) {
                 referenced_params.insert(name);
@@ -343,7 +545,7 @@ fn collect_ui_validation_refs(
     }
 
     for item in items {
-        collect_ui_validation_refs(item, defsynth_ui_count, referenced_params);
+        collect_ui_validation_refs(item, root, root_count, referenced_params);
     }
 }
 
@@ -357,7 +559,7 @@ fn ui_param_ref_name(expr: &Expression) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_instrument_ui_source;
+    use super::{validate_effect_ui_source, validate_instrument_ui_source};
     use crate::lisp_effect::{DGenManifest, DGenParam};
 
     fn manifest_with_params(names: &[&str]) -> DGenManifest {
@@ -553,6 +755,65 @@ mod tests {
     }
 
     #[test]
+    fn rejects_three_envelope_adsr_switch_with_specific_guidance() {
+        let manifest = manifest_with_params(&[
+            "amp_attack",
+            "amp_decay",
+            "amp_sustain",
+            "amp_release",
+            "index_attack",
+            "index_decay",
+            "index_sustain",
+            "index_release",
+            "filt_attack",
+            "filt_decay",
+            "filt_sustain",
+            "filt_release",
+        ]);
+
+        let err = validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (ui-lego-column-full
+                (box :width (ui-lego-col-w) :height (ui-lego-full-h)
+                  (ui-adsr-switch
+                    0 "AMP ENV" "amp_attack" "amp_decay" "amp_sustain" "amp_release"
+                    1 "FM ENV" "index_attack" "index_decay" "index_sustain" "index_release"
+                    2 "FILTER ENV" "filt_attack" "filt_decay" "filt_sustain" "filt_release"))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("ui-adsr-switch"));
+        assert!(err.contains("expects 12"));
+        assert!(err.contains("given 3 envelope slots"));
+        assert!(err.contains("Do not pass three envelopes"));
+    }
+
+    #[test]
+    fn rejects_two_block_lego_column_with_specific_guidance() {
+        let manifest = manifest_with_params(&["gain", "drive"]);
+
+        let err = validate_instrument_ui_source(
+            r#"
+            (defsynth-ui
+              (ui-lego-column
+                (ui-control-block-medium-s "OUT" (ui-accent-orange) 0
+                  (ui-lego-knob-s 0 "gain" "gain" 4.8 (ui-accent-orange) 2))
+                (ui-readout-block-small-s "DRIVE" (ui-accent-cyan) 0
+                  (ui-lego-num-s 0 "drive" "drive" 4.2 2 false (ui-accent-cyan)))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("ui-lego-column"));
+        assert!(err.contains("expects 3"));
+        assert!(err.contains("ui-lego-column-2"));
+    }
+
+    #[test]
     fn validates_dropdown_ui_and_inst_param_refs() {
         let manifest = manifest_with_params(&["filter_model", "cutoff", "resonance"]);
 
@@ -718,5 +979,91 @@ mod tests {
 
         assert!(err.contains("osc1_wvae"));
         assert!(err.contains("osc1_wave"));
+    }
+
+    #[test]
+    fn validates_defeffect_ui_and_param_refs() {
+        let manifest = manifest_with_params(&["rate", "depth", "mix"]);
+        validate_effect_ui_source(
+            r#"
+            (defeffect-ui
+              (h-stack :width :fill :gap 0.35 :align :stretch
+                (ui-lego-column-full
+                  (ui-control-block-medium-s "MOTION" (ui-accent-blue) 0
+                    (h-stack :gap 0.32 :align :start
+                      (ui-lego-knob-s 0 "rate" "rate" 4.8 (ui-accent-blue) 2)
+                      (ui-lego-knob-s 0 "depth" "depth" 4.8 (ui-accent-cyan) 2)
+                      (ui-lego-knob-s 0 "mix" "mix" 4.8 (ui-accent-orange) 2))))))
+            "#,
+            &manifest,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_defsynth_ui_for_effects() {
+        let manifest = manifest_with_params(&["mix"]);
+        let err = validate_effect_ui_source(
+            r#"(defsynth-ui (ui-lego-knob "mix" "mix" 4.8 (ui-accent-blue) 2))"#,
+            &manifest,
+        )
+        .unwrap_err();
+        assert!(err.contains("(defeffect-ui ...)"));
+    }
+
+    #[test]
+    fn rejects_unknown_effect_param_refs() {
+        let manifest = manifest_with_params(&["mix"]);
+        let err = validate_effect_ui_source(
+            r#"
+            (defeffect-ui
+              (ui-lego-column-full
+                (ui-control-block-medium-s "OUT" (ui-accent-orange) 0
+                  (ui-lego-knob-s 0 "mx" "mix" 4.8 (ui-accent-orange) 2))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+        assert!(err.contains("mx"));
+        assert!(err.contains("mix"));
+    }
+
+    #[test]
+    fn rejects_invented_effect_ui_block_helpers_before_eval() {
+        let manifest = manifest_with_params(&["curve", "drive"]);
+        let err = validate_effect_ui_source(
+            r#"
+            (defeffect-ui
+              (ui-control-block
+                (ui-control-block-header "Curve" "shape" @accent (ui-accent-violet))
+                (ui-control-block-grid
+                  (ui-control-block-param curve "Curve" (ui-lego-knob-s))
+                  (ui-control-block-param drive "Drive" (ui-lego-knob-s)))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("invented UI helper `ui-control-block`"));
+        assert!(err.contains("ui-control-block-medium-s"));
+        assert!(err.contains("ui-lego-knob-s"));
+    }
+
+    #[test]
+    fn rejects_at_prefixed_ui_pseudo_attributes_before_eval() {
+        let manifest = manifest_with_params(&["mix"]);
+        let err = validate_effect_ui_source(
+            r#"
+            (defeffect-ui
+              (ui-lego-column-full
+                (ui-control-block-medium-s "MIX" @accent 0
+                  (ui-lego-knob-s 0 "mix" "mix" 4.8 (ui-accent-blue) 2))))
+            "#,
+            &manifest,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("invalid UI attribute `@accent`"));
+        assert!(err.contains("helper arguments are positional"));
     }
 }

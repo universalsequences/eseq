@@ -5,13 +5,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::agent::actions::{
-    AgentAppAction, AgentInstrumentParamSchema, AgentInstrumentPresetDraft,
+    AgentAppAction, AgentEffectApplyTarget, AgentInstrumentParamSchema, AgentInstrumentPresetDraft,
     AgentInstrumentPresetSchema, AgentSessionContext,
 };
+use crate::agent::audition::{audition_feedback, audition_loaded_effect};
+use crate::agent::dsp_validate::validate_effect_dsp_source;
 use crate::agent::network::{AgentTurnError, AgentTurnResult};
 use crate::agent::protocol::{AgentToolRuntime, ToolCallOutcome};
 use crate::agent::providers::{AgentMessage, AgentMessageRole, AgentProviderState};
-use crate::agent::store::ConversationStore;
+use crate::agent::store::{AgentKind, ConversationStore, EffectDraft};
+use crate::agent::ui_validate::validate_effect_ui_source;
 use crate::analysis::{AnalysisJob, AnalysisService};
 use crate::audiograph::LiveGraphPtr;
 use crate::effects::{EffectDescriptor, EffectSlotSnapshot, ParamKind, ParamScaling};
@@ -389,6 +392,7 @@ pub struct AgentTranscriptEntry {
 }
 
 pub struct AgentPanelState {
+    pub kind: AgentKind,
     pub provider_state: AgentProviderState,
     pub transcript: Vec<AgentTranscriptEntry>,
     pub conversation: Vec<AgentMessage>,
@@ -398,6 +402,7 @@ pub struct AgentPanelState {
     pub auto_retry_budget: usize,
     pub model_dropdown_open: bool,
     pub model_dropdown_cursor: usize,
+    pub current_effect_artifact: Option<EffectDraft>,
     pending_request: Option<PendingAgentRequest>,
     pub load_error: Option<String>,
 }
@@ -1117,6 +1122,7 @@ impl App {
                 scroll_offset: 0,
             },
             agent_panel: AgentPanelState {
+                kind: AgentKind::General,
                 provider_state,
                 transcript: Vec::new(),
                 conversation: Vec::new(),
@@ -1126,6 +1132,7 @@ impl App {
                 auto_retry_budget: 0,
                 model_dropdown_open: false,
                 model_dropdown_cursor: 0,
+                current_effect_artifact: None,
                 pending_request: None,
                 load_error,
             },
@@ -1304,7 +1311,12 @@ impl App {
     }
 
     fn current_agent_system_prompt(&self) -> String {
-        "You help design DGenLisp instruments and effects for this sequencer. Prefer using tools instead of pasting full code into chat. Use create_instrument_track to make new synth/instrument tracks. Use read_current_instrument_source before iterating on an existing custom synth when you need the current code. Use update_current_instrument to replace the current custom instrument track in place. When the user asks for presets, inspect_current_instrument_preset_schema before creating them, then use create_current_instrument_presets to save one or more named presets for the current custom instrument. For effects, use apply_effect_to_current_track only when the user wants a brand new effect added to the chain. Use read_current_effect_source and update_current_effect when the user is asking to tweak, refine, or iterate on the currently selected custom effect. If no current track exists for an effect, tell the user to create a track first. Be concise and action-oriented.\n\nDGenLisp instrument rules:\n- Instrument definitions must use the actual local DGenLisp instrument syntax used by examples in this repo.\n- Instrument params must follow the sequencer's modulation metadata rules.\n- Any instrument param that can be modulation-targeted must declare a valid @mod-mode.\n- If the patch declares modulatable params, it must also declare at least one input marked with @modulator, following the style used by local examples.\n- If the instrument does not need modulation inputs, do not mark params as modulation-targetable.\n- When adding or changing params, preserve the modulation annotation style used by existing local instruments.\n- If you are unsure about instrument param/modulation structure or instrument declaration syntax, inspect local examples or the current instrument source first.\n- For preset generation, use exact runtime parameter names from inspect_current_instrument_preset_schema and stay within the declared ranges.\n\nDGenLisp effect rules:\n- Effects do not use synth-style modulators.\n- Do not declare @modulator inputs or synth-style modulation metadata in effects.\n- The only modulation-like routing allowed in effects is sidechaining, following the local effect examples and manifest conventions.\n- If the user asks to change an existing effect, prefer replacing the selected custom effect instead of adding a second effect.\n- If generated code fails to compile or reload, revise the code to satisfy the instrument/effect rules instead of asking the user to fix it manually.".to_string()
+        match self.agent_panel.kind {
+            AgentKind::General => include_str!("../agent/prompts/general.md"),
+            AgentKind::Instrument => include_str!("../agent/prompts/instrument.md"),
+            AgentKind::Effect => include_str!("../agent/prompts/effect.md"),
+        }
+        .to_string()
     }
 
     fn current_agent_session_context(&self) -> AgentSessionContext {
@@ -1338,6 +1350,9 @@ impl App {
         let current_effect_source = current_effect_name
             .as_deref()
             .and_then(|name| crate::lisp_effect::load_effect_source(name).ok());
+        let current_effect_ui_source = current_effect_name
+            .as_deref()
+            .and_then(|name| crate::lisp_effect::load_effect_ui_source(name).ok());
         let current_instrument_preset_schema = self.current_agent_instrument_preset_schema(
             current_track_index,
             current_instrument_name.as_deref(),
@@ -1349,6 +1364,7 @@ impl App {
             can_apply_effect_to_current_track: self.next_free_custom_slot().is_some(),
             current_effect_name,
             current_effect_source: current_effect_source.clone(),
+            current_effect_ui_source,
             current_effect_slot,
             can_update_current_effect: current_effect_source.is_some(),
             can_update_current_instrument: current_instrument_source.is_some(),
@@ -1369,17 +1385,20 @@ impl App {
         let provider = selected.provider;
         let model = selected.selected_model.clone();
         let system_prompt = self.current_agent_system_prompt();
+        let kind = self.agent_panel.kind;
         let conversation = self.agent_panel.conversation.clone();
         let session_context = self.current_agent_session_context();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = match crate::agent::network::AgentNetworkClient::load_default() {
-                Ok(client) => client.execute_turn(
+                Ok(client) => client.execute_turn_with_progress_for_kind(
                     provider,
                     &model,
                     &system_prompt,
                     &conversation,
                     session_context,
+                    kind,
+                    None,
                 ),
                 Err(error) => Err(AgentTurnError {
                     message: error,
@@ -1403,6 +1422,10 @@ impl App {
             Ok(Ok(result)) => {
                 self.agent_panel.pending_request = None;
                 let tool_count = result.tool_outcomes.len();
+                let routed_intent = result
+                    .pending_actions
+                    .iter()
+                    .any(|action| matches!(action, AgentAppAction::SetAgentIntent { .. }));
                 let action_results = result
                     .pending_actions
                     .into_iter()
@@ -1473,6 +1496,15 @@ impl App {
                     if let Err(error) = self.start_agent_request() {
                         self.editor.status_message =
                             Some((format!("Agent retry failed: {error}"), Instant::now()));
+                    }
+                } else if routed_intent && action_errors.is_empty() {
+                    if let Err(error) = self.start_agent_request() {
+                        self.agent_panel.transcript.push(AgentTranscriptEntry {
+                            role: "system".to_string(),
+                            text: format!("Failed to continue after routing: {error}"),
+                        });
+                        self.editor.status_message =
+                            Some((format!("Agent routing failed: {error}"), Instant::now()));
                     }
                 }
             }
@@ -1580,16 +1612,213 @@ impl App {
         self.agent_panel.input_cursor = 0;
         self.agent_panel.scroll_offset = 0;
         self.agent_panel.auto_retry_budget = 0;
+        self.agent_panel.kind = AgentKind::General;
         self.agent_panel.model_dropdown_open = false;
+        self.agent_panel.current_effect_artifact = None;
         self.editor.status_message = Some(("Cleared agent session".to_string(), Instant::now()));
+    }
+
+    fn create_agent_effect_artifact(
+        &mut self,
+        name: String,
+        dsp_source: String,
+        ui_source: String,
+    ) -> Result<String, String> {
+        self.validate_agent_effect_artifact(&name, &dsp_source, &ui_source)?;
+        self.agent_panel.current_effect_artifact = Some(EffectDraft {
+            name: name.clone(),
+            dsp_source,
+            ui_source,
+        });
+        Ok(format!("Created validated draft effect artifact '{name}'."))
+    }
+
+    fn update_agent_effect_artifact(
+        &mut self,
+        name: Option<String>,
+        dsp_source: String,
+        ui_source: String,
+    ) -> Result<String, String> {
+        let existing = self
+            .agent_panel
+            .current_effect_artifact
+            .as_ref()
+            .ok_or_else(|| "No draft effect artifact exists to update.".to_string())?;
+        let name = name.unwrap_or_else(|| existing.name.clone());
+        self.validate_agent_effect_artifact(&name, &dsp_source, &ui_source)?;
+        self.agent_panel.current_effect_artifact = Some(EffectDraft {
+            name: name.clone(),
+            dsp_source,
+            ui_source,
+        });
+        Ok(format!("Updated validated draft effect artifact '{name}'."))
+    }
+
+    fn validate_agent_effect_artifact(
+        &self,
+        name: &str,
+        dsp_source: &str,
+        ui_source: &str,
+    ) -> Result<(), String> {
+        validate_effect_dsp_source(dsp_source)
+            .map_err(|error| format!("dsp.lisp validation error for '{name}':\n{error}"))?;
+        let compile_result =
+            crate::lisp_effect::compile_and_load(dsp_source, self.graph.sample_rate)
+                .map_err(|error| format!("compile error for '{name}':\n{error}"))?;
+        validate_effect_ui_source(ui_source, &compile_result.manifest)
+            .map_err(|error| format!("ui.lisp validation error for '{name}':\n{error}"))?;
+        let audition = audition_loaded_effect(&compile_result, self.graph.sample_rate)
+            .map_err(|error| format!("audition failed for '{name}':\n{error}"))?;
+        let feedback = audition_feedback(&audition);
+        if audition.silent || audition.clipped || audition.differs_from_input == Some(false) {
+            return Err(feedback);
+        }
+        Ok(())
+    }
+
+    fn apply_agent_effect_artifact(
+        &mut self,
+        target: AgentEffectApplyTarget,
+    ) -> Result<String, String> {
+        let artifact = self
+            .agent_panel
+            .current_effect_artifact
+            .clone()
+            .ok_or_else(|| "No validated draft effect artifact exists to apply.".to_string())?;
+        self.validate_agent_effect_artifact(
+            &artifact.name,
+            &artifact.dsp_source,
+            &artifact.ui_source,
+        )?;
+        if self.tracks.is_empty() {
+            return Err("No current track is available.".to_string());
+        }
+        let track = self.ui.cursor_track;
+        let slot_idx = match target {
+            AgentEffectApplyTarget::NextFreeSlotOnCurrentTrack => self
+                .next_free_custom_slot()
+                .ok_or_else(|| "The current track has no free custom effect slot.".to_string())?,
+            AgentEffectApplyTarget::ReplaceCurrentEffect => {
+                let slot = self
+                    .selected_effect_slot()
+                    .ok_or_else(|| "No current custom effect slot is selected.".to_string())?;
+                if slot < crate::effects::BUILTIN_SLOT_COUNT {
+                    return Err("The selected effect slot is not a custom effect slot.".to_string());
+                }
+                slot
+            }
+        };
+        let previous_source = crate::lisp_effect::load_effect_source(&artifact.name).ok();
+        let previous_ui = crate::lisp_effect::load_effect_ui_source(&artifact.name).ok();
+        self.save_effect_artifact_sources_with_rollback(
+            &artifact.name,
+            &artifact.dsp_source,
+            &artifact.ui_source,
+        )?;
+        if let Err(error) = self.load_saved_effect_to_slot_sync(track, slot_idx, &artifact.name) {
+            self.restore_effect_source(&artifact.name, previous_source.as_deref())?;
+            self.restore_effect_ui_source(&artifact.name, previous_ui.as_deref())?;
+            return Err(format!(
+                "Failed to apply effect artifact '{}': {error}",
+                artifact.name
+            ));
+        }
+        Ok(format!(
+            "Applied effect artifact '{}' to track '{}' slot {}.",
+            artifact.name,
+            self.tracks
+                .get(track)
+                .cloned()
+                .unwrap_or_else(|| "current track".to_string()),
+            slot_idx + 1
+        ))
+    }
+
+    fn finalize_agent_effect_artifact(&mut self, name: String) -> Result<String, String> {
+        let artifact = self
+            .agent_panel
+            .current_effect_artifact
+            .clone()
+            .ok_or_else(|| "No validated draft effect artifact exists to finalize.".to_string())?;
+        let final_name = format!("{}/", name.trim_end_matches('/'));
+        if crate::lisp_effect::effect_source_path(&final_name).exists()
+            || crate::lisp_effect::effect_ui_path(&final_name).exists()
+        {
+            return Err(format!(
+                "Effect '{}' already exists.",
+                name.trim_end_matches('/')
+            ));
+        }
+        self.validate_agent_effect_artifact(
+            &final_name,
+            &artifact.dsp_source,
+            &artifact.ui_source,
+        )?;
+        self.save_effect_artifact_sources_with_rollback(
+            &final_name,
+            &artifact.dsp_source,
+            &artifact.ui_source,
+        )?;
+        Ok(format!("Finalized effect artifact as '{final_name}'."))
+    }
+
+    fn save_effect_artifact_sources_with_rollback(
+        &self,
+        name: &str,
+        dsp_source: &str,
+        ui_source: &str,
+    ) -> Result<(), String> {
+        let previous_source = crate::lisp_effect::load_effect_source(name).ok();
+        let previous_ui = crate::lisp_effect::load_effect_ui_source(name).ok();
+        crate::lisp_effect::save_effect(name, dsp_source)
+            .map_err(|error| format!("Failed to save effect '{}': {error}", name))?;
+        if let Err(error) = crate::lisp_effect::save_effect_ui(name, ui_source) {
+            self.restore_effect_source(name, previous_source.as_deref())?;
+            self.restore_effect_ui_source(name, previous_ui.as_deref())?;
+            return Err(format!("Failed to save effect UI '{}': {error}", name));
+        }
+        Ok(())
     }
 
     fn apply_agent_action(&mut self, action: AgentAppAction) -> Result<String, String> {
         match action {
+            AgentAppAction::SetAgentIntent { kind } => {
+                if kind == AgentKind::General {
+                    return Err("General is not a focused agent intent.".to_string());
+                }
+                self.agent_panel.kind = kind;
+                Ok(match kind {
+                    AgentKind::Instrument => {
+                        "Intent selected: instrument. Continuing with the focused instrument agent."
+                            .to_string()
+                    }
+                    AgentKind::Effect => {
+                        "Intent selected: effect. Continuing with the focused effect agent."
+                            .to_string()
+                    }
+                    AgentKind::General => unreachable!(),
+                })
+            }
             AgentAppAction::CreateInstrumentArtifact { .. } => Err(
                 "create_instrument_artifact is only supported by the conversation agent panel."
                     .to_string(),
             ),
+            AgentAppAction::CreateEffectArtifact {
+                name,
+                dsp_source,
+                ui_source,
+            } => self.create_agent_effect_artifact(name, dsp_source, ui_source),
+            AgentAppAction::UpdateEffectArtifact {
+                name,
+                dsp_source,
+                ui_source,
+            } => self.update_agent_effect_artifact(name, dsp_source, ui_source),
+            AgentAppAction::ApplyEffectArtifact { target } => {
+                self.apply_agent_effect_artifact(target)
+            }
+            AgentAppAction::FinalizeEffectArtifact { name } => {
+                self.finalize_agent_effect_artifact(name)
+            }
             AgentAppAction::CreateInstrumentTrack { name, source } => {
                 let previous_source = crate::lisp_effect::load_instrument_source(&name).ok();
                 crate::lisp_effect::save_instrument(&name, &source)
@@ -1830,7 +2059,7 @@ impl App {
         match previous_source {
             Some(source) => crate::lisp_effect::save_effect(name, source)
                 .map_err(|error| format!("Failed to restore effect '{}': {error}", name)),
-            None => std::fs::remove_file(format!("effects/{name}.lisp"))
+            None => std::fs::remove_file(crate::lisp_effect::effect_source_path(name))
                 .or_else(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
                         Ok(())
@@ -1839,6 +2068,26 @@ impl App {
                     }
                 })
                 .map_err(|error| format!("Failed to remove effect '{}': {error}", name)),
+        }
+    }
+
+    fn restore_effect_ui_source(
+        &self,
+        name: &str,
+        previous_source: Option<&str>,
+    ) -> Result<(), String> {
+        match previous_source {
+            Some(source) => crate::lisp_effect::save_effect_ui(name, source)
+                .map_err(|error| format!("Failed to restore effect UI '{}': {error}", name)),
+            None => std::fs::remove_file(crate::lisp_effect::effect_ui_path(name))
+                .or_else(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(|error| format!("Failed to remove effect UI '{}': {error}", name)),
         }
     }
 

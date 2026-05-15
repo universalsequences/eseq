@@ -332,6 +332,26 @@ pub struct InstrumentRenderReport {
     pub first_samples: Vec<f32>,
 }
 
+#[derive(Clone, Debug)]
+pub struct EffectRenderOptions {
+    pub sample_rate: u32,
+    pub block_size: usize,
+    pub frames: usize,
+    pub param_overrides: Vec<(String, f32)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EffectRenderReport {
+    pub frames: usize,
+    pub peak: f32,
+    pub rms: f32,
+    pub mean_abs: f32,
+    pub diff_rms: f32,
+    pub nonzero_frames: usize,
+    pub first_nonzero_frame: Option<usize>,
+    pub first_samples: Vec<f32>,
+}
+
 pub fn compile_and_load(source: &str, sample_rate: u32) -> Result<CompileResult, String> {
     let json = compile_lisp(source, sample_rate)?;
     let manifest = parse_manifest(&json)?;
@@ -346,6 +366,14 @@ const INSTRUMENTS_DIR: &str = "instruments";
 
 pub fn save_effect(name: &str, source: &str) -> io::Result<()> {
     let path = effect_source_path(name);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, source)
+}
+
+pub fn save_effect_ui(name: &str, source: &str) -> io::Result<()> {
+    let path = effect_ui_path(name);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -399,14 +427,27 @@ pub fn load_effect_source(name: &str) -> io::Result<String> {
     std::fs::read_to_string(&path)
 }
 
+pub fn load_effect_ui_source(name: &str) -> io::Result<String> {
+    std::fs::read_to_string(effect_ui_path(name))
+}
+
 pub fn effect_source_path(name: &str) -> PathBuf {
     let root = Path::new(EFFECTS_DIR);
+    if name.ends_with('/') {
+        return root.join(name.trim_end_matches('/')).join("dsp.lisp");
+    }
     let folder_dsp = root.join(name).join("dsp.lisp");
     if folder_dsp.exists() {
         folder_dsp
     } else {
         root.join(format!("{name}.lisp"))
     }
+}
+
+pub fn effect_ui_path(name: &str) -> PathBuf {
+    Path::new(EFFECTS_DIR)
+        .join(name.trim_end_matches('/'))
+        .join("ui.lisp")
 }
 
 // ── Editor flow ──
@@ -655,7 +696,9 @@ pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
     let dylib_name = format!("effect_{}", seq);
 
     let src_path = dir.join("effect.lisp");
-    std::fs::write(&src_path, source).map_err(|e| format!("Failed to write source: {e}"))?;
+    let source_with_preamble = format!("{}\n\n{source}", effect_preamble(sample_rate));
+    std::fs::write(&src_path, source_with_preamble)
+        .map_err(|e| format!("Failed to write source: {e}"))?;
 
     let tool_path = std::env::current_dir()
         .unwrap_or_default()
@@ -1027,7 +1070,7 @@ pub const EFFECT_TEMPLATE: &str = r#"; DGenLisp stereo effect
 ;
 ; Params: (def name (param name @min 0 @max 1 @default 0.5))
 ; Delay:  (def h (history N)), (read-history h delay_samples), (write-history h sample)
-; Math:   +, -, *, /, tanh, clamp, min, max, mix
+; Math:   +, -, *, /, sin, cos, tan, atan, atan2, tanh, clamp, min, max, mix
 ; Filters: (onepole input coeff)
 
 (def input (in 1 @name signal))
@@ -1921,6 +1964,10 @@ fn instrument_preamble(sample_rate: u32) -> String {
     INSTRUMENT_PREAMBLE.replace("__SAMPLE_RATE__", &format!("{sample_rate}.0"))
 }
 
+fn effect_preamble(sample_rate: u32) -> String {
+    instrument_preamble(sample_rate)
+}
+
 pub fn compile_instrument(source: &str, sample_rate: u32) -> Result<String, String> {
     compile_instrument_with_asset_base(source, sample_rate, None)
 }
@@ -2122,6 +2169,160 @@ pub fn render_loaded_instrument_for_test(
     })
 }
 
+pub fn render_effect_source_for_test(
+    source: &str,
+    options: &EffectRenderOptions,
+) -> Result<EffectRenderReport, String> {
+    let result = compile_and_load(source, options.sample_rate)?;
+    render_loaded_effect_for_test(&result.manifest, &result.lib, options)
+}
+
+pub fn render_loaded_effect_for_test(
+    manifest: &DGenManifest,
+    lib: &LoadedDGenLib,
+    options: &EffectRenderOptions,
+) -> Result<EffectRenderReport, String> {
+    if options.block_size == 0 {
+        return Err("block_size must be greater than zero".to_string());
+    }
+    if options.frames == 0 {
+        return Err("frames must be greater than zero".to_string());
+    }
+    if manifest.n_inputs < 2 || manifest.n_outputs < 2 {
+        return Err(format!(
+            "effect probe requires at least two inputs and outputs, got {} input(s) and {} output(s)",
+            manifest.n_inputs, manifest.n_outputs
+        ));
+    }
+
+    let total_slots = manifest.total_memory_slots;
+    let mut memory_read = vec![0.0f32; total_slots];
+    let mut memory_write = vec![0.0f32; total_slots];
+    let init_msg = build_init_message(0, manifest);
+    let entry_count = init_msg.get(5).copied().unwrap_or(0.0) as usize;
+    for i in 0..entry_count {
+        let idx = init_msg[6 + i * 2] as usize;
+        let value = init_msg[6 + i * 2 + 1];
+        if idx < total_slots {
+            memory_read[idx] = value;
+        }
+    }
+    memory_write.copy_from_slice(&memory_read);
+
+    for (name, value) in &options.param_overrides {
+        let param = manifest
+            .params
+            .iter()
+            .find(|param| param.name == *name)
+            .ok_or_else(|| format!("unknown effect parameter '{name}'"))?;
+        if param.cell_id >= total_slots {
+            return Err(format!(
+                "parameter '{}' cell {} is outside memory size {}",
+                param.name, param.cell_id, total_slots
+            ));
+        }
+        for lane in 0..param.cell_span {
+            let idx = param.cell_id + lane;
+            if idx < total_slots {
+                memory_read[idx] = *value;
+                memory_write[idx] = *value;
+            }
+        }
+    }
+
+    let n_inputs = manifest.n_inputs.max(2);
+    let n_outputs = manifest.n_outputs.max(2);
+    let mut rendered = Vec::with_capacity(options.frames * 2);
+    let mut input_reference = Vec::with_capacity(options.frames * 2);
+    let mut frames_done = 0usize;
+
+    while frames_done < options.frames {
+        let block = options.block_size.min(options.frames - frames_done);
+        let mut input_buffers = vec![vec![0.0f32; block]; n_inputs];
+        for frame in 0..block {
+            let t = (frames_done + frame) as f32 / options.sample_rate.max(1) as f32;
+            let impulse = if frames_done + frame == 0 { 0.45 } else { 0.0 };
+            let burst_env = (1.0 - (t * 4.0)).max(0.0);
+            let left = impulse
+                + 0.18
+                    * burst_env
+                    * ((2.0 * std::f32::consts::PI * 220.0 * t).sin()
+                        + 0.5 * (2.0 * std::f32::consts::PI * 997.0 * t).sin());
+            let right = 0.12
+                * burst_env
+                * ((2.0 * std::f32::consts::PI * 330.0 * t).sin()
+                    + 0.5 * (2.0 * std::f32::consts::PI * 1409.0 * t).sin());
+            input_buffers[0][frame] = left;
+            input_buffers[1][frame] = right;
+            input_reference.push(left);
+            input_reference.push(right);
+        }
+        let input_ptrs: Vec<*mut f32> = input_buffers
+            .iter_mut()
+            .map(|buffer| buffer.as_mut_ptr())
+            .collect();
+
+        let mut output_buffers = vec![vec![0.0f32; block]; n_outputs];
+        let output_ptrs: Vec<*mut f32> = output_buffers
+            .iter_mut()
+            .map(|buffer| buffer.as_mut_ptr())
+            .collect();
+
+        unsafe {
+            (lib.process_fn)(
+                input_ptrs.as_ptr(),
+                output_ptrs.as_ptr(),
+                block as c_int,
+                memory_read.as_mut_ptr() as *mut c_void,
+                memory_write.as_mut_ptr() as *mut c_void,
+            );
+        }
+        memory_read.copy_from_slice(&memory_write);
+        for frame in 0..block {
+            rendered.push(output_buffers[0][frame]);
+            rendered.push(output_buffers[1][frame]);
+        }
+        frames_done += block;
+    }
+
+    let mut peak = 0.0f32;
+    let mut sum_sq = 0.0f64;
+    let mut sum_abs = 0.0f64;
+    let mut diff_sq = 0.0f64;
+    let mut nonzero_frames = 0usize;
+    let mut first_nonzero_frame = None;
+    for (idx, sample) in rendered.iter().enumerate() {
+        let abs = sample.abs();
+        peak = peak.max(abs);
+        sum_sq += (*sample as f64) * (*sample as f64);
+        sum_abs += abs as f64;
+        let input = input_reference.get(idx).copied().unwrap_or(0.0);
+        let diff = *sample - input;
+        diff_sq += (diff as f64) * (diff as f64);
+        if abs > 1.0e-7 {
+            nonzero_frames += 1;
+            if first_nonzero_frame.is_none() {
+                first_nonzero_frame = Some(idx / 2);
+            }
+        }
+    }
+    let samples = rendered.len().max(1);
+    let rms = (sum_sq / samples as f64).sqrt() as f32;
+    let mean_abs = (sum_abs / samples as f64) as f32;
+    let diff_rms = (diff_sq / samples as f64).sqrt() as f32;
+
+    Ok(EffectRenderReport {
+        frames: options.frames,
+        peak,
+        rms,
+        mean_abs,
+        diff_rms,
+        nonzero_frames,
+        first_nonzero_frame,
+        first_samples: rendered.into_iter().take(32).collect(),
+    })
+}
+
 // ── Instrument editor flow ──
 
 pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
@@ -2131,7 +2332,7 @@ pub const INSTRUMENT_TEMPLATE: &str = r#"; DGenLisp instrument
 ;   then use (mod name) to read the modulated value
 ; Envelope: (adsr gate trigger attack_ms decay_ms sustain release_ms)
 ; Oscillators: (sin expr), (phasor freq_hz), (noise)
-; Math: +, -, *, /, tanh, clamp, min, max
+; Math: +, -, *, /, sin, cos, tan, atan, atan2, tanh, clamp, min, max
 ; Constants: twopi, samplerate
 
 (def gate (in 1 @name gate))
@@ -8722,6 +8923,25 @@ mod tests {
         let preamble = super::instrument_preamble(48_000);
         assert!(preamble.contains("(def samplerate 48000.0)"));
         assert!(!preamble.contains("__SAMPLE_RATE__"));
+    }
+
+    #[test]
+    fn effect_compile_injects_shared_preamble_helpers() {
+        let source = r#"
+            (def in_l (in 1 @name left))
+            (def in_r (in 2 @name right))
+            (param cutoff @default 1200 @min 40 @max 12000)
+            (param q @default 0.8 @min 0.5 @max 4.0)
+            (def filtered_l (svf in_l cutoff q 0))
+            (def filtered_r (svf in_r cutoff q 0))
+            (out filtered_l 1 @name left)
+            (out filtered_r 2 @name right)
+        "#;
+
+        let result = super::compile_and_load(source, 44_100)
+            .expect("effect compiler should inject shared preamble helpers");
+        assert_eq!(result.manifest.n_inputs, 2);
+        assert_eq!(result.manifest.n_outputs, 2);
     }
 
     #[test]
