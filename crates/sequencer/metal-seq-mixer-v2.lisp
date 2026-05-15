@@ -136,11 +136,6 @@
 (def mixer-v2-selected-mod-sources (dest input)
   (mixer-v2-selected-mod-sources-at dest input 0 (list)))
 
-(def mixer-v2-select-first-mod-source (dest input sources)
-  (if (> (len sources) 0)
-    (mixer-v2-select-mod-route (nth sources 0) dest input)
-    false))
-
 (def mixer-v2-delete-selected-mod-route ()
   (if (mixer-v2-mod-route-exists?
       mixer-v2-selected-mod-source
@@ -181,7 +176,7 @@
 
 (def mixer-v2-mod-in-click (track input)
   (if (< mixer-v2-pending-mod-source 0)
-    (mixer-v2-select-first-mod-source track input (mixer-v2-mod-route-sources track input))
+    false
     (do
       (mixer-v2-connect-mod-route mixer-v2-pending-mod-source track input)
       (set! mixer-v2-pending-mod-source -1))))
@@ -229,7 +224,9 @@
       :on-click |x y r| (mixer-v2-mod-out-click track)
       :on-mouse-down |x y r| (mixer-v2-mod-out-click track)
       :on-patch-cancel (lambda (source)
-        (mixer-v2-cancel-mod-draw)))
+        (mixer-v2-cancel-mod-draw))
+      :on-patch-miss (lambda ()
+        (mixer-v2-clear-selected-mod-route)))
     (if (mixer-v2-track-modulator? track)
       (each (range 0 4) |input|
         (box :key (str "mixer-v2-mod-in-spacer-" track "-" input)

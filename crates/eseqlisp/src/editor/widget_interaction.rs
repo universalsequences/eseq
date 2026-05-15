@@ -37,6 +37,7 @@ struct PatchPortLayout {
     on_cable_click: Option<Value>,
     on_patch_drop: Option<Value>,
     on_patch_cancel: Option<Value>,
+    on_patch_miss: Option<Value>,
 }
 
 fn patch_port_direction(node: &LayoutNode) -> Option<PatchPortDirection> {
@@ -94,6 +95,7 @@ fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout
                 on_cable_click: node.props.get("on-cable-click").cloned(),
                 on_patch_drop: node.props.get("on-patch-drop").cloned(),
                 on_patch_cancel: node.props.get("on-patch-cancel").cloned(),
+                on_patch_miss: node.props.get("on-patch-miss").cloned(),
             });
         }
     }
@@ -150,6 +152,16 @@ fn patch_cable_click_output(
             Value::Number(dest as f64),
             Value::Number(input as f64),
         ],
+    })
+}
+
+fn patch_miss_output(layout: &LayoutNode) -> Option<crate::widget_render::EventOutput> {
+    let mut ports = Vec::new();
+    collect_patch_port_layouts(layout, &mut ports);
+    let callback = ports.iter().find_map(|port| port.on_patch_miss.clone())?;
+    Some(crate::widget_render::EventOutput {
+        callback,
+        args: Vec::new(),
     })
 }
 
@@ -393,17 +405,24 @@ impl Editor {
                     local_col + self.active_leaf().widget_scroll_left,
                     local_row + self.widget_scroll_top() + self.active_buffer().scroll_top as f32,
                 );
-                let output = match mouse.kind {
+                match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        patch_cable_click_output(layout, layout_pos.0, layout_pos.1)
+                        if let Some(output) =
+                            patch_cable_click_output(layout, layout_pos.0, layout_pos.1)
+                        {
+                            return self.apply_widget_output(Some(output));
+                        }
+                        if let Some(output) = patch_miss_output(layout) {
+                            let _ = self.apply_widget_output(Some(output));
+                        }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        patch_drop_output(layout, layout_pos.0, layout_pos.1)
+                        if let Some(output) = patch_drop_output(layout, layout_pos.0, layout_pos.1)
+                        {
+                            return self.apply_widget_output(Some(output));
+                        }
                     }
-                    _ => None,
-                };
-                if let Some(output) = output {
-                    return self.apply_widget_output(Some(output));
+                    _ => {}
                 }
             }
         }
