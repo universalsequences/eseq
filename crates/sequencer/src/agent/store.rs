@@ -329,6 +329,8 @@ impl ConversationStore {
         let state = inner
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+        state.effect_draft = None;
+        state.effect_draft_applied = false;
         state.finalized_effect_name = Some(effect_name.into());
         bump(state);
         Ok(())
@@ -405,5 +407,34 @@ mod tests {
             .unwrap();
         let after = store.snapshot(id).unwrap().state.generation;
         assert!(after > before);
+    }
+
+    #[test]
+    fn finalized_effect_consumes_draft_state() {
+        let store = ConversationStore::new(44_100);
+        let id = store.new_conversation(AgentKind::Effect);
+        {
+            let inner = store.inner();
+            let mut inner = inner.lock().unwrap();
+            let state = inner.get_mut(&id).unwrap();
+            state.effect_draft = Some(super::EffectDraft {
+                name: "draft".to_string(),
+                dsp_source: "(def in_l (in 1 @name left))".to_string(),
+                ui_source: "(defeffect-ui (label \"draft\"))".to_string(),
+            });
+            state.effect_draft_applied = false;
+        }
+
+        store
+            .set_finalized_effect_name(id, "saved-effect/")
+            .expect("finalize effect");
+
+        let snapshot = store.snapshot(id).unwrap();
+        assert_eq!(
+            snapshot.state.finalized_effect_name.as_deref(),
+            Some("saved-effect/")
+        );
+        assert!(snapshot.state.effect_draft.is_none());
+        assert!(!snapshot.state.effect_draft_applied);
     }
 }

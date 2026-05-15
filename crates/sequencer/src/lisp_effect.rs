@@ -78,7 +78,15 @@ static DGEN_PROCESS_FNS: [AtomicUsize; REGISTRY_SIZE] = {
 };
 
 fn set_dgen_process_fn(slot_id: usize, f: DGenProcessFn) {
-    DGEN_PROCESS_FNS[slot_id % REGISTRY_SIZE].store(f as usize, Ordering::Release);
+    set_dgen_process_fn_raw(slot_id, f as usize);
+}
+
+fn dgen_process_fn_raw(slot_id: usize) -> usize {
+    DGEN_PROCESS_FNS[slot_id % REGISTRY_SIZE].load(Ordering::Acquire)
+}
+
+fn set_dgen_process_fn_raw(slot_id: usize, f: usize) {
+    DGEN_PROCESS_FNS[slot_id % REGISTRY_SIZE].store(f, Ordering::Release);
 }
 
 // ── Node state layout ──
@@ -963,6 +971,31 @@ pub unsafe fn remove_effect_from_chain(
     audiograph::delete_node(lg, effect_node_id);
 }
 
+unsafe fn disconnect_direct_chain(lg: *mut LiveGraph, predecessor_id: i32, successor_id: i32) {
+    for src_port in 0..2 {
+        for dst_port in 0..2 {
+            audiograph::graph_disconnect(lg, predecessor_id, src_port, successor_id, dst_port);
+        }
+    }
+}
+
+unsafe fn connect_effect_port(
+    lg: *mut LiveGraph,
+    src_node: i32,
+    src_port: i32,
+    dst_node: i32,
+    dst_port: i32,
+    context: &str,
+) -> Result<(), String> {
+    if audiograph::graph_connect(lg, src_node, src_port, dst_node, dst_port) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{context}: graph_connect({src_node}, {src_port}, {dst_node}, {dst_port}) failed"
+        ))
+    }
+}
+
 unsafe fn connect_effect_chain(
     lg: *mut LiveGraph,
     predecessor_id: i32,
@@ -972,36 +1005,60 @@ unsafe fn connect_effect_chain(
     effect_outputs: usize,
     successor_id: i32,
     successor_inputs: usize,
-) {
-    for src_port in 0..2 {
-        for dst_port in 0..2 {
-            audiograph::graph_disconnect(lg, predecessor_id, src_port, successor_id, dst_port);
-        }
-    }
-
+) -> Result<(), String> {
     if effect_inputs <= 1 {
         let pred_channels = predecessor_outputs.max(1).min(2);
         for src_port in 0..pred_channels {
-            let _ = audiograph::graph_connect(lg, predecessor_id, src_port as i32, effect_id, 0);
+            connect_effect_port(
+                lg,
+                predecessor_id,
+                src_port as i32,
+                effect_id,
+                0,
+                "connect effect input",
+            )?;
         }
     } else {
         let pred_channels = predecessor_outputs.max(1).min(2);
         for ch in 0..pred_channels.min(effect_inputs).min(2) {
-            let _ = audiograph::graph_connect(lg, predecessor_id, ch as i32, effect_id, ch as i32);
+            connect_effect_port(
+                lg,
+                predecessor_id,
+                ch as i32,
+                effect_id,
+                ch as i32,
+                "connect effect input",
+            )?;
         }
     }
 
     if effect_outputs <= 1 {
         let succ_channels = successor_inputs.max(1).min(2);
         for dst_port in 0..succ_channels {
-            let _ = audiograph::graph_connect(lg, effect_id, 0, successor_id, dst_port as i32);
+            connect_effect_port(
+                lg,
+                effect_id,
+                0,
+                successor_id,
+                dst_port as i32,
+                "connect effect output",
+            )?;
         }
     } else {
         let succ_channels = successor_inputs.max(1).min(2);
         for ch in 0..succ_channels.min(effect_outputs).min(2) {
-            let _ = audiograph::graph_connect(lg, effect_id, ch as i32, successor_id, ch as i32);
+            connect_effect_port(
+                lg,
+                effect_id,
+                ch as i32,
+                successor_id,
+                ch as i32,
+                "connect effect output",
+            )?;
         }
     }
+
+    Ok(())
 }
 
 /// Add a DGenLisp effect between predecessor and successor nodes.
@@ -1017,14 +1074,6 @@ pub unsafe fn add_effect_to_chain_at(
     successor_inputs: usize,
     existing_effect: Option<i32>,
 ) -> Result<i32, String> {
-    // Remove old effect if present
-    if let Some(old_id) = existing_effect {
-        remove_effect_from_chain(lg, old_id, predecessor_id, successor_id);
-    }
-
-    // Register process function
-    set_dgen_process_fn(slot_id, lib.process_fn);
-
     // Full state allocation (header + distinct read/write buffers), zeroed by the engine
     let state_size =
         dgen_total_state_slots(manifest.total_memory_slots) * std::mem::size_of::<f32>();
@@ -1050,7 +1099,13 @@ pub unsafe fn add_effect_to_chain_at(
         return Err("Failed to add DGenLisp node to graph".to_string());
     }
 
-    connect_effect_chain(
+    // Commit the replacement only after the new node exists and can be wired.
+    // Until this batch succeeds, the old node and process function remain the
+    // rollback target for the live graph.
+    let previous_process_fn = dgen_process_fn_raw(slot_id);
+    audiograph::begin_graph_edit_batch(lg);
+    set_dgen_process_fn(slot_id, lib.process_fn);
+    let connect_result = connect_effect_chain(
         lg,
         predecessor_id,
         predecessor_outputs,
@@ -1060,6 +1115,18 @@ pub unsafe fn add_effect_to_chain_at(
         successor_id,
         successor_inputs,
     );
+    if let Err(error) = connect_result {
+        set_dgen_process_fn_raw(slot_id, previous_process_fn);
+        audiograph::delete_node(lg, node_id);
+        audiograph::end_graph_edit_batch(lg);
+        return Err(error);
+    }
+    if let Some(old_id) = existing_effect {
+        remove_effect_from_chain(lg, old_id, predecessor_id, successor_id);
+    } else {
+        disconnect_direct_chain(lg, predecessor_id, successor_id);
+    }
+    audiograph::end_graph_edit_batch(lg);
 
     Ok(node_id)
 }

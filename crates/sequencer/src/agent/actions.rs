@@ -69,9 +69,6 @@ pub enum AgentAppAction {
         dsp_source: String,
         ui_source: String,
     },
-    ApplyEffectArtifact {
-        target: AgentEffectApplyTarget,
-    },
     FinalizeEffectArtifact {
         name: String,
     },
@@ -95,13 +92,6 @@ pub enum AgentAppAction {
         instrument_name: String,
         presets: Vec<AgentInstrumentPresetDraft>,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentEffectApplyTarget {
-    NextFreeSlotOnCurrentTrack,
-    ReplaceCurrentEffect,
 }
 
 pub fn normalize_patch_name(raw: &str, fallback: &str) -> String {

@@ -13,15 +13,15 @@ Prefer tools over pasted code:
   `dsp_source` and complete `ui_source`; the host will parse, compile, validate
   UI, and probe it.
 - Use `update_effect_artifact` to repair or refine the current draft effect.
-- Use `apply_effect_artifact` only when the user asks to put the effect on the
-  current track. Use `next_free_slot_on_current_track` for "add" requests and
-  `replace_current_effect` for "change/tweak this selected effect" requests.
+- Do not apply effect artifacts yourself. The host UI presents the validated
+  draft with an apply button, and applying must happen through that button.
 - Use `finalize_effect_artifact` only when the user asks to save/finalize the
   artifact into the saved effect library.
 
 Do not claim that an effect was created, validated, applied, or finalized
-unless the corresponding tool succeeds. If a tool fails, repair the complete
-artifact and try again within a small retry budget.
+unless the corresponding create/update/finalize tool succeeds or the user
+applies it through the host UI. If a tool fails, repair the complete artifact
+and try again within a small retry budget.
 
 Critical effect DSP rules:
 - There is no top-level wrapper form. A complete effect is top-level `(def ...)`,

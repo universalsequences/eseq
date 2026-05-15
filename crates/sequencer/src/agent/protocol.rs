@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::actions::{
-    normalize_patch_name, AgentAppAction, AgentEffectApplyTarget, AgentInstrumentPresetDraft,
-    AgentInstrumentPresetSchema, AgentSessionContext,
+    normalize_patch_name, AgentAppAction, AgentInstrumentPresetDraft, AgentInstrumentPresetSchema,
+    AgentSessionContext,
 };
 use super::dsp_validate::validate_effect_dsp_source;
 use super::store::AgentKind;
@@ -226,29 +226,6 @@ impl AgentToolRuntime {
                 }),
             },
             ToolSpec {
-                name: "apply_effect_artifact".to_string(),
-                description:
-                    "Apply the validated draft effect artifact to the current track's next free custom slot or replace the selected current custom effect."
-                        .to_string(),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "artifact_id": { "type": "string", "description": "Current effect artifact id, if known." },
-                        "target": {
-                            "type": "object",
-                            "properties": {
-                                "mode": {
-                                    "type": "string",
-                                    "enum": ["next_free_slot_on_current_track", "replace_current_effect"]
-                                }
-                            },
-                            "required": ["mode"]
-                        }
-                    },
-                    "required": ["target"]
-                }),
-            },
-            ToolSpec {
                 name: "finalize_effect_artifact".to_string(),
                 description: "Save the current effect artifact as a finalized folder-style saved effect."
                     .to_string(),
@@ -403,7 +380,6 @@ impl AgentToolRuntime {
                 "read_effect_source",
                 "create_effect_artifact",
                 "update_effect_artifact",
-                "apply_effect_artifact",
                 "finalize_effect_artifact",
                 "read_current_effect_source",
                 "apply_effect_to_current_track",
@@ -432,7 +408,6 @@ impl AgentToolRuntime {
             }
             "create_effect_artifact" => self.execute_create_effect_artifact(&call.arguments),
             "update_effect_artifact" => self.execute_update_effect_artifact(&call.arguments),
-            "apply_effect_artifact" => self.execute_apply_effect_artifact(&call.arguments, session),
             "finalize_effect_artifact" => self.execute_finalize_effect_artifact(&call.arguments),
             "create_instrument_track" => self.execute_create_instrument_track(&call.arguments),
             "read_current_instrument_source" => {
@@ -624,47 +599,6 @@ impl AgentToolRuntime {
                 dsp_source: dsp_source.to_string(),
                 ui_source: ui_source.to_string(),
             }],
-        })
-    }
-
-    fn execute_apply_effect_artifact(
-        &self,
-        arguments: &Value,
-        session: &AgentSessionContext,
-    ) -> Result<ToolResult, String> {
-        if !session.has_tracks {
-            return Err(
-                "No current track is available. Ask the user to create a track first, then apply the effect."
-                    .to_string(),
-            );
-        }
-        let target = parse_effect_apply_target(arguments)?;
-        match target {
-            AgentEffectApplyTarget::NextFreeSlotOnCurrentTrack => {
-                if !session.can_apply_effect_to_current_track {
-                    let track = session
-                        .current_track_name
-                        .as_deref()
-                        .unwrap_or("current track");
-                    return Err(format!(
-                        "Track '{}' has no free custom effect slot. Ask the user to free a slot or choose another track.",
-                        track
-                    ));
-                }
-            }
-            AgentEffectApplyTarget::ReplaceCurrentEffect => {
-                if !session.can_update_current_effect {
-                    return Err(
-                        "No current custom effect slot is selected. Select a custom effect slot first."
-                            .to_string(),
-                    );
-                }
-            }
-        }
-        Ok(ToolResult {
-            summary: "Queued effect artifact apply.".to_string(),
-            content: "Apply the current validated effect artifact.".to_string(),
-            pending_actions: vec![AgentAppAction::ApplyEffectArtifact { target }],
         })
     }
 
@@ -949,23 +883,6 @@ fn optional_usize(value: &Value, key: &str) -> Option<usize> {
         .map(|value| value as usize)
 }
 
-fn parse_effect_apply_target(value: &Value) -> Result<AgentEffectApplyTarget, String> {
-    let mode = value
-        .get("target")
-        .and_then(|target| target.get("mode"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "Missing required object field 'target.mode' for effect artifact apply.".to_string()
-        })?;
-    match mode {
-        "next_free_slot_on_current_track" => Ok(AgentEffectApplyTarget::NextFreeSlotOnCurrentTrack),
-        "replace_current_effect" => Ok(AgentEffectApplyTarget::ReplaceCurrentEffect),
-        other => Err(format!(
-            "Unknown effect artifact apply target mode '{other}'. Expected next_free_slot_on_current_track or replace_current_effect."
-        )),
-    }
-}
-
 fn optional_kind(value: &Value, key: &str) -> Result<Option<ExampleKind>, String> {
     match value.get(key).and_then(Value::as_str) {
         Some(raw) => ExampleKind::from_wire_value(raw).map(Some),
@@ -1187,7 +1104,6 @@ mod tests {
         assert!(names.contains(&"create_instrument_artifact".to_string()));
         assert!(names.contains(&"create_effect_artifact".to_string()));
         assert!(names.contains(&"update_effect_artifact".to_string()));
-        assert!(names.contains(&"apply_effect_artifact".to_string()));
         assert!(names.contains(&"finalize_effect_artifact".to_string()));
         assert!(names.contains(&"inspect_current_instrument_preset_schema".to_string()));
         assert!(names.contains(&"create_current_instrument_presets".to_string()));
@@ -1395,22 +1311,6 @@ mod tests {
         assert!(outcome.content.contains("[dsp.lisp]"));
         assert!(outcome.content.contains("[ui.lisp]"));
         assert!(outcome.content.contains("(defeffect-ui"));
-    }
-
-    #[test]
-    fn apply_effect_artifact_requires_existing_track() {
-        let runtime = AgentToolRuntime::load_default().expect("load runtime");
-        let outcome = runtime.execute(
-            ToolCall {
-                name: "apply_effect_artifact".to_string(),
-                arguments: json!({
-                    "target": { "mode": "next_free_slot_on_current_track" }
-                }),
-            },
-            &empty_session(),
-        );
-        assert!(!outcome.ok);
-        assert!(outcome.summary.contains("create a track first"));
     }
 
     #[test]

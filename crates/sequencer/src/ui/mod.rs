@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::agent::actions::{
-    AgentAppAction, AgentEffectApplyTarget, AgentInstrumentParamSchema, AgentInstrumentPresetDraft,
+    AgentAppAction, AgentInstrumentParamSchema, AgentInstrumentPresetDraft,
     AgentInstrumentPresetSchema, AgentSessionContext,
 };
 use crate::agent::audition::{audition_feedback, audition_loaded_effect};
@@ -1676,64 +1676,6 @@ impl App {
         Ok(())
     }
 
-    fn apply_agent_effect_artifact(
-        &mut self,
-        target: AgentEffectApplyTarget,
-    ) -> Result<String, String> {
-        let artifact = self
-            .agent_panel
-            .current_effect_artifact
-            .clone()
-            .ok_or_else(|| "No validated draft effect artifact exists to apply.".to_string())?;
-        self.validate_agent_effect_artifact(
-            &artifact.name,
-            &artifact.dsp_source,
-            &artifact.ui_source,
-        )?;
-        if self.tracks.is_empty() {
-            return Err("No current track is available.".to_string());
-        }
-        let track = self.ui.cursor_track;
-        let slot_idx = match target {
-            AgentEffectApplyTarget::NextFreeSlotOnCurrentTrack => self
-                .next_free_custom_slot()
-                .ok_or_else(|| "The current track has no free custom effect slot.".to_string())?,
-            AgentEffectApplyTarget::ReplaceCurrentEffect => {
-                let slot = self
-                    .selected_effect_slot()
-                    .ok_or_else(|| "No current custom effect slot is selected.".to_string())?;
-                if slot < crate::effects::BUILTIN_SLOT_COUNT {
-                    return Err("The selected effect slot is not a custom effect slot.".to_string());
-                }
-                slot
-            }
-        };
-        let previous_source = crate::lisp_effect::load_effect_source(&artifact.name).ok();
-        let previous_ui = crate::lisp_effect::load_effect_ui_source(&artifact.name).ok();
-        self.save_effect_artifact_sources_with_rollback(
-            &artifact.name,
-            &artifact.dsp_source,
-            &artifact.ui_source,
-        )?;
-        if let Err(error) = self.load_saved_effect_to_slot_sync(track, slot_idx, &artifact.name) {
-            self.restore_effect_source(&artifact.name, previous_source.as_deref())?;
-            self.restore_effect_ui_source(&artifact.name, previous_ui.as_deref())?;
-            return Err(format!(
-                "Failed to apply effect artifact '{}': {error}",
-                artifact.name
-            ));
-        }
-        Ok(format!(
-            "Applied effect artifact '{}' to track '{}' slot {}.",
-            artifact.name,
-            self.tracks
-                .get(track)
-                .cloned()
-                .unwrap_or_else(|| "current track".to_string()),
-            slot_idx + 1
-        ))
-    }
-
     fn finalize_agent_effect_artifact(&mut self, name: String) -> Result<String, String> {
         let artifact = self
             .agent_panel
@@ -1813,9 +1755,6 @@ impl App {
                 dsp_source,
                 ui_source,
             } => self.update_agent_effect_artifact(name, dsp_source, ui_source),
-            AgentAppAction::ApplyEffectArtifact { target } => {
-                self.apply_agent_effect_artifact(target)
-            }
             AgentAppAction::FinalizeEffectArtifact { name } => {
                 self.finalize_agent_effect_artifact(name)
             }

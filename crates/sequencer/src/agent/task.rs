@@ -335,7 +335,6 @@ fn tool_progress_message(call: &ToolCall) -> String {
             None => "Creating a draft effect artifact.".to_string(),
         },
         "update_effect_artifact" => "Updating the current draft effect artifact.".to_string(),
-        "apply_effect_artifact" => "Applying the current draft effect artifact.".to_string(),
         "finalize_effect_artifact" => match string_arg(&call.arguments, "name") {
             Some(name) => format!("Finalizing effect artifact as `{name}`."),
             None => "Finalizing the current effect artifact.".to_string(),
@@ -537,11 +536,9 @@ fn apply_agent_action(
             dsp_source,
             ui_source,
         } => update_effect_artifact(store, id, name, dsp_source, ui_source),
-        AgentAppAction::FinalizeEffectArtifact { name } => finalize_effect_artifact(store, id, name),
-        AgentAppAction::ApplyEffectArtifact { .. } => Err(
-            "apply_effect_artifact requires the app-host agent path because applying mutates the live project graph. The artifact was not applied."
-                .to_string(),
-        ),
+        AgentAppAction::FinalizeEffectArtifact { name } => {
+            finalize_effect_artifact(store, id, name)
+        }
         other => Err(format!(
             "Tool returned unsupported action for this agent panel: {other:?}"
         )),
