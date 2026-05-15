@@ -74,6 +74,14 @@ pub(crate) fn focused_widget_captures_text_input(editor: &Editor) -> bool {
     })
 }
 
+fn active_buffer_accepts_global_step_shortcuts(editor: &Editor) -> bool {
+    let buffer = editor.active_buffer();
+    if buffer.name == "*piano-roll*" {
+        return false;
+    }
+    buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly)
+}
+
 pub(crate) fn held_note_for_key(
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     key: &crossterm::event::KeyEvent,
@@ -403,17 +411,33 @@ pub(crate) fn handle_metal_command_shortcut(
         return true;
     }
 
-    if editor.active_buffer().name != "*metal*" {
+    if active_buffer_accepts_global_step_shortcuts(editor)
+        && !focused_widget_captures_text_input(editor)
+    {
+        match (key.code, key.modifiers) {
+            (KeyCode::Left, KeyModifiers::NONE) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-left)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Right, KeyModifiers::NONE) => {
+                let _ = editor.runtime_mut().eval_str("(cursor-right)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Backspace | KeyCode::Delete, KeyModifiers::NONE) => {
+                let _ = editor.runtime_mut().eval_str("(delete-selected-steps)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            _ => {}
+        }
+    } else {
         return false;
     }
 
     if key.modifiers.contains(KeyModifiers::SUPER) {
         match key.code {
-            KeyCode::Char('a') | KeyCode::Char('A') => {
-                let _ = editor.runtime_mut().eval_str("(select-all-steps)");
-                editor.refresh_runtime_side_effects();
-                return true;
-            }
             KeyCode::Char('c') | KeyCode::Char('C') => {
                 let track = current_track.load(Ordering::Relaxed);
                 let steps: Vec<usize> = {

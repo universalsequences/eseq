@@ -226,6 +226,20 @@
       (bus-select-all-steps)
       (seq-select-all-steps))))
 
+(def seq-global-select-all-steps ()
+  (if (and (buffer-read-only?) (not (= (current-buffer-name) "*piano-roll*")))
+    (select-all-steps)
+    false))
+
+(bind-key "C-a" "seq-global-select-all-steps")
+
+(def seq-global-toggle-record ()
+  (if (or (buffer-read-only?) (= (view-mode) "ui"))
+    (seq-toggle-record)
+    false))
+
+(bind-key "." "seq-global-toggle-record")
+
 (def delete-selected-steps ()
   (do
     (cool-off-follow)

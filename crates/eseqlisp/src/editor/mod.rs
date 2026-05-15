@@ -2476,10 +2476,12 @@ impl Editor {
             if let Some(handler) = self.lisp_bindings.get(&ks).cloned() {
                 if self.builtins.values().any(|cmd| cmd == &handler) {
                     self.run_command(&handler);
+                    return;
+                } else if self.call_lisp_handler(&handler) {
+                    return;
                 } else {
-                    self.call_lisp_handler(&handler);
+                    self.clear_minibuffer_message();
                 }
-                return;
             }
         }
 
@@ -2507,19 +2509,16 @@ impl Editor {
                     .and_then(|mode| mode.keybindings.get(&ks))
                     .cloned()
                 {
-                    self.call_lisp_handler(&handler);
-                    return;
+                    if self.call_lisp_handler(&handler) {
+                        return;
+                    }
+                    self.clear_minibuffer_message();
                 }
             }
         }
 
         if let Some(cmd) = self.builtins.get(&key).cloned() {
             self.run_command(&cmd);
-            return;
-        }
-
-        if let Some(handler) = self.lisp_bindings.get(&key_str(key)).cloned() {
-            self.call_lisp_handler(&handler);
             return;
         }
 
@@ -3638,18 +3637,18 @@ impl Editor {
         }
     }
 
-    fn call_lisp_handler(&mut self, fn_name: &str) {
-        self.call_lisp_handler_with_args(fn_name, &[]);
+    fn call_lisp_handler(&mut self, fn_name: &str) -> bool {
+        self.call_lisp_handler_with_args(fn_name, &[])
     }
 
-    fn call_lisp_handler_with_args(&mut self, fn_name: &str, args: &[Value]) {
+    fn call_lisp_handler_with_args(&mut self, fn_name: &str, args: &[Value]) -> bool {
         if fn_name == "eval-sexp" || fn_name == "eval-buffer-command" {
             self.eval_preview_handler(fn_name);
-            return;
+            return true;
         }
         if fn_name == "find-file" {
             self.run_command("find-file");
-            return;
+            return true;
         }
         self.sync_runtime_source_context();
         self.clear_minibuffer_message();
@@ -3663,17 +3662,28 @@ impl Editor {
         } else {
             format!("({fn_name} {rendered_args})")
         };
-        match self.runtime.eval_str(&code) {
-            Ok(Some(result)) => self.show_transient_message(format_value_for_minibuffer(&result)),
-            Ok(None) => self.show_transient_message("No result"),
-            Err(e) => self.show_transient_message(format!("Error: {e:?}")),
-        }
+        let handled = match self.runtime.eval_str(&code) {
+            Ok(Some(Value::Bool(false))) => false,
+            Ok(Some(result)) => {
+                self.show_transient_message(format_value_for_minibuffer(&result));
+                true
+            }
+            Ok(None) => {
+                self.show_transient_message("No result");
+                true
+            }
+            Err(e) => {
+                self.show_transient_message(format!("Error: {e:?}"));
+                true
+            }
+        };
         if let Some(status) = self.runtime.take_status_message() {
             self.show_transient_message(status);
         }
         self.refresh_runtime_side_effects();
         self.sync_runtime_context();
         self.completion = None;
+        handled
     }
 
     fn handle_mode_input_key(&mut self, key: KeyEvent) -> bool {

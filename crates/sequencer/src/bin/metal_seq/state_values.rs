@@ -5154,7 +5154,13 @@ mod tests {
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        register_agent_test_natives(editor.runtime_mut());
         register_full_grid_test_natives(&mut editor);
+        editor.runtime_mut().register_reactive(
+            "AGENT",
+            vec![("generation", Value::Number(0.0))],
+            false,
+        );
 
         let steps = test_bool_list(&[
             true, false, true, false, true, false, true, false, true, false, true, false, true,
@@ -5357,6 +5363,285 @@ mod tests {
             panic!("full grid lisp status after refresh: {status}");
         }
         editor
+    }
+
+    #[test]
+    fn metal_seq_cmd_a_global_binding_selects_steps_outside_piano_roll() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (def selected-count (state 0))
+                  (def select-all-steps () (set! selected-count (+ selected-count 1)))
+                "#,
+            )
+            .expect("install select-all test hook");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*fx*")"#)
+            .expect("switch to fx buffer");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-count").unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
+            .expect("switch to piano roll buffer");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-count").unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        editor.open_scratch_buffer("*editable*", "abc");
+        editor.active_buffer_mut().cursor = (0, 2);
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-count").unwrap(),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(editor.active_buffer().cursor, (0, 0));
+    }
+
+    #[test]
+    fn metal_seq_dot_global_binding_toggles_recording_outside_editable_text_buffers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (def record-toggle-count (state 0))
+                  (def seq-toggle-record () (set! record-toggle-count (+ record-toggle-count 1)))
+                "#,
+            )
+            .expect("install record toggle test hook");
+        editor.refresh_runtime_side_effects();
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*fx*")"#)
+            .expect("switch to fx buffer");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
+            .expect("switch to piano roll buffer");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(2.0))
+        );
+
+        editor.open_scratch_buffer("*editable*", "");
+        editor.handle_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE));
+
+        assert_eq!(
+            editor.active_buffer().text(),
+            ".",
+            "editable buffers should keep normal text insertion"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("record-toggle-count")
+                .unwrap(),
+            Some(Value::Number(2.0))
+        );
+    }
+
+    #[test]
+    fn metal_seq_global_step_edit_shortcuts_work_outside_grid_buffers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (def cursor-left-count (state 0))
+                  (def cursor-right-count (state 0))
+                  (def delete-count (state 0))
+                  (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                  (def cursor-right () (set! cursor-right-count (+ cursor-right-count 1)))
+                  (def delete-selected-steps () (set! delete-count (+ delete-count 1)))
+                "#,
+            )
+            .expect("install step edit shortcut hooks");
+        editor.refresh_runtime_side_effects();
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*fx*")"#)
+            .expect("switch to fx buffer");
+        editor.refresh_runtime_side_effects();
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-left-count").unwrap(),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-right-count").unwrap(),
+            Some(Value::Number(1.0))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("delete-count").unwrap(),
+            Some(Value::Number(1.0))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
+            .expect("switch to piano roll buffer");
+        editor.refresh_runtime_side_effects();
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        editor.open_scratch_buffer("*editable*", "");
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+    }
+
+    #[test]
+    fn metal_seq_copy_paste_step_shortcuts_work_outside_grid_buffers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+
+        state.pattern.patterns[0].set_step_active(0, true);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (set-window-buffer "*fx*")
+                  (set! cursor-step 0)
+                "#,
+            )
+            .expect("switch to fx buffer and set cursor");
+        editor.refresh_runtime_side_effects();
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(step_clipboard.lock().unwrap().is_some());
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! cursor-step 1)")
+            .expect("move cursor");
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert!(state.pattern.patterns[0].is_active(1));
+
+        editor
+            .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
+            .expect("switch to piano roll buffer");
+        editor.refresh_runtime_side_effects();
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('c'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+
+        editor.open_scratch_buffer("*editable*", "");
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
     }
 
     #[test]
