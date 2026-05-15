@@ -36,6 +36,7 @@ struct PatchPortLayout {
     connected_sources: Vec<usize>,
     on_cable_click: Option<Value>,
     on_patch_drop: Option<Value>,
+    on_patch_cancel: Option<Value>,
 }
 
 fn patch_port_direction(node: &LayoutNode) -> Option<PatchPortDirection> {
@@ -92,6 +93,7 @@ fn collect_patch_port_layouts(node: &LayoutNode, ports: &mut Vec<PatchPortLayout
                 connected_sources: node_usize_list_prop(node, "connected-sources"),
                 on_cable_click: node.props.get("on-cable-click").cloned(),
                 on_patch_drop: node.props.get("on-patch-drop").cloned(),
+                on_patch_cancel: node.props.get("on-patch-cancel").cloned(),
             });
         }
     }
@@ -162,9 +164,13 @@ fn patch_drop_output(
         .iter()
         .find(|port| port.direction == PatchPortDirection::Out && port.active && port.pending)?;
     if squared_distance(source.center, (layout_col, layout_row)) < 2.25 {
-        return None;
+        let callback = source.on_patch_cancel.clone()?;
+        return Some(crate::widget_render::EventOutput {
+            callback,
+            args: vec![Value::Number(source.track as f64)],
+        });
     }
-    let dest = ports
+    let Some(dest) = ports
         .iter()
         .filter(|port| {
             port.direction == PatchPortDirection::In
@@ -176,7 +182,14 @@ fn patch_drop_output(
             let da = squared_distance(a.center, (layout_col, layout_row));
             let db = squared_distance(b.center, (layout_col, layout_row));
             da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-        })?;
+        })
+    else {
+        let callback = source.on_patch_cancel.clone()?;
+        return Some(crate::widget_render::EventOutput {
+            callback,
+            args: vec![Value::Number(source.track as f64)],
+        });
+    };
 
     Some(crate::widget_render::EventOutput {
         callback: dest.on_patch_drop.clone()?,

@@ -2349,6 +2349,21 @@ fragment float4 waveform_frag(
                     let cursor_px = (self.cursor_pos.0 * cell_w, self.cursor_pos.1 * cell_h);
                     let cables = build_mod_patch_cables(&mod_patch_ports, vp_w, vp_h, cursor_px);
                     draw_patch_cable_instances(&enc, &self.device, &cable_pipeline, &cables);
+                    let highlight_verts = build_mod_patch_drag_highlight_verts(
+                        &mod_patch_ports,
+                        cursor_px,
+                        vp_w,
+                        vp_h,
+                    );
+                    if !highlight_verts.is_empty() {
+                        draw_text_verts(
+                            &enc,
+                            &self.device,
+                            &pipeline,
+                            &atlas_texture,
+                            &highlight_verts,
+                        );
+                    }
                 }
             }
 
@@ -4299,12 +4314,9 @@ fragment float4 waveform_frag(
         if let Some(source_port) = ports.iter().find(|port| {
             port.direction == ModPatchPortDirection::Out && port.active && port.pending
         }) {
-            let end = nearest_mod_input_port(ports, source_port.track, cursor_px)
-                .map(|port| port.center_px)
-                .unwrap_or(cursor_px);
             push_mod_patch_cable_instance(
                 (source_port.center_px.0 + 1.4, source_port.center_px.1 + 2.2),
-                (end.0 + 1.4, end.1 + 2.2),
+                (cursor_px.0 + 1.4, cursor_px.1 + 2.2),
                 3.6,
                 shadow_color,
                 &mut cables,
@@ -4314,7 +4326,7 @@ fragment float4 waveform_frag(
             );
             push_mod_patch_cable_instance(
                 source_port.center_px,
-                end,
+                cursor_px,
                 1.85,
                 preview_color,
                 &mut cables,
@@ -4324,7 +4336,7 @@ fragment float4 waveform_frag(
             );
             push_mod_patch_cable_instance(
                 (source_port.center_px.0, source_port.center_px.1 - 0.7),
-                (end.0, end.1 - 0.7),
+                (cursor_px.0, cursor_px.1 - 0.7),
                 0.55,
                 preview_highlight_color,
                 &mut cables,
@@ -4359,6 +4371,50 @@ fragment float4 waveform_frag(
         let dx = a.0 - b.0;
         let dy = a.1 - b.1;
         dx * dx + dy * dy
+    }
+
+    fn build_mod_patch_drag_highlight_verts(
+        ports: &[ModPatchPort],
+        cursor_px: (f32, f32),
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<Vertex> {
+        let Some(source_port) = ports.iter().find(|port| {
+            port.direction == ModPatchPortDirection::Out && port.active && port.pending
+        }) else {
+            return Vec::new();
+        };
+        let Some(input_port) = nearest_mod_input_port(ports, source_port.track, cursor_px) else {
+            return Vec::new();
+        };
+        let mut verts = Vec::new();
+        let size = 13.5;
+        let x = input_port.center_px.0 - size * 0.5;
+        let y = input_port.center_px.1 - size * 0.5;
+        push_rounded_rect_fill_px(
+            &mut verts,
+            x,
+            y,
+            size,
+            size,
+            size * 0.5,
+            Color::rgba(0.30, 0.76, 1.0, 0.14),
+            vp_w,
+            vp_h,
+        );
+        push_rounded_rect_border_px(
+            &mut verts,
+            x,
+            y,
+            size,
+            size,
+            2.0,
+            size * 0.5,
+            Color::rgba(0.72, 0.95, 1.0, 0.92),
+            vp_w,
+            vp_h,
+        );
+        verts
     }
 
     fn push_mod_patch_cable_instance(

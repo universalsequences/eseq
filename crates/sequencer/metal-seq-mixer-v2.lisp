@@ -166,6 +166,11 @@
       (status (str "Mod out: track " (+ track 1))))
     (status "Only modulator tracks expose mod out in v1")))
 
+(def mixer-v2-cancel-mod-draw ()
+  (do
+    (set! mixer-v2-pending-mod-source -1)
+    true))
+
 (def mixer-v2-connect-mod-route (source track input)
   (if (= source track)
     (status "Mod self-routes are not allowed")
@@ -222,7 +227,9 @@
       :selected false
       :style (if (mixer-v2-track-modulator? track) mixer-v2-mod-output-style nil)
       :on-click |x y r| (mixer-v2-mod-out-click track)
-      :on-mouse-down |x y r| (mixer-v2-mod-out-click track))
+      :on-mouse-down |x y r| (mixer-v2-mod-out-click track)
+      :on-patch-cancel (lambda (source)
+        (mixer-v2-cancel-mod-draw)))
     (if (mixer-v2-track-modulator? track)
       (each (range 0 4) |input|
         (box :key (str "mixer-v2-mod-in-spacer-" track "-" input)
