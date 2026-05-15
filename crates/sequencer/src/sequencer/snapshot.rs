@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use crate::effects::EffectSlotSnapshot;
 
 use super::data::{
-    InstrumentType, StepParam, SwingResolution, Timebase, TrackParamsSnapshot, MAX_STEPS,
-    NUM_PARAMS,
+    InstrumentType, ModConnection, StepParam, SwingResolution, Timebase, TrackParamsSnapshot,
+    MAX_STEPS, NUM_PARAMS,
 };
 use super::state::SequencerState;
 
@@ -45,6 +45,7 @@ pub struct SequencerTrackSnapshot {
 pub struct SequencerSnapshot {
     pub transport: SequencerTransportSnapshot,
     pub tracks: Vec<SequencerTrackSnapshot>,
+    pub mod_connections: Vec<ModConnection>,
 }
 
 impl SequencerSnapshot {
@@ -59,6 +60,7 @@ impl SequencerSnapshot {
                 num_tracks: 0,
             },
             tracks: Vec::new(),
+            mod_connections: Vec::new(),
         }
     }
 
@@ -101,12 +103,9 @@ impl SequencerSnapshot {
                 accum_mode: tp.get_accum_mode(),
                 fts_scale: tp.get_fts_scale(),
             };
-            let instrument_type =
-                if state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed) == 1 {
-                    InstrumentType::Custom
-                } else {
-                    InstrumentType::Sampler
-                };
+            let instrument_type = InstrumentType::from_runtime_flag(
+                state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+            );
             let instrument_base_note_offset = f32::from_bits(
                 state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
             );
@@ -167,6 +166,10 @@ impl SequencerSnapshot {
             });
         }
 
-        Self { transport, tracks }
+        Self {
+            transport,
+            tracks,
+            mod_connections: Vec::new(),
+        }
     }
 }

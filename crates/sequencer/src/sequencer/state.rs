@@ -7,10 +7,10 @@ use crate::effects::{
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, InstrumentType, StepData, StepParam, SwingPLockData, SwingResolution,
-    SwingResolutionPLockData, Timebase, TimebasePLockData, TrackParams, TrackParamsSnapshot,
-    TrackPattern, TrackSoundState, DEFAULT_BPM, MAX_STEPS, MAX_TRACKS, NUM_PARAMS,
-    TRACK_PATTERN_WORDS,
+    ChordData, ChordSnapshot, InstrumentType, ModConnection, StepData, StepParam, SwingPLockData,
+    SwingResolution, SwingResolutionPLockData, Timebase, TimebasePLockData, TrackParams,
+    TrackParamsSnapshot, TrackPattern, TrackSoundState, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
+    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
 
@@ -62,6 +62,7 @@ pub struct PatternSnapshot {
     pub swing_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub swing_resolution_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub instrument_types: Vec<InstrumentType>,
+    pub mod_connections: Vec<ModConnection>,
 }
 
 impl PatternSnapshot {
@@ -90,6 +91,13 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.swing_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.swing_resolution_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.instrument_types, track_idx);
+        self.mod_connections = self
+            .mod_connections
+            .iter()
+            .filter_map(|connection| {
+                remap_mod_connection_after_track_delete(*connection, track_idx)
+            })
+            .collect();
     }
 
     pub fn remove_effect_slot(&mut self, track: usize, slot_idx: usize) {
@@ -163,6 +171,11 @@ impl PatternSnapshot {
                 .push([None; MAX_STEPS]);
             self.instrument_types.push(InstrumentType::Sampler);
         }
+        self.mod_connections.retain(|connection| {
+            connection.source_track < track_count
+                && connection.dest_track < track_count
+                && connection.dest_input < EXT_MOD_INPUT_COUNT
+        });
 
         for steps in &mut self.step_data {
             steps.truncate(MAX_STEPS);
@@ -191,6 +204,11 @@ impl PatternSnapshot {
         self.swing_plock_snapshots.truncate(track_count);
         self.swing_resolution_plock_snapshots.truncate(track_count);
         self.instrument_types.truncate(track_count);
+        self.mod_connections.retain(|connection| {
+            connection.source_track < track_count
+                && connection.dest_track < track_count
+                && connection.dest_input < EXT_MOD_INPUT_COUNT
+        });
     }
 
     pub fn capture(
@@ -326,6 +344,7 @@ impl PatternSnapshot {
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
             instrument_types: inst_types,
+            mod_connections: Vec::new(),
         }
     }
 
@@ -528,6 +547,7 @@ impl PatternSnapshot {
             swing_plock_snapshots: Vec::with_capacity(num_tracks),
             swing_resolution_plock_snapshots: Vec::with_capacity(num_tracks),
             instrument_types: Vec::with_capacity(num_tracks),
+            mod_connections: Vec::new(),
         };
         for t in 0..num_tracks {
             snap.push_default_track(t, slot_descriptors);
@@ -563,6 +583,7 @@ impl PatternSnapshot {
             && self.chord_snapshots.len() == n
             && self.timebase_plock_snapshots.len() == n
             && self.swing_plock_snapshots.len() == n
+            && self.instrument_types.len() == n
             && self.swing_resolution_plock_snapshots.len() == n
             && self.instrument_types.len() == n
             && self.step_data.iter().all(|steps| steps.len() == MAX_STEPS)
@@ -615,6 +636,28 @@ fn remove_track_lane_if_present<T>(lanes: &mut Vec<T>, track_idx: usize) {
     if track_idx < lanes.len() {
         lanes.remove(track_idx);
     }
+}
+
+fn remap_mod_connection_after_track_delete(
+    connection: ModConnection,
+    deleted_track: usize,
+) -> Option<ModConnection> {
+    if connection.source_track == deleted_track || connection.dest_track == deleted_track {
+        return None;
+    }
+    Some(ModConnection {
+        source_track: if connection.source_track > deleted_track {
+            connection.source_track - 1
+        } else {
+            connection.source_track
+        },
+        dest_track: if connection.dest_track > deleted_track {
+            connection.dest_track - 1
+        } else {
+            connection.dest_track
+        },
+        dest_input: connection.dest_input,
+    })
 }
 
 fn sidechain_source_track(
@@ -794,6 +837,7 @@ pub struct TransportState {
 
 pub struct RuntimeBindingState {
     pub sampler_lids: Vec<AtomicU64>,
+    pub modulator_lids: Vec<AtomicU64>,
     pub pan_lids: Vec<AtomicU64>,
     pub delay_lids: Vec<AtomicU64>,
     pub send_lids: Vec<AtomicU64>,
@@ -808,6 +852,7 @@ pub struct RuntimeBindingState {
     pub engine_voice_counts: Vec<AtomicU32>,
     pub engine_route_lids: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_route_lids_r: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
+    pub engine_ext_route_lids: Vec<[[[AtomicU64; EXT_MOD_INPUT_COUNT]; MAX_TRACKS]; MAX_VOICES]>,
     pub sampler_analysis_buffer_ids: Vec<AtomicU32>,
     pub sampler_analysis_bpm: Vec<AtomicU32>,
     pub sampler_onset_ptr_lo: Vec<AtomicU32>,
@@ -915,6 +960,7 @@ impl SequencerState {
             },
             runtime: RuntimeBindingState {
                 sampler_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
+                modulator_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 pan_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 delay_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 send_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
@@ -942,6 +988,13 @@ impl SequencerState {
                     .collect(),
                 engine_route_lids_r: (0..MAX_TRACKS)
                     .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
+                    .collect(),
+                engine_ext_route_lids: (0..MAX_TRACKS)
+                    .map(|_| {
+                        std::array::from_fn(|_| {
+                            std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                        })
+                    })
                     .collect(),
                 sampler_analysis_buffer_ids: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(u32::MAX))
@@ -1099,6 +1152,7 @@ impl SequencerState {
         self.transport.track_playheads[track].store(0, Ordering::Relaxed);
         self.transport.trigger_flash[track].store(0, Ordering::Relaxed);
         self.runtime.sampler_lids[track].store(0, Ordering::Relaxed);
+        self.runtime.modulator_lids[track].store(0, Ordering::Relaxed);
         self.runtime.voice_counts[track].store(0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[track].store(0, Ordering::Relaxed);
         self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Relaxed);
@@ -1117,6 +1171,10 @@ impl SequencerState {
                 self.runtime.engine_route_lids[engine_id][voice][track].store(0, Ordering::Relaxed);
                 self.runtime.engine_route_lids_r[engine_id][voice][track]
                     .store(0, Ordering::Relaxed);
+                for input in 0..EXT_MOD_INPUT_COUNT {
+                    self.runtime.engine_ext_route_lids[engine_id][voice][track][input]
+                        .store(0, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -1134,6 +1192,10 @@ impl SequencerState {
             );
             self.runtime.sampler_lids[idx].store(
                 self.runtime.sampler_lids[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.modulator_lids[idx].store(
+                self.runtime.modulator_lids[next].load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
             self.runtime.pan_lids[idx].store(
@@ -1206,6 +1268,13 @@ impl SequencerState {
                             .load(Ordering::Relaxed),
                         Ordering::Relaxed,
                     );
+                    for input in 0..EXT_MOD_INPUT_COUNT {
+                        self.runtime.engine_ext_route_lids[engine_id][voice][idx][input].store(
+                            self.runtime.engine_ext_route_lids[engine_id][voice][next][input]
+                                .load(Ordering::Relaxed),
+                            Ordering::Relaxed,
+                        );
+                    }
                 }
             }
         }
@@ -1217,6 +1286,7 @@ impl SequencerState {
         self.transport.track_playheads[last].store(0, Ordering::Relaxed);
         self.transport.trigger_flash[last].store(0, Ordering::Relaxed);
         self.runtime.sampler_lids[last].store(0, Ordering::Relaxed);
+        self.runtime.modulator_lids[last].store(0, Ordering::Relaxed);
         self.runtime.pan_lids[last].store(0, Ordering::Relaxed);
         self.runtime.delay_lids[last].store(0, Ordering::Relaxed);
         self.runtime.send_lids[last].store(0, Ordering::Relaxed);
@@ -1238,6 +1308,10 @@ impl SequencerState {
                 self.runtime.engine_route_lids[engine_id][voice][last].store(0, Ordering::Relaxed);
                 self.runtime.engine_route_lids_r[engine_id][voice][last]
                     .store(0, Ordering::Relaxed);
+                for input in 0..EXT_MOD_INPUT_COUNT {
+                    self.runtime.engine_ext_route_lids[engine_id][voice][last][input]
+                        .store(0, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -1458,7 +1532,8 @@ impl SequencerState {
         if new_idx == cur || new_idx >= bank.len() {
             return None;
         }
-        bank[cur] = PatternSnapshot::capture(
+        let current_mod_connections = bank[cur].mod_connections.clone();
+        let mut current_snapshot = PatternSnapshot::capture(
             self,
             num_tracks,
             buffer_ids,
@@ -1466,6 +1541,8 @@ impl SequencerState {
             names,
             instrument_types,
         );
+        current_snapshot.mod_connections = current_mod_connections;
+        bank[cur] = current_snapshot;
         bank[new_idx].restore(self);
         self.pattern
             .current_pattern
@@ -2030,6 +2107,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            mod_connections: Vec::new(),
         }
     }
 
@@ -2123,6 +2201,39 @@ mod tests {
         assert_eq!(snapshot.track_bits[1][0], 3);
         assert_eq!(snapshot.sample_ids[0], (1, "track-1".to_string(), 44_100));
         assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string(), 44_100));
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_remaps_mod_connections() {
+        let mut snapshot = sample_pattern_snapshot(4);
+        snapshot.mod_connections = vec![
+            ModConnection {
+                source_track: 1,
+                dest_track: 3,
+                dest_input: 2,
+            },
+            ModConnection {
+                source_track: 0,
+                dest_track: 2,
+                dest_input: 1,
+            },
+            ModConnection {
+                source_track: 2,
+                dest_track: 1,
+                dest_input: 3,
+            },
+        ];
+
+        snapshot.remove_track(1);
+
+        assert_eq!(
+            snapshot.mod_connections,
+            vec![ModConnection {
+                source_track: 0,
+                dest_track: 1,
+                dest_input: 1,
+            }]
+        );
     }
 
     #[test]
@@ -2270,6 +2381,7 @@ mod tests {
             swing_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             swing_resolution_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             instrument_types: vec![InstrumentType::Sampler; 4],
+            mod_connections: Vec::new(),
         };
         let descriptors = vec![
             vec![EffectDescriptor::builtin_filter()],

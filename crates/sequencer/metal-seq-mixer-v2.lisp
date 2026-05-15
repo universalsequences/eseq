@@ -72,6 +72,82 @@
     (seq-clear-selection)
     (set! selected-bus i)))
 
+(defstate mixer-v2-pending-mod-source -1)
+
+(def mixer-v2-track-modulator? (i)
+  (and (< i (len SEQ.track-instrument-types))
+    (= (nth SEQ.track-instrument-types i) "modulator")))
+
+(def mixer-v2-mod-route-exists-at (source dest input idx)
+  (if (>= idx (len SEQ.mod-routes))
+    false
+    (let ((route (nth SEQ.mod-routes idx)))
+      (or (and (= (get route :source) source)
+            (= (get route :dest) dest)
+            (= (get route :input) input))
+        (mixer-v2-mod-route-exists-at source dest input (+ idx 1))))))
+
+(def mixer-v2-mod-route-exists? (source dest input)
+  (mixer-v2-mod-route-exists-at source dest input 0))
+
+(def mixer-v2-mod-out-click (track)
+  (if (mixer-v2-track-modulator? track)
+    (do
+      (set! mixer-v2-pending-mod-source track)
+      (status (str "Mod out: track " (+ track 1))))
+    (status "Only modulator tracks expose mod out in v1")))
+
+(def mixer-v2-mod-in-click (track input)
+  (if (< mixer-v2-pending-mod-source 0)
+    (status "Select a mod out first")
+    (if (= mixer-v2-pending-mod-source track)
+      (do
+        (set! mixer-v2-pending-mod-source -1)
+        (status "Mod self-routes are not allowed"))
+      (do
+        (if (mixer-v2-mod-route-exists? mixer-v2-pending-mod-source track input)
+          (host-command "delete-mod-route"
+            (dict :source mixer-v2-pending-mod-source :dest track :input input))
+          (host-command "set-mod-route"
+            (dict :source mixer-v2-pending-mod-source :dest track :input input)))
+        (set! mixer-v2-pending-mod-source -1)))))
+
+(defwidget mixer-v2-mod-port
+  :width 1.05 :height 1.05
+  :paint-margin 0.12
+  :state (active pending)
+  :shader
+  (sdf/layer
+    (sdf/fill (sdf/circle 0.82)
+      (material
+        :color (if active
+          (if pending (rgba 0.25 0.72 1.0 1.0) (rgba 0.93 0.48 0.16 1.0))
+          (rgba 0.12 0.13 0.15 1.0))))
+    (sdf/fill (sdf/circle 0.43)
+      (material :color (rgba 0.02 0.025 0.03 1.0)))))
+
+(def mixer-v2-mod-port-row (track)
+  (h-stack :key (str "mixer-v2-mod-ports-" track)
+    :width 9.8 :height 1.15 :gap 0.42 :align :center
+    (mixer-v2-mod-port
+      :key (str "mixer-v2-mod-out-" track)
+      :direction :out
+      :track track
+      :active (mixer-v2-track-modulator? track)
+      :pending (= mixer-v2-pending-mod-source track)
+      :on-click |x y r| (mixer-v2-mod-out-click track)
+      :on-mouse-down |x y r| (mixer-v2-mod-out-click track))
+    (each (range 0 4) |input|
+      (mixer-v2-mod-port
+        :key (str "mixer-v2-mod-in-" track "-" input)
+        :direction :in
+        :track track
+        :input input
+        :active true
+        :pending false
+        :on-click |x y r| (mixer-v2-mod-in-click track input)
+        :on-mouse-up |x y r| (mixer-v2-mod-in-click track input)))))
+
 (defwidget mixer-v2-volume-triangle
   :width 1.35 :height 4.24
   :paint-margin 0.15
@@ -176,7 +252,7 @@
   (let ((selected (and (< selected-bus 0) (= SEQ.current-track i)))
       (muted (mixer-v2-muted? i))
       (sends (nth SEQ.track-bus-sends i)))
-    (box :width 10.9 :height 11.0
+    (box :width 10.9 :height 12.15
       :background-color (mixer-v2-strip-bg selected muted)
       :border-width 2
       :corner-radius 10
@@ -190,6 +266,7 @@
           :on-change (lambda (v)
             (host-command "set-track-output" (dict :track i :label v)))
           :width 9.8 :height 1.2 :font-size 10)
+        (mixer-v2-mod-port-row i)
         (h-stack :gap 0.05
           (each sends |send send-idx|
             (mixer-v2-send-knob i send)))

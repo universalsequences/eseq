@@ -325,10 +325,12 @@ mod engine_registry_tests {
 
 pub struct EngineNodeIds {
     pub synth_ids: Vec<i32>,
+    pub synth_inputs: usize,
     pub synth_outputs: usize,
     pub gatepitch_ids: Vec<i32>,
     pub modulator_ids: Vec<i32>,
     pub route_gain_ids: Vec<Vec<[i32; 2]>>,
+    pub ext_route_gain_ids: Vec<Vec<[i32; crate::sequencer::EXT_MOD_INPUT_COUNT]>>,
 }
 
 #[derive(Clone, Copy)]
@@ -519,6 +521,9 @@ pub struct TrackNodeIds {
     pub filter_id: i32,
     pub delay_id: i32,
     pub send_id: i32,
+    pub mod_out_id: i32,
+    pub mod_in_clip_ids: [i32; crate::sequencer::EXT_MOD_INPUT_COUNT],
+    pub mod_env_id: i32,
     pub bus_send_ids: Vec<BusSendNodeIds>,
 }
 

@@ -4,9 +4,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::effects::EffectSlotSnapshot;
 use crate::sequencer::{
-    BusId, ChordSnapshot, InstrumentType, MidiFxPosition, PatternSnapshot, SwingResolution,
-    Timebase, TrackOutput, TrackParamsSnapshot, TrackSendSnapshot, TrackSoundState, MAX_STEPS,
-    NUM_PARAMS, TRACK_PATTERN_WORDS,
+    BusId, ChordSnapshot, InstrumentType, MidiFxPosition, ModConnection, PatternSnapshot,
+    SwingResolution, Timebase, TrackOutput, TrackParamsSnapshot, TrackSendSnapshot,
+    TrackSoundState, MAX_STEPS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use crate::track_color::TrackColor;
 
@@ -170,14 +170,18 @@ pub enum ProjectTrack {
         #[serde(default)]
         color: Option<TrackColor>,
     },
+    Modulator {
+        #[serde(default)]
+        color: Option<TrackColor>,
+    },
 }
 
 impl ProjectTrack {
     pub fn color(&self) -> Option<TrackColor> {
         match self {
-            Self::Sampler { color, .. } | Self::Custom { color, .. } => {
-                color.map(TrackColor::clamped)
-            }
+            Self::Sampler { color, .. }
+            | Self::Custom { color, .. }
+            | Self::Modulator { color } => color.map(TrackColor::clamped),
         }
     }
 }
@@ -227,9 +231,19 @@ pub struct ProjectPattern {
     pub swing_resolution_plock_snapshots: Vec<Vec<Option<u32>>>,
     #[serde(default)]
     pub bus_patterns: Vec<ProjectBusPatternSnapshot>,
+    #[serde(default)]
+    pub mod_connections: Vec<ProjectModConnection>,
     pub instrument_types: Vec<ProjectInstrumentType>,
     pub sample_paths: Vec<Option<String>>,
     pub sample_names: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectModConnection {
+    pub source_track: usize,
+    pub dest_track: usize,
+    #[serde(default)]
+    pub dest_input: usize,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -314,6 +328,7 @@ pub struct ProjectTrackSoundState {
 pub enum ProjectInstrumentType {
     Sampler,
     Custom,
+    Modulator,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -400,6 +415,12 @@ impl ProjectPattern {
                 .map(|steps| steps.to_vec())
                 .collect(),
             bus_patterns,
+            mod_connections: snapshot
+                .mod_connections
+                .iter()
+                .copied()
+                .map(ProjectModConnection::from)
+                .collect(),
             instrument_types: snapshot
                 .instrument_types
                 .iter()
@@ -585,6 +606,7 @@ impl From<InstrumentType> for ProjectInstrumentType {
         match value {
             InstrumentType::Sampler => Self::Sampler,
             InstrumentType::Custom => Self::Custom,
+            InstrumentType::Modulator => Self::Modulator,
         }
     }
 }
@@ -594,6 +616,27 @@ impl From<ProjectInstrumentType> for InstrumentType {
         match value {
             ProjectInstrumentType::Sampler => InstrumentType::Sampler,
             ProjectInstrumentType::Custom => InstrumentType::Custom,
+            ProjectInstrumentType::Modulator => InstrumentType::Modulator,
+        }
+    }
+}
+
+impl From<ModConnection> for ProjectModConnection {
+    fn from(value: ModConnection) -> Self {
+        Self {
+            source_track: value.source_track,
+            dest_track: value.dest_track,
+            dest_input: value.dest_input,
+        }
+    }
+}
+
+impl From<ProjectModConnection> for ModConnection {
+    fn from(value: ProjectModConnection) -> Self {
+        Self {
+            source_track: value.source_track,
+            dest_track: value.dest_track,
+            dest_input: value.dest_input,
         }
     }
 }
@@ -1198,6 +1241,11 @@ mod tests {
                     ProjectInstrumentType::Custom,
                     ProjectInstrumentType::Sampler,
                 ],
+                mod_connections: vec![ProjectModConnection {
+                    source_track: 0,
+                    dest_track: 1,
+                    dest_input: 2,
+                }],
                 sample_paths: vec![None, Some("samples/drums/kick.wav".to_string())],
                 sample_names: vec!["prophet-5".to_string(), "kick".to_string()],
             }],
@@ -1231,6 +1279,14 @@ mod tests {
         assert_eq!(restored.patterns[0].track_params[0].accumulator_idx, 1);
         assert_eq!(restored.patterns[0].track_params[0].accum_limit, 24.0);
         assert_eq!(restored.patterns[0].track_params[0].accum_mode, 2);
+        assert_eq!(
+            restored.patterns[0].mod_connections,
+            vec![ProjectModConnection {
+                source_track: 0,
+                dest_track: 1,
+                dest_input: 2,
+            }]
+        );
         assert!(restored.patterns[0].track_params[0].solo);
         assert!(restored.patterns[0].track_params[1].mute);
         assert_eq!(restored.buses.len(), 3);

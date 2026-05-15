@@ -1770,6 +1770,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             )));
                         }
                     },
+                    "add-track-modulator" => match app.graph_controller().add_modulator_track() {
+                        Ok(idx) => {
+                            sync_after_agent_instrument_apply(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                idx,
+                                &current_track,
+                                &mut track_names,
+                                &track_pan_ids,
+                                &record_armed,
+                                &selected_steps,
+                                &accumulator_names,
+                                &cached_track_peak_levels,
+                                &cached_bus_peak_levels,
+                                &ui_epoch,
+                                lg_raw,
+                            );
+                            let new_name = app.tracks[idx].clone();
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Added modulator track {}: {new_name}",
+                                idx + 1
+                            )));
+                        }
+                        Err(e) => {
+                            editor.handle_host_event(HostEvent::Status(format!(
+                                "Error adding modulator track: {e}"
+                            )));
+                        }
+                    },
                     "reanalyze-sample" => {
                         let Some(track) = current_track_for_app(&mut app, &current_track) else {
                             editor.handle_host_event(HostEvent::Status(
@@ -2840,6 +2870,100 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    }
+                    "set-mod-route" => {
+                        if let Value::Map(ref map) = payload {
+                            let source = map.get("source").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let dest = map.get("dest").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let input = map
+                                .get("input")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            if let (Some(source), Some(dest)) = (source, dest) {
+                                match app.graph_controller().set_mod_route(source, dest, input) {
+                                    Ok(()) => {
+                                        let message = format!(
+                                            "Connected mod route: track {} out -> track {} Ext{}",
+                                            source + 1,
+                                            dest + 1,
+                                            input + 1
+                                        );
+                                        eprintln!("[mod-route] {message}");
+                                        let rt = editor.runtime_mut();
+                                        sync_track_mixer_state(rt, &app, &state);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(message));
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "[mod-route] rejected connect {} -> {}: {}",
+                                            source + 1,
+                                            dest + 1,
+                                            error
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(error));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "delete-mod-route" => {
+                        if let Value::Map(ref map) = payload {
+                            let source = map.get("source").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let dest = map.get("dest").and_then(|cell| match &*cell.borrow() {
+                                Value::Number(n) => Some(*n as usize),
+                                _ => None,
+                            });
+                            let input = map
+                                .get("input")
+                                .and_then(|cell| match &*cell.borrow() {
+                                    Value::Number(n) => Some(*n as usize),
+                                    _ => None,
+                                })
+                                .unwrap_or(0);
+                            if let (Some(source), Some(dest)) = (source, dest) {
+                                match app.graph_controller().delete_mod_route(source, dest, input) {
+                                    Ok(()) => {
+                                        let message = format!(
+                                            "Disconnected mod route: track {} out -> track {} Ext{}",
+                                            source + 1,
+                                            dest + 1,
+                                            input + 1
+                                        );
+                                        eprintln!("[mod-route] {message}");
+                                        let rt = editor.runtime_mut();
+                                        sync_track_mixer_state(rt, &app, &state);
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(message));
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "[mod-route] rejected disconnect {} -> {}: {}",
+                                            source + 1,
+                                            dest + 1,
+                                            error
+                                        );
+                                        editor.handle_host_event(HostEvent::Status(error));
+                                    }
                                 }
                             }
                         }
@@ -4786,6 +4910,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(sample_ids) = switched {
                                     let started = Instant::now();
                                     app.graph_controller().apply_sample_ids(&sample_ids);
+                                    app.graph_controller().sync_current_pattern_mod_routes();
                                     apply_samples_elapsed = started.elapsed();
                                     let started = Instant::now();
                                     app.push_all_restored_defaults();

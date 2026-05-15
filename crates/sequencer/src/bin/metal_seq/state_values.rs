@@ -798,12 +798,34 @@ pub(crate) fn build_track_ids(app: &ui::App) -> Value {
     Value::List(items)
 }
 
+pub(crate) fn build_track_instrument_types(app: &ui::App) -> Value {
+    let items: Vec<Rc<RefCell<Value>>> = app
+        .graph
+        .track_instrument_types
+        .iter()
+        .map(|instrument_type| {
+            let label = match instrument_type {
+                sequencer::sequencer::InstrumentType::Sampler => "sampler",
+                sequencer::sequencer::InstrumentType::Custom => "custom",
+                sequencer::sequencer::InstrumentType::Modulator => "modulator",
+            };
+            Rc::new(RefCell::new(Value::String(label.to_string())))
+        })
+        .collect();
+    Value::List(items)
+}
+
 pub(crate) fn sync_track_name_state(
     rt: &mut Runtime,
     track_names: &mut Vec<String>,
     app: &ui::App,
 ) {
     rt.set_reactive("SEQ", "track-ids", build_track_ids(app));
+    rt.set_reactive(
+        "SEQ",
+        "track-instrument-types",
+        build_track_instrument_types(app),
+    );
     if *track_names == app.tracks {
         return;
     }
@@ -863,6 +885,39 @@ pub(crate) fn build_all_track_bus_sends(app: &ui::App, state: &Arc<SequencerStat
     Value::List(items)
 }
 
+pub(crate) fn build_mod_routes(state: &Arc<SequencerState>) -> Value {
+    let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+    let routes = state
+        .pattern
+        .pattern_bank
+        .lock()
+        .unwrap()
+        .get(current_pattern)
+        .map(|pattern| pattern.mod_connections.clone())
+        .unwrap_or_default();
+    Value::List(
+        routes
+            .into_iter()
+            .map(|connection| {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "source".to_string(),
+                    Rc::new(RefCell::new(Value::Number(connection.source_track as f64))),
+                );
+                map.insert(
+                    "dest".to_string(),
+                    Rc::new(RefCell::new(Value::Number(connection.dest_track as f64))),
+                );
+                map.insert(
+                    "input".to_string(),
+                    Rc::new(RefCell::new(Value::Number(connection.dest_input as f64))),
+                );
+                Rc::new(RefCell::new(Value::Map(map)))
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn build_track_mutes(state: &Arc<SequencerState>) -> Value {
     let count = state.active_track_count();
     let items: Vec<Rc<RefCell<Value>>> = (0..count)
@@ -902,6 +957,11 @@ pub(crate) fn build_track_muted_by_solo(state: &Arc<SequencerState>) -> Value {
 
 pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Arc<SequencerState>) {
     rt.set_reactive("SEQ", "track-colors", build_track_colors(app));
+    rt.set_reactive(
+        "SEQ",
+        "track-instrument-types",
+        build_track_instrument_types(app),
+    );
     rt.set_reactive("SEQ", "track-volumes", build_track_volumes(state));
     rt.set_reactive("SEQ", "track-pans", build_track_pans(state));
     rt.set_reactive("SEQ", "track-outputs", build_track_outputs(app, state));
@@ -910,6 +970,7 @@ pub(crate) fn sync_track_mixer_state(rt: &mut Runtime, app: &ui::App, state: &Ar
         "track-bus-sends",
         build_all_track_bus_sends(app, state),
     );
+    rt.set_reactive("SEQ", "mod-routes", build_mod_routes(state));
     rt.set_reactive("SEQ", "track-mutes", build_track_mutes(state));
     rt.set_reactive("SEQ", "track-solos", build_track_solos(state));
     rt.set_reactive(
@@ -970,6 +1031,7 @@ pub(crate) fn sync_track_mixer_empty_state(rt: &mut Runtime) {
     rt.set_reactive("SEQ", "track-pans", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-outputs", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-colors", Value::List(vec![]));
+    rt.set_reactive("SEQ", "track-instrument-types", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-bus-sends", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-mutes", Value::List(vec![]));
     rt.set_reactive("SEQ", "track-solos", Value::List(vec![]));
@@ -6064,6 +6126,11 @@ mod tests {
                 ("track-mutes", test_list(vec![Value::Bool(false)])),
                 ("track-solos", test_list(vec![Value::Bool(false)])),
                 ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
+                (
+                    "track-instrument-types",
+                    test_list(vec![Value::String("modulator".to_string())]),
+                ),
+                ("mod-routes", test_list(vec![])),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
                 ("track-pans", test_list(vec![Value::Number(0.0)])),
                 (
@@ -8547,14 +8614,18 @@ mod tests {
         }
 
         fn click_node(editor: &mut eseqlisp::Editor, node: &LayoutNode) {
-            let col = (node.rect.col + node.rect.width * 0.5).ceil() as u16;
-            let row = (node.rect.row + node.rect.height * 0.5).ceil() as u16;
-            editor.handle_mouse(
+            let precise_col = 1.0 + node.rect.col + node.rect.width * 0.5;
+            let precise_row = 1.0 + node.rect.row + node.rect.height * 0.5;
+            let col = precise_col.floor() as u16;
+            let row = precise_row.floor() as u16;
+            editor.handle_mouse_precise(
                 mouse_event(MouseEventKind::Down(MouseButton::Left), col, row),
                 1,
                 1,
                 120,
                 30,
+                precise_col,
+                precise_row,
             );
         }
 
@@ -8783,6 +8854,30 @@ mod tests {
             .current_layout
             .clone()
             .expect("mixer layout should be available");
+        let mod_out =
+            find_node_by_stable_key(&layout, "mixer-v2-mod-out-0").expect("track mod out port");
+        let mod_in =
+            find_node_by_stable_key(&layout, "mixer-v2-mod-in-0-0").expect("track mod in port");
+        for input in 1..4 {
+            let key = format!("mixer-v2-mod-in-0-{input}");
+            let node = find_node_by_stable_key(&layout, &key)
+                .unwrap_or_else(|| panic!("track mod in port {input}"));
+            assert!(
+                node.rect.width > 0.0 && node.rect.height > 0.0,
+                "mod-port Ext{} should have finite visible rect: {:?}",
+                input + 1,
+                node.rect
+            );
+        }
+        assert!(
+            mod_out.rect.width > 0.0
+                && mod_out.rect.height > 0.0
+                && mod_in.rect.width > 0.0
+                && mod_in.rect.height > 0.0,
+            "mod-port widgets should have finite visible rects: out={:?}, in={:?}",
+            mod_out.rect,
+            mod_in.rect
+        );
         let track_select = find_button_by_text(&layout, "1").expect("track selector button");
         click_node(&mut editor, track_select);
         assert_eq!(

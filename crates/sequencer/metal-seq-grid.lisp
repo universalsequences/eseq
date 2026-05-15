@@ -42,7 +42,7 @@
         0.55 (list :cols :gap 1
           0.78 (list :buf "*metal*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
           0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))
-        0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 12 :max-height 12)))
+        0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13)))
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
 (def seq-apply-lower-panel-layout (lower-buffer lower-ratio lower-min-height lower-max-height)

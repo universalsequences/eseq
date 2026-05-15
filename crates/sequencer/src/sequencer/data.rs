@@ -45,19 +45,46 @@ pub struct TrackSendSnapshot {
 pub enum InstrumentType {
     Sampler,
     Custom,
+    Modulator,
 }
 
 impl InstrumentType {
-    pub const COUNT: usize = 2;
-    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom];
+    pub const COUNT: usize = 3;
+    pub const ALL: [Self; Self::COUNT] = [Self::Sampler, Self::Custom, Self::Modulator];
 
     pub fn label(&self) -> &'static str {
         match self {
             InstrumentType::Sampler => "Sampler",
             InstrumentType::Custom => "Custom",
+            InstrumentType::Modulator => "Modulator",
+        }
+    }
+
+    pub fn runtime_flag(self) -> u32 {
+        match self {
+            InstrumentType::Sampler => 0,
+            InstrumentType::Custom => 1,
+            InstrumentType::Modulator => 2,
+        }
+    }
+
+    pub fn from_runtime_flag(flag: u32) -> Self {
+        match flag {
+            1 => InstrumentType::Custom,
+            2 => InstrumentType::Modulator,
+            _ => InstrumentType::Sampler,
         }
     }
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ModConnection {
+    pub source_track: usize,
+    pub dest_track: usize,
+    pub dest_input: usize,
+}
+
+pub const EXT_MOD_INPUT_COUNT: usize = 4;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]

@@ -24,7 +24,8 @@ use crate::scheduled_event::{
     ScheduledInstrumentParam, ScheduledInstrumentParamTarget, TimedEvent,
 };
 use crate::sequencer::{
-    sync_beats, BusId, KeyboardTrigger, SequencerState, StepParam, SwingResolution, MAX_TRACKS,
+    sync_beats, BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, SwingResolution,
+    MAX_TRACKS,
 };
 use crate::ui::BusGateRuntimeState;
 use crate::voice::{VoicePool, MAX_VOICES};
@@ -622,8 +623,9 @@ fn reset_audio_runtime_for_track_topology(data: &mut AudioCallbackData, num_trac
 fn publish_active_voice_counts(data: &AudioCallbackData, num_tracks: usize) {
     for track in 0..MAX_TRACKS {
         let active = if track < num_tracks {
-            let is_custom =
-                data.state.runtime.instrument_type_flags[track].load(Ordering::Relaxed) == 1;
+            let is_custom = InstrumentType::from_runtime_flag(
+                data.state.runtime.instrument_type_flags[track].load(Ordering::Relaxed),
+            ) == InstrumentType::Custom;
             if is_custom {
                 track_engine_id(&data.state, track)
                     .map(|engine_id| {
@@ -1123,6 +1125,69 @@ unsafe fn send_custom_note_off(lg: *mut LiveGraph, gatepitch_lid: u64) {
     );
 }
 
+unsafe fn set_modulator_gate(lg: *mut LiveGraph, modulator_lid: u64, gate: f32) {
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::track_modulator::PARAM_GATE,
+            logical_id: modulator_lid,
+            fvalue: gate.clamp(0.0, 1.0),
+        },
+    );
+}
+
+unsafe fn trigger_modulator_pulse(
+    lg: *mut LiveGraph,
+    modulator_lid: u64,
+    pulse_samples: f32,
+    pulse_level: f32,
+) {
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::track_modulator::PARAM_PULSE_SAMPLES,
+            logical_id: modulator_lid,
+            fvalue: pulse_samples.max(1.0),
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::track_modulator::PARAM_PULSE_LEVEL,
+            logical_id: modulator_lid,
+            fvalue: pulse_level.clamp(0.0, 1.0),
+        },
+    );
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::track_modulator::PARAM_TRIGGER,
+            logical_id: modulator_lid,
+            fvalue: 1.0,
+        },
+    );
+}
+
+unsafe fn dispatch_modulator_params(
+    lg: *mut LiveGraph,
+    modulator_lid: u64,
+    instrument_params: &[ScheduledInstrumentParam],
+) {
+    for param in instrument_params {
+        if param.target != ScheduledInstrumentParamTarget::Synth {
+            continue;
+        }
+        params_push_wrapper(
+            lg,
+            ParamMsg {
+                idx: param.idx,
+                logical_id: modulator_lid,
+                fvalue: param.value,
+            },
+        );
+    }
+}
+
 fn custom_pitch_hz(transpose: f32, base_note_offset: f32) -> f32 {
     440.0 * 2f32.powf((transpose + base_note_offset) / 12.0)
 }
@@ -1336,6 +1401,20 @@ unsafe fn route_custom_voice_to_track(
                     fvalue: value,
                 },
             );
+        }
+        for input in 0..crate::sequencer::EXT_MOD_INPUT_COUNT {
+            let ext_lid = state.runtime.engine_ext_route_lids[engine_id][voice_idx][t][input]
+                .load(Ordering::Relaxed);
+            if ext_lid != 0 {
+                params_push_wrapper(
+                    lg,
+                    ParamMsg {
+                        idx: 0,
+                        logical_id: ext_lid,
+                        fvalue: value,
+                    },
+                );
+            }
         }
     }
 }
@@ -1699,10 +1778,13 @@ fn fire_resolved(
     instrument_fingerprint: u64,
 ) {
     let tp = &data.state.pattern.track_params[track_idx];
-    let is_custom =
-        data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed) == 1;
+    let instrument_type = InstrumentType::from_runtime_flag(
+        data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+    );
+    let is_custom = instrument_type == InstrumentType::Custom;
+    let is_modulator = instrument_type == InstrumentType::Modulator;
     let sampler_lid = data.state.runtime.sampler_lids[track_idx].load(Ordering::Acquire);
-    if !is_custom && sampler_lid == 0 {
+    if !is_custom && !is_modulator && sampler_lid == 0 {
         return;
     }
 
@@ -1808,6 +1890,30 @@ fn fire_resolved(
     } else {
         resolved
     };
+
+    if is_modulator {
+        let lid = data.state.runtime.modulator_lids[track_idx].load(Ordering::Acquire);
+        if lid == 0 {
+            return;
+        }
+        unsafe {
+            dispatch_modulator_params(data.lg.0, lid, &instrument_params);
+            trigger_modulator_pulse(data.lg.0, lid, chop_gate, resolved.velocity);
+        }
+        if chop > 1 {
+            data.chop_state[track_idx] = ChopTracker {
+                remaining: chop - 1,
+                counter: chop_gate as f64,
+                interval: chop_gate as f64,
+                step,
+                chop_gate,
+            };
+        } else {
+            data.chop_state[track_idx].remaining = 0;
+        }
+        data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
+        return;
+    }
 
     // Sync polyphonic setting from track params
     let track_polyphonic = tp.is_polyphonic();
@@ -2450,6 +2556,50 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         let cs = &mut data.chop_state[track_idx];
         if cs.remaining > 0 {
             cs.counter -= nframes as f64;
+            if InstrumentType::from_runtime_flag(
+                data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+            ) == InstrumentType::Modulator
+            {
+                let lid = data.state.runtime.modulator_lids[track_idx].load(Ordering::Acquire);
+                let slot = &data.state.pattern.instrument_slots[track_idx];
+                while cs.counter <= 0.0 && cs.remaining > 0 {
+                    if lid != 0 {
+                        let rise = slot
+                            .plocks
+                            .get(cs.step, 0)
+                            .unwrap_or_else(|| slot.defaults.get(0));
+                        let fall = slot
+                            .plocks
+                            .get(cs.step, 1)
+                            .unwrap_or_else(|| slot.defaults.get(1));
+                        unsafe {
+                            params_push_wrapper(
+                                data.lg.0,
+                                ParamMsg {
+                                    idx: crate::track_modulator::PARAM_RISE_MS,
+                                    logical_id: lid,
+                                    fvalue: rise,
+                                },
+                            );
+                            params_push_wrapper(
+                                data.lg.0,
+                                ParamMsg {
+                                    idx: crate::track_modulator::PARAM_FALL_MS,
+                                    logical_id: lid,
+                                    fvalue: fall,
+                                },
+                            );
+                            let velocity = data.state.pattern.step_data[track_idx]
+                                .get(cs.step, StepParam::Velocity);
+                            trigger_modulator_pulse(data.lg.0, lid, cs.chop_gate, velocity);
+                        }
+                        data.state.transport.trigger_flash[track_idx].store(255, Ordering::Relaxed);
+                    }
+                    cs.remaining -= 1;
+                    cs.counter += cs.interval;
+                }
+                continue;
+            }
             let tp = &data.state.pattern.track_params[track_idx];
             let gate_mode = if tp.is_gate_on() { 1.0 } else { 0.0 };
             let chop_inst_slot = &data.state.pattern.instrument_slots[track_idx];
@@ -2576,14 +2726,21 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
     for track_idx in 0..num_tracks {
         let expired = data.gate_off_state[track_idx].process(nframes);
         for lid in expired {
-            if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
+            if InstrumentType::from_runtime_flag(
+                data.state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+            ) == InstrumentType::Modulator
+            {
+                unsafe {
+                    set_modulator_gate(data.lg.0, lid, 0.0);
+                }
+            } else if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
                 data.custom_engine_pools[engine_id]
                     .release_voice_by_logical_id(lid, block_end_sample);
+                unsafe {
+                    send_custom_note_off(data.lg.0, lid);
+                }
             } else {
                 data.voice_pools[track_idx].release_voice_by_logical_id(lid);
-            }
-            unsafe {
-                send_custom_note_off(data.lg.0, lid);
             }
         }
     }
