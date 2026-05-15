@@ -2,7 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use super::{WidgetDefinition, WidgetEvent};
-use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    get_stable_widget_id,
+};
 use crate::vm::Value;
 
 #[cfg(target_os = "macos")]
@@ -53,6 +56,10 @@ pub fn scroll_state_key(node: &LayoutNode) -> u64 {
     node.stable_widget_id.unwrap_or(node.widget_id)
 }
 
+pub fn scroll_state_key_for_value(node: &Value) -> Option<u64> {
+    get_stable_widget_id(node)
+}
+
 /// Per-event scroll context for child widgets that need to map pointer input
 /// into content coordinates inside a scroll container.
 pub fn current_event_scroll_offset() -> f32 {
@@ -71,6 +78,13 @@ fn clamp_offset(state: &mut ScrollState) {
 
 fn stick_to_bottom_enabled(node: &LayoutNode) -> bool {
     matches!(node.props.get("stick-to-bottom"), Some(Value::Bool(true)))
+}
+
+fn stick_to_bottom_enabled_value(node: &Value) -> bool {
+    matches!(
+        crate::layout::get_map(node).and_then(|props| props.get("stick-to-bottom").cloned()),
+        Some(Value::Bool(true))
+    )
 }
 
 fn current_content_height(node: &LayoutNode) -> f32 {
@@ -135,6 +149,29 @@ pub(crate) fn sync_node_state(node: &LayoutNode) -> ScrollState {
     state
 }
 
+fn sync_layout_state(node: &Value, content_height: f32, viewport_height: f32) -> ScrollState {
+    let Some(key) = scroll_state_key_for_value(node) else {
+        return ScrollState {
+            content_height,
+            viewport_height,
+            ..ScrollState::default()
+        };
+    };
+
+    let mut state = get_scroll_state(key);
+    let old_content_height = state.content_height;
+    let old_max_scroll = (state.content_height - state.viewport_height).max(0.0);
+    let was_at_bottom = state.offset_y >= old_max_scroll - 0.001;
+    state.content_height = content_height;
+    state.viewport_height = viewport_height;
+    if stick_to_bottom_enabled_value(node) && (old_content_height <= 0.0 || was_at_bottom) {
+        state.offset_y = (state.content_height - state.viewport_height).max(0.0);
+    }
+    clamp_offset(&mut state);
+    set_scroll_state(key, state.clone());
+    state
+}
+
 // ── Widget definition ────────────────────────────────────────────────────────
 
 pub struct ScrollWidget;
@@ -162,28 +199,27 @@ impl WidgetDefinition for ScrollWidget {
         _ctx: &MeasureCtx<'_>,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
     ) -> Option<Size> {
-        // Measure child with unbounded height to get its natural width.
-        // Report height=0 so flex distributes remaining space to us.
+        // Width: use explicit :width, or fill available space (like a block element).
+        // Falls back to child width only if max_width is unbounded.
+        let explicit_width = get_prop_num(node, "width").map(f64_to_f32);
+        let child_max_width = explicit_width.unwrap_or(constraints.max_width);
         let child_size = children.first().and_then(|child| {
             measure_child(
                 child,
                 Constraints {
+                    max_width: child_max_width,
                     max_height: f32::MAX,
                     ..constraints
                 },
             )
         });
-        // Width: use explicit :width, or fill available space (like a block element).
-        // Falls back to child width only if max_width is unbounded.
-        let width = get_prop_num(node, "width")
-            .map(f64_to_f32)
-            .unwrap_or_else(|| {
-                if constraints.max_width < f32::MAX {
-                    constraints.max_width
-                } else {
-                    child_size.map(|s| s.width).unwrap_or(0.0)
-                }
-            });
+        let width = explicit_width.unwrap_or_else(|| {
+            if constraints.max_width < f32::MAX {
+                constraints.max_width
+            } else {
+                child_size.map(|s| s.width).unwrap_or(0.0)
+            }
+        });
         Some(Size {
             width,
             height: get_prop_num(node, "height").map(f64_to_f32).unwrap_or(0.0),
@@ -196,8 +232,9 @@ impl WidgetDefinition for ScrollWidget {
         area: Rect,
         children: &[Value],
         _aspect: f32,
+        _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
-        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let Some(child) = children.first() else {
             return vec![];
@@ -228,7 +265,10 @@ impl WidgetDefinition for ScrollWidget {
             height: child_size.height,
         };
 
-        vec![build_child(child, child_rect)]
+        let scroll_state = sync_layout_state(_node, child_size.height, area.height);
+        let child_layout_ctx = LayoutCtx::with_scroll(scroll_state.offset_y, area.height);
+
+        vec![build_child(child, child_rect, child_layout_ctx)]
     }
 
     fn captures_scroll_gesture(&self) -> bool {

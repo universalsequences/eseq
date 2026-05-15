@@ -11,7 +11,7 @@ use super::{
 };
 use crate::layout::{
     Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-    get_prop_u64,
+    get_stable_widget_id,
 };
 use crate::vm::Value;
 
@@ -54,7 +54,7 @@ fn tree_state_key(node: &LayoutNode) -> u64 {
 }
 
 fn tree_state_key_from_value(node: &Value) -> Option<u64> {
-    get_prop_u64(node, "__stable-widget-id")
+    get_stable_widget_id(node)
 }
 
 // ── Flattened row ────────────────────────────────────────────────────────────

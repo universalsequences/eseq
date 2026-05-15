@@ -923,6 +923,7 @@ pub struct Runtime {
     layout_revision: u64,
     dirty_widget_ids: Vec<u64>,
     force_layout_revision_bump: bool,
+    deferred_layout_invalidated: bool,
     current_widget_tree: Option<Value>,
     current_committed_ui_snapshot: Option<CommittedBufferUiSnapshot>,
     layout_cols: u16,
@@ -964,6 +965,7 @@ impl Runtime {
             layout_revision: 0,
             dirty_widget_ids: Vec::new(),
             force_layout_revision_bump: false,
+            deferred_layout_invalidated: false,
             current_widget_tree: None,
             current_committed_ui_snapshot: None,
             layout_cols: 80,
@@ -1539,6 +1541,10 @@ impl Runtime {
         let cols = cols.max(1);
         let rows = rows.max(1);
         if self.layout_cols == cols && self.layout_rows == rows {
+            self.flush_deferred_layout_invalidation();
+            if self.current_layout.is_none() && self.current_widget_tree.is_some() {
+                self.relayout_current_tree();
+            }
             return;
         }
         self.layout_cols = cols;
@@ -1546,6 +1552,7 @@ impl Runtime {
         // Viewport changes invalidate layout geometry even if the widget tree is unchanged.
         self.current_layout = None;
         self.dirty_widget_ids.clear();
+        self.deferred_layout_invalidated = false;
         self.relayout_current_tree();
     }
 
@@ -1556,6 +1563,29 @@ impl Runtime {
         self.current_layout = None;
         self.dirty_widget_ids.clear();
         self.force_layout_revision_bump = true;
+        self.relayout_current_tree();
+    }
+
+    /// Coalesce state-driven relayout work until the next frame build.
+    ///
+    /// Scroll gestures can arrive in dense bursts. Virtualized layouts need the
+    /// latest scroll state to choose their materialized child window, but doing
+    /// a full layout on every raw scroll event would make the burst itself
+    /// expensive. This keeps the previous layout around for hit testing while
+    /// marking one full relayout for the next render pass.
+    pub fn invalidate_layout_deferred(&mut self) {
+        self.dirty_widget_ids.clear();
+        self.force_layout_revision_bump = true;
+        self.deferred_layout_invalidated = true;
+    }
+
+    pub fn flush_deferred_layout_invalidation(&mut self) {
+        if !self.deferred_layout_invalidated {
+            return;
+        }
+        self.deferred_layout_invalidated = false;
+        self.current_layout = None;
+        self.dirty_widget_ids.clear();
         self.relayout_current_tree();
     }
 

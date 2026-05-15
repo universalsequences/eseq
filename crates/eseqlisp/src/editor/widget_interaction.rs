@@ -891,10 +891,17 @@ impl Editor {
         if let Some(widget_event) =
             map_scroll_gesture_event(&node, scrolled_col, scrolled_row, delta_x, delta_y)
         {
+            let gen_before = widget_render::widget_state_generation();
             let output = handle_event(&node, widget_event);
             if !self.apply_widget_output(output) {
                 // Scroll widgets update internal state without a Lisp callback,
                 // so we still need to redraw even when there's no EventOutput.
+                self.mark_needs_redraw();
+            }
+            if node.widget_type == "scroll"
+                || widget_render::widget_state_generation() != gen_before
+            {
+                self.runtime.invalidate_layout_deferred();
                 self.mark_needs_redraw();
             }
             return true;
@@ -913,8 +920,15 @@ impl Editor {
                     delta_x,
                     delta_y,
                 ) {
+                    let gen_before = widget_render::widget_state_generation();
                     let output = handle_event(&scroll_node, widget_event);
                     if !self.apply_widget_output(output) {
+                        self.mark_needs_redraw();
+                    }
+                    if scroll_node.widget_type == "scroll"
+                        || widget_render::widget_state_generation() != gen_before
+                    {
+                        self.runtime.invalidate_layout_deferred();
                         self.mark_needs_redraw();
                     }
                     return true;

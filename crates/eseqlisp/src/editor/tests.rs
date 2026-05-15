@@ -3983,6 +3983,87 @@ fn ui_only_nested_scroll_content_does_not_inflate_outer_widget_scroll() {
 }
 
 #[test]
+fn touchpad_scroll_rematerializes_virtual_stack_on_next_frame() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(30, 8);
+    let children = (0..40)
+        .map(|i| {
+            format!(
+                r#"(box :key "item-{i}" :width :fill :height 2
+                     (label "item-{i}"))"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r#"
+            (scroll :key "outer-scroll" :width :fill :height 8
+              (virtual-v-stack
+                :key "virtual-list"
+                :width :fill
+                :gap 0
+                :padding 0
+                :estimated-item-height 2
+                :overscan 0
+                {children}))
+            "#
+    );
+    let tree = editor
+        .runtime
+        .eval_str(&source)
+        .unwrap()
+        .expect("widget expression should return a tree");
+    assert!(
+        !matches!(tree, Value::Nil),
+        "widget expression should produce a non-nil virtual scroll tree"
+    );
+    editor.runtime.set_widget_tree(tree);
+    editor.active_buffer_mut().view_mode = super::ViewMode::UiOnly;
+    let initial_frame = crate::frame::build_render_frame(&mut editor, 30, 8);
+    let initial_layout = initial_frame.widget_layout.expect("initial widget layout");
+    let initial_rendered = crate::layout::format_layout_tree_lines(&initial_layout, 0);
+    assert!(
+        initial_rendered.iter().any(|line| line.contains("item-0")),
+        "initial virtual stack should materialize top rows: {initial_rendered:?}"
+    );
+    assert!(
+        !initial_rendered.iter().any(|line| line.contains("item-10")),
+        "initial virtual stack should not materialize later rows: {initial_rendered:?}"
+    );
+    editor.runtime.drain_rendered_layouts();
+
+    for _ in 0..3 {
+        assert!(
+            editor.handle_touchpad_scroll(1, 1, 4.0, 4.0, 0.0, -140.0),
+            "touchpad scroll should be handled by the scroll widget"
+        );
+    }
+    assert!(
+        editor.runtime.drain_rendered_layouts().is_empty(),
+        "scroll bursts should defer relayout until frame build"
+    );
+
+    let scrolled_frame = crate::frame::build_render_frame(&mut editor, 30, 8);
+    let rendered_layouts = editor.runtime.drain_rendered_layouts();
+    assert_eq!(
+        rendered_layouts.len(),
+        1,
+        "coalesced scroll burst should produce one relayout on the next frame"
+    );
+    let scrolled_layout = scrolled_frame.widget_layout.expect("scrolled widget layout");
+    let scrolled_rendered = crate::layout::format_layout_tree_lines(&scrolled_layout, 0);
+    assert!(
+        scrolled_rendered.iter().any(|line| line.contains("item-10")),
+        "scroll relayout should rematerialize the visible virtual rows: {scrolled_rendered:?}"
+    );
+    assert!(
+        !scrolled_rendered.iter().any(|line| line.contains("item-0")),
+        "old top rows should no longer be materialized after scroll: {scrolled_rendered:?}"
+    );
+}
+
+#[test]
 fn timeline_drag_item_edge_emits_resize_action() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

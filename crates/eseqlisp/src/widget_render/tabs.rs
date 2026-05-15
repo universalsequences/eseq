@@ -6,7 +6,9 @@ use super::{
     CellBuffer, EventOutput, MouseEventOutcome, WidgetDefinition, WidgetEvent, get_f32_prop,
     styled_cell,
 };
-use crate::layout::{Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size};
+use crate::layout::{
+    Constraints, DEFAULT_FONT_SIZE, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size,
+};
 use crate::theme;
 use crate::vm::Value;
 
@@ -220,8 +222,9 @@ impl WidgetDefinition for TabsWidget {
         area: Rect,
         children: &[Value],
         _aspect: f32,
+        _layout_ctx: LayoutCtx,
         _measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
-        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let selected = selected_index(node, children.len());
         // Keep the tab header at its explicit/natural height. Previously this
@@ -242,7 +245,7 @@ impl WidgetDefinition for TabsWidget {
 
         children
             .get(selected)
-            .map(|child| build_child(child, child_area))
+            .map(|child| build_child(child, child_area, LayoutCtx::default()))
             .into_iter()
             .collect()
     }

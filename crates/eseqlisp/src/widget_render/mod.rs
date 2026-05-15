@@ -22,6 +22,7 @@ pub mod timeline;
 pub mod toggle;
 pub mod transport_clock;
 pub mod tree;
+pub mod virtual_vstack;
 pub mod vslider;
 pub mod vstack;
 pub mod waveform;
@@ -35,7 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crossterm::event::{KeyCode, KeyModifiers, MouseEventKind};
 
 use crate::backend::{Cell, CellStyle, Color};
-use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, get_map};
+use crate::layout::{Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, get_map};
 use crate::theme;
 use crate::vm::Value;
 
@@ -557,10 +558,19 @@ pub trait WidgetDefinition: Sync {
         area: Rect,
         children: &[Value],
         aspect: f32,
+        layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
-        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
-        let _ = (node, area, children, aspect, measure_child, build_child);
+        let _ = (
+            node,
+            area,
+            children,
+            aspect,
+            layout_ctx,
+            measure_child,
+            build_child,
+        );
         vec![]
     }
     fn tui_render(&self, _props: &HashMap<String, Value>, _rect: Rect, _buf: &mut CellBuffer) {}
@@ -671,6 +681,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &box_widget::BOX_WIDGET,
     &grid::GRID_WIDGET,
     &grid::RESPONSIVE_GRID_WIDGET,
+    &virtual_vstack::VIRTUAL_VSTACK_WIDGET,
     &image::IMAGE_WIDGET,
     &dropdown::DROPDOWN_WIDGET,
     &number_picker::NUMBER_PICKER_WIDGET,

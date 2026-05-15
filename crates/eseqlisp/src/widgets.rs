@@ -27,6 +27,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "select",
         "v-stack",
         "h-stack",
+        "virtual-v-stack",
         "box",
         "grid",
         "responsive-grid",

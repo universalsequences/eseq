@@ -1,5 +1,7 @@
 use super::{Align, WidgetDefinition, resolve_align};
-use crate::layout::{Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num};
+use crate::layout::{
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+};
 use crate::vm::Value;
 
 pub struct GridWidget;
@@ -201,8 +203,9 @@ impl WidgetDefinition for GridWidget {
         area: Rect,
         children: &[Value],
         _aspect: f32,
+        _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
-        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let fallback = resolve_align(node, "align", Align::Start);
         let h_align = resolve_align(node, "h-align", fallback);
@@ -273,6 +276,7 @@ impl WidgetDefinition for GridWidget {
                         width: child_width,
                         height: child_height,
                     },
+                    LayoutCtx::default(),
                 )
             })
             .collect()
@@ -350,8 +354,9 @@ impl WidgetDefinition for ResponsiveGridWidget {
         area: Rect,
         children: &[Value],
         _aspect: f32,
+        _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
-        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let gap = get_prop_num(node, "gap").map(f64_to_f32).unwrap_or(0.0);
         let cols = responsive_cols(node, area.width);
@@ -396,6 +401,7 @@ impl WidgetDefinition for ResponsiveGridWidget {
                         width: slot_width,
                         height: row_height,
                     },
+                    LayoutCtx::default(),
                 )
             })
             .collect()

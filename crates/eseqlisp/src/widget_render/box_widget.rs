@@ -9,10 +9,9 @@ use super::{
 };
 #[cfg(target_os = "macos")]
 use crate::backend::Color;
-use crate::layout::Rect;
 use crate::layout::{
-    Constraints, LayoutNode, MeasureCtx, Size, f64_to_f32, get_prop_num, prop_is_keyword,
-    shrink_constraints_xy,
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    prop_is_keyword, shrink_constraints_xy,
 };
 use crate::vm::Value;
 use crossterm::event::{KeyModifiers, MouseButton, MouseEventKind};
@@ -257,8 +256,9 @@ impl WidgetDefinition for BoxWidget {
         area: Rect,
         children: &[Value],
         aspect: f32,
+        _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
-        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
         let pad_y = padding / aspect;
@@ -282,6 +282,7 @@ impl WidgetDefinition for BoxWidget {
                             width: inner_width,
                             height: inner_height,
                         },
+                        LayoutCtx::default(),
                     );
                 }
 
@@ -328,6 +329,7 @@ impl WidgetDefinition for BoxWidget {
                         width: child_width,
                         height: child_height,
                     },
+                    LayoutCtx::default(),
                 )
             })
             .into_iter()

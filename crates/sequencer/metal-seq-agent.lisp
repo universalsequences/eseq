@@ -132,7 +132,13 @@
                 :width :fill
                 :flex 1
                 :stick-to-bottom true
-          (v-stack :width :fill :gap 0.45 :padding 0.4
+          (virtual-v-stack
+            :key "agent-message-stack"
+            :width :fill
+            :gap 0.45
+            :padding 0.4
+            :estimated-item-height 4.0
+            :overscan 6
             (each (range 0 (len messages)) |i|
               (agent-message-card (nth messages i) i))))))))
 

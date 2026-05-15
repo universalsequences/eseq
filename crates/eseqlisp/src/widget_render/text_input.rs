@@ -10,8 +10,8 @@ use super::{
     get_f32_prop, resolve_named_color, styled_cell,
 };
 use crate::layout::{
-    Constraints, DEFAULT_FONT_SIZE, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
-    get_prop_str,
+    Constraints, DEFAULT_FONT_SIZE, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32,
+    get_prop_num, get_prop_str,
 };
 use crate::vm::Value;
 
@@ -715,8 +715,9 @@ impl WidgetDefinition for TextInputWidget {
         area: Rect,
         children: &[Value],
         _aspect: f32,
+        _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
-        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         if children.is_empty() {
             return vec![];
@@ -739,7 +740,7 @@ impl WidgetDefinition for TextInputWidget {
             width: child_size.width,
             height: child_size.height,
         };
-        vec![build_child(child, child_rect)]
+        vec![build_child(child, child_rect, LayoutCtx::default())]
     }
 
     fn mouse_event(

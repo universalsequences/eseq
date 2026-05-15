@@ -1,7 +1,7 @@
 use super::{Align, Justify, WidgetDefinition, distribute_justify, resolve_align, resolve_justify};
 use crate::layout::{
-    Constraints, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num, prop_is_keyword,
-    shrink_constraints_xy,
+    Constraints, LayoutCtx, LayoutNode, MeasureCtx, Rect, Size, f64_to_f32, get_prop_num,
+    prop_is_keyword, shrink_constraints_xy,
 };
 use crate::vm::Value;
 
@@ -66,8 +66,9 @@ impl WidgetDefinition for VStackWidget {
         area: Rect,
         children: &[Value],
         aspect: f32,
+        _layout_ctx: LayoutCtx,
         measure_child: &mut dyn FnMut(&Value, Constraints) -> Option<Size>,
-        build_child: &mut dyn FnMut(&Value, Rect) -> LayoutNode,
+        build_child: &mut dyn FnMut(&Value, Rect, LayoutCtx) -> LayoutNode,
     ) -> Vec<LayoutNode> {
         let padding = get_prop_num(node, "padding").map(f64_to_f32).unwrap_or(0.0);
         let pad_y = padding / aspect;
@@ -140,7 +141,7 @@ impl WidgetDefinition for VStackWidget {
                     height: child_height,
                 };
                 cursor_row += child_height + effective_gap;
-                build_child(child, rect)
+                build_child(child, rect, LayoutCtx::default())
             })
             .collect()
     }

@@ -29,6 +29,25 @@ pub struct Constraints {
     pub aspect: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LayoutCtx {
+    pub scroll_offset_y: f32,
+    pub scroll_viewport_height: f32,
+}
+
+impl LayoutCtx {
+    pub fn with_scroll(offset_y: f32, viewport_height: f32) -> Self {
+        Self {
+            scroll_offset_y: offset_y.max(0.0),
+            scroll_viewport_height: viewport_height.max(0.0),
+        }
+    }
+
+    pub fn has_scroll_viewport(self) -> bool {
+        self.scroll_viewport_height > 0.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LayoutNode {
     pub widget_id: u64,
@@ -143,6 +162,7 @@ impl<'a> LayoutEngine<'a> {
                 height: root_height,
             },
             DEFAULT_FONT_SIZE,
+            LayoutCtx::default(),
         );
         let mut next_widget_id = widget_id_offset.wrapping_add(1);
         assign_widget_ids(&mut layout, &mut next_widget_id);
@@ -211,7 +231,13 @@ impl<'a> LayoutEngine<'a> {
         Some(clamp_size_for_node(node, size, constraints))
     }
 
-    fn build_layout_node(&self, node: &Value, rect: Rect, inherited_font_size: f32) -> LayoutNode {
+    fn build_layout_node(
+        &self,
+        node: &Value,
+        rect: Rect,
+        inherited_font_size: f32,
+        layout_ctx: LayoutCtx,
+    ) -> LayoutNode {
         let widget_type = get_widget_type(node).unwrap_or_default();
         let children_values = get_children(node);
 
@@ -220,7 +246,8 @@ impl<'a> LayoutEngine<'a> {
             .map(f64_to_f32)
             .unwrap_or(inherited_font_size);
 
-        let children = self.layout_children_with_font(node, rect, &children_values, font_size);
+        let children =
+            self.layout_children_with_font(node, rect, &children_values, font_size, layout_ctx);
         let mut props = collect_props(node);
 
         // Inject inherited font-size into props so the rendering path can use it.
@@ -248,10 +275,10 @@ impl<'a> LayoutEngine<'a> {
         }
 
         let focusable = matches!(props.get("focusable"), Some(Value::Bool(true)));
-        let stable_widget_id = get_prop_u64(node, "__stable-widget-id");
+        let stable_key = get_stable_widget_key(node);
+        let stable_widget_id = get_stable_widget_id(node);
         let subtree_root_id = get_prop_u64(node, "__subtree-root-id");
         let parent_subtree_root_id = get_prop_u64(node, "__parent-subtree-root-id");
-        let stable_key = get_prop_str(node, "__stable-key");
         LayoutNode {
             widget_id: 0,
             stable_widget_id,
@@ -272,6 +299,7 @@ impl<'a> LayoutEngine<'a> {
         area: Rect,
         children: &[Value],
         inherited_font_size: f32,
+        layout_ctx: LayoutCtx,
     ) -> Vec<LayoutNode> {
         let Some(widget_type) = get_widget_type(node) else {
             return vec![];
@@ -289,12 +317,15 @@ impl<'a> LayoutEngine<'a> {
                     area,
                     children,
                     self.aspect,
+                    layout_ctx,
                     &mut |child, child_constraints| {
                         let mut cc = child_constraints;
                         cc.aspect = self.aspect;
                         self.measure(child, cc, font_size)
                     },
-                    &mut |child, rect| self.build_layout_node(child, rect, font_size),
+                    &mut |child, rect, child_layout_ctx| {
+                        self.build_layout_node(child, rect, font_size, child_layout_ctx)
+                    },
                 )
             })
             .unwrap_or_default()
@@ -386,10 +417,10 @@ fn reuse_layout_node_impl(
             path,
         ));
     }
-    let new_stable_widget_id = get_prop_u64(tree, "__stable-widget-id");
+    let new_stable_widget_id = get_stable_widget_id(tree);
     let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
     let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
-    let new_stable_key = get_prop_str(tree, "__stable-key");
+    let new_stable_key = get_stable_widget_key(tree);
     let is_explicit_subtree_root =
         existing.subtree_root_id.is_some() && existing.subtree_root_id == new_subtree_root_id;
     let identity_mismatch = if is_explicit_subtree_root {
@@ -594,10 +625,10 @@ fn reuse_layout_node_at_path(
         ));
     }
 
-    let new_stable_widget_id = get_prop_u64(tree, "__stable-widget-id");
+    let new_stable_widget_id = get_stable_widget_id(tree);
     let new_subtree_root_id = get_prop_u64(tree, "__subtree-root-id");
     let new_parent_subtree_root_id = get_prop_u64(tree, "__parent-subtree-root-id");
-    let new_stable_key = get_prop_str(tree, "__stable-key");
+    let new_stable_key = get_stable_widget_key(tree);
     let is_explicit_subtree_root =
         existing.subtree_root_id.is_some() && existing.subtree_root_id == new_subtree_root_id;
     let identity_mismatch = if is_explicit_subtree_root {
@@ -965,6 +996,30 @@ pub(crate) fn get_prop_str(v: &Value, key: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn stable_key_to_widget_id(key: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET;
+    for byte in b"eseqlisp-widget-key:" {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    for byte in key.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+pub(crate) fn get_stable_widget_key(v: &Value) -> Option<String> {
+    get_prop_str(v, "__stable-key").or_else(|| get_prop_str(v, "key"))
+}
+
+pub(crate) fn get_stable_widget_id(v: &Value) -> Option<u64> {
+    get_prop_u64(v, "__stable-widget-id")
+        .or_else(|| get_stable_widget_key(v).map(|key| stable_key_to_widget_id(&key)))
+}
+
 pub(crate) fn get_prop_keyword(v: &Value, key: &str) -> Option<String> {
     let map = get_map(v)?;
     match map.get(key) {
@@ -1289,6 +1344,86 @@ mod tests {
         )
     }
 
+    fn virtual_vstack(
+        stable_id: f64,
+        estimated_item_height: f64,
+        overscan: f64,
+        children: Vec<Value>,
+    ) -> Value {
+        let mut args = vec![
+            kw("__stable-widget-id"),
+            num(stable_id),
+            kw("width"),
+            kw("fill"),
+            kw("gap"),
+            num(0.0),
+            kw("padding"),
+            num(0.0),
+            kw("estimated-item-height"),
+            num(estimated_item_height),
+            kw("overscan"),
+            num(overscan),
+        ];
+        for child in children {
+            args.push(child);
+        }
+        build_widget("virtual-v-stack", args)
+    }
+
+    fn keyed_box(stable_id: f64, height: f64, text: &str) -> Value {
+        build_widget(
+            "box",
+            vec![
+                kw("__stable-widget-id"),
+                num(stable_id),
+                kw("width"),
+                kw("fill"),
+                kw("height"),
+                num(height),
+                label(text, None),
+            ],
+        )
+    }
+
+    fn scroll_with_virtual_vstack(
+        scroll_id: f64,
+        stack_id: f64,
+        item_count: usize,
+        item_height: f64,
+        estimated_item_height: f64,
+        overscan: f64,
+        stick_to_bottom: bool,
+    ) -> Value {
+        let children = (0..item_count)
+            .map(|index| {
+                keyed_box(
+                    10_000.0 + index as f64,
+                    item_height,
+                    &format!("row {index}"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut args = vec![
+            kw("__stable-widget-id"),
+            num(scroll_id),
+            kw("width"),
+            num(20.0),
+            kw("height"),
+            num(5.0),
+        ];
+        if stick_to_bottom {
+            args.push(kw("stick-to-bottom"));
+            args.push(Value::Bool(true));
+        }
+        args.push(virtual_vstack(
+            stack_id,
+            estimated_item_height,
+            overscan,
+            children,
+        ));
+        build_widget("scroll", args)
+    }
+
     fn scroll_with_flat_selected_tree(stable_id: f64, labels: &[&str], selected: &str) -> Value {
         let items = Value::List(
             labels
@@ -1457,6 +1592,123 @@ mod tests {
         let second_state = crate::widget_render::scroll::sync_node_state(&second_layout);
 
         assert_f32_approx(second_state.offset_y, 2.0);
+    }
+
+    #[test]
+    fn virtual_vstack_materializes_only_visible_children_in_scroll() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let tree = scroll_with_virtual_vstack(600.0, 601.0, 100, 2.0, 2.0, 0.0, false);
+        let layout = engine.layout(&tree).unwrap();
+        let stack = layout.children.first().expect("virtual stack child");
+
+        assert_eq!(stack.widget_type, "virtual-v-stack");
+        assert_eq!(
+            get_prop_num_from_layout(&layout, "_content_height"),
+            Some(200.0)
+        );
+        assert!(
+            stack.children.len() < 100,
+            "virtual stack should not materialize every child"
+        );
+        assert!(
+            stack.children.iter().all(|child| child.rect.height > 0.0
+                && child.rect.row >= 0.0
+                && child.rect.row < 5.0),
+            "visible children should have finite rects inside the scroll viewport"
+        );
+    }
+
+    #[test]
+    fn virtual_vstack_uses_scroll_offset_and_overscan_for_visible_window() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let tree = scroll_with_virtual_vstack(610.0, 611.0, 100, 2.0, 2.0, 1.0, false);
+        crate::widget_render::scroll::set_scroll_state(
+            610,
+            crate::widget_render::scroll::ScrollState {
+                offset_y: 40.0,
+                content_height: 200.0,
+                viewport_height: 5.0,
+                synced_selection: None,
+            },
+        );
+        let layout = engine.layout(&tree).unwrap();
+        let stack = layout.children.first().expect("virtual stack child");
+        let first = stack.children.first().expect("first materialized child");
+
+        assert!(
+            (first.rect.row - 38.0).abs() < 0.001,
+            "one item of overscan should materialize just above the viewport"
+        );
+        assert!(
+            stack.children.len() <= 6,
+            "visible window should stay bounded by viewport plus overscan"
+        );
+    }
+
+    #[test]
+    fn virtual_vstack_updates_height_cache_after_visible_measurement() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let tree = scroll_with_virtual_vstack(620.0, 621.0, 3, 6.0, 2.0, 0.0, false);
+        let first_layout = engine.layout(&tree).unwrap();
+        assert_eq!(
+            get_prop_num_from_layout(&first_layout, "_content_height"),
+            Some(6.0),
+            "first pass uses estimates before visible children are measured"
+        );
+
+        let second_layout = engine.layout(&tree).unwrap();
+        assert_eq!(
+            get_prop_num_from_layout(&second_layout, "_content_height"),
+            Some(18.0),
+            "second pass uses cached measured heights"
+        );
+    }
+
+    #[test]
+    fn sticky_scroll_follows_virtual_vstack_growth() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = scroll_with_virtual_vstack(630.0, 631.0, 5, 2.0, 2.0, 0.0, true);
+        let first_layout = engine.layout(&first).unwrap();
+        let first_state = crate::widget_render::scroll::sync_node_state(&first_layout);
+        assert_f32_approx(first_state.offset_y, 5.0);
+
+        let second = scroll_with_virtual_vstack(630.0, 631.0, 8, 2.0, 2.0, 0.0, true);
+        let second_layout = engine.layout(&second).unwrap();
+        let second_state = crate::widget_render::scroll::sync_node_state(&second_layout);
+        assert_f32_approx(second_state.offset_y, 11.0);
+    }
+
+    #[test]
+    fn virtual_vstack_materializes_bottom_window_after_sticky_scroll_growth() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let first = scroll_with_virtual_vstack(640.0, 641.0, 5, 2.0, 2.0, 0.0, true);
+        let first_layout = engine.layout(&first).unwrap();
+        let first_state = crate::widget_render::scroll::sync_node_state(&first_layout);
+        assert_f32_approx(first_state.offset_y, 5.0);
+
+        let second = scroll_with_virtual_vstack(640.0, 641.0, 20, 2.0, 2.0, 0.0, true);
+        let second_layout = engine.layout(&second).unwrap();
+        let stack = second_layout
+            .children
+            .first()
+            .expect("virtual stack child after growth");
+        let first_materialized = stack
+            .children
+            .first()
+            .expect("bottom window should materialize at least one child");
+
+        assert!(
+            first_materialized.rect.row >= 34.0,
+            "sticky bottom layout should materialize the bottom window before render offset; first materialized rect: {:?}",
+            first_materialized.rect
+        );
+        assert!(
+            stack
+                .children
+                .iter()
+                .any(|child| child.stable_widget_id == Some(10_019)),
+            "latest item should be present in the materialized bottom window"
+        );
     }
 
     #[test]

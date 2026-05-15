@@ -3856,6 +3856,114 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_agent_transcript_uses_virtualized_message_stack() {
+        use eseqlisp::layout::LayoutNode;
+
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        fn find_label_containing<'a>(node: &'a LayoutNode, needle: &str) -> Option<&'a LayoutNode> {
+            if node.widget_type == "label"
+                && matches!(node.props.get("text"), Some(Value::String(text)) if text.contains(needle))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_label_containing(child, needle))
+        }
+
+        let mut editor =
+            eseqlisp::Editor::new(eseqlisp::Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        editor.set_layout_viewport(92, 24);
+        register_agent_test_natives(editor.runtime_mut());
+        editor
+            .runtime_mut()
+            .register_native("agent/messages", |_args, _ctx| {
+                let messages = (0..80)
+                    .map(|index| {
+                        map_value([
+                            ("role", Value::Symbol("assistant".to_string())),
+                            (
+                                "display-text",
+                                Value::String(format!(
+                                    "message {index} with enough text to produce a measurable card"
+                                )),
+                            ),
+                            ("has-code-blocks", Value::Bool(false)),
+                        ])
+                    })
+                    .collect::<Vec<_>>();
+                Ok(test_list(messages))
+            });
+        editor.runtime_mut().register_reactive(
+            "AGENT",
+            vec![("generation", Value::Number(0.0))],
+            false,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "mac-osx-dark.lisp")"#)
+            .expect("load theme");
+        editor
+            .runtime_mut()
+            .eval_str(r#"(load "metal-seq-agent.lisp")"#)
+            .expect("load agent lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(set! agent-current-conv 1)")
+            .expect("select test conversation");
+        editor.refresh_runtime_side_effects();
+
+        let agent_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*agent*")
+            .expect("agent buffer")
+            .id;
+        editor.set_active_buffer(agent_id);
+        editor.active_buffer_mut().view_mode = eseqlisp::editor::ViewMode::UiOnly;
+        editor.refresh_runtime_side_effects();
+        let layout = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("agent layout");
+        let stack = find_layout_node_by_stable_key(&layout, "agent-message-stack")
+            .expect("virtualized message stack");
+
+        assert_eq!(stack.widget_type, "virtual-v-stack");
+        assert!(
+            !stack.children.is_empty() && stack.children.len() < 80,
+            "agent transcript should materialize only a visible message window, got {} children",
+            stack.children.len()
+        );
+        let first_message = find_layout_node_by_stable_key(&layout, "agent-message-79")
+            .expect("latest visible message card");
+        assert!(
+            first_message.rect.height > 0.0 && first_message.rect.width > 0.0,
+            "visible message card should have a finite measured rect: {:?}",
+            first_message.rect
+        );
+        let first_label =
+            find_label_containing(&layout, "message 79").expect("latest visible message text");
+        assert!(
+            first_label.rect.height > 0.0 && first_label.rect.width > 0.0,
+            "visible message text should have a finite measured rect: {:?}",
+            first_label.rect
+        );
+    }
+
+    #[test]
     fn metal_seq_builtin_fx_ui_lisp_loads() {
         let mut runtime = Runtime::new();
         let loaded = runtime
