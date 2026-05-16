@@ -1595,29 +1595,32 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> Option<Vec<(i32, String, u32)>> {
-        let mut bank = self.pattern.pattern_bank.lock().unwrap();
-        let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        if new_idx == cur || new_idx >= bank.len() {
-            return None;
-        }
-        let current_snapshot = PatternSnapshot::capture_with_mod_connections(
-            self,
-            num_tracks,
-            buffer_ids,
-            sample_rates,
-            names,
-            instrument_types,
-            bank[cur].mod_connections.clone(),
-        );
-        bank[cur] = current_snapshot;
-        bank[new_idx].restore(self);
-        self.pattern
-            .current_pattern
-            .store(new_idx as u32, Ordering::Relaxed);
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        let sample_ids = {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+            if new_idx == cur || new_idx >= bank.len() {
+                return None;
+            }
+            let current_snapshot = PatternSnapshot::capture_with_mod_connections(
+                self,
+                num_tracks,
+                buffer_ids,
+                sample_rates,
+                names,
+                instrument_types,
+                bank[cur].mod_connections.clone(),
+            );
+            bank[cur] = current_snapshot;
+            bank[new_idx].restore(self);
+            self.pattern
+                .current_pattern
+                .store(new_idx as u32, Ordering::Relaxed);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            bank[new_idx].sample_ids.clone()
+        };
         self.schedule_mod_resync();
         self.publish_scheduler_snapshot();
-        Some(bank[new_idx].sample_ids.clone())
+        Some(sample_ids)
     }
 
     pub fn clone_pattern(
@@ -1628,27 +1631,30 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> usize {
-        let mut bank = self.pattern.pattern_bank.lock().unwrap();
-        let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        bank[cur] = PatternSnapshot::capture_with_mod_connections(
-            self,
-            num_tracks,
-            buffer_ids,
-            sample_rates,
-            names,
-            instrument_types,
-            bank[cur].mod_connections.clone(),
-        );
-        let cloned = bank[cur].clone();
-        bank.push(cloned);
-        let new_idx = bank.len() - 1;
-        self.pattern
-            .current_pattern
-            .store(new_idx as u32, Ordering::Relaxed);
-        self.pattern
-            .num_patterns
-            .store(bank.len() as u32, Ordering::Relaxed);
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        let new_idx = {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+            bank[cur] = PatternSnapshot::capture_with_mod_connections(
+                self,
+                num_tracks,
+                buffer_ids,
+                sample_rates,
+                names,
+                instrument_types,
+                bank[cur].mod_connections.clone(),
+            );
+            let cloned = bank[cur].clone();
+            bank.push(cloned);
+            let new_idx = bank.len() - 1;
+            self.pattern
+                .current_pattern
+                .store(new_idx as u32, Ordering::Relaxed);
+            self.pattern
+                .num_patterns
+                .store(bank.len() as u32, Ordering::Relaxed);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            new_idx
+        };
         self.publish_scheduler_snapshot();
         new_idx
     }
@@ -1661,33 +1667,36 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> Option<Vec<(i32, String, u32)>> {
-        let mut bank = self.pattern.pattern_bank.lock().unwrap();
-        if bank.len() <= 1 {
-            return None;
-        }
-        let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        bank[cur] = PatternSnapshot::capture_with_mod_connections(
-            self,
-            num_tracks,
-            buffer_ids,
-            sample_rates,
-            names,
-            instrument_types,
-            bank[cur].mod_connections.clone(),
-        );
-        bank.remove(cur);
-        let new_idx = cur.min(bank.len() - 1);
-        bank[new_idx].restore(self);
-        self.pattern
-            .current_pattern
-            .store(new_idx as u32, Ordering::Relaxed);
-        self.pattern
-            .num_patterns
-            .store(bank.len() as u32, Ordering::Relaxed);
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        let sample_ids = {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            if bank.len() <= 1 {
+                return None;
+            }
+            let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+            bank[cur] = PatternSnapshot::capture_with_mod_connections(
+                self,
+                num_tracks,
+                buffer_ids,
+                sample_rates,
+                names,
+                instrument_types,
+                bank[cur].mod_connections.clone(),
+            );
+            bank.remove(cur);
+            let new_idx = cur.min(bank.len() - 1);
+            bank[new_idx].restore(self);
+            self.pattern
+                .current_pattern
+                .store(new_idx as u32, Ordering::Relaxed);
+            self.pattern
+                .num_patterns
+                .store(bank.len() as u32, Ordering::Relaxed);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            bank[new_idx].sample_ids.clone()
+        };
         self.schedule_mod_resync();
         self.publish_scheduler_snapshot();
-        Some(bank[new_idx].sample_ids.clone())
+        Some(sample_ids)
     }
 
     pub fn propagate_track_to_all_patterns(
@@ -2589,6 +2598,44 @@ mod tests {
         assert_eq!(cloned_idx, 1);
         assert_eq!(bank[0].mod_connections, vec![route]);
         assert_eq!(bank[1].mod_connections, vec![route]);
+    }
+
+    #[test]
+    fn switch_pattern_publishes_snapshot_after_releasing_pattern_bank() {
+        let state = make_state_with_tracks(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 3,
+        };
+        state.pattern.pattern_bank.lock().unwrap()[0]
+            .mod_connections
+            .push(route);
+        state.clone_pattern(
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+        state.pattern.pattern_bank.lock().unwrap()[1]
+            .mod_connections
+            .clear();
+
+        let sample_ids = state.switch_pattern(
+            0,
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+
+        assert!(sample_ids.is_some());
+        assert_eq!(
+            state.latest_scheduler_snapshot().mod_connections,
+            vec![route]
+        );
     }
 
     #[test]
