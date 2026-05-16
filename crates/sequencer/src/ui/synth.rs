@@ -850,6 +850,8 @@ impl App {
             params,
             input_channels: 0,
             output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
         })
     }
 
@@ -900,6 +902,8 @@ impl App {
             params,
             input_channels: 0,
             output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
         })
     }
 

@@ -2890,6 +2890,8 @@ impl ScratchControlRuntime {
                     params: entry.params.clone(),
                     input_channels: 0,
                     output_channels: 0,
+                    instrument_modulators: Vec::new(),
+                    instrument_modulation_targets: Vec::new(),
                 },
                 0,
             )
@@ -3314,6 +3316,8 @@ fn register_sequencer_natives_with_accumulators(
                         params: entry.params.clone(),
                         input_channels: 0,
                         output_channels: 0,
+                        instrument_modulators: Vec::new(),
+                        instrument_modulation_targets: Vec::new(),
                     };
                     state_for_use_midi_fx.pattern.midi_fx_slots[track_idx][slot_idx]
                         .sync_descriptor(&desc, 0);

@@ -3,6 +3,8 @@
 
 (defstate instrument-panel-tab 0)
 (defstate instrument-source-tab 0)
+(defstate instrument-mods-open false)
+(defstate instrument-selected-mod-slot 1)
 (defstate selected-fx-slot -1)
 (defstate selected-midi-fx-slot -1)
 (defstate selected-bus-fx-slot -1)
@@ -136,7 +138,7 @@
             :on-change (lambda (v) (fx-plock-set-option p v))
             :width 5.2 :height 1.1 :font-size 9)
           (number-picker :value (get p :value)
-            :min (get p :min) :max (get p :max) :decimals 2
+            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
             :noui true :font-size 10 :text-color :dim
             :on-change (lambda (v) (fx-plock-set-value p v))
             :width 4.5 :height 1.05))
@@ -439,12 +441,133 @@
             :param-idx (get p :idx)))))
 
 (def fx-param-value (p)
-  (if (get p :value-field)
-    (bind-seq (get p :value-field))
-    (get p :value)))
+  (if (and instrument-mods-open (get p :modulatable))
+    (let ((target (instrument-param-control-mod-target p)))
+      (if target (instrument-mod-target-depth target) 0))
+    (if (get p :value-field)
+      (bind-seq (get p :value-field))
+      (get p :value))))
+
+(def instrument-mod-selected-slot ()
+  (if (> instrument-selected-mod-slot 0) instrument-selected-mod-slot 1))
+
+(def instrument-param-mod-targets (p)
+  (if (get p :mod-targets) (get p :mod-targets) '()))
+
+(def instrument-mod-target-source-slot (target)
+  (let ((slot (if (get target :source-value-field)
+                (reactive-value (bind-seq (get target :source-value-field)))
+                (get target :source-slot))))
+    (if slot slot (get target :source-slot))))
+
+(def instrument-mod-target-depth (target)
+  (if (get target :depth-value-field)
+    (bind-seq (get target :depth-value-field))
+    (get target :depth)))
+
+(def instrument-param-selected-mod-target (p)
+  (nth
+    (filter |target| (= (instrument-mod-target-source-slot target) (instrument-mod-selected-slot))
+      (instrument-param-mod-targets p))
+    0))
+
+(def instrument-param-empty-mod-target (p)
+  (nth
+    (filter |target| (= (instrument-mod-target-source-slot target) 0)
+      (instrument-param-mod-targets p))
+    0))
+
+(def instrument-param-control-mod-target (p)
+  (let ((selected-target (instrument-param-selected-mod-target p)))
+    (if selected-target
+      selected-target
+      (let ((empty-target (instrument-param-empty-mod-target p)))
+        (if empty-target
+          empty-target
+          (nth (instrument-param-mod-targets p) 0))))))
+
+(def instrument-param-connected-to-selected-mod? (p)
+  (if (instrument-param-selected-mod-target p) true false))
+
+(def instrument-param-connected-to-other-mod? (p)
+  (> (len
+      (filter |target|
+        (and (> (instrument-mod-target-source-slot target) 0)
+             (not (= (instrument-mod-target-source-slot target) (instrument-mod-selected-slot))))
+        (instrument-param-mod-targets p)))
+     0))
+
+(def instrument-param-control-min (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    (let ((target (instrument-param-control-mod-target p)))
+      (if target (get target :depth-min) -1))
+    (get p :min)))
+
+(def instrument-param-control-max (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    (let ((target (instrument-param-control-mod-target p)))
+      (if target (get target :depth-max) 1))
+    (get p :max)))
+
+(def instrument-set-param-control-value (p v)
+  (if (and instrument-mods-open (get p :modulatable))
+    (let ((target (instrument-param-control-mod-target p)))
+      (if target
+        (let ((source-slot (instrument-mod-target-source-slot target)))
+          (if (= source-slot (instrument-mod-selected-slot))
+            (fx-set-instrument-value
+              (dict :idx (get target :depth-idx) :control "param")
+              v)
+            (if (= source-slot 0)
+              (do
+                (fx-set-instrument-value
+                  (dict :idx (get target :source-idx) :control "param")
+                  (instrument-mod-selected-slot))
+                (fx-set-instrument-value
+                  (dict :idx (get target :depth-idx) :control "param")
+                  v)))))))
+    (fx-set-instrument-value p v)))
+
+(def instrument-toggle-param-modulation (p)
+  (if (get p :modulatable)
+    (let ((target (instrument-param-selected-mod-target p)))
+      (if target
+        (fx-set-instrument-value
+          (dict :idx (get target :source-idx) :control "param")
+          0)
+        (let ((target (instrument-param-empty-mod-target p)))
+          (if target
+            (do
+              (fx-set-instrument-value
+                (dict :idx (get target :source-idx) :control "param")
+                (instrument-mod-selected-slot))
+              (fx-set-instrument-value
+                (dict :idx (get target :depth-idx) :control "param")
+                0))))))))
+
+(def instrument-param-mod-bg (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    (if (instrument-param-connected-to-selected-mod? p)
+      (rgba 0.95 0.48 0.18 0.32)
+      (if (instrument-param-connected-to-other-mod? p)
+        (rgba 0.18 0.48 0.95 0.24)
+        (rgba 0.95 0.76 0.22 0.24)))
+    :transparent))
+
+(def instrument-param-mod-wrapper (p key body)
+  (if (and instrument-mods-open (get p :modulatable))
+    (subtree :key key
+      (box :background-color (instrument-param-mod-bg p)
+           :corner-radius 8
+           :border-width 1
+           :padding 0.08
+           :on-double-click (lambda (info) (instrument-toggle-param-modulation p))
+        body))
+    body))
 
 (def fx-param-row (p fx subtree-key)
   (subtree :key subtree-key
+    (instrument-param-mod-wrapper p (str subtree-key "-mod-wrapper")
     (box :height 1.25
       (h-stack :gap 0.45 :align :center
         (box :width 13.2 :height 1.25
@@ -478,22 +601,22 @@
                     (fx-set-instrument-option p v)))
                 :width 5.8 :height 1.2 :font-size 11)
               (number-picker :value (fx-param-value p)
-                :min (get p :min) :max (get p :max) :decimals 2
+                :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
                 :noui true :font-size 12 :text-color :dim
                 :on-change (lambda (v)
                   (if fx
                     (fx-set-effect-value fx p v)
-                    (fx-set-instrument-value p v)))
+                    (instrument-set-param-control-value p v)))
                 :width 5.2 :height 1.1)))))
         (if (or (get p :options) (get p :boolean))
           (label "" :width 7.8 :bg :transparent)
-          (hslider :width 7.8 :min (get p :min) :max (get p :max)
+          (hslider :width 7.8 :min (instrument-param-control-min p) :max (instrument-param-control-max p)
                    :value (fx-param-value p)
                    :material (aqua-slider-material)
                    :on-change (lambda (v)
                      (if fx
                        (fx-set-effect-value fx p v)
-                       (fx-set-instrument-value p v)))))))))
+                       (instrument-set-param-control-value p v))))))))))
 
 (def fx-param-grid (params fx)
   (h-stack :gap 1.5 :padding 0
@@ -554,6 +677,35 @@
           (each chunk |p pi|
             (instrument-mod-row params p
               (str "instrument-mod-row-" ci "-param-" (get p :idx)))))))))
+
+(def instrument-mod-selector-row (modulator)
+  (let ((slot (get modulator :slot))
+        (label-text (get modulator :label)))
+    (subtree :key (str "instrument-mod-selector-" slot)
+      (button label-text
+        :width 4.7 :height 1.1
+        :padding 0
+        :font-size 9
+        :background-color (if (= instrument-selected-mod-slot slot)
+          (rgba 0.95 0.48 0.18 0.82)
+          :instrument-control-bg)
+        :color (if (= instrument-selected-mod-slot slot) :white :dim)
+        :on-click (lambda (info) (set! instrument-selected-mod-slot slot))))))
+
+(def instrument-mod-selector (inst)
+  (box :debug-name "instrument-mod-selector"
+       :width 10.2
+       :height :fill
+       :background-color :instrument-group-bg
+       :corner-radius 10
+       :padding 0.25
+    (v-stack :gap 0.18 :align :start
+      (label "mods" :font-size 9 :color :dim :bg :transparent)
+      (h-stack :gap 0.18 :align :start
+        (each (chunks (get inst :modulators) 5) |column ci|
+          (v-stack :gap 0.18 :align :start
+            (each column |modulator mi|
+              (instrument-mod-selector-row modulator))))))))
 
 (def instrument-sources-grid (sections)
   (h-stack :gap 2 
@@ -684,6 +836,26 @@
       :color (if (= instrument-panel-tab idx) :white :dim)
       :bg :transparent)))
 
+(def instrument-header-button (text active width click)
+  (box :width width :height 1.2 :align :center
+    :bg (if active :dark-gray :transparent)
+    :on-click click
+    (label text :font-size 11
+      :color (if active :white :dim)
+      :bg :transparent)))
+
+(def instrument-synth-button ()
+  (instrument-header-button "synth" (and (= instrument-panel-tab 0) (not instrument-mods-open)) 4.5
+    (lambda (info) (do (set! instrument-panel-tab 0) (set! instrument-mods-open false)))))
+
+(def instrument-mods-toggle-button ()
+  (instrument-header-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
+    (lambda (info) (do (set! instrument-panel-tab 0) (set! instrument-mods-open (not instrument-mods-open))))))
+
+(def instrument-sources-button ()
+  (instrument-header-button "sources" (= instrument-panel-tab 2) 5.8
+    (lambda (info) (do (set! instrument-panel-tab 2) (set! instrument-mods-open false)))))
+
 (def inst-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
 
@@ -730,7 +902,7 @@
 (def custom-ui-set-param-in-scope (scope p value)
   (if (= (get scope :kind) "audio-fx")
     (fx-set-effect-value (get scope :audio-fx) p value)
-    (fx-set-instrument-value p value)))
+    (instrument-set-param-control-value p value)))
 
 (def custom-ui-set-param-by-name-in-scope (scope name value)
   (let ((p (custom-ui-param-in-scope scope name)))
@@ -738,14 +910,19 @@
 
 (def custom-ui-param-change-callback (p)
   (let ((scope (custom-ui-current-scope)))
-    (lambda (v) (custom-ui-set-param-in-scope scope p v))))
+    (lambda (v)
+      (if (= (get scope :kind) "audio-fx")
+        (custom-ui-set-param-in-scope scope p v)
+        (instrument-set-param-control-value p v)))))
 
 (def custom-ui-param-change-callback-s (section p)
   (let ((scope (custom-ui-current-scope)))
     (lambda (v)
       (do
         (custom-ui-select-section-in-scope scope section)
-        (custom-ui-set-param-in-scope scope p v)))))
+        (if (= (get scope :kind) "audio-fx")
+          (custom-ui-set-param-in-scope scope p v)
+          (instrument-set-param-control-value p v))))))
 
 (def custom-ui-current-param (name)
   (if (= custom-ui-current-kind "audio-fx")
@@ -758,10 +935,13 @@
     (inst-base-note-param synth-ui-current-inst)))
 
 (def custom-ui-set-param (p value)
-  (custom-ui-set-param-in-scope (custom-ui-current-scope) p value))
+  (if (= custom-ui-current-kind "audio-fx")
+    (custom-ui-set-param-in-scope (custom-ui-current-scope) p value)
+    (instrument-set-param-control-value p value)))
 
 (def custom-ui-set-param-by-name (name value)
-  (custom-ui-set-param-by-name-in-scope (custom-ui-current-scope) name value))
+  (let ((p (custom-ui-current-param name)))
+    (if p (custom-ui-set-param p value) false)))
 
 (def base-note ()
   (let ((p (inst-base-note-param synth-ui-current-inst)))
@@ -769,13 +949,13 @@
       (subtree :key (str "custom-ui-base-note-" synth-ui-current-name)
         (knob-number :label "note"
           :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals 0
+          :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
           :step 1
           :font-size 10.5 :label-font-size 10
           :text-color :dim :label-color :dim
           :width 4.4 :height 2.4
           :value-align :center
-          :on-change (lambda (v) (fx-set-instrument-value p v))))
+          :on-change (lambda (v) (instrument-set-param-control-value p v))))
       (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
 
 (defstate custom-ui-selected-sections '())
@@ -845,15 +1025,16 @@
 (def ui-param-knob (name title)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-knob-" (custom-ui-scope-name) "-" name)
-        (knob-number :label title
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals 2
-          :font-size 10.5 :label-font-size 10
-          :text-color :dim :label-color :dim
-          :width 4.4 :height 2.4
-          :value-align :center
-          :on-change (custom-ui-param-change-callback p)))
+      (instrument-param-mod-wrapper p (str "custom-ui-knob-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-knob-" (custom-ui-scope-name) "-" name)
+          (knob-number :label title
+            :value (fx-param-value p)
+            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
+            :font-size 10.5 :label-font-size 10
+            :text-color :dim :label-color :dim
+            :width 4.4 :height 2.4
+            :value-align :center
+            :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 ;; Compact knob: ~1.7 cell tall, value nestled in the lower-right of the knob
@@ -862,15 +1043,16 @@
 (def ui-param-knob-c (name title)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-knob-c-" (custom-ui-scope-name) "-" name)
-        (knob-number :label title
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals 2
-          :font-size 8.5 :label-font-size 7.5
-          :text-color :dim :label-color :dim
-          :width 3.8 :height 1.8
-          :label-height 0.5 :knob-size 1.25
-          :on-change (custom-ui-param-change-callback p)))
+      (instrument-param-mod-wrapper p (str "custom-ui-knob-c-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-knob-c-" (custom-ui-scope-name) "-" name)
+          (knob-number :label title
+            :value (fx-param-value p)
+            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
+            :font-size 8.5 :label-font-size 7.5
+            :text-color :dim :label-color :dim
+            :width 3.8 :height 1.8
+            :label-height 0.5 :knob-size 1.25
+            :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def base-note-c ()
@@ -879,7 +1061,7 @@
       (subtree :key (str "custom-ui-base-note-c-" (custom-ui-scope-name))
         (knob-number :label "note"
           :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals 0
+          :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
           :step 1
           :font-size 8.5 :label-font-size 7.5
           :text-color :dim :label-color :dim
@@ -1116,134 +1298,142 @@
 (def ui-lego-knob (name title width accent decimals)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) "-" name)
-        (knob-number :label title
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals decimals
-          :font-size 10.8 :label-font-size 9.6
-          :text-color accent :label-color :dim
-          :width width :height 2.62
-          :value-align :center
-          :on-change (custom-ui-param-change-callback p)))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) "-" name)
+          (knob-number :label title
+            :value (fx-param-value p)
+            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            :font-size 10.8 :label-font-size 9.6
+            :text-color accent :label-color :dim
+            :width width :height 2.62
+            :value-align :center
+            :on-change (custom-ui-param-change-callback p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-knob-s (section name title width accent decimals)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) "-" name)
-        (knob-number :label title
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals decimals
-          :font-size 10.8 :label-font-size 9.6
-          :text-color accent :label-color :dim
-          :width width :height 2.62
-          :value-align :center
-          :on-change (custom-ui-param-change-callback-s section p)))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) "-" name)
+          (knob-number :label title
+            :value (fx-param-value p)
+            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            :font-size 10.8 :label-font-size 9.6
+            :text-color accent :label-color :dim
+            :width width :height 2.62
+            :value-align :center
+            :on-change (custom-ui-param-change-callback-s section p))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-num (name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) "-" name)
-        (v-stack :width width :height 1.12 :gap 0.08 :align :start
-          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (get p :min) :max (get p :max) :decimals decimals
-            :unit unit
-            :noui true :font-size 10.2
-            :text-color accent :edit-color :yellow
-            :text-align :left
-            :width width :height 0.68
-            :on-change (custom-ui-param-change-callback p))))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) "-" name)
+          (v-stack :width width :height 1.12 :gap 0.08 :align :start
+            (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+            (number-picker :value (fx-param-value p)
+              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+              :unit unit
+              :noui true :font-size 10.2
+              :text-color accent :edit-color :yellow
+              :text-align :left
+              :width width :height 0.68
+              :on-change (custom-ui-param-change-callback p)))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-num-s (section name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) "-" name)
-        (v-stack :width width :height 1.12 :gap 0.08 :align :start
-          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (get p :min) :max (get p :max) :decimals decimals
-            :unit unit
-            :noui true :font-size 10.2
-            :text-color accent :edit-color :yellow
-            :text-align :left
-            :width width :height 0.68
-            :on-change (custom-ui-param-change-callback-s section p))))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) "-" name)
+          (v-stack :width width :height 1.12 :gap 0.08 :align :start
+            (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+            (number-picker :value (fx-param-value p)
+              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+              :unit unit
+              :noui true :font-size 10.2
+              :text-color accent :edit-color :yellow
+              :text-align :left
+              :width width :height 0.68
+              :on-change (custom-ui-param-change-callback-s section p)))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-micro-num-s (section name title width decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) "-" name)
-        (v-stack :width width :height 1.18 :gap 0.16 :align :start
-          (label title :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (get p :min) :max (get p :max) :decimals decimals
-            :unit unit
-            :noui true :font-size 9.0
-            :text-color accent :edit-color :yellow
-            :text-align :left
-            :width width :height 0.50
-            :on-change (custom-ui-param-change-callback-s section p))))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) "-" name)
+          (v-stack :width width :height 1.18 :gap 0.16 :align :start
+            (label title :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
+            (number-picker :value (fx-param-value p)
+              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+              :unit unit
+              :noui true :font-size 9.0
+              :text-color accent :edit-color :yellow
+              :text-align :left
+              :width width :height 0.50
+              :on-change (custom-ui-param-change-callback-s section p)))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
 (def ui-lego-option (name title width options accent)
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
-        (v-stack :width width :height 1.12 :gap 0.08 :align :start
-          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-          (dropdown :value-index (fx-param-value p)
-            :value-index-offset (get p :min)
-            :options options
-            :width width :height 0.78 :font-size 8.0
-            :on-change (lambda (v)
-              (custom-ui-set-param-in-scope
-                scope
-                p
-                (+ (get p :min) (custom-ui-option-index options v)))))))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
+          (v-stack :width width :height 1.12 :gap 0.08 :align :start
+            (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+            (dropdown :value-index (fx-param-value p)
+              :value-index-offset (get p :min)
+              :options options
+              :width width :height 0.78 :font-size 8.0
+              :on-change (lambda (v)
+                (custom-ui-set-param-in-scope
+                  scope
+                  p
+                  (+ (get p :min) (custom-ui-option-index options v))))))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-option-s (section name title width options accent)
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
-        (v-stack :width width :height 1.12 :gap 0.08 :align :start
-          (label title :font-size 8.2 :width width :color :dim :bg :transparent)
-          (dropdown :value-index (fx-param-value p)
-            :value-index-offset (get p :min)
-            :options options
-            :width width :height 0.78 :font-size 8.0
-            :on-change (lambda (v)
-              (do
-                (custom-ui-select-section-in-scope scope section)
-                (custom-ui-set-param-in-scope
-                  scope
-                p
-                (+ (get p :min) (custom-ui-option-index options v))))))))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-option-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
+          (v-stack :width width :height 1.12 :gap 0.08 :align :start
+            (label title :font-size 8.2 :width width :color :dim :bg :transparent)
+            (dropdown :value-index (fx-param-value p)
+              :value-index-offset (get p :min)
+              :options options
+              :width width :height 0.78 :font-size 8.0
+              :on-change (lambda (v)
+                (do
+                  (custom-ui-select-section-in-scope scope section)
+                  (custom-ui-set-param-in-scope
+                    scope
+                    p
+                    (+ (get p :min) (custom-ui-option-index options v)))))))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-micro-option-s (section name title width options accent)
   (let ((p (custom-ui-current-param name))
         (scope (custom-ui-current-scope)))
     (if p
-      (subtree :key (str "custom-ui-lego-micro-option-" (custom-ui-scope-name) "-" name)
-        (box :width width :height 1.18 :v-align :end
-          (dropdown :value-index (fx-param-value p)
-            :value-index-offset (get p :min)
-            :options options
-            :width width :height 0.92 :font-size 8.6
-            :on-change (lambda (v)
-              (do
-                (custom-ui-select-section-in-scope scope section)
-                (custom-ui-set-param-in-scope
-                  scope
-                  p
-                  (+ (get p :min) (custom-ui-option-index options v))))))))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-micro-option-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-micro-option-" (custom-ui-scope-name) "-" name)
+          (box :width width :height 1.18 :v-align :end
+            (dropdown :value-index (fx-param-value p)
+              :value-index-offset (get p :min)
+              :options options
+              :width width :height 0.92 :font-size 8.6
+              :on-change (lambda (v)
+                (do
+                  (custom-ui-select-section-in-scope scope section)
+                  (custom-ui-set-param-in-scope
+                    scope
+                    p
+                    (+ (get p :min) (custom-ui-option-index options v)))))))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
 (def ui-lego-micro-base-note-s (section width accent)
@@ -1253,7 +1443,7 @@
         (v-stack :width width :height 1.18 :gap 0.16 :align :start
           (label "note" :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
           (number-picker :value (fx-param-value p)
-            :min (get p :min) :max (get p :max) :decimals 0
+            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 9.0
             :text-color accent :edit-color :yellow
@@ -1265,17 +1455,18 @@
 (def ui-lego-row (name title decimals unit accent)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-lego-row-" (custom-ui-scope-name) "-" name)
-        (h-stack :width :fill :height 0.86 :gap 0.35 :align :baseline
-          (label title :font-size 8.8 :width 6.2 :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (get p :min) :max (get p :max) :decimals decimals
-            :unit unit
-            :noui true :font-size 10.2
-            :text-align :left
-            :text-color accent :edit-color :yellow
-            :width 6.0 :height 0.78
-            :on-change (custom-ui-param-change-callback p))))
+      (instrument-param-mod-wrapper p (str "custom-ui-lego-row-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-row-" (custom-ui-scope-name) "-" name)
+          (h-stack :width :fill :height 0.86 :gap 0.35 :align :baseline
+            (label title :font-size 8.8 :width 6.2 :color :dim :bg :transparent)
+            (number-picker :value (fx-param-value p)
+              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+              :unit unit
+              :noui true :font-size 10.2
+              :text-align :left
+              :text-color accent :edit-color :yellow
+              :width 6.0 :height 0.78
+              :on-change (custom-ui-param-change-callback p)))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-base-note (width accent)
@@ -1285,7 +1476,7 @@
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
           (label "note" :font-size 8.2 :width width :color :dim :bg :transparent)
           (number-picker :value (fx-param-value p)
-            :min (get p :min) :max (get p :max) :decimals 0
+            :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
             :step 1
             :noui true :font-size 10.2
             :text-color accent :edit-color :yellow
@@ -1297,34 +1488,36 @@
 (def ui-adsr-number (name title decimals unit)
   (let ((p (custom-ui-current-param name)))
     (if p
-      (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
-        (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-          (label title :font-size 10 :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (get p :min) :max (get p :max) :decimals decimals
-            :unit unit
-            :noui true :font-size 10.5
-            :text-align :center
-            :text-color :widget_focus_bg :edit-color :yellow
-            :width 5.0 :height 0.95
-            :on-change (custom-ui-param-change-callback p))))
+      (instrument-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
+          (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
+            (label title :font-size 10 :color :dim :bg :transparent)
+            (number-picker :value (fx-param-value p)
+              :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+              :unit unit
+              :noui true :font-size 10.5
+              :text-align :center
+              :text-color :widget_focus_bg :edit-color :yellow
+              :width 5.0 :height 0.95
+              :on-change (custom-ui-param-change-callback p)))))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 (def ui-adsr-number-s (section name title decimals unit)
   (if name
     (let ((p (custom-ui-current-param name)))
       (if p
-        (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
-          (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-            (label title :font-size 10 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (get p :min) :max (get p :max) :decimals decimals
-              :unit unit
-              :noui true :font-size 10.5
-              :text-align :center
-              :text-color :widget_focus_bg :edit-color :yellow
-              :width 5.0 :height 0.95
-              :on-change (custom-ui-param-change-callback-s section p))))
+        (instrument-param-mod-wrapper p (str "custom-ui-adsr-number-mod-" (custom-ui-scope-name) "-" name)
+          (subtree :key (str "custom-ui-adsr-number-" (custom-ui-scope-name) "-" name)
+            (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
+              (label title :font-size 10 :color :dim :bg :transparent)
+              (number-picker :value (fx-param-value p)
+                :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+                :unit unit
+                :noui true :font-size 10.5
+                :text-align :center
+                :text-color :widget_focus_bg :edit-color :yellow
+                :width 5.0 :height 0.95
+                :on-change (custom-ui-param-change-callback-s section p)))))
         (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
     (box :width 5.2 :height 1.75
       (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
@@ -1533,12 +1726,18 @@
   (do
     (set! custom-ui-current-kind "instrument")
     (let ((custom (custom-instrument-synth-ui inst)))
-      (if custom
-        (box custom
-          :debug-name "custom-synth-wrapper" :padding 0
-          :h-align :start :v-align :stretch)
-        (box (fx-param-grid (get inst :synth) false)
-          :debug-name "fallback-synth-wrapper")))))
+      (let ((body
+              (if custom
+                (box custom
+                  :debug-name "custom-synth-wrapper" :padding 0
+                  :h-align :start :v-align :stretch)
+                (box (fx-param-grid (get inst :synth) false)
+                  :debug-name "fallback-synth-wrapper"))))
+        (if instrument-mods-open
+          (h-stack :debug-name "instrument-mods-inline-body" :gap 0.45
+            (instrument-mod-selector inst)
+            body)
+          body)))))
 
 (def midi-fx-panel-body (fx)
   (let ((custom (custom-midi-fx-ui fx)))
@@ -1622,11 +1821,11 @@
   (subtree :key key
     (knob-number :label (substring (get p :name) 0 12)
       :value (fx-param-value p)
-      :min (get p :min) :max (get p :max) :decimals 1
+      :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 1
       :font-size 10.5 :label-font-size 10
       :text-color :dim :label-color :dim
       :width 4.0 :height 2.05
-      :on-change (lambda (v) (fx-set-instrument-value p v)))))
+      :on-change (lambda (v) (instrument-set-param-control-value p v)))))
 
 (def sampler-param-button (p key)
   (subtree :key key
@@ -1683,11 +1882,11 @@
     (subtree :key "sampler-param-bpm"
       (knob-number :label "bpm"
         :value (fx-param-value p)
-        :min (get p :min) :max (get p :max) :decimals 1
+        :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 1
         :font-size 10.5 :label-font-size 10
         :text-color :dim :label-color :dim
         :width 4.75 :height 2.05
-        :on-change (lambda (v) (fx-set-instrument-value p v))))
+        :on-change (lambda (v) (instrument-set-param-control-value p v))))
     (v-stack :gap 0.12 :align :center
       (box :height 0.82)
       (h-stack :gap 0.2
@@ -1769,12 +1968,12 @@
   (subtree :key key
     (knob-number :label label-text
       :value (fx-param-value p)
-      :min (get p :min) :max (get p :max) :decimals 0
+      :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 0
       :font-size 12 :label-font-size 11
       :text-color :dim :label-color :dim
       :width 7.0 :height 4.15 :knob-size 2.55
       :value-align :center
-      :on-change (lambda (v) (fx-set-instrument-value p v)))))
+      :on-change (lambda (v) (instrument-set-param-control-value p v)))))
 
 (def modulator-panel (inst)
   (let ((rise-p (modulator-param inst "rise"))
@@ -1829,9 +2028,9 @@
               (h-stack :v-align :center :height 0.75 :gap 2 :padding 0.1
                 (label (substring (get inst :display-name) 0 12)
                   :font-size 11  :color :white :bg :transparent)
-                  (instrument-tab-button "synth" 0 4.5)
-                  (instrument-tab-button "mods" 1 4.0)
-                  (instrument-tab-button "sources" 2 5.8))
+                  (instrument-synth-button)
+                  (instrument-mods-toggle-button)
+                  (instrument-sources-button))
             
             (box :debug-name "instrument-edit-button" :bg :dark-gray :width 1.2 :height 0.9 :align :center
               :on-click |x y r|
@@ -1845,11 +2044,9 @@
                   :on-click |x y r| (sbrowser-enter-preset-save)
                   :active 0)))))
         (fx-panel-body "instrument-content-box"
-          (if (= instrument-panel-tab 0)
+          (if (not (= instrument-panel-tab 2))
             (instrument-synth-panel-body inst)
-            (if (= instrument-panel-tab 1)
-              (box :debug-name "mods-wrapper"  (instrument-mod-grid (get inst :mod)))
-              (box :debug-name "sources-wrapper"  (instrument-source-tabs inst))))))
+            (box :debug-name "sources-wrapper"  (instrument-source-tabs inst)))))
       :debug-name "instrument-panel"
       :background "fx-panel-bg"
       :color :instrument-panel-bg

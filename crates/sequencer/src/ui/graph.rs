@@ -2835,9 +2835,33 @@ impl GraphController<'_> {
                 _ => m.name.clone(),
             }))
             .collect();
+        inst_desc.instrument_modulators = sorted_modulators
+            .iter()
+            .map(|m| crate::effects::InstrumentModulatorDescriptor {
+                slot: m.slot,
+                label: match m.slot {
+                    1 => "LFO 1".to_string(),
+                    2 => "ENV 1".to_string(),
+                    3 => "RAND".to_string(),
+                    4 => "DRIFT".to_string(),
+                    5 => "LFO 2".to_string(),
+                    6 => "LFO 3".to_string(),
+                    7 => "Ext 1".to_string(),
+                    8 => "Ext 2".to_string(),
+                    9 => "Ext 3".to_string(),
+                    10 => "Ext 4".to_string(),
+                    _ => m.name.clone(),
+                },
+            })
+            .collect();
         let param_by_cell: std::collections::HashMap<usize, &crate::lisp_effect::DGenParam> =
             manifest.params.iter().map(|p| (p.cell_id, p)).collect();
+        let mut mod_lane_counts: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
         for dest in &manifest.mod_destinations {
+            let lane = mod_lane_counts.entry(dest.param_cell_id).or_insert(0);
+            *lane += 1;
+            let lane = *lane;
             let source_default = param_by_cell
                 .get(&dest.source_cell_id)
                 .map(|p| p.default)
@@ -2846,8 +2870,24 @@ impl GraphController<'_> {
                 .get(&dest.depth_cell_id)
                 .map(|p| p.default)
                 .unwrap_or(0.0);
+            let depth_min = dest.depth_min.unwrap_or_else(|| {
+                param_by_cell
+                    .get(&dest.depth_cell_id)
+                    .map(|p| p.min)
+                    .unwrap_or(-1.0)
+            });
+            let depth_max = dest.depth_max.unwrap_or_else(|| {
+                param_by_cell
+                    .get(&dest.depth_cell_id)
+                    .map(|p| p.max)
+                    .unwrap_or(1.0)
+            });
+            let base_param_idx = inst_desc.params.iter().position(|p| {
+                p.node_param_idx == (lisp_effect::HEADER_SLOTS + dest.param_cell_id) as u32
+            });
+            let source_param_idx = inst_desc.params.len();
             inst_desc.params.push(crate::effects::ParamDescriptor {
-                name: format!("mod {} src", dest.name),
+                name: format!("mod {} lane {} src", dest.name, lane),
                 min: 0.0,
                 max: sorted_modulators.len() as f32,
                 default: source_default,
@@ -2859,20 +2899,11 @@ impl GraphController<'_> {
                 node_param_span: 1,
                 host_control: None,
             });
+            let depth_param_idx = inst_desc.params.len();
             inst_desc.params.push(crate::effects::ParamDescriptor {
-                name: format!("mod {} amt", dest.name),
-                min: dest.depth_min.unwrap_or_else(|| {
-                    param_by_cell
-                        .get(&dest.depth_cell_id)
-                        .map(|p| p.min)
-                        .unwrap_or(-1.0)
-                }),
-                max: dest.depth_max.unwrap_or_else(|| {
-                    param_by_cell
-                        .get(&dest.depth_cell_id)
-                        .map(|p| p.max)
-                        .unwrap_or(1.0)
-                }),
+                name: format!("mod {} lane {} amt", dest.name, lane),
+                min: depth_min,
+                max: depth_max,
                 default: depth_default,
                 kind: crate::effects::ParamKind::Continuous {
                     unit: dest.unit.clone(),
@@ -2882,6 +2913,18 @@ impl GraphController<'_> {
                 node_param_span: 1,
                 host_control: None,
             });
+            if let Some(base_param_idx) = base_param_idx {
+                inst_desc.instrument_modulation_targets.push(
+                    crate::effects::InstrumentModulationTarget {
+                        base_param_idx,
+                        source_param_idx,
+                        depth_param_idx,
+                        depth_min,
+                        depth_max,
+                        depth_unit: dest.unit.clone(),
+                    },
+                );
+            }
         }
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
         if preserve_runtime_values {

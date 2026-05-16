@@ -382,6 +382,25 @@ impl WidgetDefinition for BoxWidget {
         MouseEventOutcome::Ignore
     }
 
+    fn double_click_event(
+        &self,
+        node: &LayoutNode,
+        local_col: f32,
+        local_row: f32,
+    ) -> Option<WidgetEvent> {
+        if node.props.contains_key("on-double-click") {
+            Some(WidgetEvent::Custom(box_mouse_info(
+                "double-click",
+                KeyModifiers::empty(),
+                node,
+                local_col,
+                local_row,
+            )))
+        } else {
+            None
+        }
+    }
+
     fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<EventOutput> {
         let (callback_name, arg) = match event {
             WidgetEvent::Activate(modifiers) => (
@@ -398,6 +417,7 @@ impl WidgetDefinition for BoxWidget {
                 }?;
                 let callback_name = match phase.as_str() {
                     "click" => "on-click",
+                    "double-click" => "on-double-click",
                     "down" => "on-mouse-down",
                     "drag" => "on-drag",
                     "up" => "on-mouse-up",

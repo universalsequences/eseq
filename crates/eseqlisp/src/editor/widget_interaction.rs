@@ -22,6 +22,28 @@ fn is_slider_widget(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "hslider" | "vslider" | "slider")
 }
 
+fn node_contains_point(node: &LayoutNode, row: f32, col: f32) -> bool {
+    row >= node.rect.row
+        && row < node.rect.row + node.rect.height
+        && col >= node.rect.col
+        && col < node.rect.col + node.rect.width
+}
+
+fn deepest_double_click_node(node: &LayoutNode, row: f32, col: f32) -> Option<LayoutNode> {
+    if !node_contains_point(node, row, col) {
+        return None;
+    }
+    node.children
+        .iter()
+        .rev()
+        .find_map(|child| deepest_double_click_node(child, row, col))
+        .or_else(|| {
+            node.props
+                .contains_key("on-double-click")
+                .then(|| node.clone())
+        })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PatchPortDirection {
     In,
@@ -861,10 +883,24 @@ impl Editor {
         }
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
-        let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) else {
+        if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) {
+            let output = handle_event(&node, widget_event);
+            return self.apply_widget_output(output);
+        }
+        let Some(double_click_node) = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| deepest_double_click_node(layout, scrolled_row, scrolled_col))
+        else {
             return false;
         };
-        let output = handle_event(&node, widget_event);
+        let Some(widget_event) =
+            map_double_click_event(&double_click_node, scrolled_col, scrolled_row)
+        else {
+            return false;
+        };
+        let output = handle_event(&double_click_node, widget_event);
         self.apply_widget_output(output)
     }
 

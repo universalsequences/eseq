@@ -1785,6 +1785,8 @@ mod tests {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 test_param("attack", 0.01, crate::lisp_effect::HEADER_SLOTS as u32),
                 test_param("tone", 0.02, crate::lisp_effect::HEADER_SLOTS as u32 + 1),

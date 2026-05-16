@@ -932,6 +932,20 @@ pub fn register_core_natives(vm: &mut VM) {
         reactive_float_ref("SEQ", field)
     });
 
+    vm.register_native("reactive-value", |args| {
+        let Some(value) = args.first() else {
+            return Value::Nil;
+        };
+        match value {
+            Value::ReactiveRef {
+                kind: BindingKind::Float,
+                slot,
+                ..
+            } => Value::Number(crate::reactive::read_float_slot(slot)),
+            other => other.clone(),
+        }
+    });
+
     vm.register_native("bind-nth", |args| {
         let (
             Some(Value::String(namespace)),

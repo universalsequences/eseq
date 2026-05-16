@@ -714,6 +714,7 @@ pub fn node_handles_pointer_events(node: &LayoutNode) -> bool {
         || node.props.contains_key("on-change")
         || node.props.contains_key("on-mouse-down")
         || node.props.contains_key("on-mouse-up")
+        || node.props.contains_key("on-double-click")
         || node.props.contains_key("bind");
     if has_pointer_callback {
         return true;

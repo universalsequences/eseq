@@ -2551,6 +2551,26 @@ pub(crate) fn build_sampler_panel_value(
         Rc::new(RefCell::new(Value::List(mod_params))),
     );
     panel_map.insert(
+        "modulators".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            desc.instrument_modulators
+                .iter()
+                .map(|modulator| {
+                    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                    map.insert(
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(modulator.slot as f64))),
+                    );
+                    map.insert(
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String(modulator.label.clone()))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(map)))
+                })
+                .collect(),
+        ))),
+    );
+    panel_map.insert(
         "source-names".to_string(),
         Rc::new(RefCell::new(Value::List(source_names))),
     );
@@ -2652,6 +2672,18 @@ pub(crate) fn build_instrument_panel_value(
     );
     let base_note_current = base_note_default;
 
+    struct UiModMetadata {
+        source_param_idx: usize,
+        depth_param_idx: usize,
+        source_slot: f32,
+        source_value_field: Option<String>,
+        depth_value: f32,
+        depth_value_field: Option<String>,
+        depth_min: f32,
+        depth_max: f32,
+        depth_unit: Option<String>,
+    }
+
     fn push_param(
         out: &mut Vec<Rc<RefCell<Value>>>,
         name: String,
@@ -2662,6 +2694,7 @@ pub(crate) fn build_instrument_panel_value(
         max: f32,
         options: Option<&Vec<String>>,
         value_field: Option<String>,
+        mod_targets: Option<&Vec<UiModMetadata>>,
     ) {
         let is_boolean_name = name == "enabled" || name == "sync";
         let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -2718,6 +2751,65 @@ pub(crate) fn build_instrument_panel_value(
         }
         if let Some(value_field) = value_field {
             insert_string_prop(&mut pmap, "value-field", value_field);
+        }
+        if let Some(targets) = mod_targets {
+            pmap.insert(
+                "modulatable".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+            let target_values = targets
+                .iter()
+                .map(|meta| {
+                    let mut target = HashMap::new();
+                    target.insert(
+                        "source-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.source_param_idx as f64))),
+                    );
+                    target.insert(
+                        "depth-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
+                    );
+                    target.insert(
+                        "source-slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
+                    );
+                    if let Some(field) = &meta.source_value_field {
+                        target.insert(
+                            "source-value-field".to_string(),
+                            Rc::new(RefCell::new(Value::String(field.clone()))),
+                        );
+                    }
+                    target.insert(
+                        "depth".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
+                    );
+                    if let Some(field) = &meta.depth_value_field {
+                        target.insert(
+                            "depth-value-field".to_string(),
+                            Rc::new(RefCell::new(Value::String(field.clone()))),
+                        );
+                    }
+                    target.insert(
+                        "depth-min".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.depth_min as f64))),
+                    );
+                    target.insert(
+                        "depth-max".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.depth_max as f64))),
+                    );
+                    if let Some(unit) = &meta.depth_unit {
+                        target.insert(
+                            "depth-unit".to_string(),
+                            Rc::new(RefCell::new(Value::String(unit.clone()))),
+                        );
+                    }
+                    Rc::new(RefCell::new(Value::Map(target)))
+                })
+                .collect();
+            pmap.insert(
+                "mod-targets".to_string(),
+                Rc::new(RefCell::new(Value::List(target_values))),
+            );
         }
         out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
@@ -2913,6 +3005,59 @@ pub(crate) fn build_instrument_panel_value(
 
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
+    for target in desc
+        .instrument_modulation_targets
+        .iter()
+        .filter_map(|target| {
+            let source_desc = desc.params.get(target.source_param_idx)?;
+            let depth_desc = desc.params.get(target.depth_param_idx)?;
+            let source_default =
+                if target.source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(target.source_param_idx)
+                } else {
+                    source_desc.default
+                };
+            let depth_default =
+                if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(target.depth_param_idx)
+                } else {
+                    depth_desc.default
+                };
+            let source_current = plock_step
+                .and_then(|step| slot.plocks.get(step, target.source_param_idx))
+                .unwrap_or(source_default);
+            let depth_current = plock_step
+                .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
+                .unwrap_or(depth_default);
+            Some((
+                target.base_param_idx,
+                UiModMetadata {
+                    source_param_idx: target.source_param_idx,
+                    depth_param_idx: target.depth_param_idx,
+                    source_slot: source_desc.stored_to_user(source_current),
+                    source_value_field: plock_step.is_none().then(|| {
+                        instrument_param_value_field(
+                            track,
+                            target.source_param_idx,
+                            &source_desc.name,
+                        )
+                    }),
+                    depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_value_field: plock_step.is_none().then(|| {
+                        instrument_param_value_field(track, target.depth_param_idx, &depth_desc.name)
+                    }),
+                    depth_min: target.depth_min,
+                    depth_max: target.depth_max,
+                    depth_unit: target.depth_unit.clone(),
+                },
+            ))
+        }) {
+        modulation_targets
+            .entry(target.0)
+            .or_default()
+            .push(target.1);
+    }
     push_param(
         &mut synth_params,
         "base_note".to_string(),
@@ -2923,6 +3068,7 @@ pub(crate) fn build_instrument_panel_value(
         48.0,
         None,
         Some(instrument_base_note_value_field(track)),
+        None,
     );
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
@@ -2959,6 +3105,7 @@ pub(crate) fn build_instrument_panel_value(
                 plock_step
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                None,
             );
         } else {
             push_param(
@@ -2973,6 +3120,7 @@ pub(crate) fn build_instrument_panel_value(
                 plock_step
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                modulation_targets.get(&param_idx),
             );
         }
     }
@@ -3012,6 +3160,7 @@ pub(crate) fn build_instrument_panel_value(
                 plock_step
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                None,
             );
         }
         if params.is_empty() {
@@ -3082,6 +3231,26 @@ pub(crate) fn build_instrument_panel_value(
     panel_map.insert(
         "mod".to_string(),
         Rc::new(RefCell::new(Value::List(mod_params))),
+    );
+    panel_map.insert(
+        "modulators".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            desc.instrument_modulators
+                .iter()
+                .map(|modulator| {
+                    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                    map.insert(
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(modulator.slot as f64))),
+                    );
+                    map.insert(
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String(modulator.label.clone()))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(map)))
+                })
+                .collect(),
+        ))),
     );
     panel_map.insert(
         "source-names".to_string(),
@@ -8439,6 +8608,270 @@ mod tests {
             .as_ref()
             .expect("fx tree");
         assert!(value_contains_string(tree, "CUSTOM_OK"));
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_inline_custom_instrument_mod_selector() {
+        fn layout_has_double_click(node: &eseqlisp::layout::LayoutNode) -> bool {
+            node.props.contains_key("on-double-click")
+                || node.children.iter().any(layout_has_double_click)
+        }
+        fn assert_set_instrument_param(
+            command: &eseqlisp::host::HostCommand,
+            expected_idx: f64,
+            expected_value: f64,
+        ) {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-instrument-param");
+                    let Value::Map(payload) = payload else {
+                        panic!("set-instrument-param payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("param-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_idx))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                }
+                other => panic!("expected set-instrument-param host command, got {other:?}"),
+            }
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        fn test_mod_target(
+            source_idx: f64,
+            depth_idx: f64,
+            source_slot: f64,
+            depth: f64,
+            source_value_field: Option<&str>,
+            depth_value_field: Option<&str>,
+        ) -> Value {
+            let mut target = HashMap::from([
+                    (
+                        "source-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(source_idx))),
+                    ),
+                    (
+                        "depth-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(depth_idx))),
+                    ),
+                    (
+                        "source-slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(source_slot))),
+                    ),
+                    (
+                        "depth".to_string(),
+                        Rc::new(RefCell::new(Value::Number(depth))),
+                    ),
+                    (
+                        "depth-min".to_string(),
+                        Rc::new(RefCell::new(Value::Number(-1.0))),
+                    ),
+                    (
+                        "depth-max".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                ]);
+            if let Some(field) = source_value_field {
+                target.insert(
+                    "source-value-field".to_string(),
+                    Rc::new(RefCell::new(Value::String(field.to_string()))),
+                );
+            }
+            if let Some(field) = depth_value_field {
+                target.insert(
+                    "depth-value-field".to_string(),
+                    Rc::new(RefCell::new(Value::String(field.to_string()))),
+                );
+            }
+            Value::Map(target)
+        }
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/test-instrument/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-panel "SYNTH" 0
+                (h-stack :gap 0.2
+                  (ui-lego-knob-s 0 "cutoff" "cut" 4.8 (ui-accent-blue) 2))))
+            "#
+            .to_string(),
+        )));
+        let mut cutoff = test_param_map("cutoff", 0, 0.5, 0.0, 1.0);
+        cutoff.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        cutoff.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                test_mod_target(10.0, 11.0, 1.0, 0.25, None, None),
+                test_mod_target(
+                    12.0,
+                    13.0,
+                    0.0,
+                    0.0,
+                    Some("test-mod-source-12"),
+                    Some("test-mod-depth-13"),
+                ),
+            ]))),
+        );
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(cutoff),
+                Value::Map(test_param_map("gain", 1, 0.8, 0.0, 1.0)),
+            ]))),
+        );
+        inst.insert(
+            "modulators".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                    ),
+                ])),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(120, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("test-mod-source-12", Value::Number(0.0)),
+                ("test-mod-depth-13", Value::Number(0.0)),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load custom instrument UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open true) (set! instrument-selected-mod-slot 1))")
+            .expect("open inline mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("inline mods fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("inline mods layout");
+        assert_finite_layout_tree(&layout);
+        let selector = find_layout_node_by_debug_name(&layout, "instrument-mod-selector")
+            .expect("inline mods selector should render");
+        assert!(
+            selector.rect.width > 0.0 && selector.rect.height > 0.0,
+            "selector must have a nonzero rect: {:?}",
+            selector.rect
+        );
+        assert!(find_layout_node_by_text(&layout, "LFO 1").is_some());
+        assert!(
+            find_layout_node_by_stable_key(
+                &layout,
+                "custom-ui-lego-knob-mod-test-instrument-cutoff",
+            )
+            .is_some(),
+            "custom lego controls should render their modulation wrapper"
+        );
+        assert!(
+            layout_has_double_click(&layout),
+            "modulatable parameter wrapper should expose on-double-click"
+        );
+
+        let knob = find_layout_node_by_widget_type(&layout, "knob-number")
+            .expect("custom mod test should render a knob-number");
+        let callback = knob
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("modulatable knob should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback.clone(), vec![Value::Number(0.5)])
+            .expect("selected modulation lane depth edit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 11.0, 0.5);
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! instrument-selected-mod-slot 2)")
+            .expect("select second modulator");
+        editor
+            .runtime_mut()
+            .invoke(callback.clone(), vec![Value::Number(0.75)])
+            .expect("empty modulation lane assignment and depth edit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 2, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 12.0, 2.0);
+        assert_set_instrument_param(&commands[1], 13.0, 0.75);
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "test-mod-source-12", Value::Number(2.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "test-mod-depth-13", Value::Number(0.75));
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.9)])
+            .expect("claimed modulation lane stays live after reactive sync");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 13.0, 0.9);
     }
 
     #[test]

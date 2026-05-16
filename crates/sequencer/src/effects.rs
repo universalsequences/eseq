@@ -28,6 +28,22 @@ pub enum HostControl {
     FxSidechain { input_channel: usize },
 }
 
+#[derive(Clone, Debug)]
+pub struct InstrumentModulatorDescriptor {
+    pub slot: usize,
+    pub label: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstrumentModulationTarget {
+    pub base_param_idx: usize,
+    pub source_param_idx: usize,
+    pub depth_param_idx: usize,
+    pub depth_min: f32,
+    pub depth_max: f32,
+    pub depth_unit: Option<String>,
+}
+
 // ── ParamScaling ──
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -274,6 +290,8 @@ mod tests {
             name: "dense".to_string(),
             input_channels: 0,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params,
         };
 
@@ -305,6 +323,8 @@ mod tests {
             name: "dense".to_string(),
             input_channels: 0,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params,
         };
 
@@ -324,6 +344,8 @@ mod tests {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "a".to_string(),
@@ -353,6 +375,8 @@ mod tests {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "a".to_string(),
@@ -402,6 +426,8 @@ mod tests {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -433,6 +459,8 @@ mod tests {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "gain".to_string(),
@@ -484,6 +512,8 @@ mod tests {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -515,6 +545,8 @@ mod tests {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -563,6 +595,8 @@ mod tests {
             name: "custom".to_string(),
             input_channels: 0,
             output_channels: 1,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -815,6 +849,8 @@ pub struct EffectDescriptor {
     pub params: Vec<ParamDescriptor>,
     pub input_channels: usize,
     pub output_channels: usize,
+    pub instrument_modulators: Vec<InstrumentModulatorDescriptor>,
+    pub instrument_modulation_targets: Vec<InstrumentModulationTarget>,
 }
 
 impl EffectDescriptor {
@@ -899,6 +935,8 @@ impl EffectDescriptor {
             name: "Filter".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::filter::FILTER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1126,6 +1164,8 @@ impl EffectDescriptor {
             name: "Delay".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "wet".to_string(),
@@ -1222,6 +1262,8 @@ impl EffectDescriptor {
             name: "Str8 Delay".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::str8_delay::STR8_DELAY_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1420,6 +1462,8 @@ impl EffectDescriptor {
             name: "DJ Mixer".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::dj_mixer::DJ_MIXER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1468,6 +1512,8 @@ impl EffectDescriptor {
             name: "Reverb".to_string(),
             input_channels: 1,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mix".to_string(),
@@ -1535,6 +1581,8 @@ impl EffectDescriptor {
             name: name.to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -1692,6 +1740,8 @@ impl EffectDescriptor {
             name: "Compressor".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "threshold".to_string(),
@@ -1780,6 +1830,8 @@ impl EffectDescriptor {
             name: "Limiter".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "input".to_string(),
@@ -2091,6 +2143,8 @@ impl EffectDescriptor {
             name: "Sampler".to_string(),
             input_channels: 0,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params,
         }
     }
@@ -2115,6 +2169,8 @@ impl EffectDescriptor {
             params: Vec::new(),
             input_channels: 0,
             output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
         }
     }
 
@@ -2151,6 +2207,8 @@ impl EffectDescriptor {
             params: descriptors,
             input_channels,
             output_channels,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
         }
     }
 }
