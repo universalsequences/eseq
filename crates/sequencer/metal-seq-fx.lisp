@@ -465,6 +465,53 @@
     (bind-seq (get target :depth-value-field))
     (get target :depth)))
 
+(def instrument-param-base-value (p)
+  (if (get p :value-field)
+    (bind-seq (get p :value-field))
+    (get p :value)))
+
+(def instrument-param-active-mod-targets (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    (filter |target| (> (instrument-mod-target-source-slot target) 0)
+      (instrument-param-mod-targets p))
+    '()))
+
+(def instrument-param-knob-mod-target (p idx)
+  (nth (instrument-param-active-mod-targets p) idx))
+
+(def instrument-param-knob-mod-slot-prop (p idx)
+  (let ((target (instrument-param-knob-mod-target p idx)))
+    (if target (instrument-mod-target-source-slot target) false)))
+
+(def instrument-param-knob-mod-depth-prop (p idx)
+  (let ((target (instrument-param-knob-mod-target p idx)))
+    (if target (instrument-mod-target-depth target) false)))
+
+(def instrument-param-base-value-prop (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    (instrument-param-base-value p)
+    false))
+
+(def instrument-param-base-min-prop (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    (get p :min)
+    false))
+
+(def instrument-param-base-max-prop (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    (get p :max)
+    false))
+
+(def instrument-selected-mod-slot-prop (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    (instrument-mod-selected-slot)
+    false))
+
+(def instrument-param-control-key-mode (p)
+  (if (and instrument-mods-open (get p :modulatable))
+    "-mod-depth"
+    "-base"))
+
 (def instrument-param-selected-mod-target (p)
   (nth
     (filter |target| (= (instrument-mod-target-source-slot target) (instrument-mod-selected-slot))
@@ -1026,10 +1073,23 @@
   (let ((p (custom-ui-current-param name)))
     (if p
       (instrument-param-mod-wrapper p (str "custom-ui-knob-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-knob-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-knob-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
           (knob-number :label title
             :value (fx-param-value p)
             :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
+            :base-value (instrument-param-base-value-prop p)
+            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
+            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (instrument-selected-mod-slot-prop p)
             :font-size 10.5 :label-font-size 10
             :text-color :dim :label-color :dim
             :width 4.4 :height 2.4
@@ -1044,10 +1104,23 @@
   (let ((p (custom-ui-current-param name)))
     (if p
       (instrument-param-mod-wrapper p (str "custom-ui-knob-c-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-knob-c-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-knob-c-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
           (knob-number :label title
             :value (fx-param-value p)
             :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 2
+            :base-value (instrument-param-base-value-prop p)
+            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
+            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (instrument-selected-mod-slot-prop p)
             :font-size 8.5 :label-font-size 7.5
             :text-color :dim :label-color :dim
             :width 3.8 :height 1.8
@@ -1299,10 +1372,23 @@
   (let ((p (custom-ui-current-param name)))
     (if p
       (instrument-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
           (knob-number :label title
             :value (fx-param-value p)
             :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            :base-value (instrument-param-base-value-prop p)
+            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
+            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (instrument-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
             :width width :height 2.62
@@ -1314,10 +1400,23 @@
   (let ((p (custom-ui-current-param name)))
     (if p
       (instrument-param-mod-wrapper p (str "custom-ui-lego-knob-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-knob-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
           (knob-number :label title
             :value (fx-param-value p)
             :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals decimals
+            :base-value (instrument-param-base-value-prop p)
+            :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
+            :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
+            :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
+            :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
+            :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
+            :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
+            :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
+            :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
+            :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
+            :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
+            :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
+            :selected-mod-slot (instrument-selected-mod-slot-prop p)
             :font-size 10.8 :label-font-size 9.6
             :text-color accent :label-color :dim
             :width width :height 2.62
@@ -1329,7 +1428,7 @@
   (let ((p (custom-ui-current-param name)))
     (if p
       (instrument-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
             (number-picker :value (fx-param-value p)
@@ -1346,7 +1445,7 @@
   (let ((p (custom-ui-current-param name)))
     (if p
       (instrument-param-mod-wrapper p (str "custom-ui-lego-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.12 :gap 0.08 :align :start
             (label title :font-size 8.2 :width width :color :dim :bg :transparent)
             (number-picker :value (fx-param-value p)
@@ -1363,7 +1462,7 @@
   (let ((p (custom-ui-current-param name)))
     (if p
       (instrument-param-mod-wrapper p (str "custom-ui-lego-micro-num-mod-" (custom-ui-scope-name) "-" name)
-        (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) "-" name)
+        (subtree :key (str "custom-ui-lego-micro-num-" (custom-ui-scope-name) (instrument-param-control-key-mode p) "-" name)
           (v-stack :width width :height 1.18 :gap 0.16 :align :start
             (label title :font-size 7.4 :width width :height 0.52 :color :dim :bg :transparent)
             (number-picker :value (fx-param-value p)

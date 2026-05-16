@@ -57,6 +57,8 @@ fn display_decimals(props: &HashMap<String, Value>) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    use std::rc::Rc;
 
     fn numeric_props(min: f64, max: f64, decimals: f64) -> HashMap<String, Value> {
         HashMap::from([
@@ -83,6 +85,121 @@ mod tests {
         let mut props = numeric_props(0.0, 1.0, 2.0);
         props.insert("value-scale".to_string(), Value::Number(100.0));
         assert_eq!(display_decimals(&props), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn value_cell(value: Value) -> Rc<RefCell<Value>> {
+        Rc::new(RefCell::new(value))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mod_range(slot: f64, depth: f64) -> Value {
+        Value::Map(HashMap::from([
+            ("slot".to_string(), value_cell(Value::Number(slot))),
+            ("depth".to_string(), value_cell(Value::Number(depth))),
+        ]))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_viewport() -> WidgetViewport {
+        WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 10.0,
+            vp_w: 640.0,
+            vp_h: 360.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 36.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn test_knob_node(props: HashMap<String, Value>) -> LayoutNode {
+        LayoutNode {
+            widget_id: 42,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "knob-number".to_string(),
+            rect: Rect {
+                row: 2.0,
+                col: 3.0,
+                width: 4.0,
+                height: 2.8,
+            },
+            props,
+            children: Vec::new(),
+            focusable: true,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rich_mod_ranges_emit_base_knob_text_and_range_primitives() {
+        let node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("cut".to_string())),
+            ("value".to_string(), Value::Number(0.0)),
+            ("min".to_string(), Value::Number(-1.0)),
+            ("max".to_string(), Value::Number(1.0)),
+            ("base-value".to_string(), Value::Number(0.0)),
+            ("base-min".to_string(), Value::Number(-1.0)),
+            ("base-max".to_string(), Value::Number(1.0)),
+            ("selected-mod-slot".to_string(), Value::Number(1.0)),
+            (
+                "mod-ranges".to_string(),
+                Value::List(vec![
+                    value_cell(mod_range(1.0, 0.5)),
+                    value_cell(mod_range(2.0, -0.25)),
+                ]),
+            ),
+        ]));
+
+        let primitives =
+            KNOB_NUMBER_WIDGET.build_metal_primitives("knob-number", &node, test_viewport());
+        let base_instances = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "knob-number" => Some(instance),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let range_instances = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "knob-number-mod-range" => Some(instance),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let text = primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(base_instances.len(), 1);
+        assert_eq!(base_instances[0].uniform_b[0], 0.0);
+        assert_eq!(range_instances.len(), 2);
+        assert_eq!(range_instances[0].uniform_b, [1.0, 0.5, 0.75, 1.0]);
+        assert_eq!(range_instances[1].uniform_b, [1.0, 0.5, 0.375, 0.0]);
+        assert!(
+            text.contains(&"cut"),
+            "knob-number should still emit label/value text primitives: {text:?}"
+        );
     }
 }
 
@@ -123,6 +240,98 @@ fn normalized_value(props: &HashMap<String, Value>) -> f32 {
 }
 
 #[cfg(target_os = "macos")]
+fn value_as_f32(value: &Value) -> Option<f32> {
+    let value = match value {
+        Value::Number(n) => Some(*n as f32),
+        Value::ReactiveRef { slot, .. } => Some(crate::reactive::read_float_slot(slot) as f32),
+        _ => None,
+    }?;
+    value.is_finite().then_some(value)
+}
+
+#[cfg(target_os = "macos")]
+fn map_f32(
+    map: &HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>,
+    key: &str,
+) -> Option<f32> {
+    map.get(key).and_then(|value| value_as_f32(&value.borrow()))
+}
+
+#[cfg(target_os = "macos")]
+fn mod_slot_color(slot: i32, selected: bool) -> Color {
+    let mut color = match slot {
+        1 => Color {
+            r: 0.10,
+            g: 0.56,
+            b: 1.0,
+            a: 1.0,
+        },
+        2 => Color {
+            r: 0.96,
+            g: 0.50,
+            b: 0.18,
+            a: 1.0,
+        },
+        3 => Color {
+            r: 0.23,
+            g: 0.78,
+            b: 0.42,
+            a: 1.0,
+        },
+        4 => Color {
+            r: 0.62,
+            g: 0.42,
+            b: 0.98,
+            a: 1.0,
+        },
+        5 => Color {
+            r: 0.00,
+            g: 0.78,
+            b: 0.86,
+            a: 1.0,
+        },
+        6 => Color {
+            r: 0.98,
+            g: 0.72,
+            b: 0.18,
+            a: 1.0,
+        },
+        7 => Color {
+            r: 0.92,
+            g: 0.30,
+            b: 0.22,
+            a: 1.0,
+        },
+        8 => Color {
+            r: 0.18,
+            g: 0.70,
+            b: 0.95,
+            a: 1.0,
+        },
+        9 => Color {
+            r: 0.74,
+            g: 0.86,
+            b: 0.24,
+            a: 1.0,
+        },
+        10 => Color {
+            r: 0.95,
+            g: 0.42,
+            b: 0.78,
+            a: 1.0,
+        },
+        _ => Color {
+            r: 0.85,
+            g: 0.85,
+            b: 0.85,
+            a: 1.0,
+        },
+    };
+    color.a = if selected { 0.95 } else { 0.58 };
+    color
+}
+
+#[cfg(target_os = "macos")]
 fn cursor_x_from_cache(text: &str, cursor_pos: usize, font_size: f32, cell_w: f32) -> f32 {
     let key = font_size.to_bits();
     CHAR_WIDTHS.with(|cw| {
@@ -144,7 +353,7 @@ pub static KNOB_NUMBER_WIDGET: KnobNumberWidget = KnobNumberWidget;
 
 impl WidgetDefinition for KnobNumberWidget {
     fn names(&self) -> &'static [&'static str] {
-        &["knob-number"]
+        &["knob-number", "knob-number-mod-range"]
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
@@ -159,7 +368,33 @@ impl WidgetDefinition for KnobNumberWidget {
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
-        &["value"]
+        &[
+            "value",
+            "base-value",
+            "base-min",
+            "base-max",
+            "selected-mod-slot",
+            "mod-range-0-slot",
+            "mod-range-0-depth",
+            "mod-range-1-slot",
+            "mod-range-1-depth",
+            "mod-range-2-slot",
+            "mod-range-2-depth",
+            "mod-range-3-slot",
+            "mod-range-3-depth",
+            "mod-range-4-slot",
+            "mod-range-4-depth",
+            "mod-range-5-slot",
+            "mod-range-5-depth",
+            "mod-range-6-slot",
+            "mod-range-6-depth",
+            "mod-range-7-slot",
+            "mod-range-7-depth",
+            "mod-range-8-slot",
+            "mod-range-8-depth",
+            "mod-range-9-slot",
+            "mod-range-9-depth",
+        ]
     }
 
     fn measure(
@@ -410,8 +645,12 @@ impl WidgetDefinition for KnobNumberWidget {
     }
 
     #[cfg(target_os = "macos")]
-    fn metal_fragment_shader(&self, _widget_type: &str) -> Option<&'static str> {
-        Some(KNOB_NUMBER_SHADER)
+    fn metal_fragment_shader(&self, widget_type: &str) -> Option<&'static str> {
+        match widget_type {
+            "knob-number" => Some(KNOB_NUMBER_SHADER),
+            "knob-number-mod-range" => Some(KNOB_NUMBER_MOD_RANGE_SHADER),
+            _ => None,
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -573,6 +812,85 @@ impl WidgetDefinition for KnobNumberWidget {
             is_background: false,
         }];
 
+        let base_min = node
+            .props
+            .get("base-min")
+            .and_then(value_as_f32)
+            .unwrap_or_else(|| get_f32_prop(&node.props, "min", 0.0));
+        let base_max = node
+            .props
+            .get("base-max")
+            .and_then(value_as_f32)
+            .unwrap_or_else(|| get_f32_prop(&node.props, "max", 1.0));
+        let base_value = node
+            .props
+            .get("base-value")
+            .and_then(value_as_f32)
+            .unwrap_or(value);
+        let base_range = base_max - base_min;
+        let selected_slot = node
+            .props
+            .get("selected-mod-slot")
+            .and_then(value_as_f32)
+            .unwrap_or(0.0)
+            .round() as i32;
+        if base_range.abs() > 0.000_001 {
+            let base_t = ((base_value - base_min) / base_range).clamp(0.0, 1.0);
+            let mut push_mod_range = |slot_f: f32, depth: f32| {
+                let slot = slot_f.round() as i32;
+                if slot <= 0 {
+                    return;
+                }
+                let end_t = ((base_value + depth - base_min) / base_range).clamp(0.0, 1.0);
+                let color = mod_slot_color(slot, slot == selected_slot);
+                prims.push(MetalPrimitive::WidgetInstance {
+                    widget_type: "knob-number-mod-range".to_string(),
+                    instance: WidgetInstance {
+                        ndc_min,
+                        ndc_max,
+                        value_t: normalized_value(&node.props),
+                        orientation: 0.0,
+                        itime: viewport.time_seconds,
+                        uniform_a: [if is_focused { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                        uniform_b: [
+                            1.0,
+                            base_t,
+                            end_t,
+                            if slot == selected_slot { 1.0 } else { 0.0 },
+                        ],
+                        color_a: [color.r, color.g, color.b, color.a],
+                        color_b: [track_color.r, track_color.g, track_color.b, track_color.a],
+                        color_c: [edit_color.r, edit_color.g, edit_color.b, edit_color.a],
+                        color_d: [0.0; 4],
+                        corner_radius: 0.0,
+                        pixel_aspect: if px_h > 0.0 { px_w / px_h } else { 1.0 },
+                    },
+                    is_background: false,
+                });
+            };
+
+            if let Some(Value::List(ranges)) = node.props.get("mod-ranges") {
+                for range in ranges {
+                    if let Value::Map(map) = &*range.borrow()
+                        && let (Some(slot), Some(depth)) =
+                            (map_f32(map, "slot"), map_f32(map, "depth"))
+                    {
+                        push_mod_range(slot, depth);
+                    }
+                }
+            }
+            for idx in 0..10 {
+                let slot_key = format!("mod-range-{idx}-slot");
+                let depth_key = format!("mod-range-{idx}-depth");
+                if let (Some(slot), Some(depth)) = (
+                    node.props.get(&slot_key).and_then(value_as_f32),
+                    node.props.get(&depth_key).and_then(value_as_f32),
+                ) {
+                    push_mod_range(slot, depth);
+                }
+            }
+        }
+
         if let Some(Value::String(label)) = node.props.get("label") {
             prims.push(MetalPrimitive::ProportionalText(
                 MetalProportionalTextPrimitive {
@@ -722,6 +1040,37 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     col = mix(col, in.color_a, activeMask);
     col = mix(col, in.color_b, lineMask);
     col = mix(col, in.color_a, notchMask);
+    if (col.a < 0.01) { discard_fragment(); }
+    return col;
+}
+"#;
+
+#[cfg(target_os = "macos")]
+const KNOB_NUMBER_MOD_RANGE_SHADER: &str = r#"
+fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
+{
+    float2 uv = in.uv;
+    float2 p = float2((uv.x - 0.5) * 2.0, (uv.y - 0.5) * 2.0);
+    float r = length(p);
+    float a = atan2(p.y, p.x);
+
+    float start = 1.57079633;
+    float sweep = 4.71238898;
+    float rel = fmod((a - start + 6.2831853), 6.2831853);
+    float inRange = step(rel, sweep);
+    float aa = max(fwidth(r), 0.0015);
+
+    float t0 = clamp(in.uniform_b.y, 0.0, 1.0);
+    float t1 = clamp(in.uniform_b.z, 0.0, 1.0);
+    float lo = min(t0, t1) * sweep;
+    float hi = max(t0, t1) * sweep;
+    float selected = step(0.5, in.uniform_b.w);
+    float radius = mix(0.93, 0.91, selected);
+    float halfWidth = mix(0.038, 0.062, selected);
+    float modRing = abs(r - radius) - halfWidth;
+    float arcMask = step(lo, rel) * step(rel, hi) * inRange;
+    float mask = smoothstep(aa, -aa, modRing) * arcMask;
+    float4 col = float4(in.color_a.rgb, in.color_a.a * mask);
     if (col.a < 0.01) { discard_fragment(); }
     return col;
 }

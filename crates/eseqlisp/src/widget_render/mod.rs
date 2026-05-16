@@ -836,9 +836,21 @@ fn widget_primitive_cache_key(node: &LayoutNode, viewport: WidgetViewport) -> Op
 
 #[cfg(target_os = "macos")]
 fn props_contain_reactive_ref(props: &HashMap<String, Value>) -> bool {
-    props
-        .values()
-        .any(|value| matches!(value, Value::ReactiveRef { .. }))
+    props.values().any(value_contains_reactive_ref)
+}
+
+#[cfg(target_os = "macos")]
+fn value_contains_reactive_ref(value: &Value) -> bool {
+    match value {
+        Value::ReactiveRef { .. } => true,
+        Value::List(items) => items
+            .iter()
+            .any(|item| value_contains_reactive_ref(&item.borrow())),
+        Value::Map(map) => map
+            .values()
+            .any(|item| value_contains_reactive_ref(&item.borrow())),
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1123,11 +1135,12 @@ pub fn captures_scroll_gesture(node: &LayoutNode) -> bool {
 // ── Shared helpers ───────────────────────────────────────────────────────────
 
 pub fn get_f32_prop(props: &HashMap<String, Value>, key: &str, default: f32) -> f32 {
-    match props.get(key) {
+    let value = match props.get(key) {
         Some(Value::Number(n)) => *n as f32,
         Some(Value::ReactiveRef { slot, .. }) => crate::reactive::read_float_slot(slot) as f32,
-        _ => default,
-    }
+        _ => return default,
+    };
+    if value.is_finite() { value } else { default }
 }
 
 pub fn get_bool_prop(props: &HashMap<String, Value>, key: &str, default: bool) -> bool {

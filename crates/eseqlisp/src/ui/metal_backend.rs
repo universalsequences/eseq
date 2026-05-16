@@ -449,17 +449,34 @@ vertex WidgetVaryings widget_vert(
             ast.parse().unwrap().into_iter().next().unwrap()
         }
 
-        fn compile_widget_shader_with_metal(shader_src: &str) -> Result<(), String> {
+        fn compile_widget_shader_source_with_metal(
+            vertex_src: Option<&str>,
+            fragment_src: &str,
+        ) -> Result<(), String> {
             let device = MTLCreateSystemDefaultDevice().ok_or("no Metal device".to_string())?;
             let full_src = format!(
                 "{}{}{}",
-                WIDGET_SHADER_PREAMBLE, DEFAULT_WIDGET_VERTEX_SHADER, shader_src
+                WIDGET_SHADER_PREAMBLE,
+                vertex_src.unwrap_or(DEFAULT_WIDGET_VERTEX_SHADER),
+                fragment_src
             );
             let src_ns = NSString::from_str(&full_src);
             device
                 .newLibraryWithSource_options_error(&src_ns, None)
                 .map(|_| ())
                 .map_err(|err| format!("{:?}", err))
+        }
+
+        fn compile_widget_shader_with_metal(shader_src: &str) -> Result<(), String> {
+            compile_widget_shader_source_with_metal(None, shader_src)
+        }
+
+        #[test]
+        fn registered_widget_shaders_compile_in_metal() {
+            for (widget_type, vertex_src, fragment_src) in widget_render::widget_shader_sources() {
+                compile_widget_shader_source_with_metal(vertex_src, fragment_src)
+                    .unwrap_or_else(|err| panic!("{widget_type} widget shader failed: {err}"));
+            }
         }
 
         #[test]
