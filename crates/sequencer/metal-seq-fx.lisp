@@ -1865,18 +1865,13 @@
   (rgba 0.0 0.0 0 1))
 
 (def fx-empty-track-fallback ()
-  (v-stack :width :fill :padding 1 :gap 0
-    (box :flex 1)
-    (h-stack :width :fill :align :center
-      (box :flex 1)
-      (v-stack :gap 0.4 :align :center
-        (label "Instrument and effects appear here"
-          :font-size 12 :color :dim :bg :transparent)
-        (compile-progress
-          :active (if SEQ.compiling 1 0)
-          :width 12 :height 0.3))
-      (box :flex 1))
-    (box :flex 1)))
+  (box :width :fill :height :fill :padding 1 :h-align :center :v-align :center
+    (v-stack :gap 0.4 :align :center
+      (label "Instrument and effects appear here"
+        :font-size 12 :color :dim :bg :transparent)
+      (compile-progress
+        :active (if SEQ.compiling 1 0)
+        :width 12 :height 0.3))))
 
 (def selected-bus-effects ()
   (if (fx-has-selected-bus?)

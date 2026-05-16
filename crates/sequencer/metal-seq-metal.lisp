@@ -8,17 +8,12 @@
 (defstate metal-track-b 0.98)
 
 (def metal-empty-track-fallback ()
-  (v-stack :width :fill :padding 1 :gap 0
-    (box :flex 1)
-    (h-stack :width :fill :align :center
-      (box :flex 1)
-      (v-stack :gap 0.35 :align :center
-        (label "Select a sound to create a track"
-          :font-size 14 :color :gray :bg :transparent)
-        (label "Sampler, instruments, and projects are in the left browser."
-          :font-size 10 :color :dark-gray :bg :transparent))
-      (box :flex 1))
-    (box :flex 1)))
+  (box :width :fill :height :fill :padding 1 :h-align :center :v-align :center
+    (v-stack :gap 0.35 :align :center
+      (label "Select a sound to create a track"
+        :font-size 14 :color :gray :bg :transparent)
+      (label "Sampler, instruments, and projects are in the left browser."
+        :font-size 10 :color :dark-gray :bg :transparent))))
 
 (def metal-current-track-color ()
   (if (and (< SEQ.current-track (len SEQ.track-colors)) (>= SEQ.current-track 0))

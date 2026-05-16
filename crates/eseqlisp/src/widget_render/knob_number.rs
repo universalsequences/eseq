@@ -148,7 +148,14 @@ impl WidgetDefinition for KnobNumberWidget {
     }
 
     fn size_affecting_props(&self) -> &'static [&'static str] {
-        &["width", "height", "font-size", "decimals", "step"]
+        &[
+            "width",
+            "height",
+            "font-size",
+            "decimals",
+            "step",
+            "show-value",
+        ]
     }
 
     fn bindable_props(&self) -> &'static [&'static str] {
@@ -370,11 +377,16 @@ impl WidgetDefinition for KnobNumberWidget {
             .unwrap_or("");
         let value = quantized_value(props, get_f32_prop(props, "value", 0.0));
         let decimals = display_decimals(props);
-        let text = format!(
-            "{} {}",
-            label,
-            format_value(display_value(props, value) as f64, decimals)
-        );
+        let show_value = !matches!(props.get("show-value"), Some(Value::Bool(false)));
+        let text = if show_value {
+            format!(
+                "{} {}",
+                label,
+                format_value(display_value(props, value) as f64, decimals)
+            )
+        } else {
+            label.to_string()
+        };
         let fg = Color {
             r: 0.9,
             g: 0.9,
@@ -413,6 +425,7 @@ impl WidgetDefinition for KnobNumberWidget {
         let decimals = display_decimals(&node.props);
         let state = get_state(node.widget_id);
         let is_focused = viewport.focused_widget_id == Some(node.widget_id);
+        let show_value = !matches!(node.props.get("show-value"), Some(Value::Bool(false)));
         let font_size = get_f32_prop(&node.props, "font-size", DEFAULT_FONT_SIZE);
         let label_size = get_f32_prop(&node.props, "label-font-size", font_size * 0.88);
         let text_color = resolve_named_color(
@@ -619,23 +632,25 @@ impl WidgetDefinition for KnobNumberWidget {
             (knob_rect.col + knob_width * 0.55, 0.0, 0.0_f32, font_size)
         };
         let text_row = value_row;
-        prims.push(MetalPrimitive::ProportionalText(
-            MetalProportionalTextPrimitive {
-                row: text_row,
-                col: text_col,
-                align_width,
-                h_align,
-                text: display_text.clone(),
-                font_size: value_font_size,
-                fg,
-                bg: Color {
-                    r: 0.0,
-                    g: 0.0,
-                    b: 0.0,
-                    a: 0.0,
+        if show_value || state.editing || is_focused {
+            prims.push(MetalPrimitive::ProportionalText(
+                MetalProportionalTextPrimitive {
+                    row: text_row,
+                    col: text_col,
+                    align_width,
+                    h_align,
+                    text: display_text.clone(),
+                    font_size: value_font_size,
+                    fg,
+                    bg: Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 0.0,
+                    },
                 },
-            },
-        ));
+            ));
+        }
 
         if is_focused && state.editing {
             let text_left = if center_value {

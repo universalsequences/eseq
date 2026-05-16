@@ -29,9 +29,21 @@
 (bind-key "C-p" "seq-toggle-play")
 (bind-key "ESC" "seq-clear-ui-selection")
 
+(defstate piano-roll-placement :bottom)
+(defstate step-panel-buffer "*metal*")
+(defstate remembered-step-panel-buffer "*metal*")
 (defstate lower-panel-buffer "*fx*")
 
 (def lower-fx-layout-height 10)
+
+(def seq-step-buffer? (buffer)
+  (or (= buffer "*metal*") (= buffer "*sequencer*")))
+
+(def seq-sanitized-step-buffer (buffer)
+  (if (= buffer "*sequencer*") "*sequencer*" "*metal*"))
+
+(def seq-visible-step-panel-buffer ()
+  step-panel-buffer)
 
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (list :rows :gap 1
@@ -40,7 +52,7 @@
       0.2 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42)
       0.8 (list :rows :gap 1
         0.55 (list :cols :gap 1
-          0.78 (list :buf "*metal*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
+          0.78 (list :buf (seq-visible-step-panel-buffer) :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
           0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))
         0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13)))
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
@@ -51,10 +63,90 @@
     (host-command "refresh-mixer-ui" (dict))))
 
 (def seq-apply-fx-layout ()
-  (seq-apply-lower-panel-layout "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height))
+  (do
+    (set! lower-panel-buffer "*fx*")
+    (seq-apply-lower-panel-layout "*fx*" 0.33 lower-fx-layout-height lower-fx-layout-height)))
 
 (def seq-apply-piano-roll-layout ()
-  (seq-apply-lower-panel-layout "*piano-roll*" 1.0 13 50))
+  (do
+    (set! lower-panel-buffer "*piano-roll*")
+    (seq-apply-lower-panel-layout "*piano-roll*" 1.0 13 50)))
+
+(def seq-current-step-buffer ()
+  (seq-sanitized-step-buffer
+    (if (= step-panel-buffer "*piano-roll*")
+      remembered-step-panel-buffer
+      step-panel-buffer)))
+
+(def seq-piano-roll-open? ()
+  (or (= step-panel-buffer "*piano-roll*")
+    (= lower-panel-buffer "*piano-roll*")))
+
+(def seq-close-piano-roll ()
+  (if (= step-panel-buffer "*piano-roll*")
+    (do
+      (set! step-panel-buffer (seq-current-step-buffer))
+      (set-window-buffer step-panel-buffer)
+      (seq-apply-fx-layout))
+    (do
+      (set-window-buffer "*fx*")
+      (seq-apply-fx-layout))))
+
+(def seq-open-piano-roll-bottom ()
+  (do
+    (if (= step-panel-buffer "*piano-roll*")
+      (set! step-panel-buffer (seq-current-step-buffer))
+      nil)
+    (set-window-buffer "*piano-roll*")
+    (seq-apply-piano-roll-layout)))
+
+(def seq-open-piano-roll-main ()
+  (do
+    (if (= lower-panel-buffer "*piano-roll*")
+      (set! lower-panel-buffer "*fx*")
+      nil)
+    (set! remembered-step-panel-buffer (seq-current-step-buffer))
+    (set! step-panel-buffer "*piano-roll*")
+    (set-window-buffer "*piano-roll*")
+    (seq-apply-fx-layout)))
+
+(def seq-open-piano-roll-preferred ()
+  (if (= piano-roll-placement :main)
+    (seq-open-piano-roll-main)
+    (seq-open-piano-roll-bottom)))
+
+(def seq-toggle-metal-sequencer-main ()
+  (let ((next-buffer
+          (if (= (seq-current-step-buffer) "*sequencer*")
+            "*metal*"
+            "*sequencer*")))
+    (do
+      (set! remembered-step-panel-buffer next-buffer)
+      (if (= step-panel-buffer "*piano-roll*")
+        nil
+        (set! step-panel-buffer next-buffer))
+      (set-window-buffer next-buffer)
+      (if (= lower-panel-buffer "*piano-roll*")
+        (seq-apply-piano-roll-layout)
+        (seq-apply-fx-layout)))))
+
+(def seq-toggle-piano-roll-main ()
+  (if (= step-panel-buffer "*piano-roll*")
+    (seq-close-piano-roll)
+    (seq-open-piano-roll-main)))
+
+(def seq-toggle-piano-roll-placement ()
+  (if (= piano-roll-placement :main)
+    (do
+      (set! piano-roll-placement :bottom)
+      (if (seq-piano-roll-open?)
+        (seq-open-piano-roll-bottom)
+        nil))
+    (do
+      (set! piano-roll-placement :main)
+      (if (seq-piano-roll-open?)
+        (seq-open-piano-roll-main)
+        nil))))
 
 (def seq-toggle-fx-piano-roll ()
   (if (= (current-buffer-name) "*fx*")
@@ -78,11 +170,9 @@
           (seq-apply-fx-layout))))))
 
 (def seq-toggle-main-or-piano-roll ()
-  (if (= (current-buffer-name) "*metal*")
-    (set-window-buffer "*sequencer*")
-    (if (= (current-buffer-name) "*sequencer*")
-      (set-window-buffer "*metal*")
-      (seq-toggle-fx-piano-roll))))
+  (if (seq-piano-roll-open?)
+    (seq-close-piano-roll)
+    (seq-open-piano-roll-preferred)))
 
 (bind-key "Tab" "seq-toggle-main-or-piano-roll")
 
@@ -94,8 +184,13 @@
 ;; ── Step cursor ──
 (defstate cursor-step 0)
 
+(def cursor-num-steps ()
+  (if (seq-has-selected-bus?)
+    (nth SEQ.bus-num-steps selected-bus)
+    SEQ.tp-num-steps))
+
 (def current-step ()
-  (min cursor-step (- (max 1 SEQ.tp-num-steps) 1)))
+  (min cursor-step (- (max 1 (cursor-num-steps)) 1)))
 
 (def page-count ()
   (max 1 (floor (/ (+ SEQ.tp-num-steps (- page-size 1)) page-size))))
@@ -143,7 +238,11 @@
         (seq-shift-selected-steps -1)))
     (do
       (cool-off-follow)
-      (set! cursor-step (mod (- (current-step) 1) (max 1 SEQ.tp-num-steps))))))
+      (let ((num-steps (max 1 (cursor-num-steps))))
+        (set! cursor-step
+          (if (= (current-step) 0)
+            (- num-steps 1)
+            (- (current-step) 1)))))))
 
 (def cursor-right ()
   (if (seq-has-selection?)
@@ -154,7 +253,11 @@
         (seq-shift-selected-steps 1)))
     (do
       (cool-off-follow)
-      (set! cursor-step (mod (+ (current-step) 1) (max 1 SEQ.tp-num-steps))))))
+      (let ((num-steps (max 1 (cursor-num-steps))))
+        (set! cursor-step
+          (if (>= (current-step) (- num-steps 1))
+            0
+            (+ (current-step) 1)))))))
 
 (def cursor-toggle ()
   (do

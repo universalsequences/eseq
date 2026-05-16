@@ -577,6 +577,10 @@ pub(crate) fn init_runtime(
     // seq-set-track — switch current track
     let st = state.clone();
     let ct = current_track.clone();
+    let sel = selected_steps.clone();
+    let piano_sel = piano_roll_selection.clone();
+    let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-set-track", move |args, _ctx| {
         let Some(Value::Number(track)) = args.first() else {
             return Err("seq-set-track: expected track number".into());
@@ -585,7 +589,14 @@ pub(crate) fn init_runtime(
         if track >= st.active_track_count() {
             return Err(format!("seq-set-track: track {track} out of range").into());
         }
+        let previous = ct.load(Ordering::Relaxed);
         ct.store(track, Ordering::Relaxed);
+        if previous != track {
+            sel.lock().unwrap().clear();
+            piano_sel.lock().unwrap().clear();
+            ui_ep.fetch_add(1, Ordering::Relaxed);
+            fx_ep.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(Value::Number(track as f64))
     });
 

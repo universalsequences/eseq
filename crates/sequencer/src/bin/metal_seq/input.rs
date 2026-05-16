@@ -79,7 +79,11 @@ fn active_buffer_accepts_global_step_shortcuts(editor: &Editor) -> bool {
     if buffer.name == "*piano-roll*" {
         return false;
     }
-    buffer.read_only || matches!(buffer.view_mode, ViewMode::UiOnly)
+    matches!(buffer.view_mode, ViewMode::UiOnly)
+}
+
+fn active_buffer_accepts_global_ui_shortcuts(editor: &Editor) -> bool {
+    matches!(editor.active_buffer().view_mode, ViewMode::UiOnly)
 }
 
 pub(crate) fn held_note_for_key(
@@ -403,6 +407,61 @@ pub(crate) fn handle_metal_command_shortcut(
         return false;
     }
 
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && active_buffer_accepts_global_ui_shortcuts(editor)
+        && editor.focused_widget_id().is_none()
+        && !focused_widget_captures_text_input(editor)
+    {
+        match (key.code, key.modifiers) {
+            (KeyCode::Tab, KeyModifiers::CONTROL) => {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(seq-toggle-piano-roll-placement)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Tab, KeyModifiers::NONE) => {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(seq-toggle-main-or-piano-roll)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Tab, KeyModifiers::SHIFT) => {
+                let _ = editor
+                    .runtime_mut()
+                    .eval_str("(seq-toggle-metal-sequencer-main)");
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            (KeyCode::Up | KeyCode::Down, KeyModifiers::NONE)
+                if editor.active_buffer().name != "*piano-roll*" =>
+            {
+                let track_count = state.active_track_count();
+                if track_count == 0 {
+                    return true;
+                }
+                let current = current_track.load(Ordering::Relaxed).min(track_count - 1);
+                let next = if key.code == KeyCode::Up {
+                    if current == 0 {
+                        track_count - 1
+                    } else {
+                        current - 1
+                    }
+                } else {
+                    (current + 1) % track_count
+                };
+                let _ = editor.runtime_mut().eval_str(&format!(
+                    "(do (set! selected-bus -1) (seq-set-track {next}))"
+                ));
+                editor.refresh_runtime_side_effects();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     if key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G'))
     {
@@ -411,7 +470,10 @@ pub(crate) fn handle_metal_command_shortcut(
         return true;
     }
 
-    if active_buffer_accepts_global_step_shortcuts(editor)
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && active_buffer_accepts_global_step_shortcuts(editor)
+        && editor.focused_widget_id().is_none()
         && !focused_widget_captures_text_input(editor)
     {
         match (key.code, key.modifiers) {
@@ -691,8 +753,15 @@ pub(crate) fn handle_recording_key(
 
 #[cfg(test)]
 mod live_keyboard_tests {
-    use super::{held_note_for_key, note_from_key, HeldKeyboardNote};
+    use super::{
+        handle_metal_command_shortcut, held_note_for_key, note_from_key, HeldKeyboardNote,
+    };
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use eseqlisp::editor::ViewMode;
+    use eseqlisp::{Editor, EditorConfig, Runtime};
+    use sequencer::sequencer::{SequencerState, StepSnapshot};
+    use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -714,5 +783,249 @@ mod live_keyboard_tests {
     fn live_note_map_uses_lowercase_keys() {
         assert_eq!(note_from_key('a'), Some(0));
         assert_eq!(note_from_key('A'), None);
+    }
+
+    #[test]
+    fn up_down_switch_tracks_outside_piano_roll() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str("(defstate selected-bus -1)")
+            .expect("install selected bus state");
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let native_track = Arc::clone(&current_track);
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(eseqlisp::vm::Value::Number(track)) = args.first() else {
+                    return Err("expected track".to_string());
+                };
+                native_track.store(*track as usize, Ordering::Relaxed);
+                Ok(eseqlisp::vm::Value::Number(*track))
+            });
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 1);
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn tab_shortcuts_call_main_panel_toggles() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                (def seq-toggle-metal-sequencer-main () (set! tab-target "sequencer"))
+                (def seq-toggle-piano-roll-placement () (set! tab-target "placement"))
+                "#,
+            )
+            .expect("install tab handlers");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("piano".to_string()))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("sequencer".to_string()))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("placement".to_string()))
+        );
+    }
+
+    #[test]
+    fn global_ui_shortcuts_do_not_run_in_command_menu() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (defstate cursor-left-count 0)
+                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                (def cursor-left () (set! cursor-left-count (+ cursor-left-count 1)))
+                "#,
+            )
+            .expect("install tab handler");
+        editor.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT));
+        assert!(editor.minibuffer_prompt().is_some());
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("".to_string()))
+        );
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("cursor-left-count").unwrap(),
+            Some(eseqlisp::vm::Value::Number(0.0))
+        );
+    }
+
+    #[test]
+    fn global_ui_shortcuts_do_not_run_in_editable_buffers() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                "#,
+            )
+            .expect("install tab handler");
+
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("".to_string()))
+        );
+    }
+
+    #[test]
+    fn global_ui_shortcuts_do_not_run_in_read_only_text_buffers() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().read_only = true;
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate tab-target "")
+                (def seq-toggle-main-or-piano-roll () (set! tab-target "piano"))
+                "#,
+            )
+            .expect("install tab handler");
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let native_track = Arc::clone(&current_track);
+        editor
+            .runtime_mut()
+            .register_native("seq-set-track", move |args, _ctx| {
+                let Some(eseqlisp::vm::Value::Number(track)) = args.first() else {
+                    return Err("expected track".to_string());
+                };
+                native_track.store(*track as usize, Ordering::Relaxed);
+                Ok(eseqlisp::vm::Value::Number(*track))
+            });
+        let state = Arc::new(SequencerState::new(3, vec![]));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(current_track.load(Ordering::Relaxed), 0);
+
+        assert!(!handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor.runtime_mut().eval_str("tab-target").unwrap(),
+            Some(eseqlisp::vm::Value::String("".to_string()))
+        );
     }
 }

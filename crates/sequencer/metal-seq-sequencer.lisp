@@ -30,7 +30,7 @@
     :mixer-strip-selected-bg
     (if muted
       :mixer-strip-muted-bg
-      :mixer-strip-bg)))
+      :buffer-bg)))
 
 (def seqv-row-border (selected)
   (if selected

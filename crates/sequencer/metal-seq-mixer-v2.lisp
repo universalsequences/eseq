@@ -346,6 +346,7 @@
     :key (str "mixer-v2-track-" track "-send-" (get send :bus-idx))
     :value (get send :amount)
     :min 0 :max 1 :decimals 2
+    :show-value false
     :font-size 9 :label-font-size 8
     :text-color :dim :label-color :dim
     :width 4.7 :height 2.15 :knob-size 1.34
