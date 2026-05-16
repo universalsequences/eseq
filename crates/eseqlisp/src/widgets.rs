@@ -18,6 +18,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "adsr-editor",
         "meter",
         "mixer-meter",
+        "modulator-curve",
         "text-input",
         "textbox",
         "number-picker",

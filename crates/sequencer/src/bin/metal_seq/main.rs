@@ -1347,6 +1347,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_peak_r_level = -1.0f64;
     let mut prev_track_peak_levels: Vec<f64> = Vec::new();
     let mut prev_bus_peak_levels: Vec<f64> = Vec::new();
+    let mut prev_modulator_phases: Vec<f64> = Vec::new();
+    let mut prev_modulator_levels: Vec<f64> = Vec::new();
     let mut prev_bus_playheads: Vec<usize> = Vec::new();
     let mut prev_track_playheads: Vec<u32> = Vec::new();
     let mut prev_track_button_states = track_button_state_snapshot(&state);
@@ -1362,8 +1364,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cached_peak_r_level = 0.0f64;
     let mut cached_track_peak_levels = vec![0.0; track_names.len()];
     let mut cached_bus_peak_levels = read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+    let (mut cached_modulator_phases, mut cached_modulator_levels) =
+        read_modulator_display_values(app.graph.lg, &app);
     let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
     let mut last_cpu_ui_poll_at = Instant::now() - CPU_UI_POLL_INTERVAL;
+    let mut last_modulator_phase_log_at = Instant::now() - Duration::from_secs(1);
     let mut last_voice_count_log_at = Instant::now() - VOICE_COUNT_LOG_INTERVAL;
     let log_voice_counts = std::env::var_os("TINYSEQ_LOG_VOICE_COUNTS").is_some();
     let mut cached_cpu_load_bits: u32 = 0.0f32.to_bits();
@@ -2035,6 +2040,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 cached_bus_peak_levels =
                                     read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                                (cached_modulator_phases, cached_modulator_levels) =
+                                    read_modulator_display_values(app.graph.lg, &app);
                                 last_meter_poll_at = Instant::now();
                                 *record_armed.lock().unwrap() = app.graph.record_armed.clone();
 
@@ -2052,6 +2059,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &cached_track_peak_levels,
                                 );
                                 sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                                sync_modulator_phase_fields(rt, &cached_modulator_phases);
+                                sync_modulator_level_fields(rt, &cached_modulator_levels);
                                 rt.clear_subtree_effects_for_named_target("*sequencer*");
                                 rt.run_reactive_cycle();
                                 editor.refresh_runtime_side_effects();
@@ -6306,6 +6315,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
                         cached_bus_peak_levels =
                             read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                        (cached_modulator_phases, cached_modulator_levels) =
+                            read_modulator_display_values(app.graph.lg, &app);
                         last_meter_poll_at = Instant::now();
                         let rt = editor.runtime_mut();
 
@@ -6322,6 +6333,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.set_reactive("SEQ", "master-peak-l", Value::Number(cached_peak_l_level));
                         rt.set_reactive("SEQ", "master-peak-r", Value::Number(cached_peak_r_level));
                         sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                        sync_modulator_phase_fields(rt, &cached_modulator_phases);
+                        sync_modulator_level_fields(rt, &cached_modulator_levels);
                         rt.set_reactive(
                             "SEQ",
                             "num-tracks",
@@ -6424,6 +6437,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prev_peak_l_level = cached_peak_l_level;
                         prev_peak_r_level = cached_peak_r_level;
                         prev_track_peak_levels = cached_track_peak_levels.clone();
+                        prev_modulator_phases = cached_modulator_phases.clone();
+                        prev_modulator_levels = cached_modulator_levels.clone();
                         prev_bus_playheads = bus_playhead_snapshot(&app);
                         prev_track_playheads = track_playheads_snapshot(&state, &app);
                         prev_track_button_states = track_button_state_snapshot(&state);
@@ -6498,7 +6513,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     read_track_peak_levels(app.graph.lg, &track_pan_ids.lock().unwrap());
                 cached_bus_peak_levels =
                     read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                (cached_modulator_phases, cached_modulator_levels) =
+                    read_modulator_display_values(app.graph.lg, &app);
                 last_meter_poll_at = Instant::now();
+            }
+            if fx_visible
+                && app.graph.track_instrument_types.get(ct)
+                    == Some(&sequencer::sequencer::InstrumentType::Modulator)
+                && last_modulator_phase_log_at.elapsed() >= Duration::from_millis(500)
+            {
+                eprintln!(
+                    "modulator-phase-debug track={} phase={:.3} level={:.3} phases={:?} levels={:?}",
+                    ct,
+                    cached_modulator_phases.get(ct).copied().unwrap_or(0.0),
+                    cached_modulator_levels.get(ct).copied().unwrap_or(0.0),
+                    cached_modulator_phases,
+                    cached_modulator_levels
+                );
+                last_modulator_phase_log_at = Instant::now();
             }
 
             let mut needs_reactive_cycle = false;
@@ -6533,6 +6565,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sync_bus_mixer_state(rt, &app);
                 sync_track_peak_fields(rt, &cached_track_peak_levels);
                 sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                sync_modulator_phase_fields(rt, &cached_modulator_phases);
+                sync_modulator_level_fields(rt, &cached_modulator_levels);
                 rt.set_reactive(
                     "SEQ",
                     "effects",
@@ -6639,6 +6673,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
                 prev_bus_peak_levels = cached_bus_peak_levels.clone();
+            }
+            if cached_modulator_phases != prev_modulator_phases {
+                if fx_visible {
+                    needs_reactive_cycle |= sync_modulator_phase_field_delta(
+                        editor.runtime_mut(),
+                        &prev_modulator_phases,
+                        &cached_modulator_phases,
+                    );
+                }
+                prev_modulator_phases = cached_modulator_phases.clone();
+            }
+            if cached_modulator_levels != prev_modulator_levels {
+                if fx_visible {
+                    needs_reactive_cycle |= sync_modulator_level_field_delta(
+                        editor.runtime_mut(),
+                        &prev_modulator_levels,
+                        &cached_modulator_levels,
+                    );
+                }
+                prev_modulator_levels = cached_modulator_levels.clone();
             }
             if bus_playheads != prev_bus_playheads {
                 if metal_visible {

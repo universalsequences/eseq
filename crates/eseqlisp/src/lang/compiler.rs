@@ -117,6 +117,7 @@ fn is_widget_name(name: &str) -> bool {
             | "toggle"
             | "knob"
             | "meter"
+            | "modulator-curve"
             | "text-input"
             | "select"
             | "v-stack"

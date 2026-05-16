@@ -10,6 +10,7 @@ pub mod knob;
 pub mod knob_number;
 pub mod label;
 pub mod mixer_meter;
+pub mod modulator_curve;
 pub mod number_label;
 pub mod number_picker;
 pub mod response_curve_editor;
@@ -670,6 +671,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &knob::KNOB_WIDGET,
     &knob_number::KNOB_NUMBER_WIDGET,
     &mixer_meter::MIXER_METER_WIDGET,
+    &modulator_curve::MODULATOR_CURVE_WIDGET,
     &number_label::NUMBER_LABEL_WIDGET,
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,

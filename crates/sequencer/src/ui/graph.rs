@@ -2543,6 +2543,7 @@ impl GraphController<'_> {
             }
             InstrumentRegistration::Modulator => {
                 unsafe {
+                    crate::audiograph::add_node_to_watchlist(self.app.graph.lg.0, shell.mod_env_id);
                     crate::audiograph::graph_connect(
                         self.app.graph.lg.0,
                         shell.mod_env_id,

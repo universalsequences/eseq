@@ -410,6 +410,14 @@ pub(crate) fn init_runtime(
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
                 ));
+                fields.push((
+                    Box::leak(format!("modulator-phase-{idx}").into_boxed_str()),
+                    Value::Number(0.0),
+                ));
+                fields.push((
+                    Box::leak(format!("modulator-level-{idx}").into_boxed_str()),
+                    Value::Number(1.0),
+                ));
             }
             for idx in 0..app.buses.len() {
                 fields.push((

@@ -1742,6 +1742,7 @@ fragment float4 waveform_frag(
             let to_rgba = |c: Color| [c.r, c.g, c.b, c.a];
             let has_multiple_tiles = tiled.tiles.len() > 1;
             let mut mod_patch_ports = Vec::new();
+            let mut global_overlay_prims = Vec::new();
 
             // ── Render pass setup ────────────────────────────────────────────
             let desc = MTLRenderPassDescriptor::new();
@@ -2095,9 +2096,9 @@ fragment float4 waveform_frag(
                     // Restore tile scissor after segments
                     enc.setScissorRect(content_scissor);
 
-                    // ── Overlay pass (dropdown menus, etc.) ──
-                    // Rendered after all segments with full tile scissor so it
-                    // covers everything underneath (including text).
+                    // ── Overlay collection (dropdown menus, etc.) ───────────
+                    // Defer drawing until after global passes such as patch
+                    // cables so overlays remain the topmost widget layer.
                     if !overlay_prims.is_empty() {
                         // Overlay primitives are already in post-scroll tile-local
                         // coordinates; only the tile origin offset still needs to
@@ -2121,102 +2122,7 @@ fragment float4 waveform_frag(
                         if contains_agent_instrument_stub_animation(&offset_overlay) {
                             self.note_agent_instrument_stub_animation_detected();
                         }
-
-                        let (bg_runs, fg_runs) = partition_widget_instance_runs(&offset_overlay);
-                        for (widget_type, instances) in &bg_runs {
-                            let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                                continue;
-                            };
-                            if instances.is_empty() {
-                                continue;
-                            }
-                            let byte_len = std::mem::size_of_val(instances.as_slice());
-                            let Some(wbuf) = (unsafe {
-                                self.device.newBufferWithBytes_length_options(
-                                    NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                    byte_len,
-                                    MTLResourceOptions(0),
-                                )
-                            }) else {
-                                continue;
-                            };
-                            enc.setRenderPipelineState(wpipe);
-                            unsafe {
-                                enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
-                                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                    MTLPrimitiveType::Triangle,
-                                    0,
-                                    6,
-                                    instances.len() as _,
-                                );
-                            }
-                        }
-
-                        if let Some(image_pipeline) = self.image_pipeline.clone() {
-                            let images = collect_image_primitives(&offset_overlay);
-                            self.draw_image_primitives(
-                                &enc,
-                                &image_pipeline,
-                                &images,
-                                Some(content_scissor),
-                                &mut image_load_budget,
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                                render_time_seconds,
-                            );
-                        }
-
-                        let prim_quads = {
-                            let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
-                            build_widget_primitive_quads(&offset_overlay, atlas, vp_w, vp_h)
-                        };
-                        draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
-
-                        if let (Some(prop_atlas), Some(prop_pipe)) =
-                            (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
-                        {
-                            let prop_verts = build_proportional_text_quads(
-                                &offset_overlay,
-                                prop_atlas,
-                                cell_w,
-                                cell_h,
-                                vp_w,
-                                vp_h,
-                            );
-                            let prop_tex = prop_atlas.texture.clone();
-                            draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
-                        }
-
-                        for (widget_type, instances) in &fg_runs {
-                            let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
-                                continue;
-                            };
-                            if instances.is_empty() {
-                                continue;
-                            }
-                            let byte_len = std::mem::size_of_val(instances.as_slice());
-                            let Some(wbuf) = (unsafe {
-                                self.device.newBufferWithBytes_length_options(
-                                    NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                                    byte_len,
-                                    MTLResourceOptions(0),
-                                )
-                            }) else {
-                                continue;
-                            };
-                            enc.setRenderPipelineState(wpipe);
-                            unsafe {
-                                enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
-                                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                                    MTLPrimitiveType::Triangle,
-                                    0,
-                                    6,
-                                    instances.len() as _,
-                                );
-                            }
-                        }
+                        global_overlay_prims.extend(offset_overlay);
                     }
                 }
 
@@ -2362,6 +2268,114 @@ fragment float4 waveform_frag(
                             &pipeline,
                             &atlas_texture,
                             &highlight_verts,
+                        );
+                    }
+                }
+            }
+
+            // ── Global overlay pass (dropdown menus, etc.) ──────────────────
+            // Drawn after tiles and patch cables so open dropdowns always sit
+            // above interactive wiring and tile chrome.
+            if !global_overlay_prims.is_empty() {
+                enc.setScissorRect(MTLScissorRect {
+                    x: 0,
+                    y: 0,
+                    width: vp_w as usize,
+                    height: vp_h as usize,
+                });
+
+                let (bg_runs, fg_runs) = partition_widget_instance_runs(&global_overlay_prims);
+                for (widget_type, instances) in &bg_runs {
+                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                        continue;
+                    };
+                    if instances.is_empty() {
+                        continue;
+                    }
+                    let byte_len = std::mem::size_of_val(instances.as_slice());
+                    let Some(wbuf) = (unsafe {
+                        self.device.newBufferWithBytes_length_options(
+                            NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                            byte_len,
+                            MTLResourceOptions(0),
+                        )
+                    }) else {
+                        continue;
+                    };
+                    enc.setRenderPipelineState(wpipe);
+                    unsafe {
+                        enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                        enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                            MTLPrimitiveType::Triangle,
+                            0,
+                            6,
+                            instances.len() as _,
+                        );
+                    }
+                }
+
+                if let Some(image_pipeline) = self.image_pipeline.clone() {
+                    let images = collect_image_primitives(&global_overlay_prims);
+                    self.draw_image_primitives(
+                        &enc,
+                        &image_pipeline,
+                        &images,
+                        None,
+                        &mut image_load_budget,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                        render_time_seconds,
+                    );
+                }
+
+                let prim_quads = {
+                    let atlas = self.atlas.as_mut().ok_or(BackendError::MetalError)?;
+                    build_widget_primitive_quads(&global_overlay_prims, atlas, vp_w, vp_h)
+                };
+                draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
+
+                if let (Some(prop_atlas), Some(prop_pipe)) =
+                    (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+                {
+                    let prop_verts = build_proportional_text_quads(
+                        &global_overlay_prims,
+                        prop_atlas,
+                        cell_w,
+                        cell_h,
+                        vp_w,
+                        vp_h,
+                    );
+                    let prop_tex = prop_atlas.texture.clone();
+                    draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
+                }
+
+                for (widget_type, instances) in &fg_runs {
+                    let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                        continue;
+                    };
+                    if instances.is_empty() {
+                        continue;
+                    }
+                    let byte_len = std::mem::size_of_val(instances.as_slice());
+                    let Some(wbuf) = (unsafe {
+                        self.device.newBufferWithBytes_length_options(
+                            NonNull::new(instances.as_ptr() as *mut _).unwrap(),
+                            byte_len,
+                            MTLResourceOptions(0),
+                        )
+                    }) else {
+                        continue;
+                    };
+                    enc.setRenderPipelineState(wpipe);
+                    unsafe {
+                        enc.setVertexBuffer_offset_atIndex(Some(&wbuf), 0, 0);
+                        enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                            MTLPrimitiveType::Triangle,
+                            0,
+                            6,
+                            instances.len() as _,
                         );
                     }
                 }

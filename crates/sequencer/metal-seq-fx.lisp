@@ -1190,7 +1190,8 @@
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
 
 (def ui-lego-option (name title width options accent)
-  (let ((p (custom-ui-current-param name)))
+  (let ((p (custom-ui-current-param name))
+        (scope (custom-ui-current-scope)))
     (if p
       (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
@@ -1201,13 +1202,14 @@
             :width width :height 0.78 :font-size 8.0
             :on-change (lambda (v)
               (custom-ui-set-param-in-scope
-                (custom-ui-current-scope)
+                scope
                 p
                 (+ (get p :min) (custom-ui-option-index options v)))))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-option-s (section name title width options accent)
-  (let ((p (custom-ui-current-param name)))
+  (let ((p (custom-ui-current-param name))
+        (scope (custom-ui-current-scope)))
     (if p
       (subtree :key (str "custom-ui-lego-option-" (custom-ui-scope-name) "-" name)
         (v-stack :width width :height 1.12 :gap 0.08 :align :start
@@ -1218,15 +1220,16 @@
             :width width :height 0.78 :font-size 8.0
             :on-change (lambda (v)
               (do
-                (custom-ui-select-section-in-scope (custom-ui-current-scope) section)
+                (custom-ui-select-section-in-scope scope section)
                 (custom-ui-set-param-in-scope
-                  (custom-ui-current-scope)
+                  scope
                 p
                 (+ (get p :min) (custom-ui-option-index options v))))))))
       (label (str "missing: " name) :font-size 9 :color :red :bg :transparent))))
 
 (def ui-lego-micro-option-s (section name title width options accent)
-  (let ((p (custom-ui-current-param name)))
+  (let ((p (custom-ui-current-param name))
+        (scope (custom-ui-current-scope)))
     (if p
       (subtree :key (str "custom-ui-lego-micro-option-" (custom-ui-scope-name) "-" name)
         (box :width width :height 1.18 :v-align :end
@@ -1236,9 +1239,9 @@
             :width width :height 0.92 :font-size 8.6
             :on-change (lambda (v)
               (do
-                (custom-ui-select-section-in-scope (custom-ui-current-scope) section)
+                (custom-ui-select-section-in-scope scope section)
                 (custom-ui-set-param-in-scope
-                  (custom-ui-current-scope)
+                  scope
                   p
                   (+ (get p :min) (custom-ui-option-index options v))))))))
       (label (str "missing: " name) :font-size 8 :color :red :bg :transparent))))
@@ -1512,7 +1515,8 @@
   (let ((p (midi-fx-ui-param midi-fx-ui-current-fx name)))
     (if p
       (fx-param-row p midi-fx-ui-current-fx
-        (str "custom-midi-fx-ui-" midi-fx-ui-current-name "-" name))
+        (str "custom-midi-fx-ui-" midi-fx-ui-current-name
+             "-slot-" (get midi-fx-ui-current-fx :slot-idx) "-" name))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 (def audio-fx-ui-param (fx name)
@@ -1522,7 +1526,7 @@
   (let ((p (audio-fx-ui-param audio-fx-ui-current-fx name)))
     (if p
       (fx-param-row p audio-fx-ui-current-fx
-        (str "custom-audio-fx-ui-" audio-fx-ui-current-name "-" name))
+        (str "custom-audio-fx-ui-" (custom-ui-scope-name) "-" name))
       (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
 
 (def instrument-synth-panel-body (inst)
@@ -1751,9 +1755,64 @@
                   (label "No sample" :font-size 12 :color :dim :bg :transparent)))
               (sampler-param-knobs (get inst :params) inst))))))))
 
+(def modulator-param (inst name)
+  (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
+
+(def modulator-knob (p label-text key)
+  (subtree :key key
+    (knob-number :label label-text
+      :value (fx-param-value p)
+      :min (get p :min) :max (get p :max) :decimals 0
+      :font-size 12 :label-font-size 11
+      :text-color :dim :label-color :dim
+      :width 7.0 :height 4.15 :knob-size 2.55
+      :value-align :center
+      :on-change (lambda (v) (fx-set-instrument-value p v)))))
+
+(def modulator-panel (inst)
+  (let ((rise-p (modulator-param inst "rise"))
+        (fall-p (modulator-param inst "fall")))
+    (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
+      :height fx-fixed-panel-height
+      :debug-name "modulator-panel"
+      (v-stack :gap 0
+        (box :height 0.75 :padding 0 :v-align :center :h-align :start
+          (h-stack :gap 0.5 :align :center
+            (fx-panel-header-leading-spacer)
+            (fx-enabled-toggle (enabled-param (get inst :synth)) false "modulator-enabled")
+            (label "Modulator" :font-size 11 :color :white :bg :transparent)))
+        (fx-panel-body "modulator-panel-content"
+          (box :width :fill :height 7.85 :padding 0.35
+            :debug-name "modulator-panel-body"
+            (h-stack :width :fill :height :fill :gap 1.05 :align :center
+              (if rise-p
+                (modulator-knob rise-p "rise ms" "modulator-rise-knob")
+                (label "missing: rise" :font-size 10 :color :red :bg :transparent))
+              (if fall-p
+                (modulator-knob fall-p "fall ms" "modulator-fall-knob")
+                (label "missing: fall" :font-size 10 :color :red :bg :transparent))
+              (box :width 0.45 :height 1)
+              (box :width 12.8 :height 5.9 :padding 0.22
+                :background-color :black
+                :corner-radius 8
+                :debug-name "modulator-curve-wrapper"
+                (modulator-curve
+                  :width 12.25 :height 5.45
+                  :rise (if rise-p (fx-param-value rise-p) 0)
+                  :fall (if fall-p (fx-param-value fall-p) 0)
+                  :phase (bind-seq (get inst :phase-field))
+                  :level (bind-seq (get inst :level-field))
+                  :max-ms (if rise-p (get rise-p :max) 5000)
+                  :background-color :instrument-control-bg
+                  :grid-color :dim
+                  :curve-color (ui-accent-orange)
+                  :fill-color (rgba 1.0 0.48 0.18 0.16))))))))))
+
 (def instrument-panel (inst)
   (if (= (get inst :type) "sampler")
     (sampler-panel inst)
+    (if (= (get inst :type) "modulator")
+      (modulator-panel inst)
     (box
       (v-stack :debug-name "instrument-panel-vstack" :gap 0
         (box :debug-name "instrument-header-box" :height 0.75 :padding 0 :v-align :center :h-align :start
@@ -1791,7 +1850,7 @@
       :selected-header :fx-panel-header-selected-bg
       :padding 0
       :height fx-fixed-panel-height
-      :selected 0)))
+      :selected 0))))
 
 (defwidget black
   :width 2 :height 2

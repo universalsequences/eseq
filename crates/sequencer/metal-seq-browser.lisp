@@ -348,21 +348,6 @@
         :height 1.3
         :font-size 10.5
         :on-click |x y r| (sbrowser-add-modulator-track)
-        :color :white)
-      (button "New"
-        :variant :ghost
-        :icon :plus
-        :flex 1
-        :height 1.3
-        :font-size 10.5
-        :on-click |x y r| (sbrowser-enter-new-instrument-editor)
-        :color :white)
-      (button "Ask"
-        :variant :ghost
-        :flex 1
-        :height 1.3
-        :font-size 10.5
-        :on-click |x y r| (agent-open-instrument)
         :color :white))))
 
 (def sbrowser-library-label ()

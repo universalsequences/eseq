@@ -1280,12 +1280,151 @@ pub(crate) fn read_bus_peak_levels(
         .collect()
 }
 
+pub(crate) fn modulator_phase_field(track: usize) -> String {
+    format!("modulator-phase-{track}")
+}
+
+pub(crate) fn modulator_level_field(track: usize) -> String {
+    format!("modulator-level-{track}")
+}
+
+pub(crate) fn read_modulator_display_values(
+    lg: sequencer::audiograph::LiveGraphPtr,
+    app: &ui::App,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut phases = Vec::with_capacity(app.graph.track_node_ids.len());
+    let mut levels = Vec::with_capacity(app.graph.track_node_ids.len());
+    for (nodes, instrument_type) in app
+        .graph
+        .track_node_ids
+        .iter()
+        .zip(app.graph.track_instrument_types.iter())
+    {
+        if *instrument_type == sequencer::sequencer::InstrumentType::Modulator {
+            let (phase, level) = read_modulator_display_value(lg, nodes.mod_env_id);
+            phases.push(phase);
+            levels.push(level);
+        } else {
+            phases.push(0.0);
+            levels.push(0.0);
+        }
+    }
+    (phases, levels)
+}
+
+fn read_modulator_display_value(
+    lg: sequencer::audiograph::LiveGraphPtr,
+    node_id: i32,
+) -> (f64, f64) {
+    const STATE_LEN: usize = sequencer::track_modulator::MODULATOR_ENVELOPE_STATE_SIZE;
+    const STATE_BYTES: usize = STATE_LEN * std::mem::size_of::<f32>();
+    if node_id < 0 {
+        return (0.0, 0.0);
+    }
+    let mut state_size = 0usize;
+    let mut state = [0.0_f32; STATE_LEN];
+    let copied = unsafe {
+        sequencer::audiograph::get_node_state_into(
+            lg.0,
+            node_id,
+            state.as_mut_ptr().cast(),
+            STATE_BYTES,
+            &mut state_size as *mut usize,
+        )
+    };
+    if !copied || state_size < STATE_BYTES {
+        return (0.0, 0.0);
+    }
+    (
+        quantize_modulator_unit_value(state[sequencer::track_modulator::STATE_DISPLAY_PHASE]),
+        quantize_modulator_unit_value(
+            state[sequencer::track_modulator::PARAM_PULSE_LEVEL as usize],
+        ),
+    )
+}
+
+fn quantize_modulator_unit_value(value: f32) -> f64 {
+    ((value.clamp(0.0, 1.0) * 128.0).round() / 128.0) as f64
+}
+
 pub(crate) fn build_track_peaks_value(levels: &[f64]) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = levels
         .iter()
         .map(|&level| Rc::new(RefCell::new(Value::Number(level))))
         .collect();
     Value::List(items)
+}
+
+pub(crate) fn sync_modulator_phase_fields(rt: &mut Runtime, phases: &[f64]) -> bool {
+    let mut effects_dirty = false;
+    for (idx, &phase) in phases.iter().enumerate() {
+        effects_dirty |= rt
+            .set_reactive("SEQ", &modulator_phase_field(idx), Value::Number(phase))
+            .effects_dirty;
+    }
+    effects_dirty
+}
+
+pub(crate) fn sync_modulator_level_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
+    let mut effects_dirty = false;
+    for (idx, &level) in levels.iter().enumerate() {
+        effects_dirty |= rt
+            .set_reactive("SEQ", &modulator_level_field(idx), Value::Number(level))
+            .effects_dirty;
+    }
+    effects_dirty
+}
+
+pub(crate) fn sync_modulator_phase_field_delta(
+    rt: &mut Runtime,
+    previous: &[f64],
+    phases: &[f64],
+) -> bool {
+    let mut effects_dirty = false;
+    if previous.len() != phases.len() {
+        effects_dirty |= sync_modulator_phase_fields(rt, phases);
+        for idx in phases.len()..previous.len() {
+            effects_dirty |= rt
+                .set_reactive("SEQ", &modulator_phase_field(idx), Value::Number(0.0))
+                .effects_dirty;
+        }
+        return effects_dirty;
+    }
+
+    for (idx, (&old_phase, &phase)) in previous.iter().zip(phases.iter()).enumerate() {
+        if old_phase != phase {
+            effects_dirty |= rt
+                .set_reactive("SEQ", &modulator_phase_field(idx), Value::Number(phase))
+                .effects_dirty;
+        }
+    }
+    effects_dirty
+}
+
+pub(crate) fn sync_modulator_level_field_delta(
+    rt: &mut Runtime,
+    previous: &[f64],
+    levels: &[f64],
+) -> bool {
+    let mut effects_dirty = false;
+    if previous.len() != levels.len() {
+        effects_dirty |= sync_modulator_level_fields(rt, levels);
+        for idx in levels.len()..previous.len() {
+            effects_dirty |= rt
+                .set_reactive("SEQ", &modulator_level_field(idx), Value::Number(0.0))
+                .effects_dirty;
+        }
+        return effects_dirty;
+    }
+
+    for (idx, (&old_level, &level)) in previous.iter().zip(levels.iter()).enumerate() {
+        if old_level != level {
+            effects_dirty |= rt
+                .set_reactive("SEQ", &modulator_level_field(idx), Value::Number(level))
+                .effects_dirty;
+        }
+    }
+    effects_dirty
 }
 
 pub(crate) fn sync_track_peak_fields(rt: &mut Runtime, levels: &[f64]) -> bool {
@@ -2749,8 +2888,38 @@ pub(crate) fn build_instrument_panel_value(
     }
 
     let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
-    let instrument_name =
-        current_custom_instrument_name(app, track).unwrap_or_else(|| "Instrument".to_string());
+    let instrument_type = app
+        .graph
+        .track_instrument_types
+        .get(track)
+        .copied()
+        .unwrap_or(sequencer::sequencer::InstrumentType::Custom);
+    let instrument_name = current_custom_instrument_name(app, track).unwrap_or_else(|| {
+        if instrument_type == sequencer::sequencer::InstrumentType::Modulator {
+            "Modulator".to_string()
+        } else {
+            "Instrument".to_string()
+        }
+    });
+    let instrument_type_name = match instrument_type {
+        sequencer::sequencer::InstrumentType::Sampler => "sampler",
+        sequencer::sequencer::InstrumentType::Custom => "custom",
+        sequencer::sequencer::InstrumentType::Modulator => "modulator",
+    };
+    panel_map.insert(
+        "type".to_string(),
+        Rc::new(RefCell::new(Value::String(
+            instrument_type_name.to_string(),
+        ))),
+    );
+    panel_map.insert(
+        "phase-field".to_string(),
+        Rc::new(RefCell::new(Value::String(modulator_phase_field(track)))),
+    );
+    panel_map.insert(
+        "level-field".to_string(),
+        Rc::new(RefCell::new(Value::String(modulator_level_field(track)))),
+    );
     panel_map.insert(
         "name".to_string(),
         Rc::new(RefCell::new(Value::String(instrument_name.clone()))),
@@ -4792,6 +4961,21 @@ mod tests {
         }
     }
 
+    fn assert_finite_layout_tree(node: &eseqlisp::layout::LayoutNode) {
+        assert!(
+            node.rect.col.is_finite()
+                && node.rect.row.is_finite()
+                && node.rect.width.is_finite()
+                && node.rect.height.is_finite(),
+            "layout node has non-finite rect: type={} rect={:?}",
+            node.widget_type,
+            node.rect
+        );
+        for child in &node.children {
+            assert_finite_layout_tree(child);
+        }
+    }
+
     fn test_param_map(
         name: &str,
         idx: usize,
@@ -5049,6 +5233,48 @@ mod tests {
                 Value::Map(test_param_map("amp_decay", 2, 120.0, 1.0, 2000.0)),
                 Value::Map(test_param_map("amp_sustain", 3, 0.7, 0.0, 1.0)),
                 Value::Map(test_param_map("amp_release", 4, 120.0, 1.0, 3000.0)),
+            ]))),
+        );
+        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst
+    }
+
+    fn test_modulator_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut inst = std::collections::HashMap::new();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("Modulator".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("Modulator".to_string()))),
+        );
+        inst.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("modulator".to_string()))),
+        );
+        inst.insert(
+            "phase-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                modulator_phase_field(0).to_string(),
+            ))),
+        );
+        inst.insert(
+            "level-field".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                modulator_level_field(0).to_string(),
+            ))),
+        );
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("enabled", 0, 1.0, 0.0, 1.0)),
+                Value::Map(test_param_map("rise", 1, 18.0, 0.0, 5000.0)),
+                Value::Map(test_param_map("fall", 2, 140.0, 0.0, 5000.0)),
             ]))),
         );
         inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
@@ -7320,6 +7546,173 @@ mod tests {
     }
 
     #[test]
+    fn custom_instrument_option_callbacks_capture_scope_before_audio_fx_render() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let custom_audio_ui_source = build_custom_audio_fx_ui_source_with_overlay(None);
+        let custom_instrument_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/test-instrument/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-lego-micro-option-s
+                0 "voice" "drum" 6.0
+                '("kick" "snare" "lo tom")
+                (ui-accent-cyan)))
+            "#
+            .to_string(),
+        )));
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("cutoff", 0, 0.5, 0.0, 1.0)),
+                Value::Map(test_param_map("voice", 1, 1.0, 1.0, 11.0)),
+            ]))),
+        );
+
+        let shimmerpitch_params = vec![
+            Value::Map(test_param_map("shift", 0, 12.0, -24.0, 24.0)),
+            Value::Map(test_param_map("fine", 1, 0.0, -50.0, 50.0)),
+            Value::Map(test_param_map("window_ms", 2, 90.0, 25.0, 220.0)),
+            Value::Map(test_param_map("delay_ms", 3, 360.0, 20.0, 1400.0)),
+            Value::Map(test_param_map("feedback", 4, 0.42, 0.0, 0.88)),
+            Value::Map(test_param_map("damping", 5, 8500.0, 900.0, 18000.0)),
+            Value::Map(test_param_map("width", 6, 0.85, 0.0, 1.4)),
+            Value::Map(test_param_map("shimmer", 7, 1.0, 0.0, 1.0)),
+            Value::Map(test_param_map("mix", 8, 0.42, 0.0, 1.0)),
+            Value::Map(test_param_map("output", 9, 1.0, 0.25, 2.0)),
+        ];
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                (
+                    "available-effects",
+                    test_list(vec![Value::String("shimmerpitch".to_string())]),
+                ),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                (
+                    "bus-names",
+                    test_list(vec![Value::String("Mix".to_string())]),
+                ),
+                (
+                    "effects",
+                    test_list(vec![Value::Map(test_fx_map(
+                        "shimmerpitch",
+                        0,
+                        shimmerpitch_params,
+                    ))]),
+                ),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("bus-effects", test_list(vec![test_list(vec![])])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () true)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_instrument_ui_source)
+            .expect("load initial custom instrument UI");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load initial custom audio FX UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_instrument_ui_source)
+            .expect("load custom instrument UI");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_audio_ui_source)
+            .expect("load custom audio FX UI");
+        editor.refresh_runtime_side_effects();
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("custom instrument option with audio fx layout");
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let voice_subtree = find_layout_node_by_stable_key(
+            &layout,
+            "custom-ui-lego-micro-option-test-instrument-voice",
+        )
+        .unwrap_or_else(|| panic!("instrument voice dropdown; layout={layout_summaries:#?}"));
+        assert!(
+            voice_subtree.rect.width > 0.0 && voice_subtree.rect.height > 0.0,
+            "voice dropdown subtree should have a finite visible rect: {:?}",
+            voice_subtree.rect
+        );
+        assert!(
+            find_layout_node_by_stable_key(&layout, "custom-ui-lego-knob-shimmerpitch-slot-0-shift")
+                .is_some(),
+            "shimmerpitch should render after the instrument and leave the render globals in audio scope"
+        );
+
+        let dropdown =
+            find_layout_node_by_widget_type(voice_subtree, "dropdown").unwrap_or_else(|| {
+                panic!("instrument voice subtree should contain dropdown: {layout_summaries:#?}")
+            });
+        let callback = dropdown
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("instrument voice dropdown on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::String("snare".to_string())])
+            .expect("invoke instrument voice dropdown on-change");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "set-instrument-plock");
+                let Value::Map(payload) = payload else {
+                    panic!("set-instrument-plock payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("param-idx").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0)),
+                    "instrument option callback must target the voice parameter"
+                );
+                assert_eq!(
+                    payload.get("value").map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0)),
+                    "snare should map to the second 1-based voice option"
+                );
+            }
+            other => panic!("expected set-instrument-plock host command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn custom_ui_section_selection_is_scoped_per_rendered_ui() {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let custom_instrument_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -7538,7 +7931,7 @@ mod tests {
         editor.set_active_buffer(fx_id);
         editor.set_layout_viewport(120, 18);
         let layout = editor.widget_layout().expect("custom instrument fx layout");
-        assert_finite_layout(&layout);
+        assert_finite_layout_tree(&layout);
         let tree = editor
             .active_buffer()
             .widget_tree
@@ -7729,7 +8122,7 @@ mod tests {
         editor.set_active_buffer(fx_id);
         editor.set_layout_viewport(160, 20);
         let layout = editor.widget_layout().expect("korg1 fx layout");
-        assert_finite_layout(&layout);
+        assert_finite_layout_tree(&layout);
 
         let tree = editor
             .active_buffer()
@@ -7912,6 +8305,116 @@ mod tests {
                 instrument_panel.rect
             );
         }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_modulator_panel_controls() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_modulator_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("modulator panel fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor.widget_layout().expect("modulator panel layout");
+        assert_finite_layout_tree(&layout);
+
+        let panel =
+            find_layout_node_by_debug_name(&layout, "modulator-panel").expect("modulator panel");
+        let body = find_layout_node_by_debug_name(&layout, "modulator-panel-body")
+            .expect("modulator panel body");
+        let curve = find_layout_node_by_widget_type(&layout, "modulator-curve")
+            .expect("modulator curve widget");
+        assert!(matches!(
+            curve.props.get("phase"),
+            Some(Value::ReactiveRef {
+                namespace,
+                field,
+                ..
+            }) if namespace == "SEQ" && field == "modulator-phase-0"
+        ));
+        assert!(matches!(
+            curve.props.get("level"),
+            Some(Value::ReactiveRef {
+                namespace,
+                field,
+                ..
+            }) if namespace == "SEQ" && field == "modulator-level-0"
+        ));
+        assert!(
+            find_layout_node_by_widget_type(&layout, "fx-enabled-dot").is_some(),
+            "modulator panel should expose the standard enabled toggle"
+        );
+        assert_eq!(
+            count_widget_type(&layout, "knob-number"),
+            2,
+            "modulator panel should expose only rise and fall knobs"
+        );
+        assert!(
+            panel.rect.width > 30.0 && panel.rect.height > 8.0,
+            "modulator panel should occupy visible measured space, got {:?}",
+            panel.rect
+        );
+        assert!(
+            body.rect.width > 25.0 && body.rect.height > 5.0,
+            "modulator panel body should have nonzero visible space, got {:?}",
+            body.rect
+        );
+        assert!(
+            curve.rect.width > 8.0
+                && curve.rect.height > 4.0
+                && curve.rect.col >= panel.rect.col
+                && curve.rect.row >= panel.rect.row
+                && curve.rect.col + curve.rect.width <= panel.rect.col + panel.rect.width
+                && curve.rect.row + curve.rect.height <= panel.rect.row + panel.rect.height,
+            "modulator curve should be visible inside panel, curve={:?}; panel={:?}",
+            curve.rect,
+            panel.rect
+        );
     }
 
     #[test]
@@ -9578,7 +10081,8 @@ mod tests {
                   (let ((p (midi-fx-ui-param midi-fx-ui-current-fx name)))
                     (if p
                       (fx-param-row p midi-fx-ui-current-fx
-                        (str "custom-midi-fx-ui-" midi-fx-ui-current-name "-" name))
+                        (str "custom-midi-fx-ui-" midi-fx-ui-current-name
+                             "-slot-" (get midi-fx-ui-current-fx :slot-idx) "-" name))
                       false)))
                 "#,
             )
@@ -9617,11 +10121,16 @@ mod tests {
                   (nth (filter |p| (= (get p :name) name) (get fx :params)) 0))
                 (def fx-param-row (p fx key)
                   (dict :param (get p :name) :key key))
+                (def custom-ui-scope-name ()
+                  (if (get audio-fx-ui-current-fx :bus-fx)
+                    (str audio-fx-ui-current-name "-bus-" (get audio-fx-ui-current-fx :bus-idx)
+                         "-slot-" (get audio-fx-ui-current-fx :slot-idx))
+                    (str audio-fx-ui-current-name "-slot-" (get audio-fx-ui-current-fx :slot-idx))))
                 (def audio-fx-ui-param-control (name)
                   (let ((p (audio-fx-ui-param audio-fx-ui-current-fx name)))
                     (if p
                       (fx-param-row p audio-fx-ui-current-fx
-                        (str "custom-audio-fx-ui-" audio-fx-ui-current-name "-" name))
+                        (str "custom-audio-fx-ui-" (custom-ui-scope-name) "-" name))
                       false)))
                 (def custom-ui-current-kind "audio-fx")
                 (def custom-ui-selected-section 0)
@@ -9672,6 +10181,7 @@ mod tests {
                 r#"
                 (custom-audio-fx-ui
                   (dict :name "folder-delay"
+                        :slot-idx 2
                         :params (list
                           (dict :name "time" :value 250 :min 1 :max 2000)
                           (dict :name "feedback" :value 0.35 :min 0 :max 0.95))))
@@ -9679,6 +10189,37 @@ mod tests {
             )
             .expect("render custom audio FX UI");
         assert!(!matches!(rendered, Some(Value::Bool(false)) | None));
+        let rendered_control = runtime
+            .eval_str(r#"(audio-fx-ui-param-control "time")"#)
+            .expect("render scoped custom audio FX control");
+        let rendered_text = format!("{rendered_control:?}");
+        assert!(
+            rendered_text.contains("custom-audio-fx-ui-folder-delay-slot-2-time"),
+            "custom audio FX param controls must include slot scope in stable keys: {rendered_text}"
+        );
+
+        let rendered_slot_5 = runtime
+            .eval_str(
+                r#"
+                (custom-audio-fx-ui
+                  (dict :name "folder-delay"
+                        :slot-idx 5
+                        :params (list
+                          (dict :name "time" :value 250 :min 1 :max 2000)
+                          (dict :name "feedback" :value 0.35 :min 0 :max 0.95))))
+                "#,
+            )
+            .expect("render second custom audio FX UI slot");
+        assert!(!matches!(rendered_slot_5, Some(Value::Bool(false)) | None));
+        let rendered_slot_5_control = runtime
+            .eval_str(r#"(audio-fx-ui-param-control "time")"#)
+            .expect("render second scoped custom audio FX control");
+        let rendered_slot_5_text = format!("{rendered_slot_5_control:?}");
+        assert!(
+            rendered_slot_5_text.contains("custom-audio-fx-ui-folder-delay-slot-5-time"),
+            "custom audio FX param controls must not collide across slots: {rendered_slot_5_text}"
+        );
+        assert_ne!(rendered_text, rendered_slot_5_text);
 
         let all_params = [
             "base",

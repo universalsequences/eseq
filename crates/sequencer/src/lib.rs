@@ -84,7 +84,7 @@ pub mod stereo_panner;
 mod str8_delay;
 pub mod track_color;
 #[allow(dead_code)]
-mod track_modulator;
+pub mod track_modulator;
 pub mod ui;
 #[allow(dead_code)]
 mod voice;
