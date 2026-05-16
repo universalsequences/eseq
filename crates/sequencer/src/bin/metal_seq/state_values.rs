@@ -6003,6 +6003,77 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_piano_roll_placement_preference_controls_next_tab() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-placement")
+                .unwrap(),
+            Some(Value::Keyword("bottom".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*metal*".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string()))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-piano-roll-placement)")
+            .expect("switch placement preference to main");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-placement")
+                .unwrap(),
+            Some(Value::Keyword("main".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*metal*".to_string())),
+            "changing placement while closed must not open or move piano roll"
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-main-or-piano-roll)")
+            .expect("open piano roll in preferred main panel");
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*fx*".to_string()))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-piano-roll-placement)")
+            .expect("switch placement preference to bottom and move open piano roll");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("piano-roll-placement")
+                .unwrap(),
+            Some(Value::Keyword("bottom".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("step-panel-buffer").unwrap(),
+            Some(Value::String("*metal*".to_string()))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
+            Some(Value::String("*piano-roll*".to_string()))
+        );
+    }
+
+    #[test]
     fn metal_seq_dot_global_binding_toggles_recording_outside_editable_text_buffers() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -9313,6 +9384,29 @@ mod tests {
                 ("track-mutes", test_list(vec![Value::Bool(false)])),
                 ("track-solos", test_list(vec![Value::Bool(false)])),
                 ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
+                (
+                    "track-instrument-types",
+                    test_list(vec![Value::String("instrument".to_string())]),
+                ),
+                (
+                    "mod-routes",
+                    test_list(vec![Value::Map({
+                        let mut map = std::collections::HashMap::new();
+                        map.insert(
+                            "source".to_string(),
+                            Rc::new(RefCell::new(Value::Number(0.0))),
+                        );
+                        map.insert(
+                            "dest".to_string(),
+                            Rc::new(RefCell::new(Value::Number(0.0))),
+                        );
+                        map.insert(
+                            "input".to_string(),
+                            Rc::new(RefCell::new(Value::Number(2.0))),
+                        );
+                        map
+                    })]),
+                ),
                 ("track-volumes", test_list(vec![Value::Number(1.0)])),
                 ("track-pans", test_list(vec![Value::Number(0.0)])),
                 (
@@ -9558,11 +9652,14 @@ mod tests {
             mod_out.rect,
             mod_in.rect
         );
-        let track_select = find_button_by_text(&layout, "1").expect("track selector button");
+        let track_strip =
+            find_node_by_stable_key(&layout, "mixer-v2-track-0").expect("track mixer strip");
+        let track_select =
+            find_descendant_button_by_text(track_strip, "1").expect("track selector button");
         click_node(&mut editor, track_select);
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
-            Some("seq-toggle-track-mute:[0]")
+            Some("seq-set-track:[0]")
         );
         let track_label = find_button_by_text(&layout, "kick").expect("track label button");
         click_node(&mut editor, track_label);

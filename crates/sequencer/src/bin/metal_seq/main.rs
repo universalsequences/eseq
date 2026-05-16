@@ -6521,6 +6521,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ct != prev_current_track && !app.tracks.is_empty() {
                 editor.reset_widget_scroll_for_buffer_named("*metal*");
                 editor.reset_widget_scroll_for_buffer_named("*fx*");
+                let cleared_step_selection = {
+                    let mut selection = selected_steps.lock().unwrap();
+                    let had_selection = !selection.is_empty();
+                    selection.clear();
+                    had_selection
+                };
+                let cleared_piano_selection = {
+                    let mut selection = piano_roll_selection.lock().unwrap();
+                    let had_selection = !selection.is_empty();
+                    selection.clear();
+                    had_selection
+                };
+                if cleared_step_selection || cleared_piano_selection {
+                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                }
                 let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
                 let _ = editor.runtime_mut().eval_str("(sampler-reset-view)");
                 let rt = editor.runtime_mut();
