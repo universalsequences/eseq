@@ -515,6 +515,8 @@ pub struct LayoutRects {
 #[allow(dead_code)]
 pub struct TrackNodeIds {
     pub sampler_ids: Vec<i32>, // up to MAX_VOICES
+    pub sampler_gatepitch_ids: Vec<i32>,
+    pub sampler_modulator_ids: Vec<i32>,
     pub voice_sum_id: i32,
     pub voice_sum_r_id: i32,
     pub pan_id: i32,

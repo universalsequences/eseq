@@ -1716,44 +1716,51 @@
       (box :height 0.75 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0.5 :align :center
           (fx-panel-header-leading-spacer)
-          (fx-enabled-toggle (enabled-param (get inst :params)) false "sampler-enabled")
-          (label "Sampler" :font-size 11 :color :white :bg :transparent)))
+          (fx-enabled-toggle (enabled-param (get inst :synth)) false "sampler-enabled")
+          (label "Sampler" :font-size 11 :color :white :bg :transparent)
+          (instrument-tab-button "synth" 0 4.5)
+          (instrument-tab-button "mods" 1 4.0)
+          (instrument-tab-button "sources" 2 5.8)))
       (fx-panel-body "sampler-panel-content"
-        (v-stack 
-          (box :background-color :instrument-control-bg :corner-radius 10
-            (v-stack :gap 0.01 :padding 0.15
-              (box :height 0.1)
-              (if (get inst :buffer)
-                (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                  (box :width 70 :height 4.85
-                    (waveform
-                      :height 4.85
-                      :header-height 0.3
-                      :ruler-font-size 8
-                      :ruler-color :dim
-                      :ruler-bg :black
-                      :grid-major-color :black
-                      :grid-minor-color :black
-                      :bg :instrument-control-bg
-                      :focusable true
-                      :marker-selection true
-                      :active-marker sampler-active-marker
-                      :marker-color :dim
-                      :active-marker-color :widget-knob-filled
-                      :waveform-color :yellow
-                      :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
-                      :buffer (get inst :buffer)
-                      :view-start sampler-view-start
-                      :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
-                      :cursor-time sampler-cursor-time
-                      :playhead-time (bind-seq "sampler-playhead")
-                      :selection-start (bind-seq (get inst :start-time-field))
-                      :selection-end (bind-seq (get inst :end-time-field))
-                      :time-ruler (dict :mode :seconds)
-                      :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
-                (box :width 70 :height 4.85 :h-align :center :v-align :center
-                  (label "No sample" :font-size 12 :color :dim :bg :transparent)))
-              (sampler-param-knobs (get inst :params) inst))))))))
+        (if (= instrument-panel-tab 0)
+          (v-stack
+            (box :background-color :instrument-control-bg :corner-radius 10
+              (v-stack :gap 0.01 :padding 0.15
+                (box :height 0.1)
+                (if (get inst :buffer)
+                  (subtree :key (str "sampler-waveform-" (get inst :buffer))
+                    (box :width 73 :height 4.85
+                      (waveform
+                        :height 4.85
+                        :header-height 0.3
+                        :ruler-font-size 8
+                        :ruler-color :dim
+                        :ruler-bg :black
+                        :grid-major-color :black
+                        :grid-minor-color :black
+                        :bg :instrument-control-bg
+                        :focusable true
+                        :marker-selection true
+                        :active-marker sampler-active-marker
+                        :marker-color :dim
+                        :active-marker-color :widget-knob-filled
+                        :waveform-color :yellow
+                        :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
+                        :buffer (get inst :buffer)
+                        :view-start sampler-view-start
+                        :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
+                        :cursor-time sampler-cursor-time
+                        :playhead-time (bind-seq "sampler-playhead")
+                        :selection-start (bind-seq (get inst :start-time-field))
+                        :selection-end (bind-seq (get inst :end-time-field))
+                        :time-ruler (dict :mode :seconds)
+                        :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
+                  (box :width 70 :height 4.85 :h-align :center :v-align :center
+                    (label "No sample" :font-size 12 :color :dim :bg :transparent)))
+                (sampler-param-knobs (get inst :synth) inst))))
+          (if (= instrument-panel-tab 1)
+            (box :debug-name "sampler-mods-wrapper" (instrument-mod-grid (get inst :mod)))
+            (box :debug-name "sampler-sources-wrapper" (instrument-source-tabs inst))))))))
 
 (def modulator-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))

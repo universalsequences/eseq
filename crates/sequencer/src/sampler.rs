@@ -50,7 +50,21 @@ const STATE_WARP_PROJECT_BPM: usize = 41;
 const STATE_WARP_SLICE_SOURCE_FRAME_START: usize = 42;
 const STATE_WARP_LAST_TARGET_RATIO: usize = 43;
 const STATE_SOURCE_SAMPLE_RATE: usize = 44;
-pub const SAMPLER_STATE_SIZE: usize = 45;
+const STATE_SCRUB_OFFSET: usize = 45;
+const STATE_SCRUB_SMOOTH: usize = 46;
+const STATE_MOD_SPEED_SOURCE: usize = 47;
+const STATE_MOD_SPEED_DEPTH: usize = 48;
+const STATE_MOD_SCRUB_SOURCE: usize = 49;
+const STATE_MOD_SCRUB_DEPTH: usize = 50;
+const STATE_MOD_SR_SOURCE: usize = 51;
+const STATE_MOD_SR_DEPTH: usize = 52;
+const STATE_MOD_WARP_BPM_SOURCE: usize = 53;
+const STATE_MOD_WARP_BPM_DEPTH: usize = 54;
+const STATE_MOD_START_SOURCE: usize = 55;
+const STATE_MOD_START_DEPTH: usize = 56;
+const STATE_MOD_END_SOURCE: usize = 57;
+const STATE_MOD_END_DEPTH: usize = 58;
+pub const SAMPLER_STATE_SIZE: usize = 59;
 pub const SAMPLER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 // Envelope phase constants
@@ -68,6 +82,12 @@ const RETRIGGER_FADE_SAMPLES: f32 = 48.0;
 // Fresh triggers from silence use the user's attack value directly (even if 0).
 const MIN_RETRIGGER_ATTACK: f32 = 8.0;
 const WARP_XFADE_SECONDS: f32 = 0.005;
+const MOD_INPUT_COUNT: usize = 10;
+const SR_MIN_HZ: f32 = 2_000.0;
+const SR_MAX_HZ: f32 = 44_100.0;
+const WARP_BPM_MIN: f32 = 20.0;
+const WARP_BPM_MAX: f32 = 400.0;
+const SCRUB_SMOOTH_SECONDS: f32 = 0.006;
 
 fn sampler_playback_step(source_sample_rate: f32, host_sample_rate: f32, rate: f32) -> f32 {
     let source_sample_rate = source_sample_rate.max(1.0);
@@ -118,6 +138,32 @@ unsafe fn read_interpolated(
     (s0_l + frac * (s1_l - s0_l), s0_r + frac * (s1_r - s0_r))
 }
 
+unsafe fn modulation_input(
+    inp: *const *mut f32,
+    n_inputs: usize,
+    source: f32,
+    frame: usize,
+) -> f32 {
+    let source_idx = source.round() as i32;
+    if source_idx <= 0 {
+        return 0.0;
+    }
+    let input_idx = (source_idx - 1) as usize;
+    if input_idx >= MOD_INPUT_COUNT || input_idx >= n_inputs {
+        return 0.0;
+    }
+    let ptr = *inp.add(input_idx);
+    if ptr.is_null() {
+        0.0
+    } else {
+        (*ptr.add(frame)).clamp(-1.0, 1.0)
+    }
+}
+
+fn modulated_normalized(base: f32, source: f32, depth: f32) -> f32 {
+    (base + source * depth.clamp(-1.0, 1.0)).clamp(0.0, 1.0)
+}
+
 // Param indices (match state layout for direct write)
 pub const PARAM_PLAYHEAD: u64 = STATE_PLAYHEAD as u64;
 pub const PARAM_TRIGGER: u64 = STATE_PLAYING as u64;
@@ -145,6 +191,19 @@ pub const PARAM_WARP_ONSET_TABLE_PTR_HI: u64 = STATE_WARP_ONSET_TABLE_PTR_HI as 
 pub const PARAM_WARP_SAMPLE_BPM: u64 = STATE_WARP_SAMPLE_BPM as u64;
 pub const PARAM_WARP_PROJECT_BPM: u64 = STATE_WARP_PROJECT_BPM as u64;
 pub const PARAM_SOURCE_SAMPLE_RATE: u64 = STATE_SOURCE_SAMPLE_RATE as u64;
+pub const PARAM_SCRUB_OFFSET: u64 = STATE_SCRUB_OFFSET as u64;
+pub const PARAM_MOD_SPEED_SOURCE: u64 = STATE_MOD_SPEED_SOURCE as u64;
+pub const PARAM_MOD_SPEED_DEPTH: u64 = STATE_MOD_SPEED_DEPTH as u64;
+pub const PARAM_MOD_SCRUB_SOURCE: u64 = STATE_MOD_SCRUB_SOURCE as u64;
+pub const PARAM_MOD_SCRUB_DEPTH: u64 = STATE_MOD_SCRUB_DEPTH as u64;
+pub const PARAM_MOD_SR_SOURCE: u64 = STATE_MOD_SR_SOURCE as u64;
+pub const PARAM_MOD_SR_DEPTH: u64 = STATE_MOD_SR_DEPTH as u64;
+pub const PARAM_MOD_WARP_BPM_SOURCE: u64 = STATE_MOD_WARP_BPM_SOURCE as u64;
+pub const PARAM_MOD_WARP_BPM_DEPTH: u64 = STATE_MOD_WARP_BPM_DEPTH as u64;
+pub const PARAM_MOD_START_SOURCE: u64 = STATE_MOD_START_SOURCE as u64;
+pub const PARAM_MOD_START_DEPTH: u64 = STATE_MOD_START_DEPTH as u64;
+pub const PARAM_MOD_END_SOURCE: u64 = STATE_MOD_END_SOURCE as u64;
+pub const PARAM_MOD_END_DEPTH: u64 = STATE_MOD_END_DEPTH as u64;
 
 pub struct SamplerTrack {
     pub name: String,
@@ -220,6 +279,20 @@ unsafe extern "C" fn sampler_init(
     if initial_state.is_null() {
         *s.add(STATE_SOURCE_SAMPLE_RATE) = 44_100.0;
     }
+    *s.add(STATE_SCRUB_OFFSET) = 0.0;
+    *s.add(STATE_SCRUB_SMOOTH) = 0.0;
+    *s.add(STATE_MOD_SPEED_SOURCE) = 0.0;
+    *s.add(STATE_MOD_SPEED_DEPTH) = 0.0;
+    *s.add(STATE_MOD_SCRUB_SOURCE) = 0.0;
+    *s.add(STATE_MOD_SCRUB_DEPTH) = 0.0;
+    *s.add(STATE_MOD_SR_SOURCE) = 0.0;
+    *s.add(STATE_MOD_SR_DEPTH) = 0.0;
+    *s.add(STATE_MOD_WARP_BPM_SOURCE) = 0.0;
+    *s.add(STATE_MOD_WARP_BPM_DEPTH) = 0.0;
+    *s.add(STATE_MOD_START_SOURCE) = 0.0;
+    *s.add(STATE_MOD_START_DEPTH) = 0.0;
+    *s.add(STATE_MOD_END_SOURCE) = 0.0;
+    *s.add(STATE_MOD_END_DEPTH) = 0.0;
 }
 
 /// extern "C" process — reads sample data from buffer, writes to output.
@@ -230,7 +303,7 @@ unsafe extern "C" fn sampler_init(
 /// gate_samples=0 is treated as an explicit note-off regardless of gate_mode,
 /// so keyboard release always triggers the release phase.
 unsafe extern "C" fn sampler_process(
-    _inp: *const *mut f32,
+    inp: *const *mut f32,
     out: *const *mut f32,
     nframes: c_int,
     state: *mut c_void,
@@ -256,13 +329,13 @@ unsafe extern "C" fn sampler_process(
     let mut last_out_r = *s.add(STATE_LAST_OUT_R);
     let mut retrigger_out_l = *s.add(STATE_RETRIGGER_OUT_L);
     let mut retrigger_out_r = *s.add(STATE_RETRIGGER_OUT_R);
-    let start_point = (*s.add(STATE_START_POINT)).clamp(0.0, 1.0);
-    let end_point = (*s.add(STATE_END_POINT)).clamp(0.0, 1.0);
+    let base_start_point = (*s.add(STATE_START_POINT)).clamp(0.0, 1.0);
+    let base_end_point = (*s.add(STATE_END_POINT)).clamp(0.0, 1.0);
     let enabled = *s.add(STATE_ENABLED);
     let reverse_param = *s.add(STATE_REVERSE) > 0.5;
     let loop_mode_param = (*s.add(STATE_LOOP_MODE)).round().clamp(0.0, 3.0) as i32;
     let loop_xfade_samples = (*s.add(STATE_LOOP_XFADE_SAMPLES)).max(0.0);
-    let sr_hz = *s.add(STATE_SR_HZ);
+    let base_sr_hz = *s.add(STATE_SR_HZ);
     let mut play_direction = *s.add(STATE_PLAY_DIRECTION);
     let mut sr_phase = *s.add(STATE_SR_PHASE);
     let mut sr_held_l = *s.add(STATE_SR_HELD_L);
@@ -272,13 +345,8 @@ unsafe extern "C" fn sampler_process(
     let warp_enabled = *s.add(STATE_WARP_ENABLED) > 0.5;
     let warp_mode = (*s.add(STATE_WARP_MODE)).round() as i32;
     let mut warp_ratio = (*s.add(STATE_WARP_RATIO)).clamp(0.01, 32.0);
-    let warp_sample_bpm = (*s.add(STATE_WARP_SAMPLE_BPM)).clamp(20.0, 400.0);
+    let base_warp_sample_bpm = (*s.add(STATE_WARP_SAMPLE_BPM)).clamp(WARP_BPM_MIN, WARP_BPM_MAX);
     let warp_project_bpm = (*s.add(STATE_WARP_PROJECT_BPM)).clamp(1.0, 400.0);
-    let warp_target_ratio = if warp_enabled && warp_mode == 0 {
-        (warp_project_bpm / warp_sample_bpm).clamp(0.01, 32.0)
-    } else {
-        warp_ratio
-    };
     let onset_ptr = crate::analysis::unpack_ptr(
         *s.add(STATE_WARP_ONSET_TABLE_PTR_LO),
         *s.add(STATE_WARP_ONSET_TABLE_PTR_HI),
@@ -294,6 +362,20 @@ unsafe extern "C" fn sampler_process(
     let mut warp_prev_playhead = *s.add(STATE_WARP_PREV_PLAYHEAD);
     let mut slice_source_frame_start = *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START);
     let mut last_warp_target_ratio = (*s.add(STATE_WARP_LAST_TARGET_RATIO)).clamp(0.01, 32.0);
+    let scrub_offset = (*s.add(STATE_SCRUB_OFFSET)).clamp(-1.0, 1.0);
+    let mut scrub_smooth = *s.add(STATE_SCRUB_SMOOTH);
+    let mod_speed_source = *s.add(STATE_MOD_SPEED_SOURCE);
+    let mod_speed_depth = *s.add(STATE_MOD_SPEED_DEPTH);
+    let mod_scrub_source = *s.add(STATE_MOD_SCRUB_SOURCE);
+    let mod_scrub_depth = *s.add(STATE_MOD_SCRUB_DEPTH);
+    let mod_sr_source = *s.add(STATE_MOD_SR_SOURCE);
+    let mod_sr_depth = *s.add(STATE_MOD_SR_DEPTH);
+    let mod_warp_bpm_source = *s.add(STATE_MOD_WARP_BPM_SOURCE);
+    let mod_warp_bpm_depth = *s.add(STATE_MOD_WARP_BPM_DEPTH);
+    let mod_start_source = *s.add(STATE_MOD_START_SOURCE);
+    let mod_start_depth = *s.add(STATE_MOD_START_DEPTH);
+    let mod_end_source = *s.add(STATE_MOD_END_SOURCE);
+    let mod_end_depth = *s.add(STATE_MOD_END_DEPTH);
 
     let buf_desc = buffers as *const BufferDesc;
     let desc = &*buf_desc.add(buffer_id);
@@ -314,6 +396,10 @@ unsafe extern "C" fn sampler_process(
     }
 
     // Compute effective sample region from normalized start/end points
+    let block_start_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_start_source, 0);
+    let block_end_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_end_source, 0);
+    let start_point = modulated_normalized(base_start_point, block_start_mod, mod_start_depth);
+    let end_point = modulated_normalized(base_end_point, block_end_mod, mod_end_depth);
     let start_sample = (start_point * sample_len as f32) as usize;
     let end_sample = if end_point > start_point {
         (end_point * sample_len as f32) as usize
@@ -354,7 +440,22 @@ unsafe extern "C" fn sampler_process(
     let reverse = reverse_param && !warp_active;
     let loop_mode = loop_mode_param;
     let loop_xfade = loop_xfade_samples.min(region_len * 0.5);
-    let effective_rate = speed * (2.0_f32).powf(transpose / 12.0);
+    let block_speed_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_speed_source, 0);
+    let effective_speed = speed * (1.0 + block_speed_mod * mod_speed_depth.clamp(-1.0, 1.0));
+    let block_sr_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_sr_source, 0);
+    let sr_hz = (base_sr_hz
+        + block_sr_mod * mod_sr_depth.clamp(-1.0, 1.0) * (SR_MAX_HZ - SR_MIN_HZ))
+        .clamp(SR_MIN_HZ, SR_MAX_HZ);
+    let block_warp_bpm_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_warp_bpm_source, 0);
+    let warp_sample_bpm = (base_warp_sample_bpm
+        + block_warp_bpm_mod * mod_warp_bpm_depth.clamp(-1.0, 1.0) * (WARP_BPM_MAX - WARP_BPM_MIN))
+        .clamp(WARP_BPM_MIN, WARP_BPM_MAX);
+    let warp_target_ratio = if warp_enabled && warp_mode == 0 {
+        (warp_project_bpm / warp_sample_bpm).clamp(0.01, 32.0)
+    } else {
+        warp_ratio
+    };
+    let effective_rate = effective_speed * (2.0_f32).powf(transpose / 12.0);
     let step_rate = effective_rate.abs().max(0.0);
     let playback_step = sampler_playback_step(source_sample_rate, sample_rate, step_rate);
     let sr_step = if sr_hz > 0.0 {
@@ -702,10 +803,18 @@ unsafe extern "C" fn sampler_process(
             }
         }
 
+        let scrub_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_scrub_source, i);
+        let target_scrub =
+            (scrub_offset + scrub_mod * mod_scrub_depth.clamp(-1.0, 1.0)).clamp(-1.0, 1.0);
+        let scrub_coeff = (1.0 / (sample_rate * SCRUB_SMOOTH_SECONDS)).clamp(0.0001, 1.0);
+        scrub_smooth += (target_scrub - scrub_smooth) * scrub_coeff;
+        let read_head = (playhead + scrub_smooth * region_len)
+            .clamp(start_sample as f32, (end_sample.saturating_sub(1)) as f32);
+
         let (mut sample_l, mut sample_r) = if warp_silent {
             (0.0, 0.0)
         } else {
-            read_interpolated(sample_data, sample_len, channel_count, playhead)
+            read_interpolated(sample_data, sample_len, channel_count, read_head)
         };
         if loop_mode == 2 && loop_xfade > 0.0 {
             let fade_pos = if play_direction >= 0.0 {
@@ -786,6 +895,7 @@ unsafe extern "C" fn sampler_process(
     *s.add(STATE_WARP_PREV_PLAYHEAD) = warp_prev_playhead;
     *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START) = slice_source_frame_start;
     *s.add(STATE_WARP_LAST_TARGET_RATIO) = last_warp_target_ratio;
+    *s.add(STATE_SCRUB_SMOOTH) = scrub_smooth;
 }
 
 pub fn sampler_vtable() -> NodeVTable {
@@ -907,7 +1017,7 @@ pub fn create_sampler_node(
             sampler_vtable(),
             SAMPLER_STATE_SIZE * std::mem::size_of::<f32>(),
             c_name.as_ptr(),
-            0,
+            MOD_INPUT_COUNT as i32,
             2,
             initial_state.as_ptr() as *const c_void,
             initial_state.len() * std::mem::size_of::<f32>(),

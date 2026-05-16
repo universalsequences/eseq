@@ -2189,6 +2189,85 @@ pub(crate) fn build_sampler_panel_value(
 ) -> Value {
     use std::collections::HashMap;
 
+    const MOD_PARAM_BASE: u32 = 1_000_000;
+    const PARAM_LFO1_RATE_HZ: usize = 13;
+    const PARAM_LFO1_RETRIGGER: usize = 18;
+    const PARAM_LFO2_RATE_HZ: usize = 19;
+    const PARAM_LFO2_RETRIGGER: usize = 24;
+    const PARAM_LFO3_RATE_HZ: usize = 25;
+    const PARAM_LFO3_RETRIGGER: usize = 30;
+    const PARAM_ENV_ATTACK_MS: usize = 31;
+    const PARAM_ENV_RELEASE_MS: usize = 34;
+    const PARAM_RAND_RATE_HZ: usize = 35;
+    const PARAM_RAND_SLEW: usize = 38;
+    const PARAM_DRIFT_RATE: usize = 39;
+    const PARAM_DRIFT_DIV: usize = 41;
+
+    fn is_mod_param(name: &str) -> bool {
+        name.starts_with("mod ")
+    }
+
+    fn is_source_param(node_param_idx: u32) -> bool {
+        node_param_idx >= MOD_PARAM_BASE
+    }
+
+    fn source_section_name(node_param_idx: u32) -> &'static str {
+        if (MOD_PARAM_BASE + PARAM_LFO1_RATE_HZ as u32
+            ..=MOD_PARAM_BASE + PARAM_LFO1_RETRIGGER as u32)
+            .contains(&node_param_idx)
+        {
+            "LFO 1"
+        } else if (MOD_PARAM_BASE + PARAM_ENV_ATTACK_MS as u32
+            ..=MOD_PARAM_BASE + PARAM_ENV_RELEASE_MS as u32)
+            .contains(&node_param_idx)
+        {
+            "ENV 1"
+        } else if (MOD_PARAM_BASE + PARAM_RAND_RATE_HZ as u32
+            ..=MOD_PARAM_BASE + PARAM_RAND_SLEW as u32)
+            .contains(&node_param_idx)
+        {
+            "RAND"
+        } else if (MOD_PARAM_BASE + PARAM_DRIFT_RATE as u32
+            ..=MOD_PARAM_BASE + PARAM_DRIFT_DIV as u32)
+            .contains(&node_param_idx)
+        {
+            "DRIFT"
+        } else if (MOD_PARAM_BASE + PARAM_LFO2_RATE_HZ as u32
+            ..=MOD_PARAM_BASE + PARAM_LFO2_RETRIGGER as u32)
+            .contains(&node_param_idx)
+        {
+            "LFO 2"
+        } else {
+            "LFO 3"
+        }
+    }
+
+    fn rename_source_param(name: &str) -> String {
+        if name.ends_with("_div") || name.ends_with("_rate") {
+            "rate".to_string()
+        } else if name.ends_with("_sync") {
+            "sync".to_string()
+        } else if name.ends_with("_shape") {
+            "shape".to_string()
+        } else if name.ends_with("_pw") {
+            "pulse width".to_string()
+        } else if name.ends_with("_retrigger") {
+            "retrigger".to_string()
+        } else if name == "mod_rand_slew" {
+            "slew".to_string()
+        } else if name == "mod_env_attack" {
+            "attack".to_string()
+        } else if name == "mod_env_decay" {
+            "decay".to_string()
+        } else if name == "mod_env_sustain" {
+            "sustain".to_string()
+        } else if name == "mod_env_release" {
+            "release".to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
     app.publish_sampler_analysis_runtime(track);
 
     let sel = selected.lock().unwrap();
@@ -2225,7 +2304,10 @@ pub(crate) fn build_sampler_panel_value(
         .map(|s| s.duration_seconds)
         .unwrap_or(1.0);
 
-    let mut params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut source_params_by_section: HashMap<&'static str, Vec<Rc<RefCell<Value>>>> =
+        HashMap::new();
     let base_note = f32::from_bits(
         app.state.pattern.instrument_base_note_offsets[track].load(Ordering::Relaxed),
     );
@@ -2256,7 +2338,7 @@ pub(crate) fn build_sampler_panel_value(
             "value-field",
             instrument_base_note_value_field(track),
         );
-        params.push(Rc::new(RefCell::new(Value::Map(pmap))));
+        synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
         let default_val = if param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
@@ -2341,7 +2423,54 @@ pub(crate) fn build_sampler_panel_value(
                 }
             }
         }
-        params.push(Rc::new(RefCell::new(Value::Map(pmap))));
+        if is_source_param(pdesc.node_param_idx) {
+            if let Some(Value::String(name)) = pmap.get("name").map(|v| v.borrow().clone()) {
+                pmap.insert(
+                    "name".to_string(),
+                    Rc::new(RefCell::new(Value::String(rename_source_param(&name)))),
+                );
+            }
+            source_params_by_section
+                .entry(source_section_name(pdesc.node_param_idx))
+                .or_default()
+                .push(Rc::new(RefCell::new(Value::Map(pmap))));
+        } else if is_mod_param(&pdesc.name) {
+            if let Some(Value::String(name)) = pmap.get("name").map(|v| v.borrow().clone()) {
+                pmap.insert(
+                    "name".to_string(),
+                    Rc::new(RefCell::new(Value::String(
+                        name.strip_prefix("mod ").unwrap_or(&name).to_string(),
+                    ))),
+                );
+            }
+            mod_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
+        } else {
+            synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
+        }
+    }
+
+    let mut source_sections: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut source_names: Vec<Rc<RefCell<Value>>> = Vec::new();
+    for section_name in ["LFO 1", "ENV 1", "RAND", "DRIFT", "LFO 2", "LFO 3"] {
+        let Some(params) = source_params_by_section.remove(section_name) else {
+            continue;
+        };
+        if params.is_empty() {
+            continue;
+        }
+        source_names.push(Rc::new(RefCell::new(Value::String(
+            section_name.to_string(),
+        ))));
+        let mut section_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+        section_map.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(section_name.to_string()))),
+        );
+        section_map.insert(
+            "params".to_string(),
+            Rc::new(RefCell::new(Value::List(params))),
+        );
+        source_sections.push(Rc::new(RefCell::new(Value::Map(section_map))));
     }
 
     let mut panel_map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -2411,7 +2540,23 @@ pub(crate) fn build_sampler_panel_value(
     );
     panel_map.insert(
         "params".to_string(),
-        Rc::new(RefCell::new(Value::List(params))),
+        Rc::new(RefCell::new(Value::List(synth_params.clone()))),
+    );
+    panel_map.insert(
+        "synth".to_string(),
+        Rc::new(RefCell::new(Value::List(synth_params))),
+    );
+    panel_map.insert(
+        "mod".to_string(),
+        Rc::new(RefCell::new(Value::List(mod_params))),
+    );
+    panel_map.insert(
+        "source-names".to_string(),
+        Rc::new(RefCell::new(Value::List(source_names))),
+    );
+    panel_map.insert(
+        "sources".to_string(),
+        Rc::new(RefCell::new(Value::List(source_sections))),
     );
     // Start/end as seconds for the waveform selection overlay.
     // Raw stored values are 0.0-1.0 normalized; multiply by duration.

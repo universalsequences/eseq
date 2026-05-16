@@ -34,6 +34,8 @@ struct TrackShell {
 
 struct SamplerVoiceSetup {
     sampler_ids: Vec<i32>,
+    gatepitch_ids: Vec<i32>,
+    modulator_ids: Vec<i32>,
     voice_lids: Vec<u64>,
 }
 
@@ -42,6 +44,8 @@ enum InstrumentRegistration<'a> {
         buffer_id: i32,
         sample_rate: u32,
         sampler_ids: Vec<i32>,
+        gatepitch_ids: Vec<i32>,
+        modulator_ids: Vec<i32>,
     },
     Custom {
         engine_id: usize,
@@ -607,6 +611,7 @@ impl GraphController<'_> {
             sample_rate,
             shell.voice_sum_id,
             shell.voice_sum_r_id,
+            shell.mod_in_clip_ids,
         )?;
         self.finish_track_registration(TrackRegistration {
             idx,
@@ -617,6 +622,8 @@ impl GraphController<'_> {
                 buffer_id,
                 sample_rate,
                 sampler_ids: voices.sampler_ids,
+                gatepitch_ids: voices.gatepitch_ids,
+                modulator_ids: voices.modulator_ids,
             },
         });
         let sample_path = wav_path.to_path_buf();
@@ -645,6 +652,7 @@ impl GraphController<'_> {
             sample_rate,
             shell.voice_sum_id,
             shell.voice_sum_r_id,
+            shell.mod_in_clip_ids,
         )?;
         self.finish_track_registration(TrackRegistration {
             idx,
@@ -655,6 +663,8 @@ impl GraphController<'_> {
                 buffer_id,
                 sample_rate,
                 sampler_ids: voices.sampler_ids,
+                gatepitch_ids: voices.gatepitch_ids,
+                modulator_ids: voices.modulator_ids,
             },
         });
         self.app.sampler_paths.push(None);
@@ -860,6 +870,16 @@ impl GraphController<'_> {
             for &sampler_id in &track.sampler_ids {
                 unsafe {
                     crate::audiograph::delete_node(self.app.graph.lg.0, sampler_id);
+                }
+            }
+            for &modulator_id in &track.sampler_modulator_ids {
+                unsafe {
+                    crate::audiograph::delete_node(self.app.graph.lg.0, modulator_id);
+                }
+            }
+            for &gatepitch_id in &track.sampler_gatepitch_ids {
+                unsafe {
+                    crate::audiograph::delete_node(self.app.graph.lg.0, gatepitch_id);
                 }
             }
             unsafe {
@@ -1387,6 +1407,16 @@ impl GraphController<'_> {
                 crate::audiograph::delete_node(self.app.graph.lg.0, sampler_id);
             }
         }
+        for &modulator_id in &track.sampler_modulator_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, modulator_id);
+            }
+        }
+        for &gatepitch_id in &track.sampler_gatepitch_ids {
+            unsafe {
+                crate::audiograph::delete_node(self.app.graph.lg.0, gatepitch_id);
+            }
+        }
         unsafe {
             crate::audiograph::delete_node(self.app.graph.lg.0, track.send_id);
             crate::audiograph::delete_node(self.app.graph.lg.0, track.mod_env_id);
@@ -1675,11 +1705,51 @@ impl GraphController<'_> {
         sample_rate: u32,
         voice_sum_id: i32,
         voice_sum_r_id: i32,
+        track_mod_in_clip_ids: [i32; EXT_MOD_INPUT_COUNT],
     ) -> Result<SamplerVoiceSetup, String> {
         let mut sampler_ids = Vec::with_capacity(MAX_VOICES);
+        let mut gatepitch_ids = Vec::with_capacity(MAX_VOICES);
+        let mut modulator_ids = Vec::with_capacity(MAX_VOICES);
         let mut voice_lids = Vec::with_capacity(MAX_VOICES);
 
         for v in 0..MAX_VOICES {
+            let gp_name = CString::new(format!("{}_gp_{}", track_name, v)).unwrap();
+            let gp_id = unsafe {
+                crate::audiograph::add_node(
+                    self.app.graph.lg.0,
+                    crate::gatepitch::gatepitch_vtable(),
+                    crate::gatepitch::GATEPITCH_STATE_SIZE * std::mem::size_of::<f32>(),
+                    gp_name.as_ptr(),
+                    0,
+                    4,
+                    std::ptr::null(),
+                    0,
+                )
+            };
+            if gp_id < 0 {
+                return Err(format!(
+                    "build_sampler_voices: failed to add gatepitch node for voice {v}"
+                ));
+            }
+
+            let mod_name = CString::new(format!("{}_mod_{}", track_name, v)).unwrap();
+            let mod_id = unsafe {
+                crate::audiograph::add_node(
+                    self.app.graph.lg.0,
+                    crate::voice_modulator::voice_modulator_vtable(),
+                    crate::voice_modulator::STATE_SIZE * std::mem::size_of::<f32>(),
+                    mod_name.as_ptr(),
+                    4,
+                    crate::voice_modulator::NUM_OUTPUTS as i32,
+                    std::ptr::null(),
+                    0,
+                )
+            };
+            if mod_id < 0 {
+                return Err(format!(
+                    "build_sampler_voices: failed to add modulator node for voice {v}"
+                ));
+            }
             let node_name = format!("{}_{}", track_name, v);
             let st = crate::sampler::create_sampler_node(
                 self.app.graph.lg.0,
@@ -1688,6 +1758,33 @@ impl GraphController<'_> {
                 &node_name,
             )?;
             unsafe {
+                for port in 0..4 {
+                    crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        gp_id,
+                        port,
+                        mod_id,
+                        port,
+                    );
+                }
+                for port in 0..crate::voice_modulator::NUM_OUTPUTS {
+                    crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        mod_id,
+                        port as i32,
+                        st.node_id,
+                        port as i32,
+                    );
+                }
+                for (input, &clip_id) in track_mod_in_clip_ids.iter().enumerate() {
+                    crate::audiograph::graph_connect(
+                        self.app.graph.lg.0,
+                        clip_id,
+                        0,
+                        st.node_id,
+                        (crate::voice_modulator::NUM_OUTPUTS + input) as i32,
+                    );
+                }
                 crate::audiograph::graph_connect(
                     self.app.graph.lg.0,
                     st.node_id,
@@ -1704,11 +1801,15 @@ impl GraphController<'_> {
                 );
             }
             sampler_ids.push(st.node_id);
+            gatepitch_ids.push(gp_id);
+            modulator_ids.push(mod_id);
             voice_lids.push(st.logical_id);
         }
 
         Ok(SamplerVoiceSetup {
             sampler_ids,
+            gatepitch_ids,
+            modulator_ids,
             voice_lids,
         })
     }
@@ -2457,7 +2558,21 @@ impl GraphController<'_> {
                 buffer_id,
                 sample_rate,
                 sampler_ids,
+                gatepitch_ids,
+                modulator_ids,
             } => {
+                for (v, &sampler_id) in sampler_ids.iter().enumerate() {
+                    self.app.state.runtime.synth_node_ids[idx][v]
+                        .store(sampler_id as u32, Ordering::Release);
+                }
+                for (v, &gatepitch_id) in gatepitch_ids.iter().enumerate() {
+                    self.app.state.runtime.sampler_gatepitch_node_ids[idx][v]
+                        .store(gatepitch_id as u32, Ordering::Release);
+                }
+                for (v, &modulator_id) in modulator_ids.iter().enumerate() {
+                    self.app.state.runtime.sampler_modulator_node_ids[idx][v]
+                        .store(modulator_id as u32, Ordering::Release);
+                }
                 self.app.state.runtime.track_engine_ids[idx].store(u32::MAX, Ordering::Release);
                 if let Some(sound) = self
                     .app
@@ -2474,6 +2589,8 @@ impl GraphController<'_> {
                 self.app.graph.track_sample_rates.push(sample_rate);
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids,
+                    sampler_gatepitch_ids: gatepitch_ids.clone(),
+                    sampler_modulator_ids: modulator_ids.clone(),
                     voice_sum_id: shell.voice_sum_id,
                     voice_sum_r_id: shell.voice_sum_r_id,
                     pan_id: shell.pan_id,
@@ -2516,6 +2633,8 @@ impl GraphController<'_> {
                     .push(self.app.graph.sample_rate);
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids: Vec::new(),
+                    sampler_gatepitch_ids: Vec::new(),
+                    sampler_modulator_ids: Vec::new(),
                     voice_sum_id: shell.voice_sum_id,
                     voice_sum_r_id: shell.voice_sum_r_id,
                     pan_id: shell.pan_id,
@@ -2571,6 +2690,8 @@ impl GraphController<'_> {
                     .push(self.app.graph.sample_rate);
                 self.app.graph.track_node_ids.push(TrackNodeIds {
                     sampler_ids: Vec::new(),
+                    sampler_gatepitch_ids: Vec::new(),
+                    sampler_modulator_ids: Vec::new(),
                     voice_sum_id: shell.voice_sum_id,
                     voice_sum_r_id: shell.voice_sum_r_id,
                     pan_id: shell.pan_id,

@@ -1168,13 +1168,34 @@ impl App {
                 11 => (crate::sampler::PARAM_WARP_SAMPLE_BPM, value),
                 _ => (idx, value),
             };
-            if let Some(voice_lids) = self.graph.track_voice_lids.get(track) {
+            let is_mod_param = idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE;
+            let resolved_idx = if is_mod_param {
+                idx - crate::voice_modulator::MOD_PARAM_BASE as u64
+            } else {
+                idx
+            };
+            if is_mod_param {
+                if let Some(nodes) = self.graph.track_node_ids.get(track) {
+                    for &logical_id in &nodes.sampler_modulator_ids {
+                        unsafe {
+                            crate::audiograph::params_push_wrapper(
+                                self.graph.lg.0,
+                                crate::audiograph::ParamMsg {
+                                    idx: resolved_idx,
+                                    logical_id: logical_id as u64,
+                                    fvalue,
+                                },
+                            );
+                        }
+                    }
+                }
+            } else if let Some(voice_lids) = self.graph.track_voice_lids.get(track) {
                 for &logical_id in voice_lids {
                     unsafe {
                         crate::audiograph::params_push_wrapper(
                             self.graph.lg.0,
                             crate::audiograph::ParamMsg {
-                                idx,
+                                idx: resolved_idx,
                                 logical_id,
                                 fvalue,
                             },

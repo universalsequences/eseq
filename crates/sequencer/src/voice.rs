@@ -3,6 +3,8 @@ pub const MAX_VOICES: usize = 12;
 pub struct VoiceSlot {
     pub logical_id: u64,
     pub node_id: i32,
+    pub gatepitch_id: i32,
+    pub modulator_id: i32,
     pub age: u64,
     pub active: bool,
     pub note: f32,
@@ -21,6 +23,8 @@ impl VoicePool {
             voices: std::array::from_fn(|_| VoiceSlot {
                 logical_id: 0,
                 node_id: 0,
+                gatepitch_id: 0,
+                modulator_id: 0,
                 age: 0,
                 active: false,
                 note: 0.0,
@@ -32,10 +36,22 @@ impl VoicePool {
     }
 
     pub fn add_voice(&mut self, logical_id: u64, node_id: i32) {
+        self.add_modulated_voice(logical_id, node_id, 0, 0);
+    }
+
+    pub fn add_modulated_voice(
+        &mut self,
+        logical_id: u64,
+        node_id: i32,
+        gatepitch_id: i32,
+        modulator_id: i32,
+    ) {
         if self.num_voices < MAX_VOICES {
             self.voices[self.num_voices] = VoiceSlot {
                 logical_id,
                 node_id,
+                gatepitch_id,
+                modulator_id,
                 age: 0,
                 active: false,
                 note: 0.0,
@@ -51,6 +67,8 @@ impl VoicePool {
             *voice = VoiceSlot {
                 logical_id: 0,
                 node_id: 0,
+                gatepitch_id: 0,
+                modulator_id: 0,
                 age: 0,
                 active: false,
                 note: 0.0,

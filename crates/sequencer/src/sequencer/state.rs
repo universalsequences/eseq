@@ -866,6 +866,8 @@ pub struct RuntimeBindingState {
     pub voice_counts: Vec<AtomicU32>,
     pub instrument_type_flags: Vec<AtomicU32>,
     pub synth_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
+    pub sampler_gatepitch_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
+    pub sampler_modulator_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
     pub track_engine_ids: Vec<AtomicU32>,
     pub engine_voice_lids: Vec<[AtomicU64; MAX_VOICES]>,
     pub engine_synth_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
@@ -1019,6 +1021,12 @@ impl SequencerState {
                 voice_counts: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 instrument_type_flags: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 synth_node_ids: (0..MAX_TRACKS)
+                    .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
+                    .collect(),
+                sampler_gatepitch_node_ids: (0..MAX_TRACKS)
+                    .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
+                    .collect(),
+                sampler_modulator_node_ids: (0..MAX_TRACKS)
                     .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
                     .collect(),
                 track_engine_ids: (0..MAX_TRACKS).map(|_| AtomicU32::new(u32::MAX)).collect(),
@@ -1213,6 +1221,8 @@ impl SequencerState {
         for voice in 0..MAX_VOICES {
             self.runtime.voice_lids[track][voice].store(0, Ordering::Relaxed);
             self.runtime.synth_node_ids[track][voice].store(0, Ordering::Relaxed);
+            self.runtime.sampler_gatepitch_node_ids[track][voice].store(0, Ordering::Relaxed);
+            self.runtime.sampler_modulator_node_ids[track][voice].store(0, Ordering::Relaxed);
         }
         self.pending_accumulator_reset_tracks[track].store(false, Ordering::Relaxed);
         for engine_id in 0..MAX_TRACKS {
@@ -1300,6 +1310,14 @@ impl SequencerState {
                     self.runtime.synth_node_ids[next][voice].load(Ordering::Relaxed),
                     Ordering::Relaxed,
                 );
+                self.runtime.sampler_gatepitch_node_ids[idx][voice].store(
+                    self.runtime.sampler_gatepitch_node_ids[next][voice].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+                self.runtime.sampler_modulator_node_ids[idx][voice].store(
+                    self.runtime.sampler_modulator_node_ids[next][voice].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
             }
             self.pending_accumulator_reset_tracks[idx].store(
                 self.pending_accumulator_reset_tracks[next].load(Ordering::Relaxed),
@@ -1350,6 +1368,8 @@ impl SequencerState {
         for voice in 0..MAX_VOICES {
             self.runtime.voice_lids[last][voice].store(0, Ordering::Relaxed);
             self.runtime.synth_node_ids[last][voice].store(0, Ordering::Relaxed);
+            self.runtime.sampler_gatepitch_node_ids[last][voice].store(0, Ordering::Relaxed);
+            self.runtime.sampler_modulator_node_ids[last][voice].store(0, Ordering::Relaxed);
         }
         self.pending_accumulator_reset_tracks[last].store(false, Ordering::Relaxed);
         for engine_id in 0..MAX_TRACKS {

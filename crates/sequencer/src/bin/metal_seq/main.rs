@@ -1368,7 +1368,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         read_modulator_display_values(app.graph.lg, &app);
     let mut last_meter_poll_at = Instant::now() - METER_POLL_INTERVAL;
     let mut last_cpu_ui_poll_at = Instant::now() - CPU_UI_POLL_INTERVAL;
-    let mut last_modulator_phase_log_at = Instant::now() - Duration::from_secs(1);
     let mut last_voice_count_log_at = Instant::now() - VOICE_COUNT_LOG_INTERVAL;
     let log_voice_counts = std::env::var_os("TINYSEQ_LOG_VOICE_COUNTS").is_some();
     let mut cached_cpu_load_bits: u32 = 0.0f32.to_bits();
@@ -6517,22 +6516,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     read_modulator_display_values(app.graph.lg, &app);
                 last_meter_poll_at = Instant::now();
             }
-            if fx_visible
-                && app.graph.track_instrument_types.get(ct)
-                    == Some(&sequencer::sequencer::InstrumentType::Modulator)
-                && last_modulator_phase_log_at.elapsed() >= Duration::from_millis(500)
-            {
-                eprintln!(
-                    "modulator-phase-debug track={} phase={:.3} level={:.3} phases={:?} levels={:?}",
-                    ct,
-                    cached_modulator_phases.get(ct).copied().unwrap_or(0.0),
-                    cached_modulator_levels.get(ct).copied().unwrap_or(0.0),
-                    cached_modulator_phases,
-                    cached_modulator_levels
-                );
-                last_modulator_phase_log_at = Instant::now();
-            }
-
             let mut needs_reactive_cycle = false;
             // Track switch — rebuild everything
             if ct != prev_current_track && !app.tracks.is_empty() {

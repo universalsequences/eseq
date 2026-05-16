@@ -515,7 +515,16 @@ fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool: &mut Voic
     if !needs_reset {
         for v in 0..desired_count {
             let desired_lid = state.runtime.voice_lids[track][v].load(Ordering::Acquire);
-            if pool.voices[v].logical_id != desired_lid {
+            let desired_node_id = state.runtime.synth_node_ids[track][v].load(Ordering::Acquire);
+            let desired_gatepitch_id =
+                state.runtime.sampler_gatepitch_node_ids[track][v].load(Ordering::Acquire);
+            let desired_modulator_id =
+                state.runtime.sampler_modulator_node_ids[track][v].load(Ordering::Acquire);
+            if pool.voices[v].logical_id != desired_lid
+                || pool.voices[v].node_id as u32 != desired_node_id
+                || pool.voices[v].gatepitch_id as u32 != desired_gatepitch_id
+                || pool.voices[v].modulator_id as u32 != desired_modulator_id
+            {
                 needs_reset = true;
                 break;
             }
@@ -527,7 +536,12 @@ fn sync_sampler_voice_pool(state: &SequencerState, track: usize, pool: &mut Voic
         for v in 0..desired_count {
             let lid = state.runtime.voice_lids[track][v].load(Ordering::Acquire);
             if lid != 0 {
-                pool.add_voice(lid, lid as i32);
+                let node_id = state.runtime.synth_node_ids[track][v].load(Ordering::Acquire) as i32;
+                let gatepitch_id = state.runtime.sampler_gatepitch_node_ids[track][v]
+                    .load(Ordering::Acquire) as i32;
+                let modulator_id = state.runtime.sampler_modulator_node_ids[track][v]
+                    .load(Ordering::Acquire) as i32;
+                pool.add_modulated_voice(lid, node_id, gatepitch_id, modulator_id);
             }
         }
     }
@@ -1478,6 +1492,105 @@ unsafe fn dispatch_instrument_defaults_to_voice(
     }
 }
 
+unsafe fn dispatch_sampler_modulator_params_to_voice(
+    lg: *mut LiveGraph,
+    modulator_id: u64,
+    instrument_params: &[ScheduledInstrumentParam],
+) {
+    if modulator_id == 0 {
+        return;
+    }
+    for param in instrument_params {
+        if param.target != ScheduledInstrumentParamTarget::Modulator {
+            continue;
+        }
+        params_push_wrapper(
+            lg,
+            ParamMsg {
+                idx: param.idx,
+                logical_id: modulator_id,
+                fvalue: param.value,
+            },
+        );
+    }
+}
+
+unsafe fn dispatch_sampler_extra_params_to_voice(
+    lg: *mut LiveGraph,
+    sampler_lid: u64,
+    instrument_params: &[ScheduledInstrumentParam],
+) {
+    for param in instrument_params {
+        if param.target != ScheduledInstrumentParamTarget::Synth {
+            continue;
+        }
+        if param.idx < crate::sampler::PARAM_SCRUB_OFFSET {
+            continue;
+        }
+        params_push_wrapper(
+            lg,
+            ParamMsg {
+                idx: param.idx,
+                logical_id: sampler_lid,
+                fvalue: param.value,
+            },
+        );
+    }
+}
+
+unsafe fn dispatch_sampler_modulator_defaults_to_voice(
+    lg: *mut LiveGraph,
+    state: &SequencerState,
+    track_idx: usize,
+    modulator_id: u64,
+) {
+    if modulator_id == 0 {
+        return;
+    }
+    let slot = &state.pattern.instrument_slots[track_idx];
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    for param_idx in 0..num_params {
+        let idx = slot.resolve_node_idx(param_idx);
+        if (idx as u32) < crate::voice_modulator::MOD_PARAM_BASE {
+            continue;
+        }
+        params_push_wrapper(
+            lg,
+            ParamMsg {
+                idx: idx - crate::voice_modulator::MOD_PARAM_BASE as u64,
+                logical_id: modulator_id,
+                fvalue: slot.defaults.get(param_idx),
+            },
+        );
+    }
+}
+
+unsafe fn dispatch_sampler_extra_defaults_to_voice(
+    lg: *mut LiveGraph,
+    state: &SequencerState,
+    track_idx: usize,
+    sampler_lid: u64,
+) {
+    let slot = &state.pattern.instrument_slots[track_idx];
+    let num_params = slot.num_params.load(Ordering::Relaxed) as usize;
+    for param_idx in 0..num_params {
+        let idx = slot.resolve_node_idx(param_idx);
+        if idx < crate::sampler::PARAM_SCRUB_OFFSET
+            || idx as u32 >= crate::voice_modulator::MOD_PARAM_BASE
+        {
+            continue;
+        }
+        params_push_wrapper(
+            lg,
+            ParamMsg {
+                idx,
+                logical_id: sampler_lid,
+                fvalue: slot.defaults.get(param_idx),
+            },
+        );
+    }
+}
+
 fn dispatch_scheduled_step(
     data: &mut AudioCallbackData,
     track_idx: usize,
@@ -1849,6 +1962,14 @@ fn fire_resolved(
         .plocks
         .get(step, 11)
         .unwrap_or_else(|| inst_slot.defaults.get(11));
+    let playback_speed = inst_slot
+        .plocks
+        .get(step, 12)
+        .unwrap_or_else(|| inst_slot.defaults.get(12));
+    let scrub = inst_slot
+        .plocks
+        .get(step, 13)
+        .unwrap_or_else(|| inst_slot.defaults.get(13));
     let (
         warp_enabled,
         warp_mode,
@@ -2033,12 +2154,28 @@ fn fire_resolved(
                 } else {
                     sampler_lid
                 };
+                if voice.modulator_id > 0 {
+                    unsafe {
+                        dispatch_sampler_modulator_params_to_voice(
+                            data.lg.0,
+                            voice.modulator_id as u64,
+                            &instrument_params,
+                        );
+                        send_custom_trigger(
+                            data.lg.0,
+                            voice.gatepitch_id as u64,
+                            custom_pitch_hz(transpose + base_note_offset, 0.0),
+                            velocity,
+                        );
+                    }
+                }
                 unsafe {
+                    dispatch_sampler_extra_params_to_voice(data.lg.0, lid, &instrument_params);
                     send_trigger(
                         data.lg.0,
                         lid,
                         velocity,
-                        resolved.speed,
+                        resolved.speed * playback_speed,
                         note_chop_gate,
                         attack_samples,
                         release_samples,
@@ -2059,6 +2196,17 @@ fn fire_resolved(
                         warp_ptr_lo,
                         warp_ptr_hi,
                     );
+                    params_push_wrapper(
+                        data.lg.0,
+                        ParamMsg {
+                            idx: crate::sampler::PARAM_SCRUB_OFFSET,
+                            logical_id: lid,
+                            fvalue: scrub,
+                        },
+                    );
+                }
+                if gate_mode > 0.5 {
+                    data.gate_off_state[track_idx].schedule(lid, note_total_gate as f64);
                 }
             }
         }
@@ -2154,12 +2302,28 @@ fn fire_resolved(
             } else {
                 sampler_lid
             };
+            if voice.modulator_id > 0 {
+                unsafe {
+                    dispatch_sampler_modulator_params_to_voice(
+                        data.lg.0,
+                        voice.modulator_id as u64,
+                        &instrument_params,
+                    );
+                    send_custom_trigger(
+                        data.lg.0,
+                        voice.gatepitch_id as u64,
+                        custom_pitch_hz(transpose + base_note_offset, 0.0),
+                        velocity,
+                    );
+                }
+            }
             unsafe {
+                dispatch_sampler_extra_params_to_voice(data.lg.0, lid, &instrument_params);
                 send_trigger(
                     data.lg.0,
                     lid,
                     velocity,
-                    resolved.speed,
+                    resolved.speed * playback_speed,
                     chop_gate,
                     attack_samples,
                     release_samples,
@@ -2180,6 +2344,17 @@ fn fire_resolved(
                     warp_ptr_lo,
                     warp_ptr_hi,
                 );
+                params_push_wrapper(
+                    data.lg.0,
+                    ParamMsg {
+                        idx: crate::sampler::PARAM_SCRUB_OFFSET,
+                        logical_id: lid,
+                        fvalue: scrub,
+                    },
+                );
+            }
+            if gate_mode > 0.5 {
+                data.gate_off_state[track_idx].schedule(lid, total_gate as f64);
             }
         }
     }
@@ -2302,6 +2477,15 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     pool.release_voice_by_logical_id(active_note.logical_id);
                     if active_note.logical_id != 0 {
                         unsafe {
+                            let gatepitch_id = pool
+                                .voices
+                                .iter()
+                                .find(|voice| voice.logical_id == active_note.logical_id)
+                                .map(|voice| voice.gatepitch_id)
+                                .unwrap_or(0);
+                            if gatepitch_id > 0 {
+                                send_custom_note_off(data.lg.0, gatepitch_id as u64);
+                            }
                             params_push_wrapper(
                                 data.lg.0,
                                 ParamMsg {
@@ -2413,6 +2597,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let kb_loop_xfade_samples =
                     kb_inst_slot.defaults.get(7) * data.sample_rate as f32 / 1000.0;
                 let kb_sr_hz = kb_inst_slot.defaults.get(8);
+                let kb_playback_speed = kb_inst_slot.defaults.get(12);
                 let (
                     kb_warp_enabled,
                     kb_warp_mode,
@@ -2428,6 +2613,22 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     kb_inst_slot.defaults.get(10),
                     kb_inst_slot.defaults.get(11),
                 );
+                if voice.modulator_id > 0 {
+                    unsafe {
+                        dispatch_sampler_modulator_defaults_to_voice(
+                            data.lg.0,
+                            &data.state,
+                            kt.track,
+                            voice.modulator_id as u64,
+                        );
+                        send_custom_trigger(
+                            data.lg.0,
+                            voice.gatepitch_id as u64,
+                            custom_pitch_hz(resolved_transpose + base_note_offset, 0.0),
+                            kt.velocity,
+                        );
+                    }
+                }
                 unsafe {
                     send_keyboard_trigger(
                         data.lg.0,
@@ -2451,6 +2652,20 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                         kb_warp_project_bpm,
                         kb_warp_ptr_lo,
                         kb_warp_ptr_hi,
+                    );
+                    params_push_wrapper(
+                        data.lg.0,
+                        ParamMsg {
+                            idx: crate::sampler::PARAM_SPEED,
+                            logical_id: voice_lid,
+                            fvalue: kb_playback_speed,
+                        },
+                    );
+                    dispatch_sampler_extra_defaults_to_voice(
+                        data.lg.0,
+                        &data.state,
+                        kt.track,
+                        voice_lid,
                     );
                 }
                 store_active_keyboard_note(
@@ -2653,6 +2868,10 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 .plocks
                 .get(cs.step, 11)
                 .unwrap_or_else(|| chop_inst_slot.defaults.get(11));
+            let chop_playback_speed = chop_inst_slot
+                .plocks
+                .get(cs.step, 12)
+                .unwrap_or_else(|| chop_inst_slot.defaults.get(12));
             let (
                 chop_warp_enabled,
                 chop_warp_mode,
@@ -2685,12 +2904,34 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 } else {
                     sampler_lid
                 };
+                if voice.modulator_id > 0 {
+                    unsafe {
+                        dispatch_sampler_modulator_defaults_to_voice(
+                            data.lg.0,
+                            &data.state,
+                            track_idx,
+                            voice.modulator_id as u64,
+                        );
+                        send_custom_trigger(
+                            data.lg.0,
+                            voice.gatepitch_id as u64,
+                            custom_pitch_hz(transpose + chop_base_note_offset, 0.0),
+                            sd.get(cs.step, StepParam::Velocity),
+                        );
+                    }
+                }
                 unsafe {
+                    dispatch_sampler_extra_defaults_to_voice(
+                        data.lg.0,
+                        &data.state,
+                        track_idx,
+                        lid,
+                    );
                     send_trigger(
                         data.lg.0,
                         lid,
                         sd.get(cs.step, StepParam::Velocity),
-                        sd.get(cs.step, StepParam::Speed),
+                        sd.get(cs.step, StepParam::Speed) * chop_playback_speed,
                         cs.chop_gate,
                         attack_samples,
                         release_samples,
@@ -2740,6 +2981,17 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                     send_custom_note_off(data.lg.0, lid);
                 }
             } else {
+                if let Some(voice) = data.voice_pools[track_idx].voices
+                    [..data.voice_pools[track_idx].num_voices]
+                    .iter()
+                    .find(|voice| voice.logical_id == lid)
+                {
+                    if voice.gatepitch_id > 0 {
+                        unsafe {
+                            send_custom_note_off(data.lg.0, voice.gatepitch_id as u64);
+                        }
+                    }
+                }
                 data.voice_pools[track_idx].release_voice_by_logical_id(lid);
             }
         }
