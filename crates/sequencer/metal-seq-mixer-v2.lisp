@@ -182,7 +182,7 @@
       (set! mixer-v2-pending-mod-source -1))))
 
 (defwidget mixer-v2-mod-port
-  :width 1.05 :height 1.05
+  :width 1.55 :height 1.55
   :paint-margin 0.12
   :state (active pending output selected)
   :shader
@@ -364,7 +364,7 @@
       :border-color (mixer-v2-strip-border selected)
       :padding 0.45
       :on-click |x y r| (mixer-v2-select-track i)
-      (v-stack :gap 0.25
+      (v-stack :gap 0.15
         (dropdown :value (nth SEQ.track-outputs i)
           :key (str "mixer-v2-track-output-" i)
           :options SEQ.track-output-options
@@ -483,15 +483,15 @@
 
 (def mixer-v2-bus-strip (i)
   (let ((selected (= selected-bus i)))
-    (box :width 9.3 :height 11.0
+    (box :width 9.3 :height 12.0
       :background-color (mixer-v2-strip-bg selected (nth SEQ.bus-mutes i))
       :border-width 2
       :corner-radius 10
       :border-color (mixer-v2-strip-border selected)
       :padding 0.45
       :on-click |x y r| (mixer-v2-select-bus i)
-      (v-stack :gap 0.4
-        (box :height 3.0)
+      (v-stack :gap 0.25
+        (box :height 4.8)
         (h-stack :gap 0.45 :align :center
           (box :width 3.0 :height 3.6)
           (mixer-v2-bus-meter-control i))
