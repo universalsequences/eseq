@@ -809,6 +809,12 @@ fragment float4 waveform_frag(
         _pad: [f32; 3],
     }
 
+    #[derive(Clone, Copy)]
+    struct PatchCableDrawInstance {
+        instance: PatchCableInstance,
+        clip: MTLScissorRect,
+    }
+
     struct WaveformGpuResource {
         bucket_count: u32,
         buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -2255,13 +2261,12 @@ fragment float4 waveform_frag(
                     let cursor_px = (self.cursor_pos.0 * cell_w, self.cursor_pos.1 * cell_h);
                     let cables = build_mod_patch_cables(&mod_patch_ports, vp_w, vp_h, cursor_px);
                     draw_patch_cable_instances(&enc, &self.device, &cable_pipeline, &cables);
-                    let highlight_verts = build_mod_patch_drag_highlight_verts(
-                        &mod_patch_ports,
-                        cursor_px,
-                        vp_w,
-                        vp_h,
-                    );
-                    if !highlight_verts.is_empty() {
+                    let highlight =
+                        build_mod_patch_drag_highlight(&mod_patch_ports, cursor_px, vp_w, vp_h);
+                    if let Some((highlight_verts, highlight_clip)) = highlight
+                        && !highlight_verts.is_empty()
+                    {
+                        enc.setScissorRect(highlight_clip);
                         draw_text_verts(
                             &enc,
                             &self.device,
@@ -4157,6 +4162,7 @@ fragment float4 waveform_frag(
         active: bool,
         pending: bool,
         center_px: (f32, f32),
+        clip: MTLScissorRect,
         connected_sources: Vec<usize>,
         selected_sources: Vec<usize>,
     }
@@ -4167,7 +4173,7 @@ fragment float4 waveform_frag(
         row_off: f32,
         cell_w: f32,
         cell_h: f32,
-        _visible_scissor: MTLScissorRect,
+        visible_scissor: MTLScissorRect,
         out: &mut Vec<ModPatchPort>,
     ) {
         if layout_node_bool_prop(node, "patch-port") {
@@ -4186,6 +4192,7 @@ fragment float4 waveform_frag(
                         active: layout_node_bool_prop(node, "active"),
                         pending: layout_node_bool_prop(node, "pending"),
                         center_px,
+                        clip: visible_scissor,
                         connected_sources: layout_node_usize_list_prop(node, "connected-sources"),
                         selected_sources: layout_node_usize_list_prop(node, "selected-sources"),
                     });
@@ -4200,7 +4207,7 @@ fragment float4 waveform_frag(
                 row_off,
                 cell_w,
                 cell_h,
-                _visible_scissor,
+                visible_scissor,
                 out,
             );
         }
@@ -4249,11 +4256,11 @@ fragment float4 waveform_frag(
         vp_w: f32,
         vp_h: f32,
         cursor_px: (f32, f32),
-    ) -> Vec<PatchCableInstance> {
+    ) -> Vec<PatchCableDrawInstance> {
         let mut outputs = HashMap::new();
         for port in ports {
             if port.direction == ModPatchPortDirection::Out && port.active {
-                outputs.insert(port.track, port.center_px);
+                outputs.insert(port.track, (port.center_px, port.clip));
             }
         }
 
@@ -4271,14 +4278,16 @@ fragment float4 waveform_frag(
                 continue;
             }
             for source in &port.connected_sources {
-                let Some(start) = outputs.get(source).copied() else {
+                let Some((start, source_clip)) = outputs.get(source).copied() else {
                     continue;
                 };
+                let cable_clip = shared_endpoint_clip(source_clip, port.clip, vp_w, vp_h);
                 push_mod_patch_cable_instance(
                     (start.0 + 1.4, start.1 + 2.2),
                     (port.center_px.0 + 1.4, port.center_px.1 + 2.2),
                     3.6,
                     shadow_color,
+                    cable_clip,
                     &mut cables,
                     vp_w,
                     vp_h,
@@ -4304,6 +4313,7 @@ fragment float4 waveform_frag(
                     port.center_px,
                     1.85,
                     color,
+                    cable_clip,
                     &mut cables,
                     vp_w,
                     vp_h,
@@ -4318,6 +4328,7 @@ fragment float4 waveform_frag(
                     } else {
                         highlight_color
                     },
+                    cable_clip,
                     &mut cables,
                     vp_w,
                     vp_h,
@@ -4333,6 +4344,7 @@ fragment float4 waveform_frag(
                 (cursor_px.0 + 1.4, cursor_px.1 + 2.2),
                 3.6,
                 shadow_color,
+                source_port.clip,
                 &mut cables,
                 vp_w,
                 vp_h,
@@ -4343,6 +4355,7 @@ fragment float4 waveform_frag(
                 cursor_px,
                 1.85,
                 preview_color,
+                source_port.clip,
                 &mut cables,
                 vp_w,
                 vp_h,
@@ -4353,6 +4366,7 @@ fragment float4 waveform_frag(
                 (cursor_px.0, cursor_px.1 - 0.7),
                 0.55,
                 preview_highlight_color,
+                source_port.clip,
                 &mut cables,
                 vp_w,
                 vp_h,
@@ -4360,6 +4374,32 @@ fragment float4 waveform_frag(
             );
         }
         cables
+    }
+
+    fn full_viewport_scissor(vp_w: f32, vp_h: f32) -> MTLScissorRect {
+        MTLScissorRect {
+            x: 0,
+            y: 0,
+            width: vp_w.ceil().max(0.0) as usize,
+            height: vp_h.ceil().max(0.0) as usize,
+        }
+    }
+
+    fn same_scissor(a: MTLScissorRect, b: MTLScissorRect) -> bool {
+        a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height
+    }
+
+    fn shared_endpoint_clip(
+        source_clip: MTLScissorRect,
+        dest_clip: MTLScissorRect,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> MTLScissorRect {
+        if same_scissor(source_clip, dest_clip) {
+            source_clip
+        } else {
+            full_viewport_scissor(vp_w, vp_h)
+        }
     }
 
     fn nearest_mod_input_port<'a>(
@@ -4387,19 +4427,19 @@ fragment float4 waveform_frag(
         dx * dx + dy * dy
     }
 
-    fn build_mod_patch_drag_highlight_verts(
+    fn build_mod_patch_drag_highlight(
         ports: &[ModPatchPort],
         cursor_px: (f32, f32),
         vp_w: f32,
         vp_h: f32,
-    ) -> Vec<Vertex> {
+    ) -> Option<(Vec<Vertex>, MTLScissorRect)> {
         let Some(source_port) = ports.iter().find(|port| {
             port.direction == ModPatchPortDirection::Out && port.active && port.pending
         }) else {
-            return Vec::new();
+            return None;
         };
         let Some(input_port) = nearest_mod_input_port(ports, source_port.track, cursor_px) else {
-            return Vec::new();
+            return None;
         };
         let mut verts = Vec::new();
         let size = 13.5;
@@ -4428,7 +4468,7 @@ fragment float4 waveform_frag(
             vp_w,
             vp_h,
         );
-        verts
+        Some((verts, input_port.clip))
     }
 
     fn push_mod_patch_cable_instance(
@@ -4436,7 +4476,8 @@ fragment float4 waveform_frag(
         end: (f32, f32),
         radius_px: f32,
         color: Color,
-        cables: &mut Vec<PatchCableInstance>,
+        clip: MTLScissorRect,
+        cables: &mut Vec<PatchCableDrawInstance>,
         vp_w: f32,
         vp_h: f32,
         tension: f32,
@@ -4461,18 +4502,21 @@ fragment float4 waveform_frag(
         }
         let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
         let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
-        cables.push(PatchCableInstance {
-            ndc_min: [ndc_x(min_x), ndc_y(min_y)],
-            ndc_max: [ndc_x(max_x), ndc_y(max_y)],
-            bounds_min: [min_x, min_y],
-            bounds_max: [max_x, max_y],
-            start: [start.0, start.1],
-            control1: [c1.0, c1.1],
-            control2: [c2.0, c2.1],
-            end: [end.0, end.1],
-            color: color.to_rgba(),
-            radius_px,
-            _pad: [0.0; 3],
+        cables.push(PatchCableDrawInstance {
+            instance: PatchCableInstance {
+                ndc_min: [ndc_x(min_x), ndc_y(min_y)],
+                ndc_max: [ndc_x(max_x), ndc_y(max_y)],
+                bounds_min: [min_x, min_y],
+                bounds_max: [max_x, max_y],
+                start: [start.0, start.1],
+                control1: [c1.0, c1.1],
+                control2: [c2.0, c2.1],
+                end: [end.0, end.1],
+                color: color.to_rgba(),
+                radius_px,
+                _pad: [0.0; 3],
+            },
+            clip,
         });
     }
 
@@ -5051,30 +5095,47 @@ fragment float4 waveform_frag(
         enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
         device: &ProtocolObject<dyn MTLDevice>,
         pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
-        instances: &[PatchCableInstance],
+        instances: &[PatchCableDrawInstance],
     ) {
         if instances.is_empty() {
             return;
         }
-        let byte_len = std::mem::size_of_val(instances);
-        let Some(buffer) = (unsafe {
-            device.newBufferWithBytes_length_options(
-                NonNull::new(instances.as_ptr() as *mut _).unwrap(),
-                byte_len,
-                MTLResourceOptions(0),
-            )
-        }) else {
-            return;
-        };
         enc.setRenderPipelineState(pipeline);
-        unsafe {
-            enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
-            enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
-                MTLPrimitiveType::Triangle,
-                0,
-                6,
-                instances.len() as _,
-            );
+
+        let mut run_start = 0;
+        while run_start < instances.len() {
+            let clip = instances[run_start].clip;
+            let mut run_end = run_start + 1;
+            while run_end < instances.len() && same_scissor(instances[run_end].clip, clip) {
+                run_end += 1;
+            }
+
+            let run: Vec<PatchCableInstance> = instances[run_start..run_end]
+                .iter()
+                .map(|draw| draw.instance)
+                .collect();
+            let byte_len = std::mem::size_of_val(run.as_slice());
+            let Some(buffer) = (unsafe {
+                device.newBufferWithBytes_length_options(
+                    NonNull::new(run.as_ptr() as *mut _).unwrap(),
+                    byte_len,
+                    MTLResourceOptions(0),
+                )
+            }) else {
+                run_start = run_end;
+                continue;
+            };
+            enc.setScissorRect(clip);
+            unsafe {
+                enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+                enc.drawPrimitives_vertexStart_vertexCount_instanceCount(
+                    MTLPrimitiveType::Triangle,
+                    0,
+                    6,
+                    run.len() as _,
+                );
+            }
+            run_start = run_end;
         }
     }
 
