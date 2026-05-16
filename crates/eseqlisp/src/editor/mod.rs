@@ -490,6 +490,8 @@ impl Editor {
                     continue;
                 }
                 if let Some(leaf) = self.tile_root.find_leaf_mut(id) {
+                    leaf.cached_layout = None;
+                    leaf.dirty_widget_ids.clear();
                     leaf.cached_inactive_frame = None;
                     if !buf_indices.contains(&leaf.buffer_idx) {
                         buf_indices.push(leaf.buffer_idx);

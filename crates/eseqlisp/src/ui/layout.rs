@@ -148,7 +148,9 @@ impl<'a> LayoutEngine<'a> {
         let has_flex_children = get_children(tree)
             .iter()
             .any(|child| get_prop_num(child, "flex").is_some_and(|f| f > 0.0));
-        let root_height = if has_flex_children {
+        let root_height = if prop_is_keyword(tree, "height", "fill") {
+            self.terminal_rows as f32
+        } else if has_flex_children {
             (self.terminal_rows as f32).max(size.height)
         } else {
             size.height
@@ -2043,6 +2045,25 @@ mod tests {
         let layout = engine.layout(&tree).unwrap();
 
         assert_eq!(layout.rect.width, 80.0);
+    }
+
+    #[test]
+    fn height_fill_root_box_expands_to_viewport_height() {
+        let tree = build_widget(
+            "box",
+            vec![
+                kw("width"),
+                kw("fill"),
+                kw("height"),
+                kw("fill"),
+                label("centered", None),
+            ],
+        );
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let layout = engine.layout(&tree).unwrap();
+
+        assert_eq!(layout.rect.height, 24.0);
+        assert_eq!(layout.children[0].rect.height, 24.0);
     }
 
     #[test]

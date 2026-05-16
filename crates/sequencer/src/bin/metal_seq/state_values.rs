@@ -3876,6 +3876,7 @@ pub(crate) fn track_step_has_plock(
 mod tests {
     use super::*;
     use eseqlisp::parser::{ASTParser, Parser, ParserError, Token};
+    use std::collections::HashMap;
 
     fn agent_test_string_list(values: &[&str]) -> Value {
         Value::List(
@@ -5106,6 +5107,13 @@ mod tests {
         }
     }
 
+    fn layout_bottom(node: &eseqlisp::layout::LayoutNode) -> f32 {
+        node.children
+            .iter()
+            .map(layout_bottom)
+            .fold(node.rect.row + node.rect.height, f32::max)
+    }
+
     fn assert_finite_layout_tree(node: &eseqlisp::layout::LayoutNode) {
         assert!(
             node.rect.col.is_finite()
@@ -5557,6 +5565,76 @@ mod tests {
             ("fold", 0.18, 0.0, 1.0),
             ("drive", 1.25, 0.2, 8.0),
             ("gain", 0.28, 0.0, 1.0),
+        ];
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(
+                std::iter::once(Value::Map(test_base_note_param_map(0)))
+                    .chain(
+                        params
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, (name, value, min, max))| {
+                                Value::Map(test_param_map(name, idx + 1, *value, *min, *max))
+                            }),
+                    )
+                    .collect(),
+            ))),
+        );
+        inst
+    }
+
+    fn prophet_6_inspired_test_instrument_map() -> HashMap<String, Rc<RefCell<Value>>> {
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                "emulations/prophet-6-inspired/".to_string(),
+            ))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String(
+                "prophet-6-inspired".to_string(),
+            ))),
+        );
+
+        let params = [
+            ("amp_attack_ms", 4.0, 1.0, 4000.0),
+            ("amp_decay_ms", 150.0, 1.0, 4000.0),
+            ("amp_sustain", 0.82, 0.0, 1.0),
+            ("amp_release_ms", 320.0, 1.0, 6000.0),
+            ("filt_attack_ms", 2.0, 1.0, 4000.0),
+            ("filt_decay_ms", 220.0, 1.0, 4000.0),
+            ("filt_sustain", 0.10, 0.0, 1.0),
+            ("filt_release_ms", 340.0, 1.0, 6000.0),
+            ("osc1_shape", 0.92, 0.0, 1.0),
+            ("osc2_shape", 0.24, 0.0, 1.0),
+            ("osc1_semitones", 0.0, -24.0, 24.0),
+            ("osc2_semitones", 0.0, -24.0, 24.0),
+            ("pulse_width", 0.50, 0.10, 0.90),
+            ("osc_mix", 0.43, 0.0, 1.0),
+            ("osc_slop", 0.22, 0.0, 0.6),
+            ("osc_detune_cents", 8.0, -25.0, 25.0),
+            ("shape_drift", 0.16, 0.0, 0.5),
+            ("sub_level", 0.12, 0.0, 0.7),
+            ("noise_level", 0.010, 0.0, 0.25),
+            ("brass", 0.38, 0.0, 1.0),
+            ("cutoff", 820.0, 30.0, 12000.0),
+            ("resonance", 1.75, 0.5, 3.9),
+            ("filter_env_amt", 4200.0, -8000.0, 8000.0),
+            ("keytrack", 0.46, 0.0, 1.0),
+            ("vel_to_filter", 0.34, 0.0, 1.0),
+            ("filter_drive", 1.35, 0.2, 5.0),
+            ("filter_tone", 0.68, 0.0, 1.0),
+            ("cutoff_skew", 0.16, 0.0, 1.0),
+            ("lfo_rate_hz", 3.6, 0.05, 20.0),
+            ("lfo_to_pw", 0.0, 0.0, 0.35),
+            ("lfo_to_cutoff", 0.0, 0.0, 1800.0),
+            ("env_to_pitch", 0.0, -12.0, 12.0),
+            ("vibrato", 0.0, 0.0, 0.08),
+            ("stereo_spread", 0.08, 0.0, 1.0),
+            ("gain", 0.18, 0.0, 1.0),
         ];
         inst.insert(
             "synth".to_string(),
@@ -6377,6 +6455,160 @@ mod tests {
                 .find_leaf(fx_tile_id)
                 .expect("fx tile leaf should still exist")
                 .widget_viewport_height
+        );
+    }
+
+    #[test]
+    fn metal_seq_full_grid_empty_metal_buffer_is_centered_and_does_not_y_scroll_on_load() {
+        use crossterm::event::{KeyModifiers, MouseEvent, MouseEventKind};
+
+        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(0.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("empty startup grid refresh should not report status: {status}");
+        }
+
+        let frame = eseqlisp::frame::build_tiled_render_frame_borderless(&mut editor, 180, 90);
+        let metal_tile = frame
+            .tiles
+            .iter()
+            .find(|tile| tile.frame.buffer_name == "*metal*")
+            .expect("full grid layout should contain *metal* tile");
+        let metal_tile_id = metal_tile.tile_id;
+        let layout = metal_tile
+            .frame
+            .widget_layout
+            .as_ref()
+            .expect("metal tile should have widget layout");
+        let prompt = find_layout_node_by_text(layout, "Select a sound to create a track")
+            .expect("empty metal prompt should be present in tiled startup layout");
+        let prompt_center = prompt.rect.row + prompt.rect.height * 0.5;
+        let viewport_height = editor
+            .tile_root
+            .find_leaf(metal_tile_id)
+            .expect("metal tile leaf should exist")
+            .widget_viewport_height;
+        let content_bottom = layout_bottom(layout);
+
+        assert!(
+            (prompt_center - viewport_height * 0.5).abs() <= 2.0,
+            "empty *metal* prompt should be centered in its tiled viewport; prompt={:?}, viewport={viewport_height:.3}, content_bottom={content_bottom:.3}",
+            prompt.rect
+        );
+        assert!(
+            content_bottom <= viewport_height + 0.01,
+            "empty *metal* content should fit tiled viewport without scroll overflow; content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
+        );
+
+        let before = editor
+            .tile_root
+            .find_leaf(metal_tile_id)
+            .expect("metal tile leaf should exist")
+            .widget_scroll_top;
+        let scroll_col = (metal_tile.rect.col + metal_tile.rect.width * 0.5).floor() as u16;
+        let scroll_row = (metal_tile.rect.row + metal_tile.rect.height * 0.5).floor() as u16;
+        editor.handle_tiled_mouse_precise(
+            mouse_event(MouseEventKind::ScrollDown, scroll_col, scroll_row),
+            scroll_col as f32 + 0.5,
+            scroll_row as f32 + 0.5,
+            0,
+        );
+        let after = editor
+            .tile_root
+            .find_leaf(metal_tile_id)
+            .expect("metal tile leaf should still exist")
+            .widget_scroll_top;
+
+        assert_eq!(
+            after, before,
+            "empty *metal* tiled startup layout fits but wheel scroll changed; tile_id={metal_tile_id}, content_bottom={content_bottom:.3}, viewport={viewport_height:.3}"
+        );
+    }
+
+    #[test]
+    fn metal_seq_empty_metal_buffer_centers_prompt_without_overflow() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(0.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("empty metal refresh should not report status: {status}");
+        }
+
+        let metal_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*metal*")
+            .expect("metal buffer should exist")
+            .id;
+        editor.set_active_buffer(metal_id);
+        editor.set_layout_viewport(120, 36);
+        let layout = editor.widget_layout().expect("empty metal layout");
+        let prompt = find_layout_node_by_text(&layout, "Select a sound to create a track")
+            .expect("empty metal prompt should be present");
+        let prompt_center = prompt.rect.row + prompt.rect.height * 0.5;
+
+        assert!(
+            (prompt_center - 18.0).abs() <= 2.0,
+            "empty metal prompt should be vertically centered, got rect {:?}",
+            prompt.rect
+        );
+        assert!(
+            layout_bottom(&layout) <= 36.01,
+            "empty metal fallback should fit viewport without scroll overflow; bottom={:.3}",
+            layout_bottom(&layout)
+        );
+    }
+
+    #[test]
+    fn metal_seq_empty_fx_panel_centers_prompt_without_overflow() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(0.0));
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("empty fx refresh should not report status: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx buffer should exist")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(120, 10);
+        let layout = editor.widget_layout().expect("empty fx layout");
+        let prompt = find_layout_node_by_text(&layout, "Instrument and effects appear here")
+            .expect("empty fx prompt should be present");
+        let prompt_center = prompt.rect.row + prompt.rect.height * 0.5;
+
+        assert!(
+            (prompt_center - 5.0).abs() <= 1.0,
+            "empty fx prompt should be vertically centered, got rect {:?}",
+            prompt.rect
+        );
+        assert!(
+            layout_bottom(&layout) <= 10.01,
+            "empty fx fallback should fit viewport without scroll overflow; bottom={:.3}",
+            layout_bottom(&layout)
         );
     }
 
@@ -8777,6 +9009,128 @@ mod tests {
                     && node.rect.row + node.rect.height
                         <= instrument_panel.rect.row + instrument_panel.rect.height,
                 "{suffix} should be vertically inside the visible instrument panel, got {:?}; panel={:?}",
+                node.rect,
+                instrument_panel.rect
+            );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_prophet_6_inspired_condensed_controls() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let ui = std::fs::read_to_string("instruments/emulations/prophet-6-inspired/ui.lisp")
+            .expect("read prophet-6-inspired ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "emulations/prophet-6-inspired/".to_string(),
+            "instruments/emulations/prophet-6-inspired/ui.lisp".to_string(),
+            ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(180, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(prophet_6_inspired_test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load prophet-6-inspired custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("prophet-6-inspired custom instrument fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        editor.set_layout_viewport(180, 18);
+        let layout = editor
+            .widget_layout()
+            .expect("prophet-6-inspired layout should build");
+        let rendered = render_layout_cells(&layout, 180, 18);
+        assert!(
+            !rendered.contains("missing:"),
+            "prophet-6-inspired condensed UI should not render missing-param diagnostics:\n{rendered}"
+        );
+
+        let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+            .expect("instrument panel layout node");
+        let adsr_editor =
+            find_layout_node_by_widget_type(&layout, "adsr-editor").expect("adsr editor");
+        assert!(
+            adsr_editor.rect.width > 8.0 && adsr_editor.rect.height > 2.0,
+            "prophet-6-inspired ADSR editor should have a visible measured rect, got {:?}",
+            adsr_editor.rect
+        );
+
+        for suffix in [
+            "osc1_shape",
+            "osc2_shape",
+            "cutoff",
+            "filter_drive",
+            "lfo_rate_hz",
+            "gain",
+        ] {
+            let node = find_stable_key_suffix(&layout, suffix)
+                .unwrap_or_else(|| panic!("{suffix} control should be present"));
+            assert!(
+                node.rect.width > 1.0
+                    && node.rect.height > 0.4
+                    && node.rect.row >= instrument_panel.rect.row
+                    && node.rect.row + node.rect.height
+                        <= instrument_panel.rect.row + instrument_panel.rect.height,
+                "{suffix} should have a finite visible rect inside the instrument panel, got {:?}; panel={:?}",
                 node.rect,
                 instrument_panel.rect
             );
