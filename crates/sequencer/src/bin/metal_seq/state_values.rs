@@ -5107,6 +5107,28 @@ mod tests {
         }
     }
 
+    fn collect_tile_buffer_names(editor: &eseqlisp::Editor) -> Vec<String> {
+        fn visit(
+            node: &eseqlisp::tile::TileNode,
+            buffers: &[eseqlisp::buffer::Buffer],
+            out: &mut Vec<String>,
+        ) {
+            match node {
+                eseqlisp::tile::TileNode::Leaf(leaf) => {
+                    out.push(buffers[leaf.buffer_idx].name.clone());
+                }
+                eseqlisp::tile::TileNode::Split(split) => {
+                    visit(&split.a, buffers, out);
+                    visit(&split.b, buffers, out);
+                }
+            }
+        }
+
+        let mut names = Vec::new();
+        visit(&editor.tile_root, &editor.buffers, &mut names);
+        names
+    }
+
     fn layout_bottom(node: &eseqlisp::layout::LayoutNode) -> f32 {
         node.children
             .iter()
@@ -6148,6 +6170,37 @@ mod tests {
         assert_eq!(
             editor.runtime_mut().eval_str("lower-panel-buffer").unwrap(),
             Some(Value::String("*piano-roll*".to_string()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_bottom_piano_roll_layout_expands_track_panel_over_step_panel() {
+        let mut editor = full_grid_editor_for_scroll_tests();
+
+        editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-main-or-piano-roll)")
+            .expect("open piano roll in bottom panel");
+        editor.refresh_runtime_side_effects();
+
+        let tile_buffers = collect_tile_buffer_names(&editor);
+        assert!(
+            tile_buffers.contains(&"*track*".to_string()),
+            "bottom piano roll layout should keep the track parameters panel visible: {tile_buffers:?}"
+        );
+        assert!(
+            !tile_buffers.contains(&"*metal*".to_string())
+                && !tile_buffers.contains(&"*sequencer*".to_string()),
+            "bottom piano roll layout should replace the step panel with the expanded track panel: {tile_buffers:?}"
+        );
+
+        let track_count = tile_buffers
+            .iter()
+            .filter(|name| name.as_str() == "*track*")
+            .count();
+        assert_eq!(
+            track_count, 1,
+            "bottom piano roll layout should have one expanded track tile: {tile_buffers:?}"
         );
     }
 

@@ -45,15 +45,20 @@
 (def seq-visible-step-panel-buffer ()
   step-panel-buffer)
 
+(def seq-step-and-track-panel-layout-spec (lower-buffer)
+  (if (= lower-buffer "*piano-roll*")
+    (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
+    (list :cols :gap 1
+      0.78 (list :buf (seq-visible-step-panel-buffer) :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
+      0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))))
+
 (def seq-lower-panel-layout-spec (lower-buffer lower-ratio lower-min-height lower-max-height)
   (list :rows :gap 1
     0.05 (list :buf "*transport*" :hide-status true :borderless true :min-height 2.4 :max-height 2.4)
     0.95 (list :cols :gap 1
       0.2 (list :buf "*samples*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 34 :max-width 42)
       0.8 (list :rows :gap 1
-        0.55 (list :cols :gap 1
-          0.78 (list :buf (seq-visible-step-panel-buffer) :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 25)
-          0.22 (list :buf "*track*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-width 28 :max-width 44))
+        0.55 (seq-step-and-track-panel-layout-spec lower-buffer)
         0.45 (list :buf "*mixer*" :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height 13 :max-height 13)))
     lower-ratio (list :buf lower-buffer :hide-status true :border-radius 12 :border-width 4 :background-color :buffer-bg :min-height lower-min-height :max-height lower-max-height)))
 
