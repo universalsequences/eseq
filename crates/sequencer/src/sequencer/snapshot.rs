@@ -66,10 +66,11 @@ impl SequencerSnapshot {
 
     pub fn capture(state: &SequencerState) -> Self {
         let num_tracks = state.active_track_count();
+        let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
         let transport = SequencerTransportSnapshot {
             bpm: state.transport.bpm.load(Ordering::Relaxed),
             playing: state.transport.playing.load(Ordering::Relaxed),
-            current_pattern: state.pattern.current_pattern.load(Ordering::Relaxed) as usize,
+            current_pattern,
             pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
             topology_epoch: state.transport.topology_epoch.load(Ordering::Relaxed),
             num_tracks,
@@ -169,7 +170,14 @@ impl SequencerSnapshot {
         Self {
             transport,
             tracks,
-            mod_connections: Vec::new(),
+            mod_connections: state
+                .pattern
+                .pattern_bank
+                .lock()
+                .unwrap()
+                .get(current_pattern)
+                .map(|pattern| pattern.mod_connections.clone())
+                .unwrap_or_default(),
         }
     }
 }

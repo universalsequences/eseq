@@ -3297,6 +3297,24 @@ mod tests {
     }
 
     #[test]
+    fn publish_scheduler_snapshot_captures_current_pattern_mod_connections() {
+        let state = make_state_with_tracks(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 2,
+        };
+        state.pattern.pattern_bank.lock().unwrap()[0]
+            .mod_connections
+            .push(route);
+
+        state.publish_scheduler_snapshot();
+
+        let snapshot = state.latest_scheduler_snapshot();
+        assert_eq!(snapshot.mod_connections, vec![route]);
+    }
+
+    #[test]
     fn accumulator_reset_requests_are_consumed_once() {
         let state = SequencerState::new(
             2,

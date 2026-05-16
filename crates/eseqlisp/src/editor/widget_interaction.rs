@@ -15,6 +15,9 @@ use crate::widget_render::{
 use super::Editor;
 use super::widget_focus::find_node_by_id;
 
+const PATCH_PORT_CANCEL_RADIUS_CELLS: f32 = 1.5;
+const PATCH_PORT_DROP_RADIUS_CELLS: f32 = 1.75;
+
 fn is_slider_widget(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "hslider" | "vslider" | "slider")
 }
@@ -172,6 +175,19 @@ fn patch_miss_output(layout: &LayoutNode) -> Option<crate::widget_render::EventO
     })
 }
 
+fn patch_cancel_output(layout: &LayoutNode) -> Option<crate::widget_render::EventOutput> {
+    let mut ports = Vec::new();
+    collect_patch_port_layouts(layout, &mut ports);
+    let source = ports
+        .iter()
+        .find(|port| port.direction == PatchPortDirection::Out && port.active && port.pending)?;
+    let callback = source.on_patch_cancel.clone()?;
+    Some(crate::widget_render::EventOutput {
+        callback,
+        args: vec![Value::Number(source.track as f64)],
+    })
+}
+
 fn patch_drop_output(
     layout: &LayoutNode,
     layout_col: f32,
@@ -182,14 +198,12 @@ fn patch_drop_output(
     let source = ports
         .iter()
         .find(|port| port.direction == PatchPortDirection::Out && port.active && port.pending)?;
-    if squared_distance(source.center, (layout_col, layout_row)) < 2.25 {
-        let callback = source.on_patch_cancel.clone()?;
-        return Some(crate::widget_render::EventOutput {
-            callback,
-            args: vec![Value::Number(source.track as f64)],
-        });
+    if squared_distance(source.center, (layout_col, layout_row))
+        <= PATCH_PORT_CANCEL_RADIUS_CELLS * PATCH_PORT_CANCEL_RADIUS_CELLS
+    {
+        return patch_cancel_output(layout);
     }
-    let Some(dest) = ports
+    let Some((dest, distance_sq)) = ports
         .iter()
         .filter(|port| {
             port.direction == PatchPortDirection::In
@@ -197,18 +211,19 @@ fn patch_drop_output(
                 && port.track != source.track
                 && port.on_patch_drop.is_some()
         })
-        .min_by(|a, b| {
-            let da = squared_distance(a.center, (layout_col, layout_row));
-            let db = squared_distance(b.center, (layout_col, layout_row));
-            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        .map(|port| {
+            (
+                port,
+                squared_distance(port.center, (layout_col, layout_row)),
+            )
         })
+        .min_by(|(_, da), (_, db)| da.partial_cmp(db).unwrap_or(std::cmp::Ordering::Equal))
     else {
-        let callback = source.on_patch_cancel.clone()?;
-        return Some(crate::widget_render::EventOutput {
-            callback,
-            args: vec![Value::Number(source.track as f64)],
-        });
+        return patch_cancel_output(layout);
     };
+    if distance_sq > PATCH_PORT_DROP_RADIUS_CELLS * PATCH_PORT_DROP_RADIUS_CELLS {
+        return patch_cancel_output(layout);
+    }
 
     Some(crate::widget_render::EventOutput {
         callback: dest.on_patch_drop.clone()?,
@@ -286,6 +301,121 @@ fn squared_distance(a: (f32, f32), b: (f32, f32)) -> f32 {
     dx * dx + dy * dy
 }
 
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use crate::layout::{LayoutNode, Rect};
+    use crate::vm::Value;
+
+    use super::{PatchPortDirection, patch_drop_output};
+
+    fn port(
+        direction: PatchPortDirection,
+        track: usize,
+        input: usize,
+        center: (f32, f32),
+        pending: bool,
+    ) -> LayoutNode {
+        let mut props = HashMap::new();
+        props.insert("patch-port".to_string(), Value::Bool(true));
+        props.insert("active".to_string(), Value::Bool(true));
+        props.insert(
+            "direction".to_string(),
+            Value::String(match direction {
+                PatchPortDirection::In => "in".to_string(),
+                PatchPortDirection::Out => "out".to_string(),
+            }),
+        );
+        props.insert("track".to_string(), Value::Number(track as f64));
+        props.insert("input".to_string(), Value::Number(input as f64));
+        if pending {
+            props.insert("pending".to_string(), Value::Bool(true));
+        }
+        match direction {
+            PatchPortDirection::In => {
+                props.insert(
+                    "on-patch-drop".to_string(),
+                    Value::String("drop".to_string()),
+                );
+            }
+            PatchPortDirection::Out => {
+                props.insert(
+                    "on-patch-cancel".to_string(),
+                    Value::String("cancel".to_string()),
+                );
+            }
+        }
+        LayoutNode {
+            widget_id: track as u64 + 1,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "button".to_string(),
+            rect: Rect {
+                row: center.1 - 0.5,
+                col: center.0 - 0.5,
+                width: 1.0,
+                height: 1.0,
+            },
+            props,
+            children: Vec::new(),
+            focusable: false,
+        }
+    }
+
+    fn layout(children: Vec<LayoutNode>) -> LayoutNode {
+        LayoutNode {
+            widget_id: 0,
+            stable_widget_id: None,
+            subtree_root_id: None,
+            parent_subtree_root_id: None,
+            stable_key: None,
+            widget_type: "root".to_string(),
+            rect: Rect {
+                row: 0.0,
+                col: 0.0,
+                width: 100.0,
+                height: 30.0,
+            },
+            props: HashMap::new(),
+            children,
+            focusable: false,
+        }
+    }
+
+    #[test]
+    fn patch_drop_far_from_input_cancels_pending_drag() {
+        let root = layout(vec![
+            port(PatchPortDirection::Out, 0, 0, (2.0, 2.0), true),
+            port(PatchPortDirection::In, 1, 0, (20.0, 2.0), false),
+        ]);
+
+        let output = patch_drop_output(&root, 9.0, 12.0).expect("cancel output");
+
+        assert!(matches!(output.callback, Value::String(ref value) if value == "cancel"));
+        assert!(matches!(output.args.as_slice(), [Value::Number(track)] if *track == 0.0));
+    }
+
+    #[test]
+    fn patch_drop_near_input_dispatches_drop() {
+        let root = layout(vec![
+            port(PatchPortDirection::Out, 0, 0, (2.0, 2.0), true),
+            port(PatchPortDirection::In, 1, 3, (20.0, 2.0), false),
+        ]);
+
+        let output = patch_drop_output(&root, 20.4, 2.2).expect("drop output");
+
+        assert!(matches!(output.callback, Value::String(ref value) if value == "drop"));
+        assert!(matches!(
+            output.args.as_slice(),
+            [Value::Number(source), Value::Number(dest), Value::Number(input)]
+                if *source == 0.0 && *dest == 1.0 && *input == 3.0
+        ));
+    }
+}
+
 impl Editor {
     pub(super) fn active_layout_has_pending_patch_drag(&self) -> bool {
         self.runtime
@@ -317,7 +447,11 @@ impl Editor {
                 let Some((local_col, local_row)) =
                     hit::to_local(precise_col, precise_row, content_col, content_row)
                 else {
-                    return false;
+                    let output = patch_cancel_output(layout);
+                    let handled = output.is_some();
+                    let _ = self.apply_widget_output(output);
+                    self.mark_needs_redraw();
+                    return handled;
                 };
                 let layout_pos = (
                     local_col + self.active_leaf().widget_scroll_left,
