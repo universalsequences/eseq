@@ -7,10 +7,10 @@ use crate::effects::{
 use crate::voice::MAX_VOICES;
 
 use super::data::{
-    ChordData, ChordSnapshot, InstrumentType, StepData, StepParam, SwingPLockData, SwingResolution,
-    SwingResolutionPLockData, Timebase, TimebasePLockData, TrackParams, TrackParamsSnapshot,
-    TrackPattern, TrackSoundState, DEFAULT_BPM, MAX_STEPS, MAX_TRACKS, NUM_PARAMS,
-    TRACK_PATTERN_WORDS,
+    ChordData, ChordSnapshot, InstrumentType, ModConnection, StepData, StepParam, SwingPLockData,
+    SwingResolution, SwingResolutionPLockData, Timebase, TimebasePLockData, TrackParams,
+    TrackParamsSnapshot, TrackPattern, TrackSoundState, DEFAULT_BPM, EXT_MOD_INPUT_COUNT,
+    MAX_STEPS, MAX_TRACKS, NUM_PARAMS, TRACK_PATTERN_WORDS,
 };
 use super::snapshot::SequencerSnapshot;
 
@@ -62,6 +62,7 @@ pub struct PatternSnapshot {
     pub swing_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub swing_resolution_plock_snapshots: Vec<[Option<u32>; MAX_STEPS]>,
     pub instrument_types: Vec<InstrumentType>,
+    pub mod_connections: Vec<ModConnection>,
 }
 
 impl PatternSnapshot {
@@ -90,6 +91,13 @@ impl PatternSnapshot {
         remove_track_lane_if_present(&mut self.swing_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.swing_resolution_plock_snapshots, track_idx);
         remove_track_lane_if_present(&mut self.instrument_types, track_idx);
+        self.mod_connections = self
+            .mod_connections
+            .iter()
+            .filter_map(|connection| {
+                remap_mod_connection_after_track_delete(*connection, track_idx)
+            })
+            .collect();
     }
 
     pub fn remove_effect_slot(&mut self, track: usize, slot_idx: usize) {
@@ -163,6 +171,11 @@ impl PatternSnapshot {
                 .push([None; MAX_STEPS]);
             self.instrument_types.push(InstrumentType::Sampler);
         }
+        self.mod_connections.retain(|connection| {
+            connection.source_track < track_count
+                && connection.dest_track < track_count
+                && connection.dest_input < EXT_MOD_INPUT_COUNT
+        });
 
         for steps in &mut self.step_data {
             steps.truncate(MAX_STEPS);
@@ -191,6 +204,11 @@ impl PatternSnapshot {
         self.swing_plock_snapshots.truncate(track_count);
         self.swing_resolution_plock_snapshots.truncate(track_count);
         self.instrument_types.truncate(track_count);
+        self.mod_connections.retain(|connection| {
+            connection.source_track < track_count
+                && connection.dest_track < track_count
+                && connection.dest_input < EXT_MOD_INPUT_COUNT
+        });
     }
 
     pub fn capture(
@@ -326,7 +344,29 @@ impl PatternSnapshot {
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
             instrument_types: inst_types,
+            mod_connections: Vec::new(),
         }
+    }
+
+    pub fn capture_with_mod_connections(
+        state: &SequencerState,
+        num_tracks: usize,
+        track_buffer_ids: &[i32],
+        track_sample_rates: &[u32],
+        track_names: &[String],
+        instrument_types: &[InstrumentType],
+        mod_connections: Vec<ModConnection>,
+    ) -> Self {
+        let mut snapshot = Self::capture(
+            state,
+            num_tracks,
+            track_buffer_ids,
+            track_sample_rates,
+            track_names,
+            instrument_types,
+        );
+        snapshot.mod_connections = mod_connections;
+        snapshot
     }
 
     pub fn restore(&self, state: &SequencerState) {
@@ -528,6 +568,7 @@ impl PatternSnapshot {
             swing_plock_snapshots: Vec::with_capacity(num_tracks),
             swing_resolution_plock_snapshots: Vec::with_capacity(num_tracks),
             instrument_types: Vec::with_capacity(num_tracks),
+            mod_connections: Vec::new(),
         };
         for t in 0..num_tracks {
             snap.push_default_track(t, slot_descriptors);
@@ -563,6 +604,7 @@ impl PatternSnapshot {
             && self.chord_snapshots.len() == n
             && self.timebase_plock_snapshots.len() == n
             && self.swing_plock_snapshots.len() == n
+            && self.instrument_types.len() == n
             && self.swing_resolution_plock_snapshots.len() == n
             && self.instrument_types.len() == n
             && self.step_data.iter().all(|steps| steps.len() == MAX_STEPS)
@@ -615,6 +657,28 @@ fn remove_track_lane_if_present<T>(lanes: &mut Vec<T>, track_idx: usize) {
     if track_idx < lanes.len() {
         lanes.remove(track_idx);
     }
+}
+
+fn remap_mod_connection_after_track_delete(
+    connection: ModConnection,
+    deleted_track: usize,
+) -> Option<ModConnection> {
+    if connection.source_track == deleted_track || connection.dest_track == deleted_track {
+        return None;
+    }
+    Some(ModConnection {
+        source_track: if connection.source_track > deleted_track {
+            connection.source_track - 1
+        } else {
+            connection.source_track
+        },
+        dest_track: if connection.dest_track > deleted_track {
+            connection.dest_track - 1
+        } else {
+            connection.dest_track
+        },
+        dest_input: connection.dest_input,
+    })
 }
 
 fn sidechain_source_track(
@@ -794,6 +858,7 @@ pub struct TransportState {
 
 pub struct RuntimeBindingState {
     pub sampler_lids: Vec<AtomicU64>,
+    pub modulator_lids: Vec<AtomicU64>,
     pub pan_lids: Vec<AtomicU64>,
     pub delay_lids: Vec<AtomicU64>,
     pub send_lids: Vec<AtomicU64>,
@@ -801,6 +866,8 @@ pub struct RuntimeBindingState {
     pub voice_counts: Vec<AtomicU32>,
     pub instrument_type_flags: Vec<AtomicU32>,
     pub synth_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
+    pub sampler_gatepitch_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
+    pub sampler_modulator_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
     pub track_engine_ids: Vec<AtomicU32>,
     pub engine_voice_lids: Vec<[AtomicU64; MAX_VOICES]>,
     pub engine_synth_node_ids: Vec<[AtomicU32; MAX_VOICES]>,
@@ -808,6 +875,7 @@ pub struct RuntimeBindingState {
     pub engine_voice_counts: Vec<AtomicU32>,
     pub engine_route_lids: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
     pub engine_route_lids_r: Vec<[[AtomicU64; MAX_TRACKS]; MAX_VOICES]>,
+    pub engine_ext_route_lids: Vec<[[[AtomicU64; EXT_MOD_INPUT_COUNT]; MAX_TRACKS]; MAX_VOICES]>,
     pub sampler_analysis_buffer_ids: Vec<AtomicU32>,
     pub sampler_analysis_bpm: Vec<AtomicU32>,
     pub sampler_onset_ptr_lo: Vec<AtomicU32>,
@@ -833,6 +901,34 @@ const TOPOLOGY_EDIT_NONE: u32 = 0;
 const TOPOLOGY_EDIT_DELETE_TRACK: u32 = 1;
 
 impl SequencerState {
+    pub fn capture_current_pattern_snapshot(
+        &self,
+        num_tracks: usize,
+        buffer_ids: &[i32],
+        sample_rates: &[u32],
+        names: &[String],
+        instrument_types: &[InstrumentType],
+    ) -> PatternSnapshot {
+        let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let mod_connections = self
+            .pattern
+            .pattern_bank
+            .lock()
+            .unwrap()
+            .get(current_pattern)
+            .map(|snapshot| snapshot.mod_connections.clone())
+            .unwrap_or_default();
+        PatternSnapshot::capture_with_mod_connections(
+            self,
+            num_tracks,
+            buffer_ids,
+            sample_rates,
+            names,
+            instrument_types,
+            mod_connections,
+        )
+    }
+
     pub fn new(num_tracks: usize, initial_chains: Vec<Vec<EffectSlotState>>) -> Self {
         let patterns: Vec<TrackPattern> = (0..MAX_TRACKS).map(|_| TrackPattern::new()).collect();
         let step_data: Vec<StepData> = (0..MAX_TRACKS).map(|_| StepData::new()).collect();
@@ -915,6 +1011,7 @@ impl SequencerState {
             },
             runtime: RuntimeBindingState {
                 sampler_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
+                modulator_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 pan_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 delay_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
                 send_lids: (0..MAX_TRACKS).map(|_| AtomicU64::new(0)).collect(),
@@ -924,6 +1021,12 @@ impl SequencerState {
                 voice_counts: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 instrument_type_flags: (0..MAX_TRACKS).map(|_| AtomicU32::new(0)).collect(),
                 synth_node_ids: (0..MAX_TRACKS)
+                    .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
+                    .collect(),
+                sampler_gatepitch_node_ids: (0..MAX_TRACKS)
+                    .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
+                    .collect(),
+                sampler_modulator_node_ids: (0..MAX_TRACKS)
                     .map(|_| std::array::from_fn(|_| AtomicU32::new(0)))
                     .collect(),
                 track_engine_ids: (0..MAX_TRACKS).map(|_| AtomicU32::new(u32::MAX)).collect(),
@@ -942,6 +1045,13 @@ impl SequencerState {
                     .collect(),
                 engine_route_lids_r: (0..MAX_TRACKS)
                     .map(|_| std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))))
+                    .collect(),
+                engine_ext_route_lids: (0..MAX_TRACKS)
+                    .map(|_| {
+                        std::array::from_fn(|_| {
+                            std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0)))
+                        })
+                    })
                     .collect(),
                 sampler_analysis_buffer_ids: (0..MAX_TRACKS)
                     .map(|_| AtomicU32::new(u32::MAX))
@@ -1099,6 +1209,7 @@ impl SequencerState {
         self.transport.track_playheads[track].store(0, Ordering::Relaxed);
         self.transport.trigger_flash[track].store(0, Ordering::Relaxed);
         self.runtime.sampler_lids[track].store(0, Ordering::Relaxed);
+        self.runtime.modulator_lids[track].store(0, Ordering::Relaxed);
         self.runtime.voice_counts[track].store(0, Ordering::Relaxed);
         self.runtime.instrument_type_flags[track].store(0, Ordering::Relaxed);
         self.runtime.track_engine_ids[track].store(u32::MAX, Ordering::Relaxed);
@@ -1110,6 +1221,8 @@ impl SequencerState {
         for voice in 0..MAX_VOICES {
             self.runtime.voice_lids[track][voice].store(0, Ordering::Relaxed);
             self.runtime.synth_node_ids[track][voice].store(0, Ordering::Relaxed);
+            self.runtime.sampler_gatepitch_node_ids[track][voice].store(0, Ordering::Relaxed);
+            self.runtime.sampler_modulator_node_ids[track][voice].store(0, Ordering::Relaxed);
         }
         self.pending_accumulator_reset_tracks[track].store(false, Ordering::Relaxed);
         for engine_id in 0..MAX_TRACKS {
@@ -1117,6 +1230,10 @@ impl SequencerState {
                 self.runtime.engine_route_lids[engine_id][voice][track].store(0, Ordering::Relaxed);
                 self.runtime.engine_route_lids_r[engine_id][voice][track]
                     .store(0, Ordering::Relaxed);
+                for input in 0..EXT_MOD_INPUT_COUNT {
+                    self.runtime.engine_ext_route_lids[engine_id][voice][track][input]
+                        .store(0, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -1134,6 +1251,10 @@ impl SequencerState {
             );
             self.runtime.sampler_lids[idx].store(
                 self.runtime.sampler_lids[next].load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            self.runtime.modulator_lids[idx].store(
+                self.runtime.modulator_lids[next].load(Ordering::Relaxed),
                 Ordering::Relaxed,
             );
             self.runtime.pan_lids[idx].store(
@@ -1189,6 +1310,14 @@ impl SequencerState {
                     self.runtime.synth_node_ids[next][voice].load(Ordering::Relaxed),
                     Ordering::Relaxed,
                 );
+                self.runtime.sampler_gatepitch_node_ids[idx][voice].store(
+                    self.runtime.sampler_gatepitch_node_ids[next][voice].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
+                self.runtime.sampler_modulator_node_ids[idx][voice].store(
+                    self.runtime.sampler_modulator_node_ids[next][voice].load(Ordering::Relaxed),
+                    Ordering::Relaxed,
+                );
             }
             self.pending_accumulator_reset_tracks[idx].store(
                 self.pending_accumulator_reset_tracks[next].load(Ordering::Relaxed),
@@ -1206,6 +1335,13 @@ impl SequencerState {
                             .load(Ordering::Relaxed),
                         Ordering::Relaxed,
                     );
+                    for input in 0..EXT_MOD_INPUT_COUNT {
+                        self.runtime.engine_ext_route_lids[engine_id][voice][idx][input].store(
+                            self.runtime.engine_ext_route_lids[engine_id][voice][next][input]
+                                .load(Ordering::Relaxed),
+                            Ordering::Relaxed,
+                        );
+                    }
                 }
             }
         }
@@ -1217,6 +1353,7 @@ impl SequencerState {
         self.transport.track_playheads[last].store(0, Ordering::Relaxed);
         self.transport.trigger_flash[last].store(0, Ordering::Relaxed);
         self.runtime.sampler_lids[last].store(0, Ordering::Relaxed);
+        self.runtime.modulator_lids[last].store(0, Ordering::Relaxed);
         self.runtime.pan_lids[last].store(0, Ordering::Relaxed);
         self.runtime.delay_lids[last].store(0, Ordering::Relaxed);
         self.runtime.send_lids[last].store(0, Ordering::Relaxed);
@@ -1231,6 +1368,8 @@ impl SequencerState {
         for voice in 0..MAX_VOICES {
             self.runtime.voice_lids[last][voice].store(0, Ordering::Relaxed);
             self.runtime.synth_node_ids[last][voice].store(0, Ordering::Relaxed);
+            self.runtime.sampler_gatepitch_node_ids[last][voice].store(0, Ordering::Relaxed);
+            self.runtime.sampler_modulator_node_ids[last][voice].store(0, Ordering::Relaxed);
         }
         self.pending_accumulator_reset_tracks[last].store(false, Ordering::Relaxed);
         for engine_id in 0..MAX_TRACKS {
@@ -1238,6 +1377,10 @@ impl SequencerState {
                 self.runtime.engine_route_lids[engine_id][voice][last].store(0, Ordering::Relaxed);
                 self.runtime.engine_route_lids_r[engine_id][voice][last]
                     .store(0, Ordering::Relaxed);
+                for input in 0..EXT_MOD_INPUT_COUNT {
+                    self.runtime.engine_ext_route_lids[engine_id][voice][last][input]
+                        .store(0, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -1263,8 +1406,7 @@ impl SequencerState {
         }
 
         let current_pattern = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let mut current_snapshot = PatternSnapshot::capture(
-            self,
+        let mut current_snapshot = self.capture_current_pattern_snapshot(
             old_count,
             buffer_ids,
             sample_rates,
@@ -1453,27 +1595,32 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> Option<Vec<(i32, String, u32)>> {
-        let mut bank = self.pattern.pattern_bank.lock().unwrap();
-        let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        if new_idx == cur || new_idx >= bank.len() {
-            return None;
-        }
-        bank[cur] = PatternSnapshot::capture(
-            self,
-            num_tracks,
-            buffer_ids,
-            sample_rates,
-            names,
-            instrument_types,
-        );
-        bank[new_idx].restore(self);
-        self.pattern
-            .current_pattern
-            .store(new_idx as u32, Ordering::Relaxed);
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        let sample_ids = {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+            if new_idx == cur || new_idx >= bank.len() {
+                return None;
+            }
+            let current_snapshot = PatternSnapshot::capture_with_mod_connections(
+                self,
+                num_tracks,
+                buffer_ids,
+                sample_rates,
+                names,
+                instrument_types,
+                bank[cur].mod_connections.clone(),
+            );
+            bank[cur] = current_snapshot;
+            bank[new_idx].restore(self);
+            self.pattern
+                .current_pattern
+                .store(new_idx as u32, Ordering::Relaxed);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            bank[new_idx].sample_ids.clone()
+        };
         self.schedule_mod_resync();
         self.publish_scheduler_snapshot();
-        Some(bank[new_idx].sample_ids.clone())
+        Some(sample_ids)
     }
 
     pub fn clone_pattern(
@@ -1484,26 +1631,30 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> usize {
-        let mut bank = self.pattern.pattern_bank.lock().unwrap();
-        let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        bank[cur] = PatternSnapshot::capture(
-            self,
-            num_tracks,
-            buffer_ids,
-            sample_rates,
-            names,
-            instrument_types,
-        );
-        let cloned = bank[cur].clone();
-        bank.push(cloned);
-        let new_idx = bank.len() - 1;
-        self.pattern
-            .current_pattern
-            .store(new_idx as u32, Ordering::Relaxed);
-        self.pattern
-            .num_patterns
-            .store(bank.len() as u32, Ordering::Relaxed);
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        let new_idx = {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+            bank[cur] = PatternSnapshot::capture_with_mod_connections(
+                self,
+                num_tracks,
+                buffer_ids,
+                sample_rates,
+                names,
+                instrument_types,
+                bank[cur].mod_connections.clone(),
+            );
+            let cloned = bank[cur].clone();
+            bank.push(cloned);
+            let new_idx = bank.len() - 1;
+            self.pattern
+                .current_pattern
+                .store(new_idx as u32, Ordering::Relaxed);
+            self.pattern
+                .num_patterns
+                .store(bank.len() as u32, Ordering::Relaxed);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            new_idx
+        };
         self.publish_scheduler_snapshot();
         new_idx
     }
@@ -1516,32 +1667,36 @@ impl SequencerState {
         names: &[String],
         instrument_types: &[InstrumentType],
     ) -> Option<Vec<(i32, String, u32)>> {
-        let mut bank = self.pattern.pattern_bank.lock().unwrap();
-        if bank.len() <= 1 {
-            return None;
-        }
-        let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        bank[cur] = PatternSnapshot::capture(
-            self,
-            num_tracks,
-            buffer_ids,
-            sample_rates,
-            names,
-            instrument_types,
-        );
-        bank.remove(cur);
-        let new_idx = cur.min(bank.len() - 1);
-        bank[new_idx].restore(self);
-        self.pattern
-            .current_pattern
-            .store(new_idx as u32, Ordering::Relaxed);
-        self.pattern
-            .num_patterns
-            .store(bank.len() as u32, Ordering::Relaxed);
-        self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+        let sample_ids = {
+            let mut bank = self.pattern.pattern_bank.lock().unwrap();
+            if bank.len() <= 1 {
+                return None;
+            }
+            let cur = self.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+            bank[cur] = PatternSnapshot::capture_with_mod_connections(
+                self,
+                num_tracks,
+                buffer_ids,
+                sample_rates,
+                names,
+                instrument_types,
+                bank[cur].mod_connections.clone(),
+            );
+            bank.remove(cur);
+            let new_idx = cur.min(bank.len() - 1);
+            bank[new_idx].restore(self);
+            self.pattern
+                .current_pattern
+                .store(new_idx as u32, Ordering::Relaxed);
+            self.pattern
+                .num_patterns
+                .store(bank.len() as u32, Ordering::Relaxed);
+            self.transport.pattern_epoch.fetch_add(1, Ordering::Relaxed);
+            bank[new_idx].sample_ids.clone()
+        };
         self.schedule_mod_resync();
         self.publish_scheduler_snapshot();
-        Some(bank[new_idx].sample_ids.clone())
+        Some(sample_ids)
     }
 
     pub fn propagate_track_to_all_patterns(
@@ -1558,13 +1713,14 @@ impl SequencerState {
         if cur >= bank.len() || track >= num_tracks {
             return false;
         }
-        bank[cur] = PatternSnapshot::capture(
+        bank[cur] = PatternSnapshot::capture_with_mod_connections(
             self,
             num_tracks,
             buffer_ids,
             sample_rates,
             names,
             instrument_types,
+            bank[cur].mod_connections.clone(),
         );
         let source = bank[cur].clone();
         for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
@@ -2030,6 +2186,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            mod_connections: Vec::new(),
         }
     }
 
@@ -2123,6 +2280,39 @@ mod tests {
         assert_eq!(snapshot.track_bits[1][0], 3);
         assert_eq!(snapshot.sample_ids[0], (1, "track-1".to_string(), 44_100));
         assert_eq!(snapshot.sample_ids[1], (2, "track-2".to_string(), 44_100));
+    }
+
+    #[test]
+    fn pattern_snapshot_remove_track_remaps_mod_connections() {
+        let mut snapshot = sample_pattern_snapshot(4);
+        snapshot.mod_connections = vec![
+            ModConnection {
+                source_track: 1,
+                dest_track: 3,
+                dest_input: 2,
+            },
+            ModConnection {
+                source_track: 0,
+                dest_track: 2,
+                dest_input: 1,
+            },
+            ModConnection {
+                source_track: 2,
+                dest_track: 1,
+                dest_input: 3,
+            },
+        ];
+
+        snapshot.remove_track(1);
+
+        assert_eq!(
+            snapshot.mod_connections,
+            vec![ModConnection {
+                source_track: 0,
+                dest_track: 1,
+                dest_input: 1,
+            }]
+        );
     }
 
     #[test]
@@ -2270,6 +2460,7 @@ mod tests {
             swing_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             swing_resolution_plock_snapshots: vec![[None; MAX_STEPS]; 4],
             instrument_types: vec![InstrumentType::Sampler; 4],
+            mod_connections: Vec::new(),
         };
         let descriptors = vec![
             vec![EffectDescriptor::builtin_filter()],
@@ -2381,6 +2572,103 @@ mod tests {
                 .map(|_| default_empty_effect_chain())
                 .collect(),
         )
+    }
+
+    #[test]
+    fn clone_pattern_preserves_mod_connections_on_source_and_clone() {
+        let state = make_state_with_tracks(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 2,
+        };
+        state.pattern.pattern_bank.lock().unwrap()[0]
+            .mod_connections
+            .push(route);
+
+        let cloned_idx = state.clone_pattern(
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+
+        let bank = state.pattern.pattern_bank.lock().unwrap();
+        assert_eq!(cloned_idx, 1);
+        assert_eq!(bank[0].mod_connections, vec![route]);
+        assert_eq!(bank[1].mod_connections, vec![route]);
+    }
+
+    #[test]
+    fn switch_pattern_publishes_snapshot_after_releasing_pattern_bank() {
+        let state = make_state_with_tracks(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 3,
+        };
+        state.pattern.pattern_bank.lock().unwrap()[0]
+            .mod_connections
+            .push(route);
+        state.clone_pattern(
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+        state.pattern.pattern_bank.lock().unwrap()[1]
+            .mod_connections
+            .clear();
+
+        let sample_ids = state.switch_pattern(
+            0,
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+
+        assert!(sample_ids.is_some());
+        assert_eq!(
+            state.latest_scheduler_snapshot().mod_connections,
+            vec![route]
+        );
+    }
+
+    #[test]
+    fn delete_pattern_preserves_remaining_pattern_mod_connections() {
+        let state = make_state_with_tracks(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 1,
+        };
+        state.pattern.pattern_bank.lock().unwrap()[0]
+            .mod_connections
+            .push(route);
+        state.clone_pattern(
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+
+        let sample_ids = state.delete_pattern(
+            2,
+            &[-1, -1],
+            &[44_100, 44_100],
+            &[String::from("mod"), String::from("synth")],
+            &[InstrumentType::Modulator, InstrumentType::Custom],
+        );
+
+        assert!(sample_ids.is_some());
+        let bank = state.pattern.pattern_bank.lock().unwrap();
+        assert_eq!(bank.len(), 1);
+        assert_eq!(bank[0].mod_connections, vec![route]);
     }
 
     fn populate_step(state: &SequencerState, track: usize, step: usize) {
@@ -3053,6 +3341,24 @@ mod tests {
 
         let snapshot = state.latest_scheduler_snapshot();
         assert_eq!(snapshot.transport.bpm, 172);
+    }
+
+    #[test]
+    fn publish_scheduler_snapshot_captures_current_pattern_mod_connections() {
+        let state = make_state_with_tracks(2);
+        let route = ModConnection {
+            source_track: 0,
+            dest_track: 1,
+            dest_input: 2,
+        };
+        state.pattern.pattern_bank.lock().unwrap()[0]
+            .mod_connections
+            .push(route);
+
+        state.publish_scheduler_snapshot();
+
+        let snapshot = state.latest_scheduler_snapshot();
+        assert_eq!(snapshot.mod_connections, vec![route]);
     }
 
     #[test]

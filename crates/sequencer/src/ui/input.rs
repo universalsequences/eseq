@@ -820,6 +820,7 @@ impl App {
                                 &self.graph.track_instrument_types,
                             ) {
                                 self.graph_controller().apply_sample_ids(&sample_ids);
+                                self.graph_controller().sync_current_pattern_mod_routes();
                                 self.push_all_restored_defaults();
                             }
                             self.clamp_cursor_to_steps();
@@ -833,6 +834,7 @@ impl App {
                                 &self.tracks,
                                 &self.graph.track_instrument_types,
                             );
+                            self.graph_controller().sync_current_pattern_mod_routes();
                             // Show the page containing the new pattern
                             self.ui.pattern_page = new_idx / 10;
                         }
@@ -846,6 +848,7 @@ impl App {
                                 &self.graph.track_instrument_types,
                             ) {
                                 self.graph_controller().apply_sample_ids(&sample_ids);
+                                self.graph_controller().sync_current_pattern_mod_routes();
                                 self.push_all_restored_defaults();
                             }
                             self.clamp_cursor_to_steps();
@@ -1815,6 +1818,7 @@ impl App {
                     &self.graph.track_instrument_types,
                 ) {
                     self.graph_controller().apply_sample_ids(&sample_ids);
+                    self.graph_controller().sync_current_pattern_mod_routes();
                     self.push_all_restored_defaults();
                 }
                 self.clamp_cursor_to_steps();
@@ -1832,6 +1836,7 @@ impl App {
                         &self.tracks,
                         &self.graph.track_instrument_types,
                     );
+                    self.graph_controller().sync_current_pattern_mod_routes();
                 } else if let Ok(n) = self.ui.value_buffer.parse::<usize>() {
                     if n >= 1 {
                         let num_tracks = self.tracks.len();
@@ -1848,6 +1853,7 @@ impl App {
                                 &self.graph.track_instrument_types,
                             ) {
                                 self.graph_controller().apply_sample_ids(&sample_ids);
+                                self.graph_controller().sync_current_pattern_mod_routes();
                                 self.push_all_restored_defaults();
                             }
                             self.clamp_cursor_to_steps();

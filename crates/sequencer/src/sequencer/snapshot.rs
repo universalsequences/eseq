@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use crate::effects::EffectSlotSnapshot;
 
 use super::data::{
-    InstrumentType, StepParam, SwingResolution, Timebase, TrackParamsSnapshot, MAX_STEPS,
-    NUM_PARAMS,
+    InstrumentType, ModConnection, StepParam, SwingResolution, Timebase, TrackParamsSnapshot,
+    MAX_STEPS, NUM_PARAMS,
 };
 use super::state::SequencerState;
 
@@ -45,6 +45,7 @@ pub struct SequencerTrackSnapshot {
 pub struct SequencerSnapshot {
     pub transport: SequencerTransportSnapshot,
     pub tracks: Vec<SequencerTrackSnapshot>,
+    pub mod_connections: Vec<ModConnection>,
 }
 
 impl SequencerSnapshot {
@@ -59,15 +60,17 @@ impl SequencerSnapshot {
                 num_tracks: 0,
             },
             tracks: Vec::new(),
+            mod_connections: Vec::new(),
         }
     }
 
     pub fn capture(state: &SequencerState) -> Self {
         let num_tracks = state.active_track_count();
+        let current_pattern = state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
         let transport = SequencerTransportSnapshot {
             bpm: state.transport.bpm.load(Ordering::Relaxed),
             playing: state.transport.playing.load(Ordering::Relaxed),
-            current_pattern: state.pattern.current_pattern.load(Ordering::Relaxed) as usize,
+            current_pattern,
             pattern_epoch: state.transport.pattern_epoch.load(Ordering::Relaxed),
             topology_epoch: state.transport.topology_epoch.load(Ordering::Relaxed),
             num_tracks,
@@ -101,12 +104,9 @@ impl SequencerSnapshot {
                 accum_mode: tp.get_accum_mode(),
                 fts_scale: tp.get_fts_scale(),
             };
-            let instrument_type =
-                if state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed) == 1 {
-                    InstrumentType::Custom
-                } else {
-                    InstrumentType::Sampler
-                };
+            let instrument_type = InstrumentType::from_runtime_flag(
+                state.runtime.instrument_type_flags[track_idx].load(Ordering::Relaxed),
+            );
             let instrument_base_note_offset = f32::from_bits(
                 state.pattern.instrument_base_note_offsets[track_idx].load(Ordering::Relaxed),
             );
@@ -167,6 +167,17 @@ impl SequencerSnapshot {
             });
         }
 
-        Self { transport, tracks }
+        Self {
+            transport,
+            tracks,
+            mod_connections: state
+                .pattern
+                .pattern_bank
+                .lock()
+                .unwrap()
+                .get(current_pattern)
+                .map(|pattern| pattern.mod_connections.clone())
+                .unwrap_or_default(),
+        }
     }
 }

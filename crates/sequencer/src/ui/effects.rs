@@ -311,8 +311,7 @@ impl App {
         self.state.pattern.midi_fx_slots[track][slot_idx].apply_descriptor(&desc, 0);
 
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
-            &self.state,
+        let current_snapshot = self.state.capture_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
             &self.graph.track_sample_rates,
@@ -351,8 +350,7 @@ impl App {
         }
 
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
-            &self.state,
+        let current_snapshot = self.state.capture_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
             &self.graph.track_sample_rates,
@@ -662,8 +660,7 @@ impl App {
         self.state.pattern.effect_chains[track][slot_idx].apply_descriptor(&desc, node_id as u32);
 
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
-            &self.state,
+        let current_snapshot = self.state.capture_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
             &self.graph.track_sample_rates,
@@ -1047,8 +1044,7 @@ impl App {
         }
 
         let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
-        let current_snapshot = crate::sequencer::PatternSnapshot::capture(
-            &self.state,
+        let current_snapshot = self.state.capture_current_pattern_snapshot(
             self.tracks.len(),
             &self.graph.track_buffer_ids,
             &self.graph.track_sample_rates,

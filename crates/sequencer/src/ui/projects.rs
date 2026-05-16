@@ -665,7 +665,8 @@ impl App {
         {
             let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
             if current_pattern < bank.len() {
-                bank[current_pattern] = PatternSnapshot::capture(
+                let current_mod_connections = bank[current_pattern].mod_connections.clone();
+                let mut snapshot = PatternSnapshot::capture(
                     &self.state,
                     num_tracks,
                     &self.graph.track_buffer_ids,
@@ -673,6 +674,8 @@ impl App {
                     &self.tracks,
                     &self.graph.track_instrument_types,
                 );
+                snapshot.mod_connections = current_mod_connections;
+                bank[current_pattern] = snapshot;
             }
         }
         self.save_current_bus_pattern();
@@ -777,6 +780,10 @@ impl App {
                         sample_path: path.to_string_lossy().to_string(),
                         color,
                     })
+                } else if self.graph.track_instrument_types.get(track_idx)
+                    == Some(&InstrumentType::Modulator)
+                {
+                    Ok(ProjectTrack::Modulator { color })
                 } else {
                     let instrument_name = self
                         .graph
@@ -927,6 +934,10 @@ impl App {
                                 track_idx, instrument_name
                             );
                             self.add_saved_instrument_track_sync(instrument_name)?;
+                        }
+                        ProjectTrack::Modulator { .. } => {
+                            eprintln!("project-load: add modulator track index={track_idx}");
+                            self.graph_controller().add_modulator_track()?;
                         }
                     }
                     if let Some(color) = saved_color {
@@ -1204,8 +1215,11 @@ impl App {
             self.graph.track_node_ids.len()
         );
         self.state.publish_scheduler_snapshot();
-        self.graph_controller()
-            .apply_sample_ids(&current_sample_ids);
+        {
+            let mut graph = self.graph_controller();
+            graph.apply_sample_ids(&current_sample_ids);
+            graph.sync_current_pattern_mod_routes();
+        }
         {
             let track_count = self.tracks.len();
             let mut graph = self.graph_controller();
@@ -1341,6 +1355,7 @@ impl App {
             swing_plock_snapshots,
             swing_resolution_plock_snapshots,
             bus_patterns,
+            mod_connections,
             instrument_types: _,
             sample_paths: _,
             sample_names: _,
@@ -1527,6 +1542,7 @@ impl App {
                 })
                 .collect(),
             instrument_types: self.graph.track_instrument_types.clone(),
+            mod_connections: mod_connections.into_iter().map(Into::into).collect(),
         };
         snapshot.normalize_track_count(num_tracks, &self.graph.effect_descriptors);
 
@@ -1660,6 +1676,7 @@ mod tests {
                 swing_resolution_plock_snapshots: Vec::new(),
                 bus_patterns: Vec::new(),
                 instrument_types: Vec::new(),
+                mod_connections: Vec::new(),
                 sample_paths: Vec::new(),
                 sample_names: Vec::new(),
             }],

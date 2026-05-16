@@ -515,6 +515,16 @@ impl BrowserState {
                     app.editor.picker_items = crate::lisp_effect::list_saved_instruments();
                     app.ui.input_mode = super::InputMode::InstrumentPicker;
                 }
+                InstrumentType::Modulator => match app.graph_controller().add_modulator_track() {
+                    Ok(_) => {
+                        app.ui.sidebar_tab = SidebarTab::Tools;
+                        app.ui.sidebar_mode = SidebarMode::Audition;
+                        app.ui.sidebar_search_focused = false;
+                    }
+                    Err(error) => {
+                        app.editor.status_message = Some((error, std::time::Instant::now()));
+                    }
+                },
             },
             KeyCode::Esc => {
                 if !app.tracks.is_empty() {

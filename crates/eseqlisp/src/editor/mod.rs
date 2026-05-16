@@ -927,6 +927,40 @@ impl Editor {
             return;
         }
 
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+        ) && self.route_pointer_event_to_tile(self.active_tile, border_inset, true, |editor| {
+            editor.active_layout_has_pending_patch_drag()
+        }) {
+            let tile_id = self.active_tile;
+            self.route_pointer_event_to_tile(tile_id, border_inset, true, |editor| {
+                let Some((content_col, content_row, _, _)) =
+                    editor.tile_content_area(tile_id, border_inset)
+                else {
+                    return;
+                };
+                let (event_col, event_row) = editor
+                    .tile_content_precise_event_position(
+                        tile_id,
+                        border_inset,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                    .unwrap_or((precise_col, precise_row));
+                editor.handle_active_patch_drag_mouse(
+                    mouse,
+                    content_col,
+                    content_row,
+                    event_col,
+                    event_row,
+                );
+            });
+            return;
+        }
+
         let screen_col = precise_col;
         let screen_row = precise_row;
 

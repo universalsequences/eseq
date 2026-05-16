@@ -55,6 +55,7 @@ pub(crate) fn init_runtime(
                 ("transport-playhead", Value::Number(0.0)),
                 ("sampler-playhead", Value::Number(0.0)),
                 ("track-ids", build_track_ids(&app)),
+                ("track-instrument-types", build_track_instrument_types(&app)),
                 ("track-names", build_track_names(&track_names)),
                 (
                     "track-num-steps",
@@ -138,6 +139,7 @@ pub(crate) fn init_runtime(
                 ("track-pans", build_track_pans(&state)),
                 ("track-outputs", build_track_outputs(&app, &state)),
                 ("track-bus-sends", build_all_track_bus_sends(&app, &state)),
+                ("mod-routes", build_mod_routes(&state)),
                 ("track-mutes", build_track_mutes(&state)),
                 ("track-solos", build_track_solos(&state)),
                 ("track-muted-by-solo", build_track_muted_by_solo(&state)),
@@ -407,6 +409,14 @@ pub(crate) fn init_runtime(
                 fields.push((
                     Box::leak(format!("track-peak-{idx}").into_boxed_str()),
                     Value::Number(0.0),
+                ));
+                fields.push((
+                    Box::leak(format!("modulator-phase-{idx}").into_boxed_str()),
+                    Value::Number(0.0),
+                ));
+                fields.push((
+                    Box::leak(format!("modulator-level-{idx}").into_boxed_str()),
+                    Value::Number(1.0),
                 ));
             }
             for idx in 0..app.buses.len() {

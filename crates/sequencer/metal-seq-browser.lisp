@@ -96,6 +96,11 @@
   (set! sbrowser-tab "samples")
   (status "Add sampler track"))
 
+(def sbrowser-add-modulator-track ()
+  (host-command "add-track-modulator" (dict))
+  (set! sbrowser-tab "instruments")
+  (status "Add modulator track"))
+
 ;; ── SDF widgets ──
 
 (defwidget browser-panel-bg
@@ -336,20 +341,13 @@
         :font-size 10.5
         :on-click |x y r| (sbrowser-add-sampler-track)
         :color :white)
-      (button "New"
-        :variant :ghost
-        :icon :plus
+      (button "Mod"
+        :variant :secondary
+        :icon :waveform
         :flex 1
         :height 1.3
         :font-size 10.5
-        :on-click |x y r| (sbrowser-enter-new-instrument-editor)
-        :color :white)
-      (button "Ask"
-        :variant :ghost
-        :flex 1
-        :height 1.3
-        :font-size 10.5
-        :on-click |x y r| (agent-open-instrument)
+        :on-click |x y r| (sbrowser-add-modulator-track)
         :color :white))))
 
 (def sbrowser-library-label ()
