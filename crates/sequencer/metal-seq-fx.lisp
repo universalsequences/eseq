@@ -741,8 +741,6 @@
   (box :debug-name "instrument-mod-selector"
        :width 10.2
        :height :fill
-       :background-color :instrument-group-bg
-       :corner-radius 10
        :padding 0.25
     (v-stack :gap 0.18 :align :start
       (label "mods" :font-size 9 :color :dim :bg :transparent)
@@ -751,6 +749,50 @@
           (v-stack :gap 0.18 :align :start
             (each column |modulator mi|
               (instrument-mod-selector-row modulator))))))))
+
+(def instrument-mod-source-section-name (slot)
+  (if (= slot 1) "LFO 1"
+    (if (= slot 2) "ENV 1"
+      (if (= slot 3) "RAND"
+        (if (= slot 4) "DRIFT"
+          (if (= slot 5) "LFO 2"
+            (if (= slot 6) "LFO 3" false)))))))
+
+(def instrument-selected-mod-source-section (inst)
+  (let ((section-name (instrument-mod-source-section-name (instrument-mod-selected-slot))))
+    (if section-name
+      (nth (filter |section| (= (get section :name) section-name)
+             (get inst :sources))
+           0)
+      false)))
+
+(def instrument-selected-mod-source-editor (inst)
+  (let ((slot (instrument-mod-selected-slot)))
+    (box :debug-name "instrument-selected-mod-source-editor"
+         :width 25.5
+         :height :fill
+         :padding 0.35
+      (if (> slot 6)
+        (box :width :fill :height :fill :h-align :center :v-align :center
+          (label "external mod" :font-size 12 :color :dim :bg :transparent))
+        (let ((section (instrument-selected-mod-source-section inst)))
+          (if section
+            (v-stack :gap 0.3 :align :start
+              (label (get section :name) :font-size 9 :color :dim :bg :transparent)
+              (fx-param-grid (get section :params) false))
+            (box :width :fill :height :fill :h-align :center :v-align :center
+              (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))))
+
+(def instrument-mod-control-panel (inst)
+  (box :debug-name "instrument-mod-control-panel"
+       :width 36.4
+       :height :fill
+       :background-color :black
+       :corner-radius 10
+       :padding 0.25
+    (h-stack :gap 0.25 :align :stretch
+      (instrument-mod-selector inst)
+      (instrument-selected-mod-source-editor inst))))
 
 (def instrument-sources-grid (sections)
   (h-stack :gap 2 
@@ -896,10 +938,6 @@
 (def instrument-mods-toggle-button ()
   (instrument-header-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
     (lambda (info) (do (set! instrument-panel-tab 0) (set! instrument-mods-open (not instrument-mods-open))))))
-
-(def instrument-sources-button ()
-  (instrument-header-button "sources" (= instrument-panel-tab 2) 5.8
-    (lambda (info) (do (set! instrument-panel-tab 2) (set! instrument-mods-open false)))))
 
 (def inst-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
@@ -1832,7 +1870,7 @@
                   :debug-name "fallback-synth-wrapper"))))
         (if instrument-mods-open
           (h-stack :debug-name "instrument-mods-inline-body" :gap 0.45
-            (instrument-mod-selector inst)
+            (instrument-mod-control-panel inst)
             body)
           body)))))
 
@@ -2126,8 +2164,7 @@
                 (label (substring (get inst :display-name) 0 12)
                   :font-size 11  :color :white :bg :transparent)
                   (instrument-synth-button)
-                  (instrument-mods-toggle-button)
-                  (instrument-sources-button))
+                  (instrument-mods-toggle-button))
             
             (box :debug-name "instrument-edit-button" :bg :dark-gray :width 1.2 :height 0.9 :align :center
               :on-click |x y r|
@@ -2141,9 +2178,7 @@
                   :on-click |x y r| (sbrowser-enter-preset-save)
                   :active 0)))))
         (fx-panel-body "instrument-content-box"
-          (if (not (= instrument-panel-tab 2))
-            (instrument-synth-panel-body inst)
-            (box :debug-name "sources-wrapper"  (instrument-source-tabs inst)))))
+          (instrument-synth-panel-body inst)))
       :debug-name "instrument-panel"
       :background "fx-panel-bg"
       :color :instrument-panel-bg
