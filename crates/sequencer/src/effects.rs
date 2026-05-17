@@ -839,6 +839,78 @@ mod tests {
             crate::dj_mixer::DJ_MIXER_PARAM_LENGTH_SEC as u32
         );
     }
+
+    #[test]
+    fn builtin_sampler_exposes_inline_modulation_metadata() {
+        let desc = EffectDescriptor::builtin_sampler();
+        let modulators = desc
+            .instrument_modulators
+            .iter()
+            .map(|modulator| (modulator.slot, modulator.label.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            modulators,
+            vec![
+                (1, "LFO 1"),
+                (2, "ENV 1"),
+                (3, "RAND"),
+                (4, "DRIFT"),
+                (5, "LFO 2"),
+                (6, "LFO 3"),
+                (7, "Ext 1"),
+                (8, "Ext 2"),
+                (9, "Ext 3"),
+                (10, "Ext 4"),
+            ]
+        );
+
+        let target_names = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| {
+                (
+                    desc.params[target.base_param_idx].name.as_str(),
+                    desc.params[target.source_param_idx].name.as_str(),
+                    desc.params[target.depth_param_idx].name.as_str(),
+                    target.depth_min,
+                    target.depth_max,
+                    target.depth_unit.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target_names,
+            vec![
+                (
+                    "speed",
+                    "mod speed src",
+                    "mod speed amt",
+                    -1.0,
+                    1.0,
+                    Some("%")
+                ),
+                (
+                    "scrub",
+                    "mod scrub src",
+                    "mod scrub amt",
+                    -1.0,
+                    1.0,
+                    Some("%")
+                ),
+                ("sr", "mod sr src", "mod sr amt", -1.0, 1.0, Some("%")),
+                ("bpm", "mod bpm src", "mod bpm amt", -1.0, 1.0, Some("%")),
+                (
+                    "start",
+                    "mod start src",
+                    "mod start amt",
+                    -1.0,
+                    1.0,
+                    Some("%")
+                ),
+                ("end", "mod end src", "mod end amt", -1.0, 1.0, Some("%")),
+            ]
+        );
+    }
 }
 
 // ── EffectDescriptor ──
@@ -2080,6 +2152,7 @@ impl EffectDescriptor {
             "Ext 3".to_string(),
             "Ext 4".to_string(),
         ];
+        let mut instrument_modulation_targets = Vec::new();
         for (name, source_idx, depth_idx) in [
             (
                 "speed",
@@ -2112,6 +2185,11 @@ impl EffectDescriptor {
                 crate::sampler::PARAM_MOD_END_DEPTH,
             ),
         ] {
+            let base_param_idx = params
+                .iter()
+                .position(|p| p.name == name)
+                .expect("sampler modulation target base param should exist");
+            let source_param_idx = params.len();
             params.push(ParamDescriptor {
                 name: format!("mod {name} src"),
                 min: 0.0,
@@ -2125,6 +2203,7 @@ impl EffectDescriptor {
                 node_param_span: 1,
                 host_control: None,
             });
+            let depth_param_idx = params.len();
             params.push(ParamDescriptor {
                 name: format!("mod {name} amt"),
                 min: -1.0,
@@ -2138,13 +2217,38 @@ impl EffectDescriptor {
                 node_param_span: 1,
                 host_control: None,
             });
+            instrument_modulation_targets.push(InstrumentModulationTarget {
+                base_param_idx,
+                source_param_idx,
+                depth_param_idx,
+                depth_min: -1.0,
+                depth_max: 1.0,
+                depth_unit: Some("%".to_string()),
+            });
         }
         Self {
             name: "Sampler".to_string(),
             input_channels: 0,
             output_channels: 2,
-            instrument_modulators: Vec::new(),
-            instrument_modulation_targets: Vec::new(),
+            instrument_modulators: [
+                (1, "LFO 1"),
+                (2, "ENV 1"),
+                (3, "RAND"),
+                (4, "DRIFT"),
+                (5, "LFO 2"),
+                (6, "LFO 3"),
+                (7, "Ext 1"),
+                (8, "Ext 2"),
+                (9, "Ext 3"),
+                (10, "Ext 4"),
+            ]
+            .into_iter()
+            .map(|(slot, label)| InstrumentModulatorDescriptor {
+                slot,
+                label: label.to_string(),
+            })
+            .collect(),
+            instrument_modulation_targets,
             params,
         }
     }

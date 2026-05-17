@@ -2308,6 +2308,140 @@ pub(crate) fn build_sampler_panel_value(
         .map(|s| s.duration_seconds)
         .unwrap_or(1.0);
 
+    struct UiModMetadata {
+        source_param_idx: usize,
+        depth_param_idx: usize,
+        source_slot: f32,
+        source_value_field: Option<String>,
+        depth_value: f32,
+        depth_value_field: Option<String>,
+        depth_min: f32,
+        depth_max: f32,
+        depth_unit: Option<String>,
+    }
+
+    fn insert_mod_metadata(
+        pmap: &mut HashMap<String, Rc<RefCell<Value>>>,
+        targets: &[UiModMetadata],
+    ) {
+        pmap.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let target_values = targets
+            .iter()
+            .map(|meta| {
+                let mut target = HashMap::new();
+                target.insert(
+                    "source-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.source_param_idx as f64))),
+                );
+                target.insert(
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
+                );
+                target.insert(
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
+                );
+                if let Some(field) = &meta.source_value_field {
+                    target.insert(
+                        "source-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(field.clone()))),
+                    );
+                }
+                target.insert(
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
+                );
+                if let Some(field) = &meta.depth_value_field {
+                    target.insert(
+                        "depth-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(field.clone()))),
+                    );
+                }
+                target.insert(
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_min as f64))),
+                );
+                target.insert(
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_max as f64))),
+                );
+                if let Some(unit) = &meta.depth_unit {
+                    target.insert(
+                        "depth-unit".to_string(),
+                        Rc::new(RefCell::new(Value::String(unit.clone()))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(target)))
+            })
+            .collect();
+        pmap.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(Value::List(target_values))),
+        );
+    }
+
+    let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
+    for target in desc
+        .instrument_modulation_targets
+        .iter()
+        .filter_map(|target| {
+            let source_desc = desc.params.get(target.source_param_idx)?;
+            let depth_desc = desc.params.get(target.depth_param_idx)?;
+            let source_default =
+                if target.source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(target.source_param_idx)
+                } else {
+                    source_desc.default
+                };
+            let depth_default =
+                if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(target.depth_param_idx)
+                } else {
+                    depth_desc.default
+                };
+            let source_current = plock_step
+                .and_then(|step| slot.plocks.get(step, target.source_param_idx))
+                .unwrap_or(source_default);
+            let depth_current = plock_step
+                .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
+                .unwrap_or(depth_default);
+            Some((
+                target.base_param_idx,
+                UiModMetadata {
+                    source_param_idx: target.source_param_idx,
+                    depth_param_idx: target.depth_param_idx,
+                    source_slot: source_desc.stored_to_user(source_current),
+                    source_value_field: plock_step.is_none().then(|| {
+                        instrument_param_value_field(
+                            track,
+                            target.source_param_idx,
+                            &source_desc.name,
+                        )
+                    }),
+                    depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_value_field: plock_step.is_none().then(|| {
+                        instrument_param_value_field(
+                            track,
+                            target.depth_param_idx,
+                            &depth_desc.name,
+                        )
+                    }),
+                    depth_min: target.depth_min,
+                    depth_max: target.depth_max,
+                    depth_unit: target.depth_unit.clone(),
+                },
+            ))
+        })
+    {
+        modulation_targets
+            .entry(target.0)
+            .or_default()
+            .push(target.1);
+    }
+
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut source_params_by_section: HashMap<&'static str, Vec<Rc<RefCell<Value>>>> =
@@ -2452,6 +2586,9 @@ pub(crate) fn build_sampler_panel_value(
             }
             mod_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
         } else {
+            if let Some(targets) = modulation_targets.get(&param_idx) {
+                insert_mod_metadata(&mut pmap, targets);
+            }
             synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
         }
     }
@@ -9274,6 +9411,374 @@ mod tests {
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1, "commands={commands:?}");
         assert_set_instrument_param(&commands[0], 13.0, 0.9);
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_inline_sampler_mod_selector() {
+        fn layout_has_double_click(node: &eseqlisp::layout::LayoutNode) -> bool {
+            node.props.contains_key("on-double-click")
+                || node.children.iter().any(layout_has_double_click)
+        }
+
+        fn assert_set_instrument_param(
+            command: &eseqlisp::host::HostCommand,
+            expected_idx: f64,
+            expected_value: f64,
+        ) {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-instrument-param");
+                    let Value::Map(payload) = payload else {
+                        panic!("set-instrument-param payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("param-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_idx))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                }
+                other => panic!("expected set-instrument-param host command, got {other:?}"),
+            }
+        }
+
+        fn test_mod_target(source_idx: f64, depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "source-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_idx))),
+                ),
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-1.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]))
+        }
+
+        let mut enabled = test_param_map("enabled", 4, 1.0, 0.0, 1.0);
+        enabled.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let mut warp = test_param_map("warp", 9, 0.0, 0.0, 1.0);
+        warp.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let mut speed = test_param_map("speed", 11, 1.0, -4.0, 4.0);
+        speed.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        speed.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                20.0, 21.0, 2.0, 0.25,
+            )]))),
+        );
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("Sampler".to_string()))),
+        );
+        inst.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+        );
+        inst.insert(
+            "duration".to_string(),
+            Rc::new(RefCell::new(Value::Number(1.0))),
+        );
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("attack", 0, 0.0, 0.0, 500.0)),
+                Value::Map(test_param_map("release", 1, 0.0, 0.0, 2000.0)),
+                Value::Map(test_param_map("start", 2, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("end", 3, 1.0, 0.0, 1.0)),
+                Value::Map(enabled),
+                Value::Map(test_param_map("reverse", 5, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("loop", 6, 1.0, 0.0, 3.0)),
+                Value::Map(test_param_map("xfade", 7, 0.0, 0.0, 250.0)),
+                Value::Map(test_param_map("sr", 8, 44100.0, 2000.0, 44100.0)),
+                Value::Map(warp),
+                Value::Map(test_param_map("mode", 10, 0.0, 0.0, 0.0)),
+                Value::Map(speed),
+                Value::Map(test_param_map("scrub", 12, 0.0, -1.0, 1.0)),
+                Value::Map(test_param_map("bpm", 13, 120.0, 20.0, 400.0)),
+            ]))),
+        );
+        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
+        inst.insert(
+            "modulators".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                    ),
+                ])),
+            ]))),
+        );
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("rate", 40, 5.0, 0.05, 40.0)),
+                            Value::Map({
+                                let mut p = test_param_map("sync", 41, 0.0, 0.0, 1.0);
+                                p.insert(
+                                    "boolean".to_string(),
+                                    Rc::new(RefCell::new(Value::Bool(true))),
+                                );
+                                p
+                            }),
+                            Value::Map({
+                                let mut p = test_param_map("division", 42, 6.0, 0.0, 10.0);
+                                p.insert(
+                                    "text-value".to_string(),
+                                    Rc::new(RefCell::new(Value::String("1/4".to_string()))),
+                                );
+                                p.insert(
+                                    "options".to_string(),
+                                    Rc::new(RefCell::new(test_list(vec![
+                                        Value::String("1/8".to_string()),
+                                        Value::String("1/4".to_string()),
+                                    ]))),
+                                );
+                                p
+                            }),
+                            Value::Map({
+                                let mut p = test_param_map("shape", 43, 2.0, 0.0, 3.0);
+                                p.insert(
+                                    "text-value".to_string(),
+                                    Rc::new(RefCell::new(Value::String("triangle".to_string()))),
+                                );
+                                p.insert(
+                                    "options".to_string(),
+                                    Rc::new(RefCell::new(test_list(vec![
+                                        Value::String("sine".to_string()),
+                                        Value::String("triangle".to_string()),
+                                    ]))),
+                                );
+                                p
+                            }),
+                            Value::Map(test_param_map("pulse width", 44, 0.5, 0.05, 0.95)),
+                            Value::Map({
+                                let mut p = test_param_map("retrigger", 45, 0.0, 0.0, 1.0);
+                                p.insert(
+                                    "boolean".to_string(),
+                                    Rc::new(RefCell::new(Value::Bool(true))),
+                                );
+                                p
+                            }),
+                        ]))),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("attack", 30, 5.0, 1.0, 5000.0)),
+                            Value::Map(test_param_map("decay", 31, 120.0, 1.0, 5000.0)),
+                            Value::Map(test_param_map("sustain", 32, 0.7, 0.0, 1.0)),
+                            Value::Map(test_param_map("release", 33, 240.0, 1.0, 5000.0)),
+                        ]))),
+                    ),
+                ])),
+            ]))),
+        );
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("sampler-playhead", Value::Number(0.0)),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open true) (set! instrument-selected-mod-slot 2))")
+            .expect("open sampler inline mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("sampler fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("sampler inline mods layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let selector = find_layout_node_by_debug_name(&layout, "instrument-mod-selector")
+            .unwrap_or_else(|| {
+                panic!("sampler inline mods selector should render; layout={layout_summaries:#?}")
+            });
+        assert!(
+            selector.rect.width > 0.0 && selector.rect.height > 0.0,
+            "selector must have a nonzero rect: {:?}",
+            selector.rect
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "sampler-mods-inline-body").is_some(),
+            "sampler should use inline mods body"
+        );
+        assert!(
+            find_layout_node_by_stable_key(&layout, "sampler-param-11-mod-wrapper").is_some(),
+            "sampler speed control should render its modulation wrapper"
+        );
+        assert!(
+            layout_has_double_click(&layout),
+            "sampler modulatable parameter wrapper should expose on-double-click"
+        );
+
+        let speed_knob = find_layout_node_by_stable_key(&layout, "sampler-param-11-mod-depth")
+            .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+            .expect("sampler speed should render as a mod-depth knob");
+        assert!(
+            speed_knob.props.contains_key("base-value")
+                && speed_knob.props.contains_key("mod-range-0-slot")
+                && speed_knob.props.contains_key("mod-range-0-depth"),
+            "sampler speed knob should expose mod metadata props"
+        );
+        let callback = speed_knob
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("sampler speed knob should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.75)])
+            .expect("sampler speed depth edit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 21.0, 0.75);
+
+        let env_editor = find_layout_node_by_widget_type(&layout, "adsr-editor")
+            .expect("sampler ENV 1 source editor should use an adsr-editor widget");
+        assert!(
+            env_editor.rect.width > 8.0 && env_editor.rect.height > 1.5,
+            "sampler ENV 1 adsr-editor should be visible, got {:?}",
+            env_editor.rect
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! instrument-selected-mod-slot 1)")
+            .expect("select sampler LFO source editor");
+        editor.set_active_buffer(fx_id);
+        let lfo_layout = editor.widget_layout().expect("sampler LFO source layout");
+        assert_finite_layout_tree(&lfo_layout);
+        let lfo_editor =
+            find_layout_node_by_debug_name(&lfo_layout, "instrument-lfo-source-editor")
+                .expect("sampler LFO source should use compact LFO editor");
+        assert!(
+            lfo_editor.rect.width > 0.0 && lfo_editor.rect.height > 0.0,
+            "LFO source editor should be visible, got {:?}",
+            lfo_editor.rect
+        );
+        let pulse_width =
+            find_layout_node_by_debug_name(&lfo_layout, "instrument-source-compact-knob-pw")
+                .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+                .expect("LFO pulse width should render as a compact knob");
+        assert!(
+            pulse_width.rect.width <= 4.5 && pulse_width.rect.height > 0.0,
+            "pulse width knob should be compact, got {:?}",
+            pulse_width.rect
+        );
+        let retrigger =
+            find_layout_node_by_debug_name(&lfo_layout, "instrument-lfo-retrigger-button")
+                .and_then(|node| find_layout_node_by_widget_type(node, "button"))
+                .expect("LFO retrigger should render as a button widget");
+        assert!(
+            retrigger.rect.width <= 4.5 && retrigger.rect.height > 0.0,
+            "retrigger button should be compact, got {:?}",
+            retrigger.rect
+        );
     }
 
     #[test]

@@ -83,6 +83,19 @@ impl Drop for GraphEditBatchGuard {
     }
 }
 
+unsafe fn disconnect_all_ports(lg: *mut crate::audiograph::LiveGraph, src_id: i32, dst_id: i32) {
+    for src_port in 0..2 {
+        for dst_port in 0..2 {
+            crate::audiograph::graph_disconnect(lg, src_id, src_port, dst_id, dst_port);
+        }
+    }
+}
+
+unsafe fn connect_stereo_pair(lg: *mut crate::audiograph::LiveGraph, src_id: i32, dst_id: i32) {
+    crate::audiograph::graph_connect(lg, src_id, 0, dst_id, 0);
+    crate::audiograph::graph_connect(lg, src_id, 1, dst_id, 1);
+}
+
 impl App {
     pub fn graph_controller(&mut self) -> GraphController<'_> {
         GraphController { app: self }
@@ -955,6 +968,45 @@ impl GraphController<'_> {
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.state.publish_scheduler_snapshot();
+    }
+
+    pub fn clear_all_bus_effect_chains(&mut self) {
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let bus_nodes = self.app.graph.bus_node_ids.clone();
+
+        for bus in &mut self.app.buses {
+            let Some(nodes) = bus_nodes.iter().find(|nodes| nodes.id == bus.id) else {
+                continue;
+            };
+
+            let active_effect_ids = bus
+                .effect_slots
+                .iter()
+                .filter_map(|slot| (slot.node_id != 0).then_some(slot.node_id as i32))
+                .collect::<Vec<_>>();
+
+            unsafe {
+                let mut predecessor_id = nodes.gate_id;
+                for effect_id in &active_effect_ids {
+                    disconnect_all_ports(self.app.graph.lg.0, predecessor_id, *effect_id);
+                    predecessor_id = *effect_id;
+                }
+                disconnect_all_ports(self.app.graph.lg.0, predecessor_id, nodes.volume_id);
+                disconnect_all_ports(self.app.graph.lg.0, nodes.gate_id, nodes.volume_id);
+
+                for effect_id in active_effect_ids {
+                    crate::audiograph::delete_node(self.app.graph.lg.0, effect_id);
+                }
+
+                connect_stereo_pair(self.app.graph.lg.0, nodes.gate_id, nodes.volume_id);
+            }
+
+            bus.effect_descriptors = super::BusChannelState::default_effect_descriptors();
+            bus.effect_slots = super::BusChannelState::default_effect_slots();
+            bus.custom_effect_names = vec![None; crate::lisp_effect::MAX_CUSTOM_FX];
+        }
+
+        self.app.publish_bus_gate_runtime();
     }
 
     pub fn delete_track(&mut self, track_idx: usize) -> Result<usize, String> {

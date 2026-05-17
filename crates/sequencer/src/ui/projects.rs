@@ -949,7 +949,11 @@ impl App {
                     pending.tick,
                     self.tracks.len()
                 );
-                self.graph_controller().clear_all_tracks();
+                {
+                    let mut graph = self.graph_controller();
+                    graph.clear_all_tracks();
+                    graph.clear_all_bus_effect_chains();
+                }
                 pending.phase = super::PendingProjectLoadPhase::AddTrack(0);
             }
             super::PendingProjectLoadPhase::AddTrack(track_idx) => {

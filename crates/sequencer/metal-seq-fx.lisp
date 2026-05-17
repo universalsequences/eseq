@@ -775,6 +775,52 @@
 (def instrument-source-set-param-value (p v)
   (if p (instrument-set-param-control-value p v) false))
 
+(def instrument-source-button (p title width)
+  (let ((active (> (instrument-source-param-value p 0) 0.5)))
+    (v-stack :width width :height 1.72 :gap 0.10 :align :start
+      (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
+      (button (if active "ON" "OFF")
+        :width width :height 0.88 :padding 0 :font-size 9
+        :background-color (if active (ui-accent-orange) :mixer-control-bg)
+        :color (if active :black :dim)
+        :on-click |x y r|
+          (instrument-source-set-param-value p (if active 0 1))))))
+
+(def instrument-source-dropdown (p title width)
+  (v-stack :width width :height 1.72 :gap 0.10 :align :start
+    (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
+    (dropdown :value (if p (get p :text-value) "")
+      :options (if p (get p :options) '())
+      :on-change (lambda (v) (if p (fx-set-instrument-option p v) false))
+      :width width :height 0.88 :font-size 8.5)))
+
+(def instrument-source-number (p title decimals unit width)
+  (v-stack :width width :height 1.72 :gap 0.10 :align :start
+    (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
+    (number-picker :value (instrument-source-param-value p 0)
+      :min (if p (instrument-param-control-min p) 0)
+      :max (if p (instrument-param-control-max p) 0)
+      :decimals decimals
+      :unit unit
+      :noui true :font-size 9.3
+      :text-color :dim :edit-color :yellow
+      :text-align :left
+      :width width :height 0.82
+      :on-change (lambda (v) (instrument-source-set-param-value p v)))))
+
+(def instrument-source-compact-knob (p title decimals)
+  (box :debug-name (str "instrument-source-compact-knob-" title)
+       :width 4.4 :height 2.25 :padding 0
+    (knob-number :label title
+      :value (instrument-source-param-value p 0)
+      :min (if p (instrument-param-control-min p) 0)
+      :max (if p (instrument-param-control-max p) 0)
+      :decimals decimals
+      :font-size 9.4 :label-font-size 8.2
+      :text-color :dim :label-color :dim
+      :width 4.4 :height 2.05
+      :on-change (lambda (v) (instrument-source-set-param-value p v)))))
+
 (def instrument-source-adsr-number (p title decimals unit)
   (v-stack :width 3.8 :height 1.18 :gap 0.16 :align :start
     (label title :font-size 7.4 :width 3.8 :height 0.52 :color :dim :bg :transparent)
@@ -818,6 +864,34 @@
             (instrument-source-adsr-number sustain "sus" 2 false)
             (instrument-source-adsr-number release "rel" 0 "ms")))))))
 
+(def instrument-lfo-source-editor (section)
+  (let ((rate (instrument-source-param section "rate"))
+        (sync (instrument-source-param section "sync"))
+        (division (instrument-source-param section "division"))
+        (shape (instrument-source-param section "shape"))
+        (pulse-width (instrument-source-param section "pulse width"))
+        (retrigger (instrument-source-param section "retrigger")))
+    (ui-readout-panel-medium-s 0
+      (h-stack :debug-name "instrument-lfo-source-editor"
+               :width :fill :height :fill :gap 0.38 :align :start
+        (v-stack :width 13.8 :height :fill :gap 0.12 :align :start
+          (h-stack :gap 0.25 :align :start
+            (instrument-source-number rate "rate" 2 false 6.4)
+            (instrument-source-button sync "sync" 5.0))
+          (h-stack :gap 0.25 :align :start
+            (instrument-source-dropdown division "division" 6.4)
+            (instrument-source-dropdown shape "shape" 5.0)))
+        (v-stack :width 5.0 :height :fill :gap 0.18 :align :center
+          (instrument-source-compact-knob pulse-width "pw" 2)
+          (box :debug-name "instrument-lfo-retrigger-button"
+               :width 4.4 :height 1.55 :padding 0
+            (instrument-source-button retrigger "retrig" 4.4)))))))
+
+(def instrument-lfo-source-section? (section)
+  (or (= (get section :name) "LFO 1")
+      (= (get section :name) "LFO 2")
+      (= (get section :name) "LFO 3")))
+
 (def instrument-selected-mod-source-editor (inst)
   (let ((slot (instrument-mod-selected-slot)))
     (box :debug-name "instrument-selected-mod-source-editor"
@@ -833,7 +907,9 @@
               (label (get section :name) :font-size 9 :color :dim :bg :transparent)
               (if (= (get section :name) "ENV 1")
                 (instrument-env-source-editor section)
-                (fx-param-grid (get section :params) false)))
+                (if (instrument-lfo-source-section? section)
+                  (instrument-lfo-source-editor section)
+                  (fx-param-grid (get section :params) false))))
             (box :width :fill :height :fill :h-align :center :v-align :center
               (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))))
 
@@ -2007,14 +2083,28 @@
     nil))
 
 (def sampler-param-knob (p key)
-  (subtree :key key
-    (knob-number :label (substring (get p :name) 0 12)
-      :value (fx-param-value p)
-      :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 1
-      :font-size 10.5 :label-font-size 10
-      :text-color :dim :label-color :dim
-      :width 4.0 :height 2.05
-      :on-change (lambda (v) (instrument-set-param-control-value p v)))))
+  (instrument-param-mod-wrapper p (str key "-mod-wrapper")
+    (subtree :key (str key (instrument-param-control-key-mode p))
+      (knob-number :label (substring (get p :name) 0 12)
+        :value (fx-param-value p)
+        :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 1
+        :base-value (instrument-param-base-value-prop p)
+        :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
+        :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
+        :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
+        :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
+        :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
+        :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
+        :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
+        :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
+        :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
+        :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
+        :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
+        :selected-mod-slot (instrument-selected-mod-slot-prop p)
+        :font-size 10.5 :label-font-size 10
+        :text-color :dim :label-color :dim
+        :width 4.0 :height 2.05
+        :on-change (lambda (v) (instrument-set-param-control-value p v))))))
 
 (def sampler-param-button (p key)
   (subtree :key key
@@ -2068,14 +2158,28 @@
 
 (def sampler-bpm-control (p)
   (h-stack :gap 0.65 :align :end
-    (subtree :key "sampler-param-bpm"
-      (knob-number :label "bpm"
-        :value (fx-param-value p)
-        :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 1
-        :font-size 10.5 :label-font-size 10
-        :text-color :dim :label-color :dim
-        :width 4.75 :height 2.05
-        :on-change (lambda (v) (instrument-set-param-control-value p v))))
+    (instrument-param-mod-wrapper p "sampler-param-bpm-mod-wrapper"
+      (subtree :key (str "sampler-param-bpm" (instrument-param-control-key-mode p))
+        (knob-number :label "bpm"
+          :value (fx-param-value p)
+          :min (instrument-param-control-min p) :max (instrument-param-control-max p) :decimals 1
+          :base-value (instrument-param-base-value-prop p)
+          :base-min (instrument-param-base-min-prop p) :base-max (instrument-param-base-max-prop p)
+          :mod-range-0-slot (instrument-param-knob-mod-slot-prop p 0) :mod-range-0-depth (instrument-param-knob-mod-depth-prop p 0)
+          :mod-range-1-slot (instrument-param-knob-mod-slot-prop p 1) :mod-range-1-depth (instrument-param-knob-mod-depth-prop p 1)
+          :mod-range-2-slot (instrument-param-knob-mod-slot-prop p 2) :mod-range-2-depth (instrument-param-knob-mod-depth-prop p 2)
+          :mod-range-3-slot (instrument-param-knob-mod-slot-prop p 3) :mod-range-3-depth (instrument-param-knob-mod-depth-prop p 3)
+          :mod-range-4-slot (instrument-param-knob-mod-slot-prop p 4) :mod-range-4-depth (instrument-param-knob-mod-depth-prop p 4)
+          :mod-range-5-slot (instrument-param-knob-mod-slot-prop p 5) :mod-range-5-depth (instrument-param-knob-mod-depth-prop p 5)
+          :mod-range-6-slot (instrument-param-knob-mod-slot-prop p 6) :mod-range-6-depth (instrument-param-knob-mod-depth-prop p 6)
+          :mod-range-7-slot (instrument-param-knob-mod-slot-prop p 7) :mod-range-7-depth (instrument-param-knob-mod-depth-prop p 7)
+          :mod-range-8-slot (instrument-param-knob-mod-slot-prop p 8) :mod-range-8-depth (instrument-param-knob-mod-depth-prop p 8)
+          :mod-range-9-slot (instrument-param-knob-mod-slot-prop p 9) :mod-range-9-depth (instrument-param-knob-mod-depth-prop p 9)
+          :selected-mod-slot (instrument-selected-mod-slot-prop p)
+          :font-size 10.5 :label-font-size 10
+          :text-color :dim :label-color :dim
+          :width 4.75 :height 2.05
+          :on-change (lambda (v) (instrument-set-param-control-value p v)))))
     (v-stack :gap 0.12 :align :center
       (box :height 0.82)
       (h-stack :gap 0.2
@@ -2106,49 +2210,50 @@
           (fx-panel-header-leading-spacer)
           (fx-enabled-toggle (enabled-param (get inst :synth)) false "sampler-enabled")
           (label "Sampler" :font-size 11 :color :white :bg :transparent)
-          (instrument-tab-button "synth" 0 4.5)
-          (instrument-tab-button "mods" 1 4.0)
-          (instrument-tab-button "sources" 2 5.8)))
+          (instrument-synth-button)
+          (instrument-mods-toggle-button)))
       (fx-panel-body "sampler-panel-content"
-        (if (= instrument-panel-tab 0)
-          (v-stack
-            (box :background-color :instrument-control-bg :corner-radius 10
-              (v-stack :gap 0.01 :padding 0.15
-                (box :height 0.1)
-                (if (get inst :buffer)
-                  (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                    (box :width 73 :height 4.85
-                      (waveform
-                        :height 4.85
-                        :header-height 0.3
-                        :ruler-font-size 8
-                        :ruler-color :dim
-                        :ruler-bg :black
-                        :grid-major-color :black
-                        :grid-minor-color :black
-                        :bg :instrument-control-bg
-                        :focusable true
-                        :marker-selection true
-                        :active-marker sampler-active-marker
-                        :marker-color :dim
-                        :active-marker-color :widget-knob-filled
-                        :waveform-color :yellow
-                        :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
-                        :buffer (get inst :buffer)
-                        :view-start sampler-view-start
-                        :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
-                        :cursor-time sampler-cursor-time
-                        :playhead-time (bind-seq "sampler-playhead")
-                        :selection-start (bind-seq (get inst :start-time-field))
-                        :selection-end (bind-seq (get inst :end-time-field))
-                        :time-ruler (dict :mode :seconds)
-                        :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
-                  (box :width 70 :height 4.85 :h-align :center :v-align :center
-                    (label "No sample" :font-size 12 :color :dim :bg :transparent)))
-                (sampler-param-knobs (get inst :synth) inst))))
-          (if (= instrument-panel-tab 1)
-            (box :debug-name "sampler-mods-wrapper" (instrument-mod-grid (get inst :mod)))
-            (box :debug-name "sampler-sources-wrapper" (instrument-source-tabs inst))))))))
+        (let ((body
+                (v-stack
+                  (box :background-color :instrument-control-bg :corner-radius 10
+                    (v-stack :gap 0.01 :padding 0.15
+                      (box :height 0.1)
+                      (if (get inst :buffer)
+                        (subtree :key (str "sampler-waveform-" (get inst :buffer))
+                          (box :width 73 :height 4.85
+                            (waveform
+                              :height 4.85
+                              :header-height 0.3
+                              :ruler-font-size 8
+                              :ruler-color :dim
+                              :ruler-bg :black
+                              :grid-major-color :black
+                              :grid-minor-color :black
+                              :bg :instrument-control-bg
+                              :focusable true
+                              :marker-selection true
+                              :active-marker sampler-active-marker
+                              :marker-color :dim
+                              :active-marker-color :widget-knob-filled
+                              :waveform-color :yellow
+                              :inactive-waveform-color '(rgba 0.25 0.25 0.25 1)
+                              :buffer (get inst :buffer)
+                              :view-start sampler-view-start
+                              :view-duration (if (= sampler-view-duration 0) (get inst :duration) sampler-view-duration)
+                              :cursor-time sampler-cursor-time
+                              :playhead-time (bind-seq "sampler-playhead")
+                              :selection-start (bind-seq (get inst :start-time-field))
+                              :selection-end (bind-seq (get inst :end-time-field))
+                              :time-ruler (dict :mode :seconds)
+                              :on-action |event| (handle-sampler-waveform-action event (get inst :duration)))))
+                        (box :width 70 :height 4.85 :h-align :center :v-align :center
+                          (label "No sample" :font-size 12 :color :dim :bg :transparent)))
+                      (sampler-param-knobs (get inst :synth) inst))))))
+          (if instrument-mods-open
+            (h-stack :debug-name "sampler-mods-inline-body" :height :fill :gap 0.45 :align :stretch
+              (instrument-mod-control-panel inst)
+              body)
+            body))))))
 
 (def modulator-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
