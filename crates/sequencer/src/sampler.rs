@@ -100,7 +100,17 @@ const STATE_MOD_START_LANE4_SOURCE: usize = 91;
 const STATE_MOD_START_LANE4_DEPTH: usize = 92;
 const STATE_MOD_END_LANE4_SOURCE: usize = 93;
 const STATE_MOD_END_LANE4_DEPTH: usize = 94;
-pub const SAMPLER_STATE_SIZE: usize = 95;
+const STATE_SCRUB_SMOOTH_TIME_MS: usize = 95;
+const STATE_LAST_ENV_AMP: usize = 96;
+const STATE_RETRIGGER_PLAYHEAD: usize = 97;
+const STATE_RETRIGGER_DIRECTION: usize = 98;
+const STATE_RETRIGGER_AMP: usize = 99;
+const STATE_RETRIGGER_SR_PHASE: usize = 100;
+const STATE_RETRIGGER_SR_HELD_L: usize = 101;
+const STATE_RETRIGGER_SR_HELD_R: usize = 102;
+const STATE_LAST_READ_HEAD: usize = 103;
+const STATE_RETRIGGER_FADE_REMAINING: usize = 104;
+pub const SAMPLER_STATE_SIZE: usize = 105;
 pub const SAMPLER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 // Envelope phase constants
@@ -108,15 +118,13 @@ const ENV_IDLE: f32 = 0.0;
 const ENV_ATTACK: f32 = 1.0;
 const ENV_SUSTAIN: f32 = 2.0;
 const ENV_RELEASE: f32 = 3.0;
-const ENV_RETRIGGER: f32 = 4.0; // smooth fade-down before re-attack
+const ENV_RETRIGGER: f32 = 4.0; // legacy retrigger phase, migrated to ATTACK at process time
 
 // Minimum release to prevent clicks (in samples, ~1.5ms at 44100)
 const MIN_RELEASE_SAMPLES: f32 = 64.0;
-// Retrigger crossfade duration (~1ms at 44100). Fades old content to 0 before new attack.
-const RETRIGGER_FADE_SAMPLES: f32 = 48.0;
-// Minimum attack applied after retrigger to prevent click on ramp-up (~0.2ms at 44100).
-// Fresh triggers from silence use the user's attack value directly (even if 0).
-const MIN_RETRIGGER_ATTACK: f32 = 8.0;
+// Retrigger fade-down duration. A new trigger while the old envelope is nonzero
+// first fades the previous output to silence, then starts the new amp envelope.
+const RETRIGGER_FADE_SECONDS: f32 = 0.004;
 const WARP_XFADE_SECONDS: f32 = 0.005;
 const MOD_INPUT_COUNT: usize = 10;
 const SR_MIN_HZ: f32 = 2_000.0;
@@ -125,7 +133,8 @@ const SPEED_MIN: f32 = -4.0;
 const SPEED_MAX: f32 = 4.0;
 const WARP_BPM_MIN: f32 = 20.0;
 const WARP_BPM_MAX: f32 = 400.0;
-const SCRUB_SMOOTH_SECONDS: f32 = 0.006;
+const SCRUB_SMOOTH_TIME_MS_DEFAULT: f32 = 6.0;
+const SCRUB_RELEASE_EPSILON: f32 = 0.000_1;
 
 const MOD_SPEED_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM] = [
     (STATE_MOD_SPEED_SOURCE, STATE_MOD_SPEED_DEPTH),
@@ -288,6 +297,94 @@ fn modulated_normalized(base: f32, modulation: f32) -> f32 {
     (base + modulation).clamp(0.0, 1.0)
 }
 
+fn retrigger_fade_samples(sample_rate: f32) -> f32 {
+    (sample_rate.max(1.0) * RETRIGGER_FADE_SECONDS).max(1.0)
+}
+
+fn retrigger_tail_gain(remaining_samples: f32, total_samples: f32) -> f32 {
+    let progress = 1.0 - (remaining_samples / total_samples.max(1.0)).clamp(0.0, 1.0);
+    0.5 * (1.0 + (std::f32::consts::PI * progress).cos())
+}
+
+fn advance_retrigger_playhead(
+    playhead: f32,
+    direction: f32,
+    step: f32,
+    start_sample: usize,
+    end_sample: usize,
+    loop_mode: i32,
+) -> (f32, f32, bool) {
+    let start = start_sample as f32;
+    let end = end_sample as f32;
+    let mut next_playhead = playhead + step * direction;
+    let mut next_direction = direction;
+    let past_forward = next_playhead >= end;
+    let past_reverse = next_playhead < start;
+
+    if !(past_forward || past_reverse) {
+        return (next_playhead, next_direction, true);
+    }
+
+    if loop_mode == 2 || loop_mode == 3 {
+        if loop_mode == 3 {
+            next_direction = -next_direction;
+            next_playhead = if past_forward {
+                end_sample.saturating_sub(1) as f32
+            } else {
+                start
+            };
+        } else if next_direction >= 0.0 {
+            let len = (end - start).max(1.0);
+            next_playhead = start + (next_playhead - start).rem_euclid(len);
+        } else {
+            let len = (end - start).max(1.0);
+            next_playhead = start + (next_playhead - start).rem_euclid(len);
+        }
+        (
+            next_playhead.clamp(start, end_sample.saturating_sub(1) as f32),
+            next_direction,
+            true,
+        )
+    } else {
+        (next_playhead, next_direction, false)
+    }
+}
+
+fn accumulated_scrub_read_head(
+    playhead: &mut f32,
+    scrub_smooth: &mut f32,
+    target_scrub: f32,
+    region_len: f32,
+    start_sample: f32,
+    end_sample: f32,
+    sample_rate: f32,
+    smooth_time_ms: f32,
+) -> f32 {
+    let max_read_head = end_sample.max(start_sample);
+    let target_scrub = target_scrub.clamp(-1.0, 1.0);
+    if target_scrub.abs() <= SCRUB_RELEASE_EPSILON && scrub_smooth.abs() > SCRUB_RELEASE_EPSILON {
+        *playhead = (*playhead + *scrub_smooth * region_len).clamp(start_sample, max_read_head);
+        *scrub_smooth = 0.0;
+        return *playhead;
+    }
+    if target_scrub.abs() <= SCRUB_RELEASE_EPSILON {
+        *scrub_smooth = 0.0;
+        return (*playhead).clamp(start_sample, max_read_head);
+    }
+    if scrub_smooth.abs() > SCRUB_RELEASE_EPSILON && target_scrub.signum() != scrub_smooth.signum()
+    {
+        *playhead = (*playhead + *scrub_smooth * region_len).clamp(start_sample, max_read_head);
+        *scrub_smooth = 0.0;
+    }
+
+    if target_scrub.abs() > scrub_smooth.abs() {
+        let smooth_seconds = smooth_time_ms.clamp(0.0, 5000.0) * 0.001;
+        let scrub_coeff = (1.0 / (sample_rate * smooth_seconds)).clamp(0.0001, 1.0);
+        *scrub_smooth += (target_scrub - *scrub_smooth) * scrub_coeff;
+    }
+    (*playhead + *scrub_smooth * region_len).clamp(start_sample, max_read_head)
+}
+
 // Param indices (match state layout for direct write)
 pub const PARAM_PLAYHEAD: u64 = STATE_PLAYHEAD as u64;
 pub const PARAM_TRIGGER: u64 = STATE_PLAYING as u64;
@@ -317,6 +414,7 @@ pub const PARAM_WARP_PROJECT_BPM: u64 = STATE_WARP_PROJECT_BPM as u64;
 pub const PARAM_SOURCE_SAMPLE_RATE: u64 = STATE_SOURCE_SAMPLE_RATE as u64;
 pub const PARAM_SCRUB_OFFSET: u64 = STATE_SCRUB_OFFSET as u64;
 pub const PARAM_SCRUB_SMOOTH: u64 = STATE_SCRUB_SMOOTH as u64;
+pub const PARAM_SCRUB_SMOOTH_TIME_MS: u64 = STATE_SCRUB_SMOOTH_TIME_MS as u64;
 pub const PARAM_MOD_SPEED_SOURCE: u64 = STATE_MOD_SPEED_SOURCE as u64;
 pub const PARAM_MOD_SPEED_DEPTH: u64 = STATE_MOD_SPEED_DEPTH as u64;
 pub const PARAM_MOD_SCRUB_SOURCE: u64 = STATE_MOD_SCRUB_SOURCE as u64;
@@ -532,6 +630,15 @@ unsafe extern "C" fn sampler_init(
     *s.add(STATE_LAST_OUT_R) = 0.0;
     *s.add(STATE_RETRIGGER_OUT_L) = 0.0;
     *s.add(STATE_RETRIGGER_OUT_R) = 0.0;
+    *s.add(STATE_LAST_ENV_AMP) = 0.0;
+    *s.add(STATE_RETRIGGER_PLAYHEAD) = 0.0;
+    *s.add(STATE_RETRIGGER_DIRECTION) = 1.0;
+    *s.add(STATE_RETRIGGER_AMP) = 0.0;
+    *s.add(STATE_RETRIGGER_SR_PHASE) = 0.0;
+    *s.add(STATE_RETRIGGER_SR_HELD_L) = 0.0;
+    *s.add(STATE_RETRIGGER_SR_HELD_R) = 0.0;
+    *s.add(STATE_LAST_READ_HEAD) = 0.0;
+    *s.add(STATE_RETRIGGER_FADE_REMAINING) = 0.0;
     *s.add(STATE_START_POINT) = 0.0;
     *s.add(STATE_END_POINT) = 1.0;
     *s.add(STATE_ENABLED) = 1.0;
@@ -562,6 +669,7 @@ unsafe extern "C" fn sampler_init(
     }
     *s.add(STATE_SCRUB_OFFSET) = 0.0;
     *s.add(STATE_SCRUB_SMOOTH) = 0.0;
+    *s.add(STATE_SCRUB_SMOOTH_TIME_MS) = SCRUB_SMOOTH_TIME_MS_DEFAULT;
     for (source_idx, depth_idx) in ALL_MOD_LANES {
         *s.add(source_idx) = 0.0;
         *s.add(depth_idx) = 0.0;
@@ -602,6 +710,15 @@ unsafe extern "C" fn sampler_process(
     let mut last_out_r = *s.add(STATE_LAST_OUT_R);
     let mut retrigger_out_l = *s.add(STATE_RETRIGGER_OUT_L);
     let mut retrigger_out_r = *s.add(STATE_RETRIGGER_OUT_R);
+    let mut last_env_amp = *s.add(STATE_LAST_ENV_AMP);
+    let mut retrigger_playhead = *s.add(STATE_RETRIGGER_PLAYHEAD);
+    let mut retrigger_direction = *s.add(STATE_RETRIGGER_DIRECTION);
+    let mut retrigger_amp = *s.add(STATE_RETRIGGER_AMP);
+    let mut retrigger_sr_phase = *s.add(STATE_RETRIGGER_SR_PHASE);
+    let mut retrigger_sr_held_l = *s.add(STATE_RETRIGGER_SR_HELD_L);
+    let mut retrigger_sr_held_r = *s.add(STATE_RETRIGGER_SR_HELD_R);
+    let mut last_read_head = *s.add(STATE_LAST_READ_HEAD);
+    let mut retrigger_fade_remaining = *s.add(STATE_RETRIGGER_FADE_REMAINING);
     let base_start_point = (*s.add(STATE_START_POINT)).clamp(0.0, 1.0);
     let base_end_point = (*s.add(STATE_END_POINT)).clamp(0.0, 1.0);
     let enabled = *s.add(STATE_ENABLED);
@@ -614,6 +731,7 @@ unsafe extern "C" fn sampler_process(
     let mut sr_held_l = *s.add(STATE_SR_HELD_L);
     let mut sr_held_r = *s.add(STATE_SR_HELD_R);
     let sample_rate = (*s.add(STATE_SAMPLE_RATE)).max(1.0);
+    let retrigger_fade_samples = retrigger_fade_samples(sample_rate);
     let source_sample_rate = (*s.add(STATE_SOURCE_SAMPLE_RATE)).max(1.0);
     let warp_enabled = *s.add(STATE_WARP_ENABLED) > 0.5;
     let warp_mode = (*s.add(STATE_WARP_MODE)).round() as i32;
@@ -637,6 +755,7 @@ unsafe extern "C" fn sampler_process(
     let mut last_warp_target_ratio = (*s.add(STATE_WARP_LAST_TARGET_RATIO)).clamp(0.01, 32.0);
     let scrub_offset = (*s.add(STATE_SCRUB_OFFSET)).clamp(-1.0, 1.0);
     let mut scrub_smooth = *s.add(STATE_SCRUB_SMOOTH);
+    let scrub_smooth_time_ms = (*s.add(STATE_SCRUB_SMOOTH_TIME_MS)).clamp(0.0, 5000.0);
     let buf_desc = buffers as *const BufferDesc;
     let desc = &*buf_desc.add(buffer_id);
     let sample_data = desc.buffer;
@@ -652,6 +771,9 @@ unsafe extern "C" fn sampler_process(
             *out0.add(i) = 0.0;
             *out1.add(i) = 0.0;
         }
+        *s.add(STATE_LAST_ENV_AMP) = 0.0;
+        *s.add(STATE_LAST_READ_HEAD) = 0.0;
+        *s.add(STATE_RETRIGGER_FADE_REMAINING) = 0.0;
         return;
     }
 
@@ -674,6 +796,9 @@ unsafe extern "C" fn sampler_process(
         }
         *s.add(STATE_LAST_OUT_L) = 0.0;
         *s.add(STATE_LAST_OUT_R) = 0.0;
+        *s.add(STATE_LAST_ENV_AMP) = 0.0;
+        *s.add(STATE_LAST_READ_HEAD) = 0.0;
+        *s.add(STATE_RETRIGGER_FADE_REMAINING) = 0.0;
         return;
     }
 
@@ -724,10 +849,6 @@ unsafe extern "C" fn sampler_process(
     let amplitude = velocity * gain;
     let eff_release = release_samples.max(MIN_RELEASE_SAMPLES);
     let warp_ratio_slew = (1.0 / (sample_rate * 0.050)).clamp(0.0001, 1.0);
-    // After a retrigger fade, use a small minimum attack to avoid click on ramp-up.
-    // For fresh triggers from silence this flag stays false → attack=0 stays punchy.
-    let mut post_retrigger = false;
-
     let reset_forward_warp_state = |table: &crate::analysis::OnsetTableShared,
                                     current_slice: &mut usize,
                                     slice_project_frame_start: &mut f32,
@@ -752,7 +873,12 @@ unsafe extern "C" fn sampler_process(
 
     // ── Trigger detection ──
     // playhead==0 means params just reset it. Distinguish fresh vs retrigger:
-    if playhead == 0.0 && env_phase != ENV_RETRIGGER {
+    if playhead == 0.0 {
+        let old_read_head = last_read_head;
+        let old_play_direction = play_direction;
+        let old_sr_phase = sr_phase;
+        let old_sr_held_l = sr_held_l;
+        let old_sr_held_r = sr_held_r;
         play_direction = if reverse { -1.0 } else { 1.0 };
         playhead = if reverse {
             (end_sample.saturating_sub(1)) as f32
@@ -776,21 +902,30 @@ unsafe extern "C" fn sampler_process(
         }
         gate_counter = 0.0; // reset real-time duration counter
         sr_phase = 0.0;
+        scrub_smooth = 0.0;
         if env_level > 0.001 || last_out_l.abs() > 0.000_1 || last_out_r.abs() > 0.000_1 {
-            // Voice was still audible → fade the actual previous output to zero
-            // before starting the new waveform attack.
-            env_phase = ENV_RETRIGGER;
-            env_level = 1.0;
-            release_level = 1.0;
+            // Voice was still audible. Keep rendering the outgoing waveform as a
+            // short stolen tail while the new trigger starts its normal attack.
             retrigger_out_l = last_out_l;
             retrigger_out_r = last_out_r;
+            retrigger_playhead =
+                old_read_head.clamp(start_sample as f32, end_sample.saturating_sub(1) as f32);
+            retrigger_direction = old_play_direction;
+            retrigger_amp = last_env_amp.max(0.0);
+            retrigger_sr_phase = old_sr_phase;
+            retrigger_sr_held_l = old_sr_held_l;
+            retrigger_sr_held_r = old_sr_held_r;
+            retrigger_fade_remaining = retrigger_fade_samples;
         } else {
             // Voice was silent → clean attack from 0
-            env_phase = ENV_ATTACK;
-            env_level = 0.0;
             retrigger_out_l = 0.0;
             retrigger_out_r = 0.0;
+            retrigger_amp = 0.0;
+            retrigger_fade_remaining = 0.0;
         }
+        env_phase = ENV_ATTACK;
+        env_level = 0.0;
+        release_level = 0.0;
     }
 
     if warp_active && (warp_target_ratio - last_warp_target_ratio).abs() > 0.0001 {
@@ -920,6 +1055,7 @@ unsafe extern "C" fn sampler_process(
             *out1.add(i) = 0.0;
             env_phase = ENV_IDLE;
             env_level = 0.0;
+            last_env_amp = 0.0;
             *s.add(STATE_PLAYING) = 0.0;
             for j in (i + 1)..nf {
                 *out0.add(j) = 0.0;
@@ -930,45 +1066,15 @@ unsafe extern "C" fn sampler_process(
 
         // ── Envelope state machine (per sample) ──
         // Uses chained `if` (not else-if) so phase transitions within a
-        // single sample flow through immediately (e.g. retrigger→attack).
-
+        // single sample flow through immediately.
         if env_phase == ENV_RETRIGGER {
-            // Fade the previously emitted sample to zero, then begin the new attack.
-            // The new playhead advances underneath this silent crossfade so we do not
-            // jump directly from the old waveform to the new one.
-            *out0.add(i) = retrigger_out_l * env_level;
-            *out1.add(i) = retrigger_out_r * env_level;
-            last_out_l = *out0.add(i);
-            last_out_r = *out1.add(i);
-
-            env_level -= 1.0 / RETRIGGER_FADE_SAMPLES;
-            playhead += if warp_active && play_direction >= 0.0 {
-                playback_step
-            } else {
-                playback_step * play_direction
-            };
-            gate_counter += 1.0;
-            if env_level <= 0.0 {
-                env_level = 0.0;
-                env_phase = ENV_ATTACK;
-                post_retrigger = true;
-                last_out_l = 0.0;
-                last_out_r = 0.0;
-            }
-            continue;
+            env_phase = ENV_ATTACK;
+            env_level = 0.0;
         }
 
         if env_phase == ENV_ATTACK {
-            // After retrigger, enforce a minimum attack to prevent click
-            // on the ramp back up (sample data at playhead≈48 != 0).
-            // Fresh triggers from silence keep attack=0 for max punch.
-            let eff_attack = if post_retrigger {
-                attack_samples.max(MIN_RETRIGGER_ATTACK)
-            } else {
-                attack_samples
-            };
-            if eff_attack > 0.0 {
-                env_level += 1.0 / eff_attack;
+            if attack_samples > 0.0 {
+                env_level += 1.0 / attack_samples;
             } else {
                 env_level = 1.0;
             }
@@ -1016,6 +1122,7 @@ unsafe extern "C" fn sampler_process(
                 *out1.add(i) = 0.0;
                 last_out_l = 0.0;
                 last_out_r = 0.0;
+                last_env_amp = 0.0;
                 for j in (i + 1)..nf {
                     *out0.add(j) = 0.0;
                     *out1.add(j) = 0.0;
@@ -1062,10 +1169,16 @@ unsafe extern "C" fn sampler_process(
 
         let scrub_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_SCRUB_LANES, i);
         let target_scrub = (scrub_offset + scrub_mod).clamp(-1.0, 1.0);
-        let scrub_coeff = (1.0 / (sample_rate * SCRUB_SMOOTH_SECONDS)).clamp(0.0001, 1.0);
-        scrub_smooth += (target_scrub - scrub_smooth) * scrub_coeff;
-        let read_head = (playhead + scrub_smooth * region_len)
-            .clamp(start_sample as f32, (end_sample.saturating_sub(1)) as f32);
+        let read_head = accumulated_scrub_read_head(
+            &mut playhead,
+            &mut scrub_smooth,
+            target_scrub,
+            region_len,
+            start_sample as f32,
+            (end_sample.saturating_sub(1)) as f32,
+            sample_rate,
+            scrub_smooth_time_ms,
+        );
 
         let (mut sample_l, mut sample_r) = if warp_silent {
             (0.0, 0.0)
@@ -1116,11 +1229,62 @@ unsafe extern "C" fn sampler_process(
             sample_r = sr_held_r;
         }
         let env_amp = amplitude * env_level;
+        let mut tail_l = 0.0;
+        let mut tail_r = 0.0;
+        if retrigger_fade_remaining > 0.0 && retrigger_amp > 0.0 {
+            let tail_in_region =
+                retrigger_playhead >= start_sample as f32 && retrigger_playhead < end_sample as f32;
+            let (mut raw_tail_l, mut raw_tail_r) = if tail_in_region {
+                read_interpolated(sample_data, sample_len, channel_count, retrigger_playhead)
+            } else {
+                (retrigger_out_l, retrigger_out_r)
+            };
 
-        *out0.add(i) = sample_l * env_amp;
-        *out1.add(i) = sample_r * env_amp;
+            if sr_reduced && tail_in_region {
+                if retrigger_sr_phase <= 0.0 {
+                    retrigger_sr_held_l = raw_tail_l;
+                    retrigger_sr_held_r = raw_tail_r;
+                    retrigger_sr_phase += sr_step;
+                }
+                retrigger_sr_phase -= 1.0;
+                raw_tail_l = retrigger_sr_held_l;
+                raw_tail_r = retrigger_sr_held_r;
+            }
+
+            let tail_gain = retrigger_tail_gain(retrigger_fade_remaining, retrigger_fade_samples);
+            tail_l = raw_tail_l * retrigger_amp * tail_gain;
+            tail_r = raw_tail_r * retrigger_amp * tail_gain;
+            retrigger_fade_remaining -= 1.0;
+
+            if tail_in_region {
+                let (next_playhead, next_direction, tail_active) = advance_retrigger_playhead(
+                    retrigger_playhead,
+                    retrigger_direction,
+                    playback_step,
+                    start_sample,
+                    end_sample,
+                    loop_mode,
+                );
+                retrigger_playhead = next_playhead;
+                retrigger_direction = next_direction;
+                if !tail_active {
+                    retrigger_fade_remaining = 0.0;
+                    retrigger_amp = 0.0;
+                }
+            }
+
+            if retrigger_fade_remaining <= 0.0 {
+                retrigger_fade_remaining = 0.0;
+                retrigger_amp = 0.0;
+            }
+        }
+
+        *out0.add(i) = sample_l * env_amp + tail_l;
+        *out1.add(i) = sample_r * env_amp + tail_r;
         last_out_l = *out0.add(i);
         last_out_r = *out1.add(i);
+        last_env_amp = env_amp;
+        last_read_head = read_head;
 
         playhead += if warp_active && play_direction >= 0.0 {
             playback_step
@@ -1140,6 +1304,14 @@ unsafe extern "C" fn sampler_process(
     *s.add(STATE_LAST_OUT_R) = last_out_r;
     *s.add(STATE_RETRIGGER_OUT_L) = retrigger_out_l;
     *s.add(STATE_RETRIGGER_OUT_R) = retrigger_out_r;
+    *s.add(STATE_LAST_ENV_AMP) = last_env_amp;
+    *s.add(STATE_RETRIGGER_PLAYHEAD) = retrigger_playhead;
+    *s.add(STATE_RETRIGGER_DIRECTION) = retrigger_direction;
+    *s.add(STATE_RETRIGGER_AMP) = retrigger_amp;
+    *s.add(STATE_RETRIGGER_SR_PHASE) = retrigger_sr_phase;
+    *s.add(STATE_RETRIGGER_SR_HELD_L) = retrigger_sr_held_l;
+    *s.add(STATE_RETRIGGER_SR_HELD_R) = retrigger_sr_held_r;
+    *s.add(STATE_RETRIGGER_FADE_REMAINING) = retrigger_fade_remaining;
     *s.add(STATE_PLAY_DIRECTION) = play_direction;
     *s.add(STATE_SR_PHASE) = sr_phase;
     *s.add(STATE_SR_HELD_L) = sr_held_l;
@@ -1152,6 +1324,7 @@ unsafe extern "C" fn sampler_process(
     *s.add(STATE_WARP_SLICE_SOURCE_FRAME_START) = slice_source_frame_start;
     *s.add(STATE_WARP_LAST_TARGET_RATIO) = last_warp_target_ratio;
     *s.add(STATE_SCRUB_SMOOTH) = scrub_smooth;
+    *s.add(STATE_LAST_READ_HEAD) = last_read_head;
 }
 
 pub fn sampler_vtable() -> NodeVTable {
@@ -1301,10 +1474,15 @@ pub fn create_sampler_track(lg: *mut LiveGraph, wav_path: &Path) -> Result<Sampl
 #[cfg(test)]
 mod tests {
     use super::{
-        modulation_lane_sum, sampler_playback_step, source_frames_to_host_frames,
-        SAMPLER_MOD_LANES_PER_PARAM, SAMPLER_STATE_SIZE, STATE_MOD_SPEED_DEPTH,
-        STATE_MOD_SPEED_LANE2_DEPTH, STATE_MOD_SPEED_LANE2_SOURCE, STATE_MOD_SPEED_SOURCE,
+        accumulated_scrub_read_head, advance_retrigger_playhead, modulation_lane_sum,
+        retrigger_fade_samples, sampler_init, sampler_playback_step, sampler_process,
+        source_frames_to_host_frames, BufferDesc, SAMPLER_MOD_LANES_PER_PARAM, SAMPLER_STATE_SIZE,
+        SCRUB_SMOOTH_TIME_MS_DEFAULT, STATE_ATTACK_SAMPLES, STATE_BUFFER_ID, STATE_END_POINT,
+        STATE_GAIN, STATE_GATE_SAMPLES, STATE_MOD_SPEED_DEPTH, STATE_MOD_SPEED_LANE2_DEPTH,
+        STATE_MOD_SPEED_LANE2_SOURCE, STATE_MOD_SPEED_SOURCE, STATE_PLAYHEAD, STATE_PLAYING,
+        STATE_SAMPLE_RATE, STATE_SOURCE_SAMPLE_RATE, STATE_VELOCITY,
     };
+    use std::ffi::c_void;
 
     #[test]
     fn playback_step_preserves_44100_wav_pitch_at_48000_host_rate() {
@@ -1325,6 +1503,114 @@ mod tests {
         let host_frames = source_frames_to_host_frames(44_100.0, 44_100.0, 48_000.0);
 
         assert!((host_frames - 48_000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn retrigger_fade_is_four_milliseconds_at_host_rate() {
+        assert!((retrigger_fade_samples(48_000.0) - 192.0).abs() < 0.001);
+        assert!((retrigger_fade_samples(44_100.0) - 176.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn retrigger_tail_advances_outgoing_sample_position() {
+        let (playhead, direction, active) =
+            advance_retrigger_playhead(100.0, 1.0, 2.5, 0, 1_000, 1);
+
+        assert!(active);
+        assert_eq!(direction, 1.0);
+        assert_eq!(playhead, 102.5);
+    }
+
+    #[test]
+    fn retrigger_tail_wraps_looped_outgoing_sample_position() {
+        let (playhead, direction, active) =
+            advance_retrigger_playhead(998.0, 1.0, 5.0, 100, 1_000, 2);
+
+        assert!(active);
+        assert_eq!(direction, 1.0);
+        assert_eq!(playhead, 103.0);
+    }
+
+    #[test]
+    fn sampler_process_preserves_stereo_channels_during_playback_and_retrigger_tail() {
+        let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
+        let initial = [0.0_f32, 44_100.0];
+        unsafe {
+            sampler_init(
+                state.as_mut_ptr() as *mut c_void,
+                44_100,
+                64,
+                initial.as_ptr() as *const c_void,
+            );
+        }
+        state[STATE_BUFFER_ID] = 0.0;
+        state[STATE_SOURCE_SAMPLE_RATE] = 44_100.0;
+        state[STATE_SAMPLE_RATE] = 44_100.0;
+        state[STATE_PLAYING] = 1.0;
+        state[STATE_PLAYHEAD] = 0.0;
+        state[STATE_GAIN] = 1.0;
+        state[STATE_VELOCITY] = 1.0;
+        state[STATE_ATTACK_SAMPLES] = 0.0;
+        state[STATE_GATE_SAMPLES] = f32::MAX;
+        state[STATE_END_POINT] = 1.0;
+
+        let mut sample = [
+            0.30, -0.70, 0.35, -0.65, 0.40, -0.60, 0.45, -0.55, 0.50, -0.50, 0.55, -0.45, 0.60,
+            -0.40, 0.65, -0.35,
+        ];
+        let desc = [BufferDesc {
+            buffer: sample.as_mut_ptr(),
+            size: 8,
+            channel_count: 2,
+        }];
+        let mut left = [0.0_f32; 8];
+        let mut right = [0.0_f32; 8];
+        let outputs = [left.as_mut_ptr(), right.as_mut_ptr()];
+        let inputs: [*mut f32; 0] = [];
+
+        unsafe {
+            sampler_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                8,
+                state.as_mut_ptr() as *mut c_void,
+                desc.as_ptr() as *mut c_void,
+            );
+        }
+
+        assert!(
+            left.iter().any(|v| v.abs() > 0.01),
+            "left channel was silent during normal playback: {left:?}"
+        );
+        assert!(
+            right.iter().any(|v| v.abs() > 0.01),
+            "right channel was silent during normal playback: {right:?}"
+        );
+        assert_ne!(left[0], right[0]);
+
+        state[STATE_PLAYHEAD] = 0.0;
+        left.fill(0.0);
+        right.fill(0.0);
+
+        unsafe {
+            sampler_process(
+                inputs.as_ptr(),
+                outputs.as_ptr(),
+                4,
+                state.as_mut_ptr() as *mut c_void,
+                desc.as_ptr() as *mut c_void,
+            );
+        }
+
+        assert!(
+            left.iter().any(|v| v.abs() > 0.01),
+            "left channel was silent during retrigger tail: {left:?}"
+        );
+        assert!(
+            right.iter().any(|v| v.abs() > 0.01),
+            "right channel was silent during retrigger tail: {right:?}"
+        );
+        assert_ne!(left[0], right[0]);
     }
 
     #[test]
@@ -1350,5 +1636,92 @@ mod tests {
         };
 
         assert!((sum + 1.8).abs() < 0.00001, "sum was {sum}");
+    }
+
+    #[test]
+    fn accumulated_scrub_commits_offset_when_scrub_releases() {
+        let mut playhead = 500.0;
+        let mut scrub_smooth = 0.25;
+
+        let read_head = accumulated_scrub_read_head(
+            &mut playhead,
+            &mut scrub_smooth,
+            0.0,
+            1_000.0,
+            0.0,
+            999.0,
+            48_000.0,
+            SCRUB_SMOOTH_TIME_MS_DEFAULT,
+        );
+
+        assert_eq!(read_head, 750.0);
+        assert_eq!(playhead, 750.0);
+        assert_eq!(scrub_smooth, 0.0);
+    }
+
+    #[test]
+    fn accumulated_scrub_offsets_read_head_while_active_without_committing() {
+        let mut playhead = 500.0;
+        let mut scrub_smooth = 0.0;
+
+        let read_head = accumulated_scrub_read_head(
+            &mut playhead,
+            &mut scrub_smooth,
+            1.0,
+            1_000.0,
+            0.0,
+            999.0,
+            48_000.0,
+            SCRUB_SMOOTH_TIME_MS_DEFAULT,
+        );
+
+        assert!(
+            read_head > playhead,
+            "read_head={read_head} playhead={playhead}"
+        );
+        assert_eq!(playhead, 500.0);
+        assert!(scrub_smooth > 0.0);
+    }
+
+    #[test]
+    fn accumulated_scrub_holds_peak_while_pulse_falls() {
+        let mut playhead = 500.0;
+        let mut scrub_smooth = 0.25;
+
+        let read_head = accumulated_scrub_read_head(
+            &mut playhead,
+            &mut scrub_smooth,
+            0.1,
+            1_000.0,
+            0.0,
+            999.0,
+            48_000.0,
+            SCRUB_SMOOTH_TIME_MS_DEFAULT,
+        );
+
+        assert_eq!(read_head, 750.0);
+        assert_eq!(playhead, 500.0);
+        assert_eq!(scrub_smooth, 0.25);
+    }
+
+    #[test]
+    fn accumulated_scrub_commits_before_opposite_direction_scrub() {
+        let mut playhead = 500.0;
+        let mut scrub_smooth = 0.25;
+
+        let read_head = accumulated_scrub_read_head(
+            &mut playhead,
+            &mut scrub_smooth,
+            -1.0,
+            1_000.0,
+            0.0,
+            999.0,
+            48_000.0,
+            SCRUB_SMOOTH_TIME_MS_DEFAULT,
+        );
+
+        assert!(read_head < 750.0);
+        assert_eq!(playhead, 750.0);
+        assert!(scrub_smooth < 0.0);
     }
 }

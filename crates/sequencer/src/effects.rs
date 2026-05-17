@@ -959,6 +959,16 @@ mod tests {
                 Some("%")
             ))
         );
+        let smooth = desc
+            .params
+            .iter()
+            .find(|param| param.name == "smooth")
+            .expect("sampler should expose scrub smooth time");
+        assert_eq!(
+            smooth.node_param_idx,
+            crate::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32
+        );
+        assert_eq!((smooth.min, smooth.max, smooth.default), (0.0, 250.0, 6.0));
     }
 }
 
@@ -2265,6 +2275,19 @@ impl EffectDescriptor {
                 depth_unit,
             });
         }
+        params.push(ParamDescriptor {
+            name: "smooth".to_string(),
+            min: 0.0,
+            max: 250.0,
+            default: 6.0,
+            kind: ParamKind::Continuous {
+                unit: Some("ms".to_string()),
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32,
+            node_param_span: 1,
+            host_control: None,
+        });
         Self {
             name: "Sampler".to_string(),
             input_channels: 0,

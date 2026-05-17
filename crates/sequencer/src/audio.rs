@@ -1538,6 +1538,104 @@ unsafe fn dispatch_sampler_extra_params_to_voice(
     }
 }
 
+fn sampler_live_param_value(idx: u64, value: f32, sample_rate: f64) -> f32 {
+    if idx == PARAM_ATTACK_SAMPLES
+        || idx == PARAM_RELEASE_SAMPLES
+        || idx == PARAM_LOOP_XFADE_SAMPLES
+    {
+        value * sample_rate as f32 / 1000.0
+    } else {
+        value
+    }
+}
+
+unsafe fn dispatch_sampler_live_params_to_voice(
+    lg: *mut LiveGraph,
+    sampler_lid: u64,
+    modulator_id: u64,
+    instrument_params: &[ScheduledInstrumentParam],
+    sample_rate: f64,
+) {
+    for param in instrument_params {
+        match param.target {
+            ScheduledInstrumentParamTarget::Synth => {
+                params_push_wrapper(
+                    lg,
+                    ParamMsg {
+                        idx: param.idx,
+                        logical_id: sampler_lid,
+                        fvalue: sampler_live_param_value(param.idx, param.value, sample_rate),
+                    },
+                );
+            }
+            ScheduledInstrumentParamTarget::Modulator => {
+                if modulator_id != 0 {
+                    params_push_wrapper(
+                        lg,
+                        ParamMsg {
+                            idx: param.idx,
+                            logical_id: modulator_id,
+                            fvalue: param.value,
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn dispatch_instrument_params_to_active_voices(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    instrument_params: &[ScheduledInstrumentParam],
+) {
+    if instrument_params.is_empty() {
+        return;
+    }
+    if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
+        let pool = &mut data.custom_engine_pools[engine_id];
+        for voice_idx in 0..pool.num_voices {
+            if !pool.voices[voice_idx].active
+                || pool.voices[voice_idx].assigned_track != Some(track_idx)
+            {
+                continue;
+            }
+            let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
+                .load(Ordering::Relaxed);
+            let modulator_id = data.state.runtime.engine_modulator_node_ids[engine_id][voice_idx]
+                .load(Ordering::Relaxed);
+            if synth_id == 0 || modulator_id == 0 {
+                continue;
+            }
+            unsafe {
+                dispatch_instrument_params_to_voice(
+                    data.lg.0,
+                    synth_id as u64,
+                    modulator_id as u64,
+                    instrument_params,
+                );
+            }
+            pool.voices[voice_idx].fingerprint = 0;
+        }
+    } else {
+        let pool = &data.voice_pools[track_idx];
+        for voice in pool.voices[..pool.num_voices]
+            .iter()
+            .filter(|voice| voice.active && voice.logical_id != 0)
+        {
+            unsafe {
+                dispatch_sampler_live_params_to_voice(
+                    data.lg.0,
+                    voice.logical_id,
+                    voice.modulator_id as u64,
+                    instrument_params,
+                    data.sample_rate,
+                );
+            }
+        }
+    }
+}
+
 unsafe fn dispatch_sampler_modulator_defaults_to_voice(
     lg: *mut LiveGraph,
     state: &SequencerState,
@@ -1640,6 +1738,13 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
                 instrument_params,
                 instrument_fingerprint,
             );
+        }
+        ScheduledEventKind::InstrumentParams {
+            track,
+            step: _,
+            instrument_params,
+        } => {
+            dispatch_instrument_params_to_active_voices(data, track, &instrument_params);
         }
     }
 }

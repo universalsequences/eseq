@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::HashMap;
 
-fn modulation_depth_display_range(
+fn sampler_modulation_depth_display_range(
     depth_desc: &sequencer::effects::ParamDescriptor,
     target: &sequencer::effects::InstrumentModulationTarget,
 ) -> (f32, f32) {
@@ -9,6 +9,12 @@ fn modulation_depth_display_range(
         depth_desc.stored_to_user(target.depth_min),
         depth_desc.stored_to_user(target.depth_max),
     )
+}
+
+fn instrument_modulation_depth_display_range(
+    target: &sequencer::effects::InstrumentModulationTarget,
+) -> (f32, f32) {
+    (target.depth_min, target.depth_max)
 }
 
 /// Build a Lisp Value::List of bools from the step pattern for a given track.
@@ -2418,7 +2424,7 @@ pub(crate) fn build_sampler_panel_value(
             let depth_current = plock_step
                 .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
                 .unwrap_or(depth_default);
-            let (depth_min, depth_max) = modulation_depth_display_range(depth_desc, target);
+            let (depth_min, depth_max) = sampler_modulation_depth_display_range(depth_desc, target);
             Some((
                 target.base_param_idx,
                 UiModMetadata {
@@ -3189,7 +3195,7 @@ pub(crate) fn build_instrument_panel_value(
             let depth_current = plock_step
                 .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
                 .unwrap_or(depth_default);
-            let (depth_min, depth_max) = modulation_depth_display_range(depth_desc, target);
+            let (depth_min, depth_max) = instrument_modulation_depth_display_range(target);
             Some((
                 target.base_param_idx,
                 UiModMetadata {
@@ -4267,9 +4273,43 @@ mod tests {
             .get(target.depth_param_idx)
             .expect("sampler scrub mod depth param should exist");
 
-        let (min, max) = modulation_depth_display_range(depth_desc, target);
+        let (min, max) = sampler_modulation_depth_display_range(depth_desc, target);
 
         assert_eq!((min, max), (-100.0, 100.0));
+    }
+
+    #[test]
+    fn custom_instrument_mod_depth_range_uses_manifest_domain() {
+        let depth_desc = sequencer::effects::ParamDescriptor {
+            name: "mod depth".to_string(),
+            min: -1.0,
+            max: 1.0,
+            default: 0.0,
+            kind: sequencer::effects::ParamKind::Continuous {
+                unit: Some("%".to_string()),
+            },
+            scaling: sequencer::effects::ParamScaling::Linear,
+            node_param_idx: 0,
+            node_param_span: 1,
+            host_control: None,
+        };
+        let target = sequencer::effects::InstrumentModulationTarget {
+            base_param_idx: 0,
+            source_param_idx: 1,
+            depth_param_idx: 2,
+            depth_min: -1.0,
+            depth_max: 1.0,
+            depth_unit: Some("%".to_string()),
+        };
+
+        assert_eq!(
+            sampler_modulation_depth_display_range(&depth_desc, &target),
+            (-100.0, 100.0)
+        );
+        assert_eq!(
+            instrument_modulation_depth_display_range(&target),
+            (-1.0, 1.0)
+        );
     }
 
     fn parse_expression_at(tokens: &[Token], pos: &mut usize) -> Result<(), ParserError> {
@@ -9213,23 +9253,70 @@ mod tests {
                 ])),
             ]))),
         );
+        let mut lfo_sync = test_param_map("sync", 31, 1.0, 0.0, 1.0);
+        lfo_sync.insert(
+            "value-field".to_string(),
+            Rc::new(RefCell::new(Value::String("test-lfo-sync".to_string()))),
+        );
+        let mut lfo_division = test_param_map("division", 32, 0.0, 0.0, 1.0);
+        lfo_division.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String("1/8".to_string()))),
+        );
+        lfo_division.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::String("1/8".to_string()),
+                Value::String("1/16".to_string()),
+            ]))),
+        );
+        let mut lfo_shape = test_param_map("shape", 33, 0.0, 0.0, 1.0);
+        lfo_shape.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String("sine".to_string()))),
+        );
+        lfo_shape.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::String("sine".to_string()),
+                Value::String("square".to_string()),
+            ]))),
+        );
         inst.insert(
             "sources".to_string(),
-            Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
-                (
-                    "name".to_string(),
-                    Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
-                ),
-                (
-                    "params".to_string(),
-                    Rc::new(RefCell::new(test_list(vec![
-                        Value::Map(test_param_map("attack", 20, 5.0, 1.0, 5000.0)),
-                        Value::Map(test_param_map("decay", 21, 120.0, 1.0, 5000.0)),
-                        Value::Map(test_param_map("sustain", 22, 0.7, 0.0, 1.0)),
-                        Value::Map(test_param_map("release", 23, 240.0, 1.0, 5000.0)),
-                    ]))),
-                ),
-            ]))]))),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("rate", 30, 2.0, 0.1, 20.0)),
+                            Value::Map(lfo_sync),
+                            Value::Map(lfo_division),
+                            Value::Map(lfo_shape),
+                            Value::Map(test_param_map("pulse width", 34, 0.5, 0.0, 1.0)),
+                        ]))),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("attack", 20, 5.0, 1.0, 5000.0)),
+                            Value::Map(test_param_map("decay", 21, 120.0, 1.0, 5000.0)),
+                            Value::Map(test_param_map("sustain", 22, 0.7, 0.0, 1.0)),
+                            Value::Map(test_param_map("release", 23, 240.0, 1.0, 5000.0)),
+                        ]))),
+                    ),
+                ])),
+            ]))),
         );
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -9246,6 +9333,7 @@ mod tests {
                 ("effects", test_list(vec![])),
                 ("midi-effects", test_list(vec![])),
                 ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("test-lfo-sync", Value::Number(1.0)),
                 ("test-mod-source-12", Value::Number(0.0)),
                 ("test-mod-depth-13", Value::Number(0.0)),
                 ("bus-effects", test_list(vec![])),
@@ -9321,20 +9409,28 @@ mod tests {
             selector.rect
         );
         assert!(find_layout_node_by_text(&layout, "LFO 1").is_some());
+        let lfo_editor = find_layout_node_by_debug_name(&layout, "instrument-lfo-source-editor")
+            .expect("selected LFO source editor should render");
         assert!(
-            find_layout_node_by_stable_key(
-                &layout,
-                "custom-ui-lego-knob-mod-test-instrument-cutoff",
-            )
-            .is_some(),
-            "custom lego controls should render their modulation wrapper"
+            lfo_editor.rect.width > 0.0 && lfo_editor.rect.height > 0.0,
+            "LFO source editor should have a visible measured rect: {:?}",
+            lfo_editor.rect
         );
+        assert!(
+            find_layout_node_by_text(&layout, "ON").is_some(),
+            "reactive LFO sync source button should resolve its value and render as ON"
+        );
+        let custom_knob_wrapper = find_layout_node_by_stable_key(
+            &layout,
+            "custom-ui-lego-knob-mod-test-instrument-cutoff",
+        )
+        .expect("custom lego controls should render their modulation wrapper");
         assert!(
             layout_has_double_click(&layout),
             "modulatable parameter wrapper should expose on-double-click"
         );
 
-        let knob = find_layout_node_by_widget_type(&layout, "knob-number")
+        let knob = find_layout_node_by_widget_type(custom_knob_wrapper, "knob-number")
             .expect("custom mod test should render a knob-number");
         assert_knob_measured(knob, "mods-open");
         for prop in ["mod-range-0-slot", "mod-range-0-depth"] {

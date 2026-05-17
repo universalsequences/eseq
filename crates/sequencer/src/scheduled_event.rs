@@ -45,6 +45,11 @@ pub enum ScheduledEventKind {
         instrument_params: Vec<ScheduledInstrumentParam>,
         instrument_fingerprint: u64,
     },
+    InstrumentParams {
+        track: usize,
+        step: usize,
+        instrument_params: Vec<ScheduledInstrumentParam>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

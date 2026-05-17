@@ -29,6 +29,21 @@ pub enum VMError {
 pub type NativeFn = Rc<dyn Fn(Vec<Value>, &mut VM) -> Value>;
 pub type NodeId = u32;
 
+fn debug_lisp_callback_errors_enabled() -> bool {
+    std::env::var("ESEQLISP_DEBUG_LISP_ERRORS")
+        .ok()
+        .is_none_or(|value| !matches!(value.as_str(), "0" | "false" | "no" | "off"))
+}
+
+fn log_native_callback_error(vm: &VM, native_name: &str, index: usize, error: &VMError) {
+    if debug_lisp_callback_errors_enabled() {
+        let detail = vm.last_reactive_error_detail.as_deref().unwrap_or("-");
+        eprintln!(
+            "[lisp-error][{native_name}] callback index={index} error={error:?} detail={detail}"
+        );
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReactiveSource {
     NamespaceField { namespace: String, field: String },
@@ -1115,7 +1130,10 @@ pub fn register_core_natives(vm: &mut VM) {
             }
             let result = vm
                 .invoke(callback.clone(), vec![value, Value::Number(idx as f64)])
-                .unwrap_or(Some(Value::Nil));
+                .unwrap_or_else(|error| {
+                    log_native_callback_error(vm, "each", idx, &error);
+                    Some(Value::Nil)
+                });
             out.push(Rc::new(RefCell::new(result.unwrap_or(Value::Nil))));
         }
         Value::List(out)
@@ -1128,10 +1146,13 @@ pub fn register_core_natives(vm: &mut VM) {
         };
 
         let mut out = Vec::with_capacity(items.len());
-        for item in items {
+        for (idx, item) in items.iter().enumerate() {
             let mapped = vm
                 .invoke(callback.clone(), vec![item.borrow().clone()])
-                .unwrap_or(Some(Value::Nil))
+                .unwrap_or_else(|error| {
+                    log_native_callback_error(vm, "map", idx, &error);
+                    Some(Value::Nil)
+                })
                 .unwrap_or(Value::Nil);
             out.push(Rc::new(RefCell::new(mapped)));
         }
@@ -1145,11 +1166,14 @@ pub fn register_core_natives(vm: &mut VM) {
         };
 
         let mut out = Vec::new();
-        for item in items {
+        for (idx, item) in items.iter().enumerate() {
             let item_value = item.borrow().clone();
             let keep = vm
                 .invoke(callback.clone(), vec![item_value.clone()])
-                .unwrap_or(Some(Value::Nil))
+                .unwrap_or_else(|error| {
+                    log_native_callback_error(vm, "filter", idx, &error);
+                    Some(Value::Nil)
+                })
                 .unwrap_or(Value::Nil);
             if !is_falsey(&keep) {
                 out.push(Rc::new(RefCell::new(item_value)));
@@ -1165,10 +1189,13 @@ pub fn register_core_natives(vm: &mut VM) {
             return Value::Nil;
         };
 
-        for item in items {
+        for (idx, item) in items.iter().enumerate() {
             acc = vm
                 .invoke(callback.clone(), vec![acc, item.borrow().clone()])
-                .unwrap_or(Some(Value::Nil))
+                .unwrap_or_else(|error| {
+                    log_native_callback_error(vm, "reduce", idx, &error);
+                    Some(Value::Nil)
+                })
                 .unwrap_or(Value::Nil);
         }
         acc
@@ -1180,8 +1207,10 @@ pub fn register_core_natives(vm: &mut VM) {
             return Value::Nil;
         };
 
-        for item in items {
-            let _ = vm.invoke(callback.clone(), vec![item.borrow().clone()]);
+        for (idx, item) in items.iter().enumerate() {
+            if let Err(error) = vm.invoke(callback.clone(), vec![item.borrow().clone()]) {
+                log_native_callback_error(vm, "for-each", idx, &error);
+            }
         }
         Value::Nil
     });

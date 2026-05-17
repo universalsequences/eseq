@@ -448,6 +448,12 @@
       (bind-seq (get p :value-field))
       (get p :value))))
 
+(def fx-param-numeric-value (p)
+  (reactive-value (fx-param-value p)))
+
+(def fx-param-on? (p)
+  (> (fx-param-numeric-value p) 0.5))
+
 (def instrument-mod-selected-slot ()
   (if (> instrument-selected-mod-slot 0) instrument-selected-mod-slot 1))
 
@@ -626,7 +632,7 @@
                      (if fx
                        (fx-toggle-effect-value fx p)
                        (fx-toggle-instrument-value p))
-                (label (if (> (get p :value) 0.5) "ON" "OFF")
+                (label (if (fx-param-on? p) "ON" "OFF")
                        :font-size 11 :width 5.5
                        :color :white :bg :transparent))
               (if (get p :options)
@@ -776,7 +782,7 @@
   (if p (instrument-set-param-control-value p v) false))
 
 (def instrument-source-button (p title width)
-  (let ((active (> (instrument-source-param-value p 0) 0.5)))
+  (let ((active (> (reactive-value (instrument-source-param-value p 0)) 0.5)))
     (v-stack :width width :height 1.72 :gap 0.10 :align :start
       (label title :font-size 8.2 :width width :height 0.52 :color :dim :bg :transparent)
       (button (if active "ON" "OFF")
@@ -2110,11 +2116,11 @@
   (subtree :key key
     (v-stack :align :center :gap 0.2
       (label (substring (get p :name) 0 12) :font-size 10 :color :dim :bg :transparent)
-      (button (if (> (get p :value) 0.5) "ON" "OFF")
+      (button (if (fx-param-on? p) "ON" "OFF")
         :width 3.2 :height 1.0 :padding 0 :font-size 10
-        :background-color (if (> (get p :value) 0.5) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
-        :color (if (> (get p :value) 0.5) :black :dim)
-        :on-click |x y r| (fx-set-instrument-value p (if (> (get p :value) 0.5) 0 1))))))
+        :background-color (if (fx-param-on? p) (rgba 0.95 0.48 0.18 1.0) :mixer-control-bg)
+        :color (if (fx-param-on? p) :black :dim)
+        :on-click |x y r| (fx-set-instrument-value p (if (fx-param-on? p) 0 1))))))
 
 (def sampler-param-dropdown (p key)
   (subtree :key key
