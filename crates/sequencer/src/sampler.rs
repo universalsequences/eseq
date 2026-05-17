@@ -64,7 +64,43 @@ const STATE_MOD_START_SOURCE: usize = 55;
 const STATE_MOD_START_DEPTH: usize = 56;
 const STATE_MOD_END_SOURCE: usize = 57;
 const STATE_MOD_END_DEPTH: usize = 58;
-pub const SAMPLER_STATE_SIZE: usize = 59;
+const STATE_MOD_SPEED_LANE2_SOURCE: usize = 59;
+const STATE_MOD_SPEED_LANE2_DEPTH: usize = 60;
+const STATE_MOD_SCRUB_LANE2_SOURCE: usize = 61;
+const STATE_MOD_SCRUB_LANE2_DEPTH: usize = 62;
+const STATE_MOD_SR_LANE2_SOURCE: usize = 63;
+const STATE_MOD_SR_LANE2_DEPTH: usize = 64;
+const STATE_MOD_WARP_BPM_LANE2_SOURCE: usize = 65;
+const STATE_MOD_WARP_BPM_LANE2_DEPTH: usize = 66;
+const STATE_MOD_START_LANE2_SOURCE: usize = 67;
+const STATE_MOD_START_LANE2_DEPTH: usize = 68;
+const STATE_MOD_END_LANE2_SOURCE: usize = 69;
+const STATE_MOD_END_LANE2_DEPTH: usize = 70;
+const STATE_MOD_SPEED_LANE3_SOURCE: usize = 71;
+const STATE_MOD_SPEED_LANE3_DEPTH: usize = 72;
+const STATE_MOD_SCRUB_LANE3_SOURCE: usize = 73;
+const STATE_MOD_SCRUB_LANE3_DEPTH: usize = 74;
+const STATE_MOD_SR_LANE3_SOURCE: usize = 75;
+const STATE_MOD_SR_LANE3_DEPTH: usize = 76;
+const STATE_MOD_WARP_BPM_LANE3_SOURCE: usize = 77;
+const STATE_MOD_WARP_BPM_LANE3_DEPTH: usize = 78;
+const STATE_MOD_START_LANE3_SOURCE: usize = 79;
+const STATE_MOD_START_LANE3_DEPTH: usize = 80;
+const STATE_MOD_END_LANE3_SOURCE: usize = 81;
+const STATE_MOD_END_LANE3_DEPTH: usize = 82;
+const STATE_MOD_SPEED_LANE4_SOURCE: usize = 83;
+const STATE_MOD_SPEED_LANE4_DEPTH: usize = 84;
+const STATE_MOD_SCRUB_LANE4_SOURCE: usize = 85;
+const STATE_MOD_SCRUB_LANE4_DEPTH: usize = 86;
+const STATE_MOD_SR_LANE4_SOURCE: usize = 87;
+const STATE_MOD_SR_LANE4_DEPTH: usize = 88;
+const STATE_MOD_WARP_BPM_LANE4_SOURCE: usize = 89;
+const STATE_MOD_WARP_BPM_LANE4_DEPTH: usize = 90;
+const STATE_MOD_START_LANE4_SOURCE: usize = 91;
+const STATE_MOD_START_LANE4_DEPTH: usize = 92;
+const STATE_MOD_END_LANE4_SOURCE: usize = 93;
+const STATE_MOD_END_LANE4_DEPTH: usize = 94;
+pub const SAMPLER_STATE_SIZE: usize = 95;
 pub const SAMPLER_PARAM_ENABLED: u64 = STATE_ENABLED as u64;
 
 // Envelope phase constants
@@ -85,9 +121,83 @@ const WARP_XFADE_SECONDS: f32 = 0.005;
 const MOD_INPUT_COUNT: usize = 10;
 const SR_MIN_HZ: f32 = 2_000.0;
 const SR_MAX_HZ: f32 = 44_100.0;
+const SPEED_MIN: f32 = -4.0;
+const SPEED_MAX: f32 = 4.0;
 const WARP_BPM_MIN: f32 = 20.0;
 const WARP_BPM_MAX: f32 = 400.0;
 const SCRUB_SMOOTH_SECONDS: f32 = 0.006;
+
+const MOD_SPEED_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM] = [
+    (STATE_MOD_SPEED_SOURCE, STATE_MOD_SPEED_DEPTH),
+    (STATE_MOD_SPEED_LANE2_SOURCE, STATE_MOD_SPEED_LANE2_DEPTH),
+    (STATE_MOD_SPEED_LANE3_SOURCE, STATE_MOD_SPEED_LANE3_DEPTH),
+    (STATE_MOD_SPEED_LANE4_SOURCE, STATE_MOD_SPEED_LANE4_DEPTH),
+];
+const MOD_SCRUB_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM] = [
+    (STATE_MOD_SCRUB_SOURCE, STATE_MOD_SCRUB_DEPTH),
+    (STATE_MOD_SCRUB_LANE2_SOURCE, STATE_MOD_SCRUB_LANE2_DEPTH),
+    (STATE_MOD_SCRUB_LANE3_SOURCE, STATE_MOD_SCRUB_LANE3_DEPTH),
+    (STATE_MOD_SCRUB_LANE4_SOURCE, STATE_MOD_SCRUB_LANE4_DEPTH),
+];
+const MOD_SR_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM] = [
+    (STATE_MOD_SR_SOURCE, STATE_MOD_SR_DEPTH),
+    (STATE_MOD_SR_LANE2_SOURCE, STATE_MOD_SR_LANE2_DEPTH),
+    (STATE_MOD_SR_LANE3_SOURCE, STATE_MOD_SR_LANE3_DEPTH),
+    (STATE_MOD_SR_LANE4_SOURCE, STATE_MOD_SR_LANE4_DEPTH),
+];
+const MOD_WARP_BPM_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM] = [
+    (STATE_MOD_WARP_BPM_SOURCE, STATE_MOD_WARP_BPM_DEPTH),
+    (
+        STATE_MOD_WARP_BPM_LANE2_SOURCE,
+        STATE_MOD_WARP_BPM_LANE2_DEPTH,
+    ),
+    (
+        STATE_MOD_WARP_BPM_LANE3_SOURCE,
+        STATE_MOD_WARP_BPM_LANE3_DEPTH,
+    ),
+    (
+        STATE_MOD_WARP_BPM_LANE4_SOURCE,
+        STATE_MOD_WARP_BPM_LANE4_DEPTH,
+    ),
+];
+const MOD_START_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM] = [
+    (STATE_MOD_START_SOURCE, STATE_MOD_START_DEPTH),
+    (STATE_MOD_START_LANE2_SOURCE, STATE_MOD_START_LANE2_DEPTH),
+    (STATE_MOD_START_LANE3_SOURCE, STATE_MOD_START_LANE3_DEPTH),
+    (STATE_MOD_START_LANE4_SOURCE, STATE_MOD_START_LANE4_DEPTH),
+];
+const MOD_END_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM] = [
+    (STATE_MOD_END_SOURCE, STATE_MOD_END_DEPTH),
+    (STATE_MOD_END_LANE2_SOURCE, STATE_MOD_END_LANE2_DEPTH),
+    (STATE_MOD_END_LANE3_SOURCE, STATE_MOD_END_LANE3_DEPTH),
+    (STATE_MOD_END_LANE4_SOURCE, STATE_MOD_END_LANE4_DEPTH),
+];
+const ALL_MOD_LANES: [(usize, usize); SAMPLER_MOD_LANES_PER_PARAM * 6] = [
+    MOD_SPEED_LANES[0],
+    MOD_SPEED_LANES[1],
+    MOD_SPEED_LANES[2],
+    MOD_SPEED_LANES[3],
+    MOD_SCRUB_LANES[0],
+    MOD_SCRUB_LANES[1],
+    MOD_SCRUB_LANES[2],
+    MOD_SCRUB_LANES[3],
+    MOD_SR_LANES[0],
+    MOD_SR_LANES[1],
+    MOD_SR_LANES[2],
+    MOD_SR_LANES[3],
+    MOD_WARP_BPM_LANES[0],
+    MOD_WARP_BPM_LANES[1],
+    MOD_WARP_BPM_LANES[2],
+    MOD_WARP_BPM_LANES[3],
+    MOD_START_LANES[0],
+    MOD_START_LANES[1],
+    MOD_START_LANES[2],
+    MOD_START_LANES[3],
+    MOD_END_LANES[0],
+    MOD_END_LANES[1],
+    MOD_END_LANES[2],
+    MOD_END_LANES[3],
+];
 
 fn sampler_playback_step(source_sample_rate: f32, host_sample_rate: f32, rate: f32) -> f32 {
     let source_sample_rate = source_sample_rate.max(1.0);
@@ -160,8 +270,22 @@ unsafe fn modulation_input(
     }
 }
 
-fn modulated_normalized(base: f32, source: f32, depth: f32) -> f32 {
-    (base + source * depth.clamp(-1.0, 1.0)).clamp(0.0, 1.0)
+unsafe fn modulation_lane_sum(
+    inp: *const *mut f32,
+    n_inputs: usize,
+    state: *mut f32,
+    lanes: &[(usize, usize); SAMPLER_MOD_LANES_PER_PARAM],
+    frame: usize,
+) -> f32 {
+    lanes.iter().fold(0.0, |sum, (source_idx, depth_idx)| {
+        let source = *state.add(*source_idx);
+        let depth = *state.add(*depth_idx);
+        sum + modulation_input(inp, n_inputs, source, frame) * depth
+    })
+}
+
+fn modulated_normalized(base: f32, modulation: f32) -> f32 {
+    (base + modulation).clamp(0.0, 1.0)
 }
 
 // Param indices (match state layout for direct write)
@@ -192,6 +316,7 @@ pub const PARAM_WARP_SAMPLE_BPM: u64 = STATE_WARP_SAMPLE_BPM as u64;
 pub const PARAM_WARP_PROJECT_BPM: u64 = STATE_WARP_PROJECT_BPM as u64;
 pub const PARAM_SOURCE_SAMPLE_RATE: u64 = STATE_SOURCE_SAMPLE_RATE as u64;
 pub const PARAM_SCRUB_OFFSET: u64 = STATE_SCRUB_OFFSET as u64;
+pub const PARAM_SCRUB_SMOOTH: u64 = STATE_SCRUB_SMOOTH as u64;
 pub const PARAM_MOD_SPEED_SOURCE: u64 = STATE_MOD_SPEED_SOURCE as u64;
 pub const PARAM_MOD_SPEED_DEPTH: u64 = STATE_MOD_SPEED_DEPTH as u64;
 pub const PARAM_MOD_SCRUB_SOURCE: u64 = STATE_MOD_SCRUB_SOURCE as u64;
@@ -204,6 +329,162 @@ pub const PARAM_MOD_START_SOURCE: u64 = STATE_MOD_START_SOURCE as u64;
 pub const PARAM_MOD_START_DEPTH: u64 = STATE_MOD_START_DEPTH as u64;
 pub const PARAM_MOD_END_SOURCE: u64 = STATE_MOD_END_SOURCE as u64;
 pub const PARAM_MOD_END_DEPTH: u64 = STATE_MOD_END_DEPTH as u64;
+pub const SAMPLER_MOD_LANES_PER_PARAM: usize = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SamplerModTargetParam {
+    pub destination: &'static str,
+    pub lane: usize,
+    pub source_param: u64,
+    pub depth_param: u64,
+}
+
+pub const SAMPLER_MOD_TARGET_PARAMS: [SamplerModTargetParam; SAMPLER_MOD_LANES_PER_PARAM * 6] = [
+    SamplerModTargetParam {
+        destination: "speed",
+        lane: 1,
+        source_param: STATE_MOD_SPEED_SOURCE as u64,
+        depth_param: STATE_MOD_SPEED_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "speed",
+        lane: 2,
+        source_param: STATE_MOD_SPEED_LANE2_SOURCE as u64,
+        depth_param: STATE_MOD_SPEED_LANE2_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "speed",
+        lane: 3,
+        source_param: STATE_MOD_SPEED_LANE3_SOURCE as u64,
+        depth_param: STATE_MOD_SPEED_LANE3_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "speed",
+        lane: 4,
+        source_param: STATE_MOD_SPEED_LANE4_SOURCE as u64,
+        depth_param: STATE_MOD_SPEED_LANE4_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "scrub",
+        lane: 1,
+        source_param: STATE_MOD_SCRUB_SOURCE as u64,
+        depth_param: STATE_MOD_SCRUB_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "scrub",
+        lane: 2,
+        source_param: STATE_MOD_SCRUB_LANE2_SOURCE as u64,
+        depth_param: STATE_MOD_SCRUB_LANE2_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "scrub",
+        lane: 3,
+        source_param: STATE_MOD_SCRUB_LANE3_SOURCE as u64,
+        depth_param: STATE_MOD_SCRUB_LANE3_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "scrub",
+        lane: 4,
+        source_param: STATE_MOD_SCRUB_LANE4_SOURCE as u64,
+        depth_param: STATE_MOD_SCRUB_LANE4_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "sr",
+        lane: 1,
+        source_param: STATE_MOD_SR_SOURCE as u64,
+        depth_param: STATE_MOD_SR_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "sr",
+        lane: 2,
+        source_param: STATE_MOD_SR_LANE2_SOURCE as u64,
+        depth_param: STATE_MOD_SR_LANE2_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "sr",
+        lane: 3,
+        source_param: STATE_MOD_SR_LANE3_SOURCE as u64,
+        depth_param: STATE_MOD_SR_LANE3_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "sr",
+        lane: 4,
+        source_param: STATE_MOD_SR_LANE4_SOURCE as u64,
+        depth_param: STATE_MOD_SR_LANE4_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "bpm",
+        lane: 1,
+        source_param: STATE_MOD_WARP_BPM_SOURCE as u64,
+        depth_param: STATE_MOD_WARP_BPM_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "bpm",
+        lane: 2,
+        source_param: STATE_MOD_WARP_BPM_LANE2_SOURCE as u64,
+        depth_param: STATE_MOD_WARP_BPM_LANE2_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "bpm",
+        lane: 3,
+        source_param: STATE_MOD_WARP_BPM_LANE3_SOURCE as u64,
+        depth_param: STATE_MOD_WARP_BPM_LANE3_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "bpm",
+        lane: 4,
+        source_param: STATE_MOD_WARP_BPM_LANE4_SOURCE as u64,
+        depth_param: STATE_MOD_WARP_BPM_LANE4_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "start",
+        lane: 1,
+        source_param: STATE_MOD_START_SOURCE as u64,
+        depth_param: STATE_MOD_START_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "start",
+        lane: 2,
+        source_param: STATE_MOD_START_LANE2_SOURCE as u64,
+        depth_param: STATE_MOD_START_LANE2_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "start",
+        lane: 3,
+        source_param: STATE_MOD_START_LANE3_SOURCE as u64,
+        depth_param: STATE_MOD_START_LANE3_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "start",
+        lane: 4,
+        source_param: STATE_MOD_START_LANE4_SOURCE as u64,
+        depth_param: STATE_MOD_START_LANE4_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "end",
+        lane: 1,
+        source_param: STATE_MOD_END_SOURCE as u64,
+        depth_param: STATE_MOD_END_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "end",
+        lane: 2,
+        source_param: STATE_MOD_END_LANE2_SOURCE as u64,
+        depth_param: STATE_MOD_END_LANE2_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "end",
+        lane: 3,
+        source_param: STATE_MOD_END_LANE3_SOURCE as u64,
+        depth_param: STATE_MOD_END_LANE3_DEPTH as u64,
+    },
+    SamplerModTargetParam {
+        destination: "end",
+        lane: 4,
+        source_param: STATE_MOD_END_LANE4_SOURCE as u64,
+        depth_param: STATE_MOD_END_LANE4_DEPTH as u64,
+    },
+];
 
 pub struct SamplerTrack {
     pub name: String,
@@ -281,18 +562,10 @@ unsafe extern "C" fn sampler_init(
     }
     *s.add(STATE_SCRUB_OFFSET) = 0.0;
     *s.add(STATE_SCRUB_SMOOTH) = 0.0;
-    *s.add(STATE_MOD_SPEED_SOURCE) = 0.0;
-    *s.add(STATE_MOD_SPEED_DEPTH) = 0.0;
-    *s.add(STATE_MOD_SCRUB_SOURCE) = 0.0;
-    *s.add(STATE_MOD_SCRUB_DEPTH) = 0.0;
-    *s.add(STATE_MOD_SR_SOURCE) = 0.0;
-    *s.add(STATE_MOD_SR_DEPTH) = 0.0;
-    *s.add(STATE_MOD_WARP_BPM_SOURCE) = 0.0;
-    *s.add(STATE_MOD_WARP_BPM_DEPTH) = 0.0;
-    *s.add(STATE_MOD_START_SOURCE) = 0.0;
-    *s.add(STATE_MOD_START_DEPTH) = 0.0;
-    *s.add(STATE_MOD_END_SOURCE) = 0.0;
-    *s.add(STATE_MOD_END_DEPTH) = 0.0;
+    for (source_idx, depth_idx) in ALL_MOD_LANES {
+        *s.add(source_idx) = 0.0;
+        *s.add(depth_idx) = 0.0;
+    }
 }
 
 /// extern "C" process — reads sample data from buffer, writes to output.
@@ -315,7 +588,7 @@ unsafe extern "C" fn sampler_process(
     let playing = *s.add(STATE_PLAYING);
     let gain = *s.add(STATE_GAIN);
     let velocity = *s.add(STATE_VELOCITY);
-    let speed = *s.add(STATE_SPEED);
+    let speed = (*s.add(STATE_SPEED)).clamp(SPEED_MIN, SPEED_MAX);
     let gate_samples = *s.add(STATE_GATE_SAMPLES);
     let transpose = *s.add(STATE_TRANSPOSE);
     let attack_samples = *s.add(STATE_ATTACK_SAMPLES);
@@ -364,19 +637,6 @@ unsafe extern "C" fn sampler_process(
     let mut last_warp_target_ratio = (*s.add(STATE_WARP_LAST_TARGET_RATIO)).clamp(0.01, 32.0);
     let scrub_offset = (*s.add(STATE_SCRUB_OFFSET)).clamp(-1.0, 1.0);
     let mut scrub_smooth = *s.add(STATE_SCRUB_SMOOTH);
-    let mod_speed_source = *s.add(STATE_MOD_SPEED_SOURCE);
-    let mod_speed_depth = *s.add(STATE_MOD_SPEED_DEPTH);
-    let mod_scrub_source = *s.add(STATE_MOD_SCRUB_SOURCE);
-    let mod_scrub_depth = *s.add(STATE_MOD_SCRUB_DEPTH);
-    let mod_sr_source = *s.add(STATE_MOD_SR_SOURCE);
-    let mod_sr_depth = *s.add(STATE_MOD_SR_DEPTH);
-    let mod_warp_bpm_source = *s.add(STATE_MOD_WARP_BPM_SOURCE);
-    let mod_warp_bpm_depth = *s.add(STATE_MOD_WARP_BPM_DEPTH);
-    let mod_start_source = *s.add(STATE_MOD_START_SOURCE);
-    let mod_start_depth = *s.add(STATE_MOD_START_DEPTH);
-    let mod_end_source = *s.add(STATE_MOD_END_SOURCE);
-    let mod_end_depth = *s.add(STATE_MOD_END_DEPTH);
-
     let buf_desc = buffers as *const BufferDesc;
     let desc = &*buf_desc.add(buffer_id);
     let sample_data = desc.buffer;
@@ -396,10 +656,10 @@ unsafe extern "C" fn sampler_process(
     }
 
     // Compute effective sample region from normalized start/end points
-    let block_start_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_start_source, 0);
-    let block_end_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_end_source, 0);
-    let start_point = modulated_normalized(base_start_point, block_start_mod, mod_start_depth);
-    let end_point = modulated_normalized(base_end_point, block_end_mod, mod_end_depth);
+    let block_start_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_START_LANES, 0);
+    let block_end_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_END_LANES, 0);
+    let start_point = modulated_normalized(base_start_point, block_start_mod);
+    let end_point = modulated_normalized(base_end_point, block_end_mod);
     let start_sample = (start_point * sample_len as f32) as usize;
     let end_sample = if end_point > start_point {
         (end_point * sample_len as f32) as usize
@@ -440,16 +700,13 @@ unsafe extern "C" fn sampler_process(
     let reverse = reverse_param && !warp_active;
     let loop_mode = loop_mode_param;
     let loop_xfade = loop_xfade_samples.min(region_len * 0.5);
-    let block_speed_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_speed_source, 0);
-    let effective_speed = speed * (1.0 + block_speed_mod * mod_speed_depth.clamp(-1.0, 1.0));
-    let block_sr_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_sr_source, 0);
-    let sr_hz = (base_sr_hz
-        + block_sr_mod * mod_sr_depth.clamp(-1.0, 1.0) * (SR_MAX_HZ - SR_MIN_HZ))
-        .clamp(SR_MIN_HZ, SR_MAX_HZ);
-    let block_warp_bpm_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_warp_bpm_source, 0);
-    let warp_sample_bpm = (base_warp_sample_bpm
-        + block_warp_bpm_mod * mod_warp_bpm_depth.clamp(-1.0, 1.0) * (WARP_BPM_MAX - WARP_BPM_MIN))
-        .clamp(WARP_BPM_MIN, WARP_BPM_MAX);
+    let block_speed_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_SPEED_LANES, 0);
+    let effective_speed = (speed + block_speed_mod).clamp(SPEED_MIN, SPEED_MAX);
+    let block_sr_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_SR_LANES, 0);
+    let sr_hz = (base_sr_hz + block_sr_mod).clamp(SR_MIN_HZ, SR_MAX_HZ);
+    let block_warp_bpm_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_WARP_BPM_LANES, 0);
+    let warp_sample_bpm =
+        (base_warp_sample_bpm + block_warp_bpm_mod).clamp(WARP_BPM_MIN, WARP_BPM_MAX);
     let warp_target_ratio = if warp_enabled && warp_mode == 0 {
         (warp_project_bpm / warp_sample_bpm).clamp(0.01, 32.0)
     } else {
@@ -803,9 +1060,8 @@ unsafe extern "C" fn sampler_process(
             }
         }
 
-        let scrub_mod = modulation_input(inp, MOD_INPUT_COUNT, mod_scrub_source, i);
-        let target_scrub =
-            (scrub_offset + scrub_mod * mod_scrub_depth.clamp(-1.0, 1.0)).clamp(-1.0, 1.0);
+        let scrub_mod = modulation_lane_sum(inp, MOD_INPUT_COUNT, s, &MOD_SCRUB_LANES, i);
+        let target_scrub = (scrub_offset + scrub_mod).clamp(-1.0, 1.0);
         let scrub_coeff = (1.0 / (sample_rate * SCRUB_SMOOTH_SECONDS)).clamp(0.0001, 1.0);
         scrub_smooth += (target_scrub - scrub_smooth) * scrub_coeff;
         let read_head = (playhead + scrub_smooth * region_len)
@@ -1044,7 +1300,11 @@ pub fn create_sampler_track(lg: *mut LiveGraph, wav_path: &Path) -> Result<Sampl
 
 #[cfg(test)]
 mod tests {
-    use super::{sampler_playback_step, source_frames_to_host_frames};
+    use super::{
+        modulation_lane_sum, sampler_playback_step, source_frames_to_host_frames,
+        SAMPLER_MOD_LANES_PER_PARAM, SAMPLER_STATE_SIZE, STATE_MOD_SPEED_DEPTH,
+        STATE_MOD_SPEED_LANE2_DEPTH, STATE_MOD_SPEED_LANE2_SOURCE, STATE_MOD_SPEED_SOURCE,
+    };
 
     #[test]
     fn playback_step_preserves_44100_wav_pitch_at_48000_host_rate() {
@@ -1065,5 +1325,30 @@ mod tests {
         let host_frames = source_frames_to_host_frames(44_100.0, 44_100.0, 48_000.0);
 
         assert!((host_frames - 48_000.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn modulation_lane_sum_adds_multiple_sampler_lanes() {
+        let mut lfo = [0.25_f32];
+        let mut env = [0.5_f32];
+        let inputs = [lfo.as_mut_ptr(), env.as_mut_ptr()];
+        let mut state = [0.0_f32; SAMPLER_STATE_SIZE];
+        state[STATE_MOD_SPEED_SOURCE] = 1.0;
+        state[STATE_MOD_SPEED_DEPTH] = 0.8;
+        state[STATE_MOD_SPEED_LANE2_SOURCE] = 2.0;
+        state[STATE_MOD_SPEED_LANE2_DEPTH] = -4.0;
+        let lanes = [
+            (STATE_MOD_SPEED_SOURCE, STATE_MOD_SPEED_DEPTH),
+            (STATE_MOD_SPEED_LANE2_SOURCE, STATE_MOD_SPEED_LANE2_DEPTH),
+            (0, 0),
+            (0, 0),
+        ];
+        assert_eq!(lanes.len(), SAMPLER_MOD_LANES_PER_PARAM);
+
+        let sum = unsafe {
+            modulation_lane_sum(inputs.as_ptr(), inputs.len(), state.as_mut_ptr(), &lanes, 0)
+        };
+
+        assert!((sum + 1.8).abs() < 0.00001, "sum was {sum}");
     }
 }

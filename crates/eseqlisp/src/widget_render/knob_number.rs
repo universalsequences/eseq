@@ -202,6 +202,42 @@ mod tests {
             "knob-number should still emit label/value text primitives: {text:?}"
         );
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mod_range_arc_uses_display_domain_for_percent_depths() {
+        let node = test_knob_node(HashMap::from([
+            ("label".to_string(), Value::String("scrub".to_string())),
+            ("value".to_string(), Value::Number(100.0)),
+            ("min".to_string(), Value::Number(-100.0)),
+            ("max".to_string(), Value::Number(100.0)),
+            ("base-value".to_string(), Value::Number(0.0)),
+            ("base-min".to_string(), Value::Number(-100.0)),
+            ("base-max".to_string(), Value::Number(100.0)),
+            ("selected-mod-slot".to_string(), Value::Number(1.0)),
+            (
+                "mod-ranges".to_string(),
+                Value::List(vec![value_cell(mod_range(1.0, 100.0))]),
+            ),
+        ]));
+
+        let primitives =
+            KNOB_NUMBER_WIDGET.build_metal_primitives("knob-number", &node, test_viewport());
+        let range = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } if widget_type == "knob-number-mod-range" => Some(instance),
+                _ => None,
+            })
+            .expect("full-range scrub modulation depth should emit a range arc");
+
+        assert_eq!(range.uniform_b[1], 0.5);
+        assert_eq!(range.uniform_b[2], 1.0);
+    }
 }
 
 fn quantized_value(props: &HashMap<String, Value>, value: f32) -> f32 {

@@ -210,7 +210,7 @@
 
 (def mixer-v2-mod-port-row (track)
   (h-stack :key (str "mixer-v2-mod-ports-" track)
-    :width 9.8 :height 1.15 :gap 0.42 :align :center
+    :width 9.8 :height 1.1 :gap 0.42 :align :center
     (mixer-v2-mod-port
       :key (str "mixer-v2-mod-out-" track)
       :patch-port true
@@ -349,7 +349,7 @@
     :show-value false
     :font-size 9 :label-font-size 8
     :text-color :dim :label-color :dim
-    :width 4.7 :height 2.15 :knob-size 1.34
+    :width 4.7 :height 1.5 :knob-size 1.34
     :on-change (lambda (v)
       (host-command "set-track-bus-send"
         (dict :track track :bus (get send :bus-idx) :amount v)))))

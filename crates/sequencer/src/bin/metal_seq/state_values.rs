@@ -1,6 +1,16 @@
 use super::*;
 use std::collections::HashMap;
 
+fn modulation_depth_display_range(
+    depth_desc: &sequencer::effects::ParamDescriptor,
+    target: &sequencer::effects::InstrumentModulationTarget,
+) -> (f32, f32) {
+    (
+        depth_desc.stored_to_user(target.depth_min),
+        depth_desc.stored_to_user(target.depth_max),
+    )
+}
+
 /// Build a Lisp Value::List of bools from the step pattern for a given track.
 pub(crate) fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
@@ -2408,6 +2418,7 @@ pub(crate) fn build_sampler_panel_value(
             let depth_current = plock_step
                 .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
                 .unwrap_or(depth_default);
+            let (depth_min, depth_max) = modulation_depth_display_range(depth_desc, target);
             Some((
                 target.base_param_idx,
                 UiModMetadata {
@@ -2429,8 +2440,8 @@ pub(crate) fn build_sampler_panel_value(
                             &depth_desc.name,
                         )
                     }),
-                    depth_min: target.depth_min,
-                    depth_max: target.depth_max,
+                    depth_min,
+                    depth_max,
                     depth_unit: target.depth_unit.clone(),
                 },
             ))
@@ -3178,6 +3189,7 @@ pub(crate) fn build_instrument_panel_value(
             let depth_current = plock_step
                 .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
                 .unwrap_or(depth_default);
+            let (depth_min, depth_max) = modulation_depth_display_range(depth_desc, target);
             Some((
                 target.base_param_idx,
                 UiModMetadata {
@@ -3199,8 +3211,8 @@ pub(crate) fn build_instrument_panel_value(
                             &depth_desc.name,
                         )
                     }),
-                    depth_min: target.depth_min,
-                    depth_max: target.depth_max,
+                    depth_min,
+                    depth_max,
                     depth_unit: target.depth_unit.clone(),
                 },
             ))
@@ -4235,6 +4247,29 @@ mod tests {
             );
             Ok(Value::Map(map))
         });
+    }
+
+    #[test]
+    fn sampler_scrub_mod_depth_range_uses_display_domain() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let target = desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| {
+                desc.params
+                    .get(target.base_param_idx)
+                    .map(|param| param.name == "scrub")
+                    .unwrap_or(false)
+            })
+            .expect("sampler scrub should be modulatable");
+        let depth_desc = desc
+            .params
+            .get(target.depth_param_idx)
+            .expect("sampler scrub mod depth param should exist");
+
+        let (min, max) = modulation_depth_display_range(depth_desc, target);
+
+        assert_eq!((min, max), (-100.0, 100.0));
     }
 
     fn parse_expression_at(tokens: &[Token], pos: &mut usize) -> Result<(), ParserError> {
@@ -9490,9 +9525,10 @@ mod tests {
         );
         speed.insert(
             "mod-targets".to_string(),
-            Rc::new(RefCell::new(test_list(vec![test_mod_target(
-                20.0, 21.0, 2.0, 0.25,
-            )]))),
+            Rc::new(RefCell::new(test_list(vec![
+                test_mod_target(20.0, 21.0, 2.0, 0.25),
+                test_mod_target(22.0, 23.0, 0.0, 0.0),
+            ]))),
         );
 
         let mut inst = test_instrument_map();
@@ -9725,6 +9761,11 @@ mod tests {
                 && speed_knob.props.contains_key("mod-range-0-depth"),
             "sampler speed knob should expose mod metadata props"
         );
+        assert!(
+            speed_knob.props.contains_key("mod-range-1-slot")
+                && speed_knob.props.contains_key("mod-range-1-depth"),
+            "sampler speed knob should expose multiple modulation lanes"
+        );
         let callback = speed_knob
             .props
             .get("on-change")
@@ -9732,7 +9773,7 @@ mod tests {
             .expect("sampler speed knob should expose on-change");
         editor
             .runtime_mut()
-            .invoke(callback, vec![Value::Number(0.75)])
+            .invoke(callback.clone(), vec![Value::Number(0.75)])
             .expect("sampler speed depth edit");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1, "commands={commands:?}");
@@ -9750,6 +9791,14 @@ mod tests {
             .runtime_mut()
             .eval_str("(set! instrument-selected-mod-slot 1)")
             .expect("select sampler LFO source editor");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.5)])
+            .expect("assign sampler speed second modulation lane");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 2, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 22.0, 1.0);
+        assert_set_instrument_param(&commands[1], 23.0, 0.5);
         editor.set_active_buffer(fx_id);
         let lfo_layout = editor.widget_layout().expect("sampler LFO source layout");
         assert_finite_layout_tree(&lfo_layout);

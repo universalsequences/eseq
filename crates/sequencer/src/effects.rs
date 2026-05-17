@@ -879,41 +879,101 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            target_names,
-            vec![
+            target_names.len(),
+            crate::sampler::SAMPLER_MOD_LANES_PER_PARAM * 6
+        );
+        assert_eq!(
+            &target_names[..4],
+            &[
+                ("speed", "mod speed src", "mod speed amt", -8.0, 8.0, None),
                 (
                     "speed",
-                    "mod speed src",
-                    "mod speed amt",
-                    -1.0,
-                    1.0,
-                    Some("%")
+                    "mod speed lane 2 src",
+                    "mod speed lane 2 amt",
+                    -8.0,
+                    8.0,
+                    None
                 ),
                 (
+                    "speed",
+                    "mod speed lane 3 src",
+                    "mod speed lane 3 amt",
+                    -8.0,
+                    8.0,
+                    None
+                ),
+                (
+                    "speed",
+                    "mod speed lane 4 src",
+                    "mod speed lane 4 amt",
+                    -8.0,
+                    8.0,
+                    None
+                ),
+            ]
+        );
+        assert!(
+            target_names.iter().any(|target| *target
+                == (
                     "scrub",
                     "mod scrub src",
                     "mod scrub amt",
                     -1.0,
                     1.0,
                     Some("%")
-                ),
-                ("sr", "mod sr src", "mod sr amt", -1.0, 1.0, Some("%")),
-                ("bpm", "mod bpm src", "mod bpm amt", -1.0, 1.0, Some("%")),
-                (
-                    "start",
-                    "mod start src",
-                    "mod start amt",
-                    -1.0,
-                    1.0,
-                    Some("%")
-                ),
-                ("end", "mod end src", "mod end amt", -1.0, 1.0, Some("%")),
-            ]
+                )),
+            "sampler scrub modulation depth should use the same percent display domain as scrub: {target_names:?}"
+        );
+        assert!(
+            target_names.iter().any(|target| *target
+                == (
+                    "sr",
+                    "mod sr src",
+                    "mod sr amt",
+                    -42_100.0,
+                    42_100.0,
+                    Some("Hz")
+                )),
+            "sampler sr modulation depth should be exposed in Hz: {target_names:?}"
+        );
+        assert!(
+            target_names.iter().any(|target| *target
+                == (
+                    "bpm",
+                    "mod bpm src",
+                    "mod bpm amt",
+                    -380.0,
+                    380.0,
+                    Some("bpm")
+                )),
+            "sampler bpm modulation depth should be exposed in BPM: {target_names:?}"
+        );
+        assert_eq!(
+            target_names.last(),
+            Some(&(
+                "end",
+                "mod end lane 4 src",
+                "mod end lane 4 amt",
+                -1.0,
+                1.0,
+                Some("%")
+            ))
         );
     }
 }
 
 // ── EffectDescriptor ──
+
+fn sampler_mod_depth_range(destination: &str) -> (f32, f32, Option<String>) {
+    match destination {
+        "speed" => (-8.0, 8.0, None),
+        "scrub" => (-1.0, 1.0, Some("%".to_string())),
+        "sr" => (-42_100.0, 42_100.0, Some("Hz".to_string())),
+        "bpm" => (-380.0, 380.0, Some("bpm".to_string())),
+        "start" | "end" => (-1.0, 1.0, Some("%".to_string())),
+        _ => (-1.0, 1.0, None),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct EffectDescriptor {
@@ -2153,45 +2213,19 @@ impl EffectDescriptor {
             "Ext 4".to_string(),
         ];
         let mut instrument_modulation_targets = Vec::new();
-        for (name, source_idx, depth_idx) in [
-            (
-                "speed",
-                crate::sampler::PARAM_MOD_SPEED_SOURCE,
-                crate::sampler::PARAM_MOD_SPEED_DEPTH,
-            ),
-            (
-                "scrub",
-                crate::sampler::PARAM_MOD_SCRUB_SOURCE,
-                crate::sampler::PARAM_MOD_SCRUB_DEPTH,
-            ),
-            (
-                "sr",
-                crate::sampler::PARAM_MOD_SR_SOURCE,
-                crate::sampler::PARAM_MOD_SR_DEPTH,
-            ),
-            (
-                "bpm",
-                crate::sampler::PARAM_MOD_WARP_BPM_SOURCE,
-                crate::sampler::PARAM_MOD_WARP_BPM_DEPTH,
-            ),
-            (
-                "start",
-                crate::sampler::PARAM_MOD_START_SOURCE,
-                crate::sampler::PARAM_MOD_START_DEPTH,
-            ),
-            (
-                "end",
-                crate::sampler::PARAM_MOD_END_SOURCE,
-                crate::sampler::PARAM_MOD_END_DEPTH,
-            ),
-        ] {
+        for lane in crate::sampler::SAMPLER_MOD_TARGET_PARAMS {
+            let name = lane.destination;
             let base_param_idx = params
                 .iter()
                 .position(|p| p.name == name)
                 .expect("sampler modulation target base param should exist");
             let source_param_idx = params.len();
             params.push(ParamDescriptor {
-                name: format!("mod {name} src"),
+                name: if lane.lane == 1 {
+                    format!("mod {name} src")
+                } else {
+                    format!("mod {name} lane {} src", lane.lane)
+                },
                 min: 0.0,
                 max: 10.0,
                 default: 0.0,
@@ -2199,21 +2233,26 @@ impl EffectDescriptor {
                     labels: mod_source_labels.clone(),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: source_idx as u32,
+                node_param_idx: lane.source_param as u32,
                 node_param_span: 1,
                 host_control: None,
             });
             let depth_param_idx = params.len();
+            let (depth_min, depth_max, depth_unit) = sampler_mod_depth_range(name);
             params.push(ParamDescriptor {
-                name: format!("mod {name} amt"),
-                min: -1.0,
-                max: 1.0,
+                name: if lane.lane == 1 {
+                    format!("mod {name} amt")
+                } else {
+                    format!("mod {name} lane {} amt", lane.lane)
+                },
+                min: depth_min,
+                max: depth_max,
                 default: 0.0,
                 kind: ParamKind::Continuous {
-                    unit: Some("%".to_string()),
+                    unit: depth_unit.clone(),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: depth_idx as u32,
+                node_param_idx: lane.depth_param as u32,
                 node_param_span: 1,
                 host_control: None,
             });
@@ -2221,9 +2260,9 @@ impl EffectDescriptor {
                 base_param_idx,
                 source_param_idx,
                 depth_param_idx,
-                depth_min: -1.0,
-                depth_max: 1.0,
-                depth_unit: Some("%".to_string()),
+                depth_min,
+                depth_max,
+                depth_unit,
             });
         }
         Self {
