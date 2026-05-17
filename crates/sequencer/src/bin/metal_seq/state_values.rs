@@ -9041,6 +9041,24 @@ mod tests {
                 ])),
             ]))),
         );
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![Value::Map(HashMap::from([
+                (
+                    "name".to_string(),
+                    Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                ),
+                (
+                    "params".to_string(),
+                    Rc::new(RefCell::new(test_list(vec![
+                        Value::Map(test_param_map("attack", 20, 5.0, 1.0, 5000.0)),
+                        Value::Map(test_param_map("decay", 21, 120.0, 1.0, 5000.0)),
+                        Value::Map(test_param_map("sustain", 22, 0.7, 0.0, 1.0)),
+                        Value::Map(test_param_map("release", 23, 240.0, 1.0, 5000.0)),
+                    ]))),
+                ),
+            ]))]))),
+        );
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
         editor.set_layout_viewport(120, 18);
@@ -9197,6 +9215,51 @@ mod tests {
         assert_eq!(commands.len(), 2, "commands={commands:?}");
         assert_set_instrument_param(&commands[0], 12.0, 2.0);
         assert_set_instrument_param(&commands[1], 13.0, 0.75);
+
+        editor.set_active_buffer(fx_id);
+        let env_layout = editor.widget_layout().expect("ENV 1 source editor layout");
+        let env_editor = find_layout_node_by_widget_type(&env_layout, "adsr-editor")
+            .expect("ENV 1 source editor should use an adsr-editor widget");
+        assert!(
+            env_editor.rect.width > 8.0 && env_editor.rect.height > 1.5,
+            "ENV 1 adsr-editor should have a visible measured rect, got {:?}",
+            env_editor.rect
+        );
+        let env_callback = env_editor
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("ENV 1 adsr-editor should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(
+                env_callback,
+                vec![Value::Map(HashMap::from([
+                    (
+                        "attack".to_string(),
+                        Rc::new(RefCell::new(Value::Number(11.0))),
+                    ),
+                    (
+                        "decay".to_string(),
+                        Rc::new(RefCell::new(Value::Number(220.0))),
+                    ),
+                    (
+                        "sustain".to_string(),
+                        Rc::new(RefCell::new(Value::Number(0.42))),
+                    ),
+                    (
+                        "release".to_string(),
+                        Rc::new(RefCell::new(Value::Number(330.0))),
+                    ),
+                ]))],
+            )
+            .expect("edit ENV 1 source ADSR");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 4, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 20.0, 11.0);
+        assert_set_instrument_param(&commands[1], 21.0, 220.0);
+        assert_set_instrument_param(&commands[2], 22.0, 0.42);
+        assert_set_instrument_param(&commands[3], 23.0, 330.0);
 
         editor
             .runtime_mut()
@@ -10198,6 +10261,249 @@ mod tests {
                 node.rect,
                 instrument_panel.rect
             );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_converted_monomachine_and_prophet_uis() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        fn dsp_param_names(path: &str) -> Vec<String> {
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim_start();
+                    line.strip_prefix("(param ")
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .map(str::to_string)
+                })
+                .collect()
+        }
+
+        fn test_instrument_map_from_dsp(
+            instrument_name: &str,
+            dsp_path: &str,
+        ) -> HashMap<String, Rc<RefCell<Value>>> {
+            let mut inst = test_instrument_map();
+            inst.insert(
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String(instrument_name.to_string()))),
+            );
+            inst.insert(
+                "display-name".to_string(),
+                Rc::new(RefCell::new(Value::String(
+                    instrument_name.trim_end_matches('/').to_string(),
+                ))),
+            );
+
+            let synth_params: Vec<Value> = std::iter::once(Value::Map(test_base_note_param_map(0)))
+                .chain(
+                    dsp_param_names(dsp_path)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, name)| {
+                            let (min, max) = if name.ends_with("_mode") {
+                                (0.0, 3.0)
+                            } else {
+                                (-10000.0, 10000.0)
+                            };
+                            Value::Map(test_param_map(&name, idx + 1, 0.0, min, max))
+                        }),
+                )
+                .collect();
+            inst.insert(
+                "synth".to_string(),
+                Rc::new(RefCell::new(test_list(synth_params))),
+            );
+            inst
+        }
+
+        let cases = [
+            (
+                "emulations/monomachine-digipro/",
+                "instruments/emulations/monomachine-digipro/dsp.lisp",
+                "instruments/emulations/monomachine-digipro/ui.lisp",
+                vec!["morph", "cutoff", "gain"],
+            ),
+            (
+                "emulations/monomachine-dpro-bbox-v1/",
+                "instruments/emulations/monomachine-dpro-bbox-v1/dsp.lisp",
+                "instruments/emulations/monomachine-dpro-bbox-v1/ui.lisp",
+                vec!["ptch", "cutoff", "gain"],
+            ),
+            (
+                "emulations/monomachine-dpro-dens-v1/",
+                "instruments/emulations/monomachine-dpro-dens-v1/dsp.lisp",
+                "instruments/emulations/monomachine-dpro-dens-v1/ui.lisp",
+                vec!["wave", "chrl", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-dpro-ddrw-v1/",
+                "instruments/emulations/monomachine-dpro-ddrw-v1/dsp.lisp",
+                "instruments/emulations/monomachine-dpro-ddrw-v1/ui.lisp",
+                vec!["wav1", "time", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-dpro-wave-v2/",
+                "instruments/emulations/monomachine-dpro-wave-v2/dsp.lisp",
+                "instruments/emulations/monomachine-dpro-wave-v2/ui.lisp",
+                vec!["wave", "cutoff", "gain"],
+            ),
+            (
+                "emulations/monomachine-fmplus/",
+                "instruments/emulations/monomachine-fmplus/dsp.lisp",
+                "instruments/emulations/monomachine-fmplus/ui.lisp",
+                vec!["ratio_a", "tone", "gain"],
+            ),
+            (
+                "emulations/monomachine-fmplus-par-v1/",
+                "instruments/emulations/monomachine-fmplus-par-v1/dsp.lisp",
+                "instruments/emulations/monomachine-fmplus-par-v1/ui.lisp",
+                vec!["op1_frq", "op3_frq", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-fmplus-stat-v1/",
+                "instruments/emulations/monomachine-fmplus-stat-v1/dsp.lisp",
+                "instruments/emulations/monomachine-fmplus-stat-v1/ui.lisp",
+                vec!["op1_frq", "op2_vol", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-sid/",
+                "instruments/emulations/monomachine-sid/dsp.lisp",
+                "instruments/emulations/monomachine-sid/ui.lisp",
+                vec!["osc2_semi", "pulse_width", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-superwave/",
+                "instruments/emulations/monomachine-superwave/dsp.lisp",
+                "instruments/emulations/monomachine-superwave/ui.lisp",
+                vec!["saw_mix", "motion_rate", "cutoff"],
+            ),
+            (
+                "emulations/prophet-6/",
+                "instruments/emulations/prophet-6/dsp.lisp",
+                "instruments/emulations/prophet-6/ui.lisp",
+                vec!["osc1_shape", "osc2_mix", "cutoff"],
+            ),
+            (
+                "emulations/prophet-6-emu/",
+                "instruments/emulations/prophet-6-emu/dsp.lisp",
+                "instruments/emulations/prophet-6-emu/ui.lisp",
+                vec!["osc1_shape", "filter_drive", "gain"],
+            ),
+        ];
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        for (instrument_name, dsp_path, ui_path, expected_suffixes) in cases {
+            let ui = std::fs::read_to_string(ui_path).unwrap_or_else(|error| {
+                panic!("read {ui_path}: {error}");
+            });
+            let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+                instrument_name.to_string(),
+                ui_path.to_string(),
+                ui,
+            )));
+
+            let mut editor =
+                eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+            editor.set_layout_viewport(180, 18);
+            editor.runtime_mut().register_reactive(
+                "SEQ",
+                vec![
+                    ("num-tracks", Value::Number(1.0)),
+                    ("compiling", Value::Bool(false)),
+                    ("available-effects", test_list(vec![])),
+                    ("available-builtin-effects", test_list(vec![])),
+                    ("available-midi-effects", test_list(vec![])),
+                    ("bus-names", test_list(vec![])),
+                    ("effects", test_list(vec![])),
+                    ("midi-effects", test_list(vec![])),
+                    (
+                        "instrument-panel",
+                        test_list(vec![Value::Map(test_instrument_map_from_dsp(
+                            instrument_name,
+                            dsp_path,
+                        ))]),
+                    ),
+                    ("bus-effects", test_list(vec![])),
+                ],
+                true,
+            );
+            editor
+                .runtime_mut()
+                .eval_str(
+                    r#"
+                    (def selected-bus-name () "Mix")
+                    (def seq-has-selection? () false)
+                    (def sbrowser-editor-name "")
+                    (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                    (def custom-midi-fx-ui (fx) false)
+                    (def custom-audio-fx-ui (fx) false)
+                    (defstate selected-bus -1)
+                    "#,
+                )
+                .expect("install fx test helpers");
+            editor
+                .runtime_mut()
+                .eval_str(&custom_ui_source)
+                .unwrap_or_else(|error| panic!("load {instrument_name} custom UI: {error:?}"));
+            editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+            editor.refresh_runtime_side_effects();
+            if let Some(status) = editor.runtime_mut().take_status_message() {
+                panic!(
+                    "{instrument_name} custom instrument fx lisp status after refresh: {status}"
+                );
+            }
+
+            let fx_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*fx*")
+                .expect("fx lisp should create the *fx* buffer")
+                .id;
+            editor.set_active_buffer(fx_id);
+            editor.set_layout_viewport(180, 18);
+            let layout = editor
+                .widget_layout()
+                .unwrap_or_else(|| panic!("{instrument_name} layout should build"));
+            let rendered = render_layout_cells(&layout, 180, 18);
+            assert!(
+                !rendered.contains("missing:"),
+                "{instrument_name} should not render missing-param diagnostics:\n{rendered}"
+            );
+            let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+                .unwrap_or_else(|| panic!("{instrument_name} instrument panel layout node"));
+
+            for suffix in expected_suffixes {
+                let node = find_stable_key_suffix(&layout, suffix).unwrap_or_else(|| {
+                    panic!("{instrument_name} should render a control ending in {suffix}")
+                });
+                assert!(
+                    node.rect.width > 1.0
+                        && node.rect.height > 0.4
+                        && node.rect.row >= instrument_panel.rect.row
+                        && node.rect.row + node.rect.height
+                            <= instrument_panel.rect.row + instrument_panel.rect.height,
+                    "{instrument_name} {suffix} should have a finite visible rect inside the instrument panel, got {:?}; panel={:?}",
+                    node.rect,
+                    instrument_panel.rect
+                );
+            }
         }
     }
 

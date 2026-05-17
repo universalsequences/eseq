@@ -766,6 +766,58 @@
            0)
       false)))
 
+(def instrument-source-param (section name)
+  (nth (filter |p| (= (get p :name) name) (get section :params)) 0))
+
+(def instrument-source-param-value (p fallback)
+  (if p (fx-param-value p) fallback))
+
+(def instrument-source-set-param-value (p v)
+  (if p (instrument-set-param-control-value p v) false))
+
+(def instrument-source-adsr-number (p title decimals unit)
+  (v-stack :width 3.8 :height 1.18 :gap 0.16 :align :start
+    (label title :font-size 7.4 :width 3.8 :height 0.52 :color :dim :bg :transparent)
+    (number-picker :value (instrument-source-param-value p 0)
+      :min (if p (instrument-param-control-min p) 0)
+      :max (if p (instrument-param-control-max p) 0)
+      :decimals decimals
+      :unit unit
+      :noui true :font-size 9.0
+      :text-color :widget_focus_bg :edit-color :yellow
+      :text-align :left
+      :width 3.8 :height 0.50
+      :on-change (lambda (v) (instrument-source-set-param-value p v)))))
+
+(def instrument-env-source-editor (section)
+  (let ((attack (instrument-source-param section "attack"))
+        (decay (instrument-source-param section "decay"))
+        (sustain (instrument-source-param section "sustain"))
+        (release (instrument-source-param section "release")))
+    (ui-readout-panel-medium-s 0
+      (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+        (adsr-editor
+          :attack (instrument-source-param-value attack 5)
+          :decay (instrument-source-param-value decay 120)
+          :sustain (instrument-source-param-value sustain 0.7)
+          :release (instrument-source-param-value release 120)
+          :width 13.2 :height :fill
+          :background-color :instrument-control-bg
+          :on-change (lambda (env)
+            (do
+              (instrument-source-set-param-value attack (get env :attack))
+              (instrument-source-set-param-value decay (get env :decay))
+              (instrument-source-set-param-value sustain (get env :sustain))
+              (instrument-source-set-param-value release (get env :release)))))
+        (v-stack :width 8.2 :height :fill :gap 0.10 :align :start
+          (ui-lego-badge-dark "ENV 1" 7.7 (ui-accent-blue))
+          (h-stack :gap 0.14 :align :start
+            (instrument-source-adsr-number attack "atk" 0 "ms")
+            (instrument-source-adsr-number decay "dec" 0 "ms"))
+          (h-stack :gap 0.14 :align :start
+            (instrument-source-adsr-number sustain "sus" 2 false)
+            (instrument-source-adsr-number release "rel" 0 "ms")))))))
+
 (def instrument-selected-mod-source-editor (inst)
   (let ((slot (instrument-mod-selected-slot)))
     (box :debug-name "instrument-selected-mod-source-editor"
@@ -777,9 +829,11 @@
           (label "external mod" :font-size 12 :color :dim :bg :transparent))
         (let ((section (instrument-selected-mod-source-section inst)))
           (if section
-            (v-stack :gap 0.3 :align :start
+            (v-stack :width :fill :height :fill :gap 0.3 :align :start
               (label (get section :name) :font-size 9 :color :dim :bg :transparent)
-              (fx-param-grid (get section :params) false))
+              (if (= (get section :name) "ENV 1")
+                (instrument-env-source-editor section)
+                (fx-param-grid (get section :params) false)))
             (box :width :fill :height :fill :h-align :center :v-align :center
               (label "no source controls" :font-size 12 :color :dim :bg :transparent))))))))
 
@@ -790,7 +844,7 @@
        :background-color :black
        :corner-radius 10
        :padding 0.25
-    (h-stack :gap 0.25 :align :stretch
+    (h-stack :height :fill :gap 0.25 :align :stretch
       (instrument-mod-selector inst)
       (instrument-selected-mod-source-editor inst))))
 
@@ -1869,7 +1923,7 @@
                 (box (fx-param-grid (get inst :synth) false)
                   :debug-name "fallback-synth-wrapper"))))
         (if instrument-mods-open
-          (h-stack :debug-name "instrument-mods-inline-body" :gap 0.45
+          (h-stack :debug-name "instrument-mods-inline-body" :height :fill :gap 0.45 :align :stretch
             (instrument-mod-control-panel inst)
             body)
           body)))))
