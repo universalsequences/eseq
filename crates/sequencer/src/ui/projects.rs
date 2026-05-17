@@ -166,6 +166,10 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     desc: &crate::effects::EffectDescriptor,
     node_id: u32,
 ) -> crate::effects::EffectSlotSnapshot {
+    if project_slot_matches_descriptor_param_layout(&slot, desc) {
+        return project_slot_into_synced_snapshot(slot, desc, node_id);
+    }
+
     let new_np = desc.params.len();
     let has_generated_host_mod_params = desc
         .params
@@ -281,6 +285,21 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .map(|p| p.node_param_span.max(1))
             .collect(),
     }
+}
+
+fn project_slot_matches_descriptor_param_layout(
+    slot: &project::ProjectEffectSlot,
+    desc: &crate::effects::EffectDescriptor,
+) -> bool {
+    let num_params = desc.params.len();
+    slot.num_params as usize == num_params
+        && slot.defaults.len() >= num_params
+        && slot.param_node_indices.len() >= num_params
+        && desc
+            .params
+            .iter()
+            .zip(slot.param_node_indices.iter())
+            .all(|(param, saved_node_idx)| param.node_param_idx == *saved_node_idx)
 }
 
 fn is_generated_host_mod_param_name(name: &str) -> bool {
@@ -1897,5 +1916,63 @@ mod tests {
         assert_eq!(restored.plocks[3][6], Some(0.91));
         assert_eq!(restored.plocks[3][1], None);
         assert_eq!(restored.plocks[3][2], None);
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_preserves_saved_generated_host_mod_lanes() {
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                test_param("attack", 0.01, 10),
+                test_param("__host_mod__attack__lane2__source", 0.0, 14),
+                test_param("__host_mod__attack__lane2__depth", 0.0, 18),
+                test_param("tone", 0.02, 22),
+                test_param("__host_mod__tone__lane2__source", 0.0, 26),
+                test_param("__host_mod__tone__lane2__depth", 0.0, 30),
+                test_param("cutoff", 0.03, 34),
+                test_param("gain", 0.04, 38),
+            ],
+        };
+        let mut plocks = vec![vec![None; desc.params.len()]; MAX_STEPS];
+        plocks[3][2] = Some(0.91);
+        plocks[4][5] = Some(-0.42);
+
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: desc.params.len() as u32,
+            defaults: vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78],
+            plocks,
+            param_node_indices: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect(),
+            param_node_spans: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_span.max(1))
+                .collect(),
+        };
+
+        let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
+
+        assert_eq!(restored.node_id, 42);
+        assert_eq!(restored.num_params, desc.params.len() as u32);
+        assert_eq!(
+            restored.defaults,
+            vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78]
+        );
+        assert_eq!(restored.plocks[3][2], Some(0.91));
+        assert_eq!(restored.plocks[4][5], Some(-0.42));
+        assert_eq!(
+            restored.param_node_indices,
+            desc.params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect::<Vec<_>>()
+        );
     }
 }
