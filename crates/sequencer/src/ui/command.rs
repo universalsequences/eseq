@@ -491,6 +491,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
     match cmd {
         // ── Pattern / step mutations ──────────────────────────────────────
         AppCommand::ToggleStep { track, step } => {
+            app.clear_step_selection();
             app.state.toggle_step_and_clear_plocks(track, step);
         }
 

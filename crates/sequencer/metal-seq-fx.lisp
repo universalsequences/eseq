@@ -477,7 +477,9 @@
     '()))
 
 (def instrument-param-knob-mod-target (p idx)
-  (nth (instrument-param-active-mod-targets p) idx))
+  (if (and instrument-mods-open (get p :modulatable))
+    (nth (instrument-param-mod-targets p) idx)
+    false))
 
 (def instrument-param-knob-mod-slot-prop (p idx)
   (let ((target (instrument-param-knob-mod-target p idx)))
@@ -594,11 +596,7 @@
 
 (def instrument-param-mod-bg (p)
   (if (and instrument-mods-open (get p :modulatable))
-    (if (instrument-param-connected-to-selected-mod? p)
-      (rgba 0.95 0.48 0.18 0.32)
-      (if (instrument-param-connected-to-other-mod? p)
-        (rgba 0.18 0.48 0.95 0.24)
-        (rgba 0.95 0.76 0.22 0.24)))
+    (rgba 0.18 0.48 0.95 0.24)
     :transparent))
 
 (def instrument-param-mod-wrapper (p key body)

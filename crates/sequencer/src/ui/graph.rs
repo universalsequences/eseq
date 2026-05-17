@@ -2926,6 +2926,46 @@ impl GraphController<'_> {
                 );
             }
         }
+        for base_param in &manifest.params {
+            let Some(base_param_idx) = inst_desc.params.iter().position(|p| {
+                p.node_param_idx == (lisp_effect::HEADER_SLOTS + base_param.cell_id) as u32
+            }) else {
+                continue;
+            };
+            for lane in 2..=lisp_effect::ADDITIVE_HOST_MOD_LANES_PER_PARAM {
+                let source_name =
+                    lisp_effect::additive_host_mod_source_param_name(&base_param.name, lane);
+                let depth_name =
+                    lisp_effect::additive_host_mod_depth_param_name(&base_param.name, lane);
+                let Some(source_param_idx) =
+                    inst_desc.params.iter().position(|p| p.name == source_name)
+                else {
+                    continue;
+                };
+                let Some(depth_param_idx) =
+                    inst_desc.params.iter().position(|p| p.name == depth_name)
+                else {
+                    continue;
+                };
+                let Some(depth_desc) = inst_desc.params.get(depth_param_idx) else {
+                    continue;
+                };
+                let depth_unit = match &depth_desc.kind {
+                    crate::effects::ParamKind::Continuous { unit } => unit.clone(),
+                    _ => None,
+                };
+                inst_desc.instrument_modulation_targets.push(
+                    crate::effects::InstrumentModulationTarget {
+                        base_param_idx,
+                        source_param_idx,
+                        depth_param_idx,
+                        depth_min: depth_desc.min,
+                        depth_max: depth_desc.max,
+                        depth_unit,
+                    },
+                );
+            }
+        }
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
         if preserve_runtime_values {
             let node_id = inst_slot.node_id.load(Ordering::Relaxed);

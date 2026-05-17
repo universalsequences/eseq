@@ -2051,7 +2051,8 @@ pub fn compile_instrument_with_asset_base(
     let dylib_name = format!("instrument_{}", seq);
 
     let src_path = dir.join(format!("instrument_{seq}.lisp"));
-    let source_with_preamble = format!("{}\n\n{source}", instrument_preamble(sample_rate));
+    let expanded_source = expand_additive_host_mod_lanes(source)?;
+    let source_with_preamble = format!("{}\n\n{expanded_source}", instrument_preamble(sample_rate));
     std::fs::write(&src_path, source_with_preamble)
         .map_err(|e| format!("Failed to write source: {e}"))?;
 
@@ -2388,6 +2389,371 @@ pub fn render_loaded_effect_for_test(
         first_nonzero_frame,
         first_samples: rendered.into_iter().take(32).collect(),
     })
+}
+
+pub const ADDITIVE_HOST_MOD_LANES_PER_PARAM: usize = 4;
+
+pub fn additive_host_mod_source_param_name(param_name: &str, lane: usize) -> String {
+    format!(
+        "__host_mod__{}__lane{}__source",
+        sanitize_mod_param_symbol(param_name),
+        lane
+    )
+}
+
+pub fn additive_host_mod_depth_param_name(param_name: &str, lane: usize) -> String {
+    format!(
+        "__host_mod__{}__lane{}__depth",
+        sanitize_mod_param_symbol(param_name),
+        lane
+    )
+}
+
+fn sanitize_mod_param_symbol(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "param".to_string()
+    } else {
+        out
+    }
+}
+
+#[derive(Clone, Debug)]
+struct AdditiveHostModParam {
+    name: String,
+    depth_min: f64,
+    depth_max: f64,
+    unit: Option<String>,
+}
+
+fn expand_additive_host_mod_lanes(source: &str) -> Result<String, String> {
+    // DGenLisp lowers one source/depth pair for each `@mod true` param. The host
+    // UI supports multiple assignments, so additive params get extra explicit
+    // source/depth params and each `(mod p)` read sums those extra lanes.
+    let tokens = eseqlisp::parser::Parser::new(source.to_string())
+        .parse()
+        .map_err(|err| {
+            format!("Failed to tokenize instrument source for host mod expansion: {err:?}")
+        })?;
+    let mut exprs = eseqlisp::parser::ASTParser::new(tokens)
+        .parse()
+        .map_err(|err| {
+            format!("Failed to parse instrument source for host mod expansion: {err:?}")
+        })?;
+    let modulators = host_modulator_symbols(&exprs);
+    if modulators.is_empty() || ADDITIVE_HOST_MOD_LANES_PER_PARAM <= 1 {
+        return Ok(source.to_string());
+    }
+
+    let params = exprs
+        .iter()
+        .filter_map(additive_host_mod_param_from_expr)
+        .collect::<Vec<_>>();
+    if params.is_empty() {
+        return Ok(source.to_string());
+    }
+
+    for expr in &mut exprs {
+        expand_mod_expr(expr, &params, &modulators);
+    }
+    let mut expanded = Vec::with_capacity(
+        exprs.len() + params.len() * (ADDITIVE_HOST_MOD_LANES_PER_PARAM - 1) * 2,
+    );
+    for expr in exprs {
+        let host_mod_param = additive_host_mod_param_from_expr(&expr);
+        expanded.push(expr);
+        if let Some(param) = host_mod_param {
+            for lane in 2..=ADDITIVE_HOST_MOD_LANES_PER_PARAM {
+                expanded.push(generated_host_mod_param_expr(
+                    &additive_host_mod_source_param_name(&param.name, lane),
+                    0.0,
+                    0.0,
+                    modulators.len() as f64,
+                    None,
+                ));
+                expanded.push(generated_host_mod_param_expr(
+                    &additive_host_mod_depth_param_name(&param.name, lane),
+                    0.0,
+                    param.depth_min,
+                    param.depth_max,
+                    param.unit.as_deref(),
+                ));
+            }
+        }
+    }
+    Ok(expanded
+        .iter()
+        .map(render_dgen_expr)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn host_modulator_symbols(exprs: &[eseqlisp::parser::Expression]) -> Vec<String> {
+    let mut modulators = exprs
+        .iter()
+        .filter_map(|expr| match expr {
+            eseqlisp::parser::Expression::List(items)
+                if matches!(items.first(), Some(eseqlisp::parser::Expression::Symbol(sym)) if sym == "def") =>
+            {
+                let name = match items.get(1) {
+                    Some(eseqlisp::parser::Expression::Symbol(name)) => name,
+                    _ => return None,
+                };
+                let input = match items.get(2) {
+                    Some(eseqlisp::parser::Expression::List(input)) => input,
+                    _ => return None,
+                };
+                let is_modulator = input.windows(2).any(|pair| {
+                    matches!(&pair[0], eseqlisp::parser::Expression::Symbol(attr) if attr == "@modulator")
+                        && matches!(pair[1], eseqlisp::parser::Expression::Number(slot) if slot.is_finite() && slot > 0.0)
+                });
+                is_modulator.then(|| name.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    modulators.sort_by_key(|name| {
+        exprs
+            .iter()
+            .find_map(|expr| modulator_slot_for_symbol(expr, name))
+            .unwrap_or(usize::MAX)
+    });
+    modulators
+}
+
+fn modulator_slot_for_symbol(expr: &eseqlisp::parser::Expression, target: &str) -> Option<usize> {
+    let eseqlisp::parser::Expression::List(items) = expr else {
+        return None;
+    };
+    if !matches!(items.first(), Some(eseqlisp::parser::Expression::Symbol(sym)) if sym == "def") {
+        return None;
+    }
+    if !matches!(items.get(1), Some(eseqlisp::parser::Expression::Symbol(sym)) if sym == target) {
+        return None;
+    }
+    let Some(eseqlisp::parser::Expression::List(input)) = items.get(2) else {
+        return None;
+    };
+    input.windows(2).find_map(|pair| {
+        if matches!(&pair[0], eseqlisp::parser::Expression::Symbol(attr) if attr == "@modulator") {
+            if let eseqlisp::parser::Expression::Number(slot) = pair[1] {
+                return Some(slot as usize);
+            }
+        }
+        None
+    })
+}
+
+fn additive_host_mod_param_from_expr(
+    expr: &eseqlisp::parser::Expression,
+) -> Option<AdditiveHostModParam> {
+    let eseqlisp::parser::Expression::List(items) = expr else {
+        return None;
+    };
+    if !matches!(items.first(), Some(eseqlisp::parser::Expression::Symbol(sym)) if sym == "param") {
+        return None;
+    }
+    let name = match items.get(1) {
+        Some(eseqlisp::parser::Expression::Symbol(name)) => name.clone(),
+        _ => return None,
+    };
+    if !param_attr_bool(items, "@mod") {
+        return None;
+    }
+    let mode = param_attr_symbol(items, "@mod-mode").unwrap_or_else(|| "additive".to_string());
+    if mode != "additive" {
+        return None;
+    }
+    let min = param_attr_number(items, "@min").unwrap_or(0.0);
+    let max = param_attr_number(items, "@max").unwrap_or(1.0);
+    let depth_range = (max - min).abs().max(1.0);
+    Some(AdditiveHostModParam {
+        name,
+        depth_min: param_attr_number(items, "@mod-depth-min").unwrap_or(-depth_range),
+        depth_max: param_attr_number(items, "@mod-depth-max").unwrap_or(depth_range),
+        unit: param_attr_symbol(items, "@unit"),
+    })
+}
+
+fn param_attr_number(items: &[eseqlisp::parser::Expression], attr: &str) -> Option<f64> {
+    items.windows(2).find_map(|pair| {
+        if matches!(&pair[0], eseqlisp::parser::Expression::Symbol(sym) if sym == attr) {
+            if let eseqlisp::parser::Expression::Number(value) = pair[1] {
+                return value.is_finite().then_some(value);
+            }
+        }
+        None
+    })
+}
+
+fn param_attr_symbol(items: &[eseqlisp::parser::Expression], attr: &str) -> Option<String> {
+    items.windows(2).find_map(|pair| {
+        if matches!(&pair[0], eseqlisp::parser::Expression::Symbol(sym) if sym == attr) {
+            return match &pair[1] {
+                eseqlisp::parser::Expression::Symbol(value)
+                | eseqlisp::parser::Expression::String(value) => Some(value.clone()),
+                _ => None,
+            };
+        }
+        None
+    })
+}
+
+fn param_attr_bool(items: &[eseqlisp::parser::Expression], attr: &str) -> bool {
+    items.windows(2).any(|pair| {
+        matches!(&pair[0], eseqlisp::parser::Expression::Symbol(sym) if sym == attr)
+            && matches!(&pair[1], eseqlisp::parser::Expression::Symbol(value) if value == "true")
+    })
+}
+
+fn expand_mod_expr(
+    expr: &mut eseqlisp::parser::Expression,
+    params: &[AdditiveHostModParam],
+    modulators: &[String],
+) {
+    match expr {
+        eseqlisp::parser::Expression::List(items) => {
+            for item in items.iter_mut() {
+                expand_mod_expr(item, params, modulators);
+            }
+            if items.len() == 2
+                && matches!(&items[0], eseqlisp::parser::Expression::Symbol(sym) if sym == "mod")
+            {
+                let Some(eseqlisp::parser::Expression::Symbol(param_name)) = items.get(1) else {
+                    return;
+                };
+                let Some(param) = params.iter().find(|param| param.name == *param_name) else {
+                    return;
+                };
+                *expr = expanded_mod_read_expr(param, modulators);
+            }
+        }
+        eseqlisp::parser::Expression::QuoteList(items) => {
+            for item in items {
+                expand_mod_expr(item, params, modulators);
+            }
+        }
+        eseqlisp::parser::Expression::Quasiquote(item)
+        | eseqlisp::parser::Expression::Unquote(item) => expand_mod_expr(item, params, modulators),
+        _ => {}
+    }
+}
+
+fn expanded_mod_read_expr(
+    param: &AdditiveHostModParam,
+    modulators: &[String],
+) -> eseqlisp::parser::Expression {
+    use eseqlisp::parser::Expression;
+    let mut terms = vec![Expression::List(vec![
+        Expression::Symbol("mod".to_string()),
+        Expression::Symbol(param.name.clone()),
+    ])];
+    for lane in 2..=ADDITIVE_HOST_MOD_LANES_PER_PARAM {
+        let source_name = additive_host_mod_source_param_name(&param.name, lane);
+        let depth_name = additive_host_mod_depth_param_name(&param.name, lane);
+        terms.push(Expression::List(vec![
+            Expression::Symbol("*".to_string()),
+            mod_source_selector_expr(&source_name, modulators),
+            Expression::Symbol(depth_name),
+        ]));
+    }
+    let mut expr = vec![Expression::Symbol("+".to_string())];
+    expr.extend(terms);
+    Expression::List(expr)
+}
+
+fn mod_source_selector_expr(
+    source_name: &str,
+    modulators: &[String],
+) -> eseqlisp::parser::Expression {
+    use eseqlisp::parser::Expression;
+    let mut selector = vec![
+        Expression::Symbol("selector".to_string()),
+        Expression::List(vec![
+            Expression::Symbol("+".to_string()),
+            Expression::List(vec![
+                Expression::Symbol("clip".to_string()),
+                Expression::List(vec![
+                    Expression::Symbol("round".to_string()),
+                    Expression::Symbol(source_name.to_string()),
+                ]),
+                Expression::Number(0.0),
+                Expression::Number(modulators.len() as f64),
+            ]),
+            Expression::Number(1.0),
+        ]),
+        Expression::Number(0.0),
+    ];
+    selector.extend(modulators.iter().cloned().map(Expression::Symbol));
+    Expression::List(selector)
+}
+
+fn generated_host_mod_param_expr(
+    name: &str,
+    default: f64,
+    min: f64,
+    max: f64,
+    unit: Option<&str>,
+) -> eseqlisp::parser::Expression {
+    use eseqlisp::parser::Expression;
+    let mut items = vec![
+        Expression::Symbol("param".to_string()),
+        Expression::Symbol(name.to_string()),
+        Expression::Symbol("@default".to_string()),
+        Expression::Number(default),
+        Expression::Symbol("@min".to_string()),
+        Expression::Number(min),
+        Expression::Symbol("@max".to_string()),
+        Expression::Number(max),
+        Expression::Symbol("@generated".to_string()),
+        Expression::Symbol("true".to_string()),
+    ];
+    if let Some(unit) = unit {
+        items.push(Expression::Symbol("@unit".to_string()));
+        items.push(Expression::Symbol(unit.to_string()));
+    }
+    Expression::List(items)
+}
+
+fn render_dgen_expr(expr: &eseqlisp::parser::Expression) -> String {
+    match expr {
+        eseqlisp::parser::Expression::Symbol(value) => value.clone(),
+        eseqlisp::parser::Expression::Keyword(value) => format!(":{value}"),
+        eseqlisp::parser::Expression::String(value) => format!("{value:?}"),
+        eseqlisp::parser::Expression::QuoteSymbol(value) => format!("'{value}"),
+        eseqlisp::parser::Expression::QuoteList(items) => format!(
+            "'({})",
+            items
+                .iter()
+                .map(render_dgen_expr)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        eseqlisp::parser::Expression::Number(value) => {
+            if value.fract() == 0.0 {
+                format!("{value:.0}")
+            } else {
+                value.to_string()
+            }
+        }
+        eseqlisp::parser::Expression::List(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(render_dgen_expr)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        eseqlisp::parser::Expression::Quasiquote(item) => format!("`{}", render_dgen_expr(item)),
+        eseqlisp::parser::Expression::Unquote(item) => format!(",{}", render_dgen_expr(item)),
+    }
 }
 
 // ── Instrument editor flow ──
@@ -7311,6 +7677,48 @@ mod tests {
         assert!(!entries.contains(&(5, 0.25)));
         assert!(entries.contains(&(8, 0.5)));
         assert!(entries.contains(&(11, 0.5)));
+    }
+
+    #[test]
+    fn additive_host_mod_expansion_adds_extra_assignable_lanes() {
+        let source = r#"
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (def mod1 (in 5 @name mod1 @modulator 1))
+            (def mod2 (in 6 @name mod2 @modulator 2))
+            (def mod3 (in 7 @name mod3 @modulator 3))
+            (def mod4 (in 8 @name mod4 @modulator 4))
+            (def mod5 (in 9 @name mod5 @modulator 5))
+            (def mod6 (in 10 @name mod6 @modulator 6))
+            (def ext1 (in 11 @name ext1 @modulator 7))
+            (def ext2 (in 12 @name ext2 @modulator 8))
+            (def ext3 (in 13 @name ext3 @modulator 9))
+            (def ext4 (in 14 @name ext4 @modulator 10))
+            (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+            (out (* (sin (* (phasor pitch) twopi)) velocity (mod gain)) 1 @name audio)
+        "#;
+
+        let json = compile_instrument_with_asset_base(source, 44_100, None)
+            .expect("expanded additive instrument compiles");
+        let manifest = parse_manifest(&json).expect("manifest parses");
+        assert_eq!(manifest.mod_destinations.len(), 1);
+        for lane in 2..=super::ADDITIVE_HOST_MOD_LANES_PER_PARAM {
+            let source_name = super::additive_host_mod_source_param_name("gain", lane);
+            let depth_name = super::additive_host_mod_depth_param_name("gain", lane);
+            assert!(
+                manifest
+                    .params
+                    .iter()
+                    .any(|param| param.name == source_name),
+                "missing generated source param {source_name}"
+            );
+            assert!(
+                manifest.params.iter().any(|param| param.name == depth_name),
+                "missing generated depth param {depth_name}"
+            );
+        }
     }
     use std::sync::Arc;
 

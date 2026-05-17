@@ -281,6 +281,7 @@
 (defstate step-drag-anchor nil)
 (defstate step-click-pending nil)
 (defstate step-move-last nil)
+(defstate step-toggle-drag-value nil)
 
 (def step-select-drag-start (step evt)
   (do
@@ -295,20 +296,20 @@
     (do
       (set! step-click-pending nil)
       (set! step-move-last nil)
+      (set! step-toggle-drag-value nil)
       (cool-off-follow)
       (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
       (set! cursor-step step)
       (seq-select-step-range step-drag-anchor step))
-    (if (= step-move-last nil)
+    (if (= step-toggle-drag-value nil)
       nil
-      (if (= step step-move-last)
-        nil
-        (do
-          (set! step-click-pending nil)
-          (cool-off-follow)
-          (seq-move-step-drag step-move-last step)
-          (set! step-move-last step)
-          (set! cursor-step step))))))
+      (do
+        (set! step-click-pending nil)
+        (cool-off-follow)
+        (set! cursor-step step)
+        (if (= (seq-track-step-active? SEQ.current-track step) step-toggle-drag-value)
+          nil
+          (seq-toggle-step step))))))
 
 (def step-pointer-down (step evt)
   (if (selection-click? evt)
@@ -317,8 +318,10 @@
       (cool-off-follow)
       (set! cursor-step step)
       (set! step-drag-anchor nil)
-      (set! step-move-last step)
-      (set! step-click-pending step))))
+      (set! step-move-last nil)
+      (set! step-click-pending nil)
+      (set! step-toggle-drag-value (not (seq-track-step-active? SEQ.current-track step)))
+      (step-select-drag-over step evt))))
 
 (def step-pointer-up (step evt)
   (do
@@ -327,7 +330,18 @@
       nil)
     (set! step-click-pending nil)
     (set! step-drag-anchor nil)
-    (set! step-move-last nil)))
+    (set! step-move-last nil)
+    (set! step-toggle-drag-value nil)))
+
+(def step-selected? (step)
+  (and (seq-has-selection?) (nth SEQ.selected-steps step)))
+
+(def seq-set-step-param-from-step (step param value)
+  (if (step-selected? step)
+    (seq-set-step-param-plock param value)
+    (do
+      (if (seq-has-selection?) (seq-clear-selection) nil)
+      (seq-set-step-param step param value))))
 
 (def select-all-steps ()
   (do
@@ -337,7 +351,9 @@
       (seq-select-all-steps))))
 
 (def seq-global-select-all-steps ()
-  (if (and (buffer-read-only?) (not (= (current-buffer-name) "*piano-roll*")))
+  (if (and
+        (or (buffer-read-only?) (= (current-buffer-name) "*transport*"))
+        (not (= (current-buffer-name) "*piano-roll*")))
     (select-all-steps)
     false))
 

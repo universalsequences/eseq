@@ -2207,6 +2207,10 @@ pub(crate) fn build_sampler_panel_value(
         name.starts_with("mod ")
     }
 
+    fn is_generated_host_mod_param(name: &str) -> bool {
+        name.starts_with("__host_mod__")
+    }
+
     fn is_source_param(node_param_idx: u32) -> bool {
         node_param_idx >= MOD_PARAM_BASE
     }
@@ -2422,6 +2426,9 @@ pub(crate) fn build_sampler_panel_value(
                     );
                 }
             }
+        }
+        if is_generated_host_mod_param(&pdesc.name) {
+            continue;
         }
         if is_source_param(pdesc.node_param_idx) {
             if let Some(Value::String(name)) = pmap.get("name").map(|v| v.borrow().clone()) {
@@ -2818,6 +2825,10 @@ pub(crate) fn build_instrument_panel_value(
         name.starts_with("mod ")
     }
 
+    fn is_generated_host_mod_param(name: &str) -> bool {
+        name.starts_with("__host_mod__")
+    }
+
     fn is_source_param(node_param_idx: u32) -> bool {
         node_param_idx >= MOD_PARAM_BASE
     }
@@ -3045,14 +3056,19 @@ pub(crate) fn build_instrument_panel_value(
                     }),
                     depth_value: depth_desc.stored_to_user(depth_current),
                     depth_value_field: plock_step.is_none().then(|| {
-                        instrument_param_value_field(track, target.depth_param_idx, &depth_desc.name)
+                        instrument_param_value_field(
+                            track,
+                            target.depth_param_idx,
+                            &depth_desc.name,
+                        )
                     }),
                     depth_min: target.depth_min,
                     depth_max: target.depth_max,
                     depth_unit: target.depth_unit.clone(),
                 },
             ))
-        }) {
+        })
+    {
         modulation_targets
             .entry(target.0)
             .or_default()
@@ -3084,7 +3100,7 @@ pub(crate) fn build_instrument_panel_value(
             sequencer::effects::ParamKind::Enum { labels } => Some(labels),
             _ => None,
         };
-        if is_source_param(pdesc.node_param_idx) {
+        if is_source_param(pdesc.node_param_idx) || is_generated_host_mod_param(&pdesc.name) {
             continue;
         }
         if is_mod_param(&pdesc.name) {
@@ -6434,6 +6450,18 @@ mod tests {
 
         editor
             .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-count").unwrap(),
+            Some(Value::Number(2.0))
+        );
+
+        editor
+            .runtime_mut()
             .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
             .expect("switch to piano roll buffer");
         editor.refresh_runtime_side_effects();
@@ -6441,7 +6469,7 @@ mod tests {
 
         assert_eq!(
             editor.runtime_mut().eval_str("selected-count").unwrap(),
-            Some(Value::Number(1.0))
+            Some(Value::Number(2.0))
         );
 
         editor.open_scratch_buffer("*editable*", "abc");
@@ -6450,7 +6478,7 @@ mod tests {
 
         assert_eq!(
             editor.runtime_mut().eval_str("selected-count").unwrap(),
-            Some(Value::Number(1.0))
+            Some(Value::Number(2.0))
         );
         assert_eq!(editor.active_buffer().cursor, (0, 0));
     }

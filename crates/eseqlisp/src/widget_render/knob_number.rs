@@ -194,8 +194,9 @@ mod tests {
         assert_eq!(base_instances.len(), 1);
         assert_eq!(base_instances[0].uniform_b[0], 0.0);
         assert_eq!(range_instances.len(), 2);
-        assert_eq!(range_instances[0].uniform_b, [1.0, 0.5, 0.75, 1.0]);
-        assert_eq!(range_instances[1].uniform_b, [1.0, 0.5, 0.375, 0.0]);
+        assert_eq!(range_instances[0].uniform_b, [0.98, 0.5, 0.75, 1.0]);
+        assert!((range_instances[1].uniform_b[0] - 0.895).abs() < 0.000_01);
+        assert_eq!(&range_instances[1].uniform_b[1..], &[0.5, 0.375, 0.0]);
         assert!(
             text.contains(&"cut"),
             "knob-number should still emit label/value text primitives: {text:?}"
@@ -329,6 +330,11 @@ fn mod_slot_color(slot: i32, selected: bool) -> Color {
     };
     color.a = if selected { 0.95 } else { 0.58 };
     color
+}
+
+#[cfg(target_os = "macos")]
+fn mod_range_ring_radius(range_index: usize) -> f32 {
+    (0.98 - (range_index.min(4) as f32 * 0.085)).max(0.64)
 }
 
 #[cfg(target_os = "macos")]
@@ -836,10 +842,33 @@ impl WidgetDefinition for KnobNumberWidget {
             .round() as i32;
         if base_range.abs() > 0.000_001 {
             let base_t = ((base_value - base_min) / base_range).clamp(0.0, 1.0);
-            let mut push_mod_range = |slot_f: f32, depth: f32| {
+            let mut ranges = Vec::new();
+
+            if let Some(Value::List(mod_ranges)) = node.props.get("mod-ranges") {
+                for range in mod_ranges {
+                    if let Value::Map(map) = &*range.borrow()
+                        && let (Some(slot), Some(depth)) =
+                            (map_f32(map, "slot"), map_f32(map, "depth"))
+                    {
+                        ranges.push((slot, depth));
+                    }
+                }
+            }
+            for idx in 0..10 {
+                let slot_key = format!("mod-range-{idx}-slot");
+                let depth_key = format!("mod-range-{idx}-depth");
+                if let (Some(slot), Some(depth)) = (
+                    node.props.get(&slot_key).and_then(value_as_f32),
+                    node.props.get(&depth_key).and_then(value_as_f32),
+                ) {
+                    ranges.push((slot, depth));
+                }
+            }
+
+            for (range_index, (slot_f, depth)) in ranges.into_iter().enumerate() {
                 let slot = slot_f.round() as i32;
                 if slot <= 0 {
-                    return;
+                    continue;
                 }
                 let end_t = ((base_value + depth - base_min) / base_range).clamp(0.0, 1.0);
                 let color = mod_slot_color(slot, slot == selected_slot);
@@ -853,7 +882,7 @@ impl WidgetDefinition for KnobNumberWidget {
                         itime: viewport.time_seconds,
                         uniform_a: [if is_focused { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                         uniform_b: [
-                            1.0,
+                            mod_range_ring_radius(range_index),
                             base_t,
                             end_t,
                             if slot == selected_slot { 1.0 } else { 0.0 },
@@ -867,27 +896,6 @@ impl WidgetDefinition for KnobNumberWidget {
                     },
                     is_background: false,
                 });
-            };
-
-            if let Some(Value::List(ranges)) = node.props.get("mod-ranges") {
-                for range in ranges {
-                    if let Value::Map(map) = &*range.borrow()
-                        && let (Some(slot), Some(depth)) =
-                            (map_f32(map, "slot"), map_f32(map, "depth"))
-                    {
-                        push_mod_range(slot, depth);
-                    }
-                }
-            }
-            for idx in 0..10 {
-                let slot_key = format!("mod-range-{idx}-slot");
-                let depth_key = format!("mod-range-{idx}-depth");
-                if let (Some(slot), Some(depth)) = (
-                    node.props.get(&slot_key).and_then(value_as_f32),
-                    node.props.get(&depth_key).and_then(value_as_f32),
-                ) {
-                    push_mod_range(slot, depth);
-                }
             }
         }
 
@@ -1018,8 +1026,9 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float inRange = step(rel, sweep);
     float active = step(rel, sweep * in.value_t);
 
-    float ring = abs(r - 0.74) - 0.088;
-    float activeRing = abs(r - 0.74) - 0.103;
+    float knobRadius = 0.58;
+    float ring = abs(r - knobRadius) - 0.070;
+    float activeRing = abs(r - knobRadius) - 0.082;
     float aa = max(fwidth(r), 0.0015);
     float ringMask = smoothstep(aa, -aa, ring) * inRange;
     float activeMask = smoothstep(aa, -aa, activeRing) * inRange * active;
@@ -1027,12 +1036,12 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
 
     float notchAngle = start + sweep * in.value_t;
     float2 n = float2(cos(notchAngle), sin(notchAngle));
-    float notch = length(p - n * 0.74) - 0.084;
+    float notch = length(p - n * knobRadius) - 0.070;
     float notchMask = smoothstep(aa, -aa, notch);
     float lineAlong = dot(p, n);
     float lineAcross = abs(p.x * n.y - p.y * n.x);
-    float lineSegment = step(0.0, lineAlong) * step(lineAlong, 0.68);
-    float line = lineAcross - 0.088;
+    float lineSegment = step(0.0, lineAlong) * step(lineAlong, 0.52);
+    float line = lineAcross - 0.070;
     float lineMask = smoothstep(aa, -aa, line) * lineSegment;
 
     float4 col = float4(0.0);
@@ -1060,13 +1069,14 @@ fragment float4 widget_frag(WidgetVaryings in [[stage_in]])
     float inRange = step(rel, sweep);
     float aa = max(fwidth(r), 0.0015);
 
+    float ringRadius = clamp(in.uniform_b.x, 0.62, 1.02);
     float t0 = clamp(in.uniform_b.y, 0.0, 1.0);
     float t1 = clamp(in.uniform_b.z, 0.0, 1.0);
     float lo = min(t0, t1) * sweep;
     float hi = max(t0, t1) * sweep;
     float selected = step(0.5, in.uniform_b.w);
-    float radius = mix(0.93, 0.91, selected);
-    float halfWidth = mix(0.038, 0.062, selected);
+    float radius = ringRadius;
+    float halfWidth = mix(0.040, 0.056, selected);
     float modRing = abs(r - radius) - halfWidth;
     float arcMask = step(lo, rel) * step(rel, hi) * inRange;
     float mask = smoothstep(aa, -aa, modRing) * arcMask;
