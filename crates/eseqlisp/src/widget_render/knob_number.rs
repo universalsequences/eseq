@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(base_instances.len(), 1);
         assert_eq!(base_instances[0].uniform_b[0], 0.0);
         assert_eq!(range_instances.len(), 2);
-        assert_eq!(range_instances[0].uniform_b, [0.98, 0.5, 0.75, 1.0]);
+        assert_eq!(range_instances[0].uniform_b, [0.94, 0.5, 0.75, 1.0]);
         assert!((range_instances[1].uniform_b[0] - 0.895).abs() < 0.000_01);
         assert_eq!(&range_instances[1].uniform_b[1..], &[0.5, 0.375, 0.0]);
         assert!(
@@ -237,6 +237,18 @@ mod tests {
 
         assert_eq!(range.uniform_b[1], 0.5);
         assert_eq!(range.uniform_b[2], 1.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn outer_mod_range_radius_keeps_stroke_inside_primitive_bounds() {
+        let selected_radius = mod_range_ring_radius(0, true);
+        let unselected_radius = mod_range_ring_radius(0, false);
+
+        assert!(selected_radius + mod_range_ring_half_width(true) < 1.0);
+        assert!(unselected_radius + mod_range_ring_half_width(false) < 1.0);
+        assert_eq!(selected_radius, 0.94);
+        assert_eq!(unselected_radius, 0.956);
     }
 }
 
@@ -369,8 +381,15 @@ fn mod_slot_color(slot: i32, selected: bool) -> Color {
 }
 
 #[cfg(target_os = "macos")]
-fn mod_range_ring_radius(range_index: usize) -> f32 {
-    (0.98 - (range_index.min(4) as f32 * 0.085)).max(0.64)
+fn mod_range_ring_half_width(selected: bool) -> f32 {
+    if selected { 0.056 } else { 0.040 }
+}
+
+#[cfg(target_os = "macos")]
+fn mod_range_ring_radius(range_index: usize, selected: bool) -> f32 {
+    const OUTER_EDGE_MARGIN: f32 = 0.004;
+    let preferred = (0.98 - (range_index.min(4) as f32 * 0.085)).max(0.64);
+    preferred.min(1.0 - mod_range_ring_half_width(selected) - OUTER_EDGE_MARGIN)
 }
 
 #[cfg(target_os = "macos")]
@@ -907,7 +926,8 @@ impl WidgetDefinition for KnobNumberWidget {
                     continue;
                 }
                 let end_t = ((base_value + depth - base_min) / base_range).clamp(0.0, 1.0);
-                let color = mod_slot_color(slot, slot == selected_slot);
+                let selected = slot == selected_slot;
+                let color = mod_slot_color(slot, selected);
                 prims.push(MetalPrimitive::WidgetInstance {
                     widget_type: "knob-number-mod-range".to_string(),
                     instance: WidgetInstance {
@@ -918,10 +938,10 @@ impl WidgetDefinition for KnobNumberWidget {
                         itime: viewport.time_seconds,
                         uniform_a: [if is_focused { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                         uniform_b: [
-                            mod_range_ring_radius(range_index),
+                            mod_range_ring_radius(range_index, selected),
                             base_t,
                             end_t,
-                            if slot == selected_slot { 1.0 } else { 0.0 },
+                            if selected { 1.0 } else { 0.0 },
                         ],
                         color_a: [color.r, color.g, color.b, color.a],
                         color_b: [track_color.r, track_color.g, track_color.b, track_color.a],

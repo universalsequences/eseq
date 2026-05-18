@@ -3001,7 +3001,7 @@ fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
 
     assert_eq!(base_count, 1);
     assert_eq!(range_uniforms.len(), 2);
-    assert_eq!(range_uniforms[0], [0.98, 0.5, 0.375, 0.0]);
+    assert_eq!(range_uniforms[0], [0.956, 0.5, 0.375, 0.0]);
     assert!((range_uniforms[1][0] - 0.895).abs() < 0.000_01);
     assert_eq!(&range_uniforms[1][1..], &[0.5, 0.75, 1.0]);
     assert!(text.contains(&"cut"), "expected knob label text primitive: {text:?}");
