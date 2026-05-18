@@ -86,6 +86,12 @@
       (host-command "save-project" (dict :name SEQ.current-project-name))
       (status (str "Save project: " SEQ.current-project-name)))))
 
+(def sbrowser-new-project ()
+  (host-command "new-project" (dict))
+  (set! sbrowser-filter "")
+  (set! sbrowser-tab "projects")
+  (status "New project"))
+
 (def sbrowser-add-instrument-track (name)
   (host-command "add-track-instrument" (dict :name name))
   (set! sbrowser-tab "presets")
@@ -475,19 +481,35 @@
 
 (def sbrowser-projects-tab-panel ()
   (let ((items (seq-project-tree sbrowser-filter)))
-    (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
-      (if (= (len items) 0)
-        (sbrowser-empty-message "No projects found.")
-        (scroll :key "projects-tab-scroll" :width :fill :flex 1
-          (tree
-            :key "projects-tab-tree"
-            :width :fill
-            :background-color :buffer-bg
-            :items items
-            :selected-label SEQ.current-project-name
-            :expand-all false
-            :on-select (lambda (item) (sbrowser-load-project (get item :label)))
-            :on-activate (lambda (item) (sbrowser-load-project (get item :label)))))))))
+    (v-stack :key "projects-tab-panel" :width :fill :gap 0.5 :flex 1
+      (box :width :fill :padding 0.25
+        (h-stack :width :fill :gap 0.5 :align :center
+          (button "New Project"
+            :key "project-new-button"
+            :variant :secondary
+            :flex 1
+            :height 1.3
+            :font-size 10.5
+            :on-click |x y r| (sbrowser-new-project)
+            :color :white)))
+      (box :width :fill :padding 0.25
+        (label "Projects"
+          :font-size 10
+          :color :gray
+          :bg :transparent))
+      (box :width :fill :background-color :buffer-bg :corner-radius 8 :padding 0 :flex 1
+        (if (= (len items) 0)
+          (sbrowser-empty-message "No projects found.")
+          (scroll :key "projects-tab-scroll" :width :fill :flex 1
+            (tree
+              :key "projects-tab-tree"
+              :width :fill
+              :background-color :buffer-bg
+              :items items
+              :selected-label SEQ.current-project-name
+              :expand-all false
+              :on-select (lambda (item) (sbrowser-load-project (get item :label)))
+              :on-activate (lambda (item) (sbrowser-load-project (get item :label))))))))))
 
 (def sbrowser-active-tab-panel ()
   (if (= sbrowser-tab "samples") (sbrowser-samples-panel)

@@ -4998,6 +4998,57 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_browser_projects_tab_renders_visible_new_project_button() {
+        fn node_text(node: &eseqlisp::layout::LayoutNode) -> Option<&str> {
+            match node.props.get("text") {
+                Some(Value::String(text)) => Some(text.as_str()),
+                _ => None,
+            }
+        }
+
+        fn find_button_by_text<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            text: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == "button" && node_text(node) == Some(text) {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_button_by_text(child, text))
+        }
+
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"projects\")")
+            .expect("select projects tab");
+        editor.refresh_runtime_side_effects();
+        editor.set_active_buffer(browser_id(&editor));
+        editor.set_layout_viewport(72, 60);
+
+        let layout = editor.widget_layout().expect("browser layout");
+        let rendered = render_layout_cells(&layout, 72, 60);
+        let button = find_button_by_text(&layout, "New Project")
+            .unwrap_or_else(|| panic!("new project button layout node; rendered:\n{rendered}"));
+
+        assert!(
+            button.rect.width > 1.0
+                && button.rect.height > 0.4
+                && button.rect.col >= 0.0
+                && button.rect.row >= 0.0
+                && button.rect.col + button.rect.width <= 72.0
+                && button.rect.row + button.rect.height <= 60.0,
+            "new project button should have a finite visible rect, got {:?}; rendered:\n{rendered}",
+            button.rect
+        );
+        assert!(
+            rendered.contains("New Project"),
+            "projects tab should visibly render the New button; rendered:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn metal_seq_browser_render_does_not_mutate_sample_search_on_track_change() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
@@ -5029,6 +5080,35 @@ mod tests {
             editor.runtime_mut().eval_str("sbrowser-filter"),
             Ok(Some(Value::String("kick".to_string()))),
             "rendering the browser should not clear the search filter as a side effect"
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_new_project_button_queues_host_command() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-new-project)")
+            .expect("invoke new project action");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "new-project");
+                assert!(
+                    matches!(payload, Value::Map(map) if map.is_empty()),
+                    "new project payload should be an empty dict: {payload:?}"
+                );
+            }
+            other => panic!("expected new-project host command, got {other:?}"),
+        }
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-tab")
+                .expect("read browser tab"),
+            Some(Value::String("projects".to_string()))
         );
     }
 

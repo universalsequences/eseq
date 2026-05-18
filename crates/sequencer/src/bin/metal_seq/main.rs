@@ -2170,6 +2170,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rt.run_reactive_cycle();
                         editor.refresh_runtime_side_effects();
                     }
+                    "new-project" => {
+                        app.start_new_project();
+                        push_project_scratch_to_named_buffer(&mut editor, &app);
+                        selected_steps.lock().unwrap().clear();
+                        piano_roll_selection.lock().unwrap().clear();
+                        track_names = app.tracks.clone();
+                        current_track.store(0, Ordering::Relaxed);
+                        {
+                            let mut pan_ids = track_pan_ids.lock().unwrap();
+                            pan_ids.clear();
+                            push_solo_mutes(lg_raw, &state, &pan_ids);
+                        }
+                        *bus_node_ids.lock().unwrap() = app.graph.bus_node_ids.clone();
+                        *record_armed.lock().unwrap() = Vec::new();
+                        *accumulator_names.lock().unwrap() = build_accumulator_names(&app);
+                        cached_track_peak_levels.clear();
+                        cached_bus_peak_levels =
+                            read_bus_peak_levels(app.graph.lg, &app.graph.bus_node_ids);
+                        (cached_modulator_phases, cached_modulator_levels) =
+                            read_modulator_display_values(app.graph.lg, &app);
+                        last_meter_poll_at = Instant::now();
+
+                        let bpm = state.transport.bpm.load(Ordering::Relaxed);
+                        let playing = state.transport.playing.load(Ordering::Relaxed);
+                        let transport_playhead = state.transport.playhead.load(Ordering::Relaxed);
+                        let rt = editor.runtime_mut();
+                        sync_pattern_state(rt, &state);
+                        sync_project_state(rt, &app);
+                        rt.set_reactive("SEQ", "playing", Value::Bool(playing));
+                        rt.set_reactive("SEQ", "bpm", Value::Number(bpm as f64));
+                        rt.set_reactive(
+                            "SEQ",
+                            "transport-playhead",
+                            Value::Number(transport_playhead as f64),
+                        );
+                        sync_bus_mixer_state(rt, &app);
+                        sync_bus_peak_fields(rt, &cached_bus_peak_levels);
+                        sync_modulator_phase_fields(rt, &cached_modulator_phases);
+                        sync_modulator_level_fields(rt, &cached_modulator_levels);
+                        rt.set_reactive("SEQ", "num-tracks", Value::Number(0.0));
+                        rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
+                        rt.set_reactive("SEQ", "track-ids", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "track-names", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "record-armed", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "selected-steps", Value::List(vec![]));
+                        sync_playhead_fields(rt, 0, 1);
+                        rt.set_reactive("SEQ", "steps", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "velocities", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "durations", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "transposes", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "pans", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "syncs", Value::List(vec![]));
+                        sync_track_mixer_empty_state(rt);
+                        rt.set_reactive("SEQ", "effects", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "midi-effects", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "instrument-panel", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "step-has-plocks", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "track-steps", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "track-num-steps", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "track-duration-spans", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "track-playheads", Value::List(vec![]));
+                        rt.set_reactive("SEQ", "track-step-has-plocks", Value::List(vec![]));
+                        sync_sidebar_browser(rt, &app, 0);
+                        rt.clear_subtree_effects_for_named_target("*sequencer*");
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                        refresh_visible_track_topology_layouts(&mut editor);
+
+                        prev_current_track = 0;
+                        prev_playhead = 0;
+                        prev_transport_playhead = transport_playhead;
+                        prev_bpm = bpm;
+                        prev_playing = playing;
+                        prev_pattern_epoch = state.transport.pattern_epoch.load(Ordering::Relaxed);
+                        prev_snapshot_version = state.scheduler_snapshot_version();
+                        prev_track_peak_levels.clear();
+                        prev_modulator_phases = cached_modulator_phases.clone();
+                        prev_modulator_levels = cached_modulator_levels.clone();
+                        prev_bus_playheads = bus_playhead_snapshot(&app);
+                        prev_track_playheads = track_playheads_snapshot(&state, &app);
+                        prev_track_button_states = track_button_state_snapshot(&state);
+                        prev_ui_epoch = ui_epoch.fetch_add(1, Ordering::Relaxed) + 1;
+
+                        editor.handle_host_event(HostEvent::Status("New project".to_string()));
+                    }
                     "save-project" => {
                         let requested_name = if let Value::Map(ref map) = payload {
                             map.get("name").and_then(|cell| match &*cell.borrow() {

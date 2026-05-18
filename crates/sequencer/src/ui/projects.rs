@@ -467,6 +467,99 @@ impl From<ProjectBusChannel> for BusChannelState {
 }
 
 impl App {
+    pub fn start_new_project(&mut self) {
+        self.editor.pending_project_load = None;
+
+        {
+            let mut graph = self.graph_controller();
+            graph.clear_all_tracks();
+            graph.clear_all_bus_effect_chains();
+        }
+
+        let removable_bus_ids = self
+            .buses
+            .iter()
+            .map(|bus| bus.id)
+            .filter(|id| *id != BusId::MIX && *id != BusId::DEFAULT_A && *id != BusId::DEFAULT_B)
+            .collect::<Vec<_>>();
+        for id in removable_bus_ids {
+            self.delete_bus_channel(id);
+        }
+
+        self.buses = BusChannelState::default_buses();
+        for bus in self.buses.clone() {
+            self.graph_controller()
+                .ensure_bus_graph_node(bus.id, &bus.name);
+        }
+        self.bus_pattern_bank.clear();
+        self.ensure_bus_pattern_bank_len(1);
+        let default_bus_snapshot = self.capture_bus_pattern_snapshot();
+        self.restore_bus_pattern_snapshot(&default_bus_snapshot);
+        for bus in &self.buses {
+            let Some(nodes) = self
+                .graph
+                .bus_node_ids
+                .iter()
+                .find(|nodes| nodes.id == bus.id)
+            else {
+                continue;
+            };
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_VOLUME,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: crate::mixer_volume::fader_to_gain(bus.volume),
+                    },
+                );
+                crate::audiograph::params_push_wrapper(
+                    self.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::stereo_panner::STEREO_PANNER_PARAM_MUTE,
+                        logical_id: nodes.volume_id as u64,
+                        fvalue: if bus.mute { 1.0 } else { 0.0 },
+                    },
+                );
+            }
+        }
+
+        self.state
+            .transport
+            .bpm
+            .store(crate::sequencer::DEFAULT_BPM, Ordering::Relaxed);
+        self.state
+            .transport
+            .master_volume
+            .store(1.0_f32.to_bits(), Ordering::Relaxed);
+        self.push_master_volume();
+        self.set_reverb_param(0, 0.2);
+        self.set_reverb_param(1, 0.8);
+        self.set_reverb_param(2, 0.3);
+
+        self.current_project_name = None;
+        self.editor.scratch_buffer.clear();
+        self.editor.scratch_cursor = (0, 0);
+        self.editor.scratch_runtime = None;
+        self.state.set_scratch_source(String::new());
+        self.clear_control_hooks();
+
+        self.ui.value_buffer.clear();
+        self.ui.input_mode = InputMode::Normal;
+        self.ui.cursor_track = 0;
+        self.ui.cursor_step = 0;
+        self.ui.pattern_page = 0;
+        self.ui.focused_region = Region::Sidebar;
+        self.ui.sidebar_tab = SidebarTab::Sounds;
+        self.ui.sidebar_mode = SidebarMode::InstrumentPicker;
+        self.ui.sidebar_search_focused = false;
+        self.ui.selection_anchor = None;
+        self.ui.track_selection_anchor = None;
+        self.ui.visual_steps.clear();
+
+        self.editor.status_message = Some(("New project".to_string(), Instant::now()));
+    }
+
     pub fn add_bus_channel(&mut self, name: impl Into<String>) -> BusId {
         let next_id = self
             .buses
