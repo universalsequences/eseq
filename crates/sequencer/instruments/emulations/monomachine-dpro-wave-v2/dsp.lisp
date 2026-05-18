@@ -37,7 +37,7 @@
 (param sfrq            @default 440  @min 20    @max 8000 @unit Hz @mod true @mod-mode additive)
 (param tune_cents      @default 0    @min -100  @max 100 @unit cents @mod true @mod-mode additive)
 
-(param cutoff          @default 7400 @min 80    @max 12000 @unit Hz @mod true @mod-mode additive)
+(param cutoff          @default 7200 @min 80    @max 12000 @unit Hz @mod true @mod-mode additive)
 (param resonance       @default 0.707 @min 0.5   @max 2.5 @mod true @mod-mode additive)
 (param keytrack        @default 0.18 @min 0     @max 2)
 (param filter_env_amt  @default 1800 @min -8000 @max 8000 @unit Hz @mod true @mod-mode additive)

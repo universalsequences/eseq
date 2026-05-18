@@ -1974,12 +1974,6 @@ impl GraphController<'_> {
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
             let state_size = lisp_effect::dgen_total_state_slots(manifest.total_memory_slots)
                 * std::mem::size_of::<f32>();
-            lisp_effect::trace_dgen_init_state_buffer(
-                &format!("ensure_custom_engine_runtime:{name}:engine={engine_id}"),
-                v,
-                state_size,
-                &init_msg,
-            );
 
             let synth_name = CString::new(format!("{}_engine_synth_{}", name, v)).unwrap();
             let synth_id = unsafe {
@@ -2446,12 +2440,6 @@ impl GraphController<'_> {
             let init_msg_size = init_msg.len() * std::mem::size_of::<f32>();
             let state_size = lisp_effect::dgen_total_state_slots(manifest.total_memory_slots)
                 * std::mem::size_of::<f32>();
-            lisp_effect::trace_dgen_init_state_buffer(
-                &format!("rebuild_custom_engine_runtime:engine={engine_id}"),
-                v,
-                state_size,
-                &init_msg,
-            );
             let synth_name = CString::new(format!("engine_{}_synth_{}", engine_id, v)).unwrap();
             let synth_id = unsafe {
                 crate::audiograph::add_node(
