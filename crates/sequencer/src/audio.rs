@@ -351,6 +351,8 @@ impl CustomEnginePool {
         }
 
         let mut active_same_note_idx = None;
+        let mut releasing_same_note_idx = None;
+        let mut releasing_same_note_age = u64::MAX;
         let mut idle_same_track_idx = None;
         let mut idle_same_track_age = u64::MAX;
         let mut releasing_same_track_idx = None;
@@ -374,6 +376,12 @@ impl CustomEnginePool {
                 match voice.assigned_track {
                     Some(assigned) if assigned == track => {
                         if is_releasing {
+                            if (voice.note - note).abs() < 0.01
+                                && voice.age < releasing_same_note_age
+                            {
+                                releasing_same_note_idx = Some(i);
+                                releasing_same_note_age = voice.age;
+                            }
                             if voice.age < releasing_same_track_age {
                                 releasing_same_track_idx = Some(i);
                                 releasing_same_track_age = voice.age;
@@ -423,12 +431,14 @@ impl CustomEnginePool {
 
         let idx = if assigned_same_track_count >= max_polyphony {
             active_same_note_idx
+                .or(releasing_same_note_idx)
                 .or(idle_same_track_idx)
                 .or(releasing_same_track_idx)
                 .or(oldest_same_track)
                 .unwrap_or(oldest_idx)
         } else {
             active_same_note_idx
+                .or(releasing_same_note_idx)
                 .or(idle_same_track_idx)
                 .or(unassigned_idle_idx)
                 .or(idle_other_track_idx)
@@ -3725,7 +3735,26 @@ mod tests {
     }
 
     #[test]
-    fn custom_engine_pool_does_not_reuse_releasing_voice_before_cap() {
+    fn custom_engine_pool_reuses_releasing_same_note_before_expanding() {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=6 {
+            pool.add_voice(lid);
+        }
+
+        let low = pool.allocate_voice(0, 0.0, true, 6);
+        let low_lid = low.logical_id;
+        pool.release_voice_by_logical_id(low_lid, 1_000);
+
+        let retriggered = pool.allocate_voice(0, 0.0, true, 6);
+
+        assert_eq!(low_lid, 1);
+        assert_eq!(retriggered.logical_id, low_lid);
+        assert!(!retriggered.stole_active_voice);
+        assert_eq!(pool.voices[0].release_started_sample, None);
+    }
+
+    #[test]
+    fn custom_engine_pool_uses_unassigned_voice_for_different_note_before_cap() {
         let mut pool = CustomEnginePool::new();
         for lid in 1..=6 {
             pool.add_voice(lid);
