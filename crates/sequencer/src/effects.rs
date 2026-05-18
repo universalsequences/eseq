@@ -2209,19 +2209,9 @@ impl EffectDescriptor {
             },
         ];
         params.extend(crate::voice_modulator::ui_param_descriptors());
-        let mod_source_labels = vec![
-            "off".to_string(),
-            "LFO 1".to_string(),
-            "ENV 1".to_string(),
-            "RAND".to_string(),
-            "DRIFT".to_string(),
-            "LFO 2".to_string(),
-            "LFO 3".to_string(),
-            "Ext 1".to_string(),
-            "Ext 2".to_string(),
-            "Ext 3".to_string(),
-            "Ext 4".to_string(),
-        ];
+        let mod_source_labels: Vec<String> = std::iter::once("off".to_string())
+            .chain((1..=10).map(|slot| crate::voice_modulator::modulator_slot_label(slot, "")))
+            .collect();
         let mut instrument_modulation_targets = Vec::new();
         for lane in crate::sampler::SAMPLER_MOD_TARGET_PARAMS {
             let name = lane.destination;
@@ -2292,24 +2282,12 @@ impl EffectDescriptor {
             name: "Sampler".to_string(),
             input_channels: 0,
             output_channels: 2,
-            instrument_modulators: [
-                (1, "LFO 1"),
-                (2, "ENV 1"),
-                (3, "RAND"),
-                (4, "DRIFT"),
-                (5, "LFO 2"),
-                (6, "LFO 3"),
-                (7, "Ext 1"),
-                (8, "Ext 2"),
-                (9, "Ext 3"),
-                (10, "Ext 4"),
-            ]
-            .into_iter()
-            .map(|(slot, label)| InstrumentModulatorDescriptor {
-                slot,
-                label: label.to_string(),
-            })
-            .collect(),
+            instrument_modulators: (1..=10)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
             instrument_modulation_targets,
             params,
         }

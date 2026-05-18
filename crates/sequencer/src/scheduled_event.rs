@@ -51,7 +51,6 @@ pub enum ScheduledEventKind {
     },
     InstrumentParams {
         track: usize,
-        step: usize,
         instrument_params: ScheduledInstrumentParams,
     },
 }

@@ -412,7 +412,6 @@ fn enqueue_instrument_param_change(
     pattern_epoch: u64,
     sample_time: u64,
     track_idx: usize,
-    step_idx: usize,
     instrument_params: ScheduledInstrumentParams,
 ) -> bool {
     if instrument_params.is_empty() {
@@ -424,7 +423,6 @@ fn enqueue_instrument_param_change(
             sample_time,
             kind: ScheduledEventKind::InstrumentParams {
                 track: track_idx,
-                step: step_idx,
                 instrument_params,
             },
         })
@@ -1587,7 +1585,6 @@ pub fn spawn_scheduler_thread(
                                 pattern_epoch,
                                 sample_time,
                                 trigger.track,
-                                trigger.step,
                                 resolve_instrument_plocks(&snapshot, trigger.track, trigger.step),
                             );
                             if !chunk_enqueued {

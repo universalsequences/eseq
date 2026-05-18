@@ -1539,6 +1539,8 @@ fn sampler_live_param_value(idx: u64, value: f32, sample_rate: f64) -> f32 {
         || idx == PARAM_RELEASE_SAMPLES
         || idx == PARAM_LOOP_XFADE_SAMPLES
     {
+        // Sampler p-lock values for these UI params are stored in ms; the DSP
+        // node consumes samples.
         value * sample_rate as f32 / 1000.0
     } else {
         value
@@ -1600,7 +1602,7 @@ fn dispatch_instrument_params_to_active_voices(
                 .load(Ordering::Relaxed);
             let modulator_id = data.state.runtime.engine_modulator_node_ids[engine_id][voice_idx]
                 .load(Ordering::Relaxed);
-            if synth_id == 0 || modulator_id == 0 {
+            if synth_id == 0 {
                 continue;
             }
             unsafe {
@@ -1611,6 +1613,8 @@ fn dispatch_instrument_params_to_active_voices(
                     instrument_params,
                 );
             }
+            // Force re-resolve on the next trigger because live p-locks can
+            // diverge the active voice from descriptor defaults.
             pool.voices[voice_idx].fingerprint = 0;
         }
     } else {
@@ -1737,7 +1741,6 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
         }
         ScheduledEventKind::InstrumentParams {
             track,
-            step: _,
             instrument_params,
         } => {
             dispatch_instrument_params_to_active_voices(data, track, &instrument_params);

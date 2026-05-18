@@ -382,6 +382,8 @@ fn mod_slot_color(slot: i32, selected: bool) -> Color {
 
 #[cfg(target_os = "macos")]
 fn mod_range_ring_half_width(selected: bool) -> f32 {
+    // Keep these in sync with the Metal shader's halfWidth constants below;
+    // CPU radius clamping relies on the same stroke width to stay in bounds.
     if selected { 0.056 } else { 0.040 }
 }
 

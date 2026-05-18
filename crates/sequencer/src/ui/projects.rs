@@ -1979,4 +1979,68 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    #[test]
+    fn custom_instrument_project_restore_preserves_plocks_by_node_idx_when_lane_names_change() {
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                test_param("cutoff", 0.01, 10),
+                test_param("mod cutoff lane 1 src", 1.0, 14),
+                test_param("mod cutoff lane 1 amt", 0.25, 18),
+                test_param("mod cutoff lane 2 src", 2.0, 22),
+                test_param("mod cutoff lane 2 amt", -0.5, 26),
+            ],
+        };
+        let mut plocks = vec![vec![None; desc.params.len()]; MAX_STEPS];
+        plocks[3][2] = Some(0.75);
+        plocks[4][4] = Some(-0.25);
+
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: desc.params.len() as u32,
+            defaults: vec![0.12, 1.0, 0.31, 2.0, -0.27],
+            plocks,
+            param_node_indices: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect(),
+            param_node_spans: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_span.max(1))
+                .collect(),
+        };
+
+        let renamed_desc = crate::effects::EffectDescriptor {
+            params: vec![
+                test_param("cutoff", 0.01, 10),
+                test_param("mod filter cutoff lane 1 src", 1.0, 14),
+                test_param("mod filter cutoff lane 1 amt", 0.25, 18),
+                test_param("mod filter cutoff lane 2 src", 2.0, 22),
+                test_param("mod filter cutoff lane 2 amt", -0.5, 26),
+            ],
+            ..desc
+        };
+
+        let restored =
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &renamed_desc, 42);
+
+        assert_eq!(restored.node_id, 42);
+        assert_eq!(restored.defaults, vec![0.12, 1.0, 0.31, 2.0, -0.27]);
+        assert_eq!(restored.plocks[3][2], Some(0.75));
+        assert_eq!(restored.plocks[4][4], Some(-0.25));
+        assert_eq!(
+            restored.param_node_indices,
+            renamed_desc
+                .params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect::<Vec<_>>()
+        );
+    }
 }

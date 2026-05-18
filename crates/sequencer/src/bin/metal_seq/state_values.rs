@@ -14,6 +14,8 @@ fn sampler_modulation_depth_display_range(
 fn instrument_modulation_depth_display_range(
     target: &sequencer::effects::InstrumentModulationTarget,
 ) -> (f32, f32) {
+    // Custom-instrument manifests define modulation depth ranges in display
+    // units already; sampler ranges are stored in DSP units and scaled above.
     (target.depth_min, target.depth_max)
 }
 

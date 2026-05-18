@@ -2873,37 +2873,17 @@ impl GraphController<'_> {
             ms
         };
         let mod_source_labels: Vec<String> = std::iter::once("off".to_string())
-            .chain(sorted_modulators.iter().map(|m| match m.slot {
-                1 => "LFO 1".to_string(),
-                2 => "ENV 1".to_string(),
-                3 => "RAND".to_string(),
-                4 => "DRIFT".to_string(),
-                5 => "LFO 2".to_string(),
-                6 => "LFO 3".to_string(),
-                7 => "Ext 1".to_string(),
-                8 => "Ext 2".to_string(),
-                9 => "Ext 3".to_string(),
-                10 => "Ext 4".to_string(),
-                _ => m.name.clone(),
-            }))
+            .chain(
+                sorted_modulators
+                    .iter()
+                    .map(|m| crate::voice_modulator::modulator_slot_label(m.slot, &m.name)),
+            )
             .collect();
         inst_desc.instrument_modulators = sorted_modulators
             .iter()
             .map(|m| crate::effects::InstrumentModulatorDescriptor {
                 slot: m.slot,
-                label: match m.slot {
-                    1 => "LFO 1".to_string(),
-                    2 => "ENV 1".to_string(),
-                    3 => "RAND".to_string(),
-                    4 => "DRIFT".to_string(),
-                    5 => "LFO 2".to_string(),
-                    6 => "LFO 3".to_string(),
-                    7 => "Ext 1".to_string(),
-                    8 => "Ext 2".to_string(),
-                    9 => "Ext 3".to_string(),
-                    10 => "Ext 4".to_string(),
-                    _ => m.name.clone(),
-                },
+                label: crate::voice_modulator::modulator_slot_label(m.slot, &m.name),
             })
             .collect();
         let param_by_cell: std::collections::HashMap<usize, &crate::lisp_effect::DGenParam> =
