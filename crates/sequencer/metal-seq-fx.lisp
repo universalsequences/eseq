@@ -2093,6 +2093,15 @@
     _
     nil))
 
+(def sampler-panel-drop-sample (event)
+  (let ((payload (get event :payload))
+      (target (get event :target)))
+    (let ((path (get payload :path))
+        (track (get target :track)))
+      (if path
+        (host-command "load-sample-into-track" (dict :track track :path path))
+        (status "Drop a sample file, not a folder")))))
+
 (def sampler-param-knob (p key)
   (instrument-param-mod-wrapper p (str key "-mod-wrapper")
     (subtree :key (str key (instrument-param-control-key-mode p))
@@ -2215,6 +2224,11 @@
 (def sampler-panel (inst)
   (box :background "fx-panel-bg" :color :instrument-panel-bg :header :fx-panel-header-bg :selected-header :fx-panel-header-selected-bg :selected 0 :padding 0
     :height fx-fixed-panel-height
+    :debug-name "sampler-panel"
+    :drop-types (list "sample")
+    :drop-meta (dict :kind "sampler-panel" :track (get inst :track))
+    :drop-hover-border-color :mixer-strip-selected-border
+    :on-drop (lambda (event) (sampler-panel-drop-sample event))
     (v-stack :gap 0
       (box :height 0.75 :padding 0 :v-align :center :h-align :start
         (h-stack :gap 0.5 :align :center

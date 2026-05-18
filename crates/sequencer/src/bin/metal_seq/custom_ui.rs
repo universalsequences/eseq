@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use eseqlisp::Editor;
@@ -285,6 +285,34 @@ fn namespace_local_helpers(
     }
 }
 
+fn instrument_leaf_name(instrument_name: &str) -> Option<String> {
+    let normalized = instrument_name.trim_end_matches('/');
+    Path::new(normalized)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+fn instrument_ui_dispatch_aliases(
+    instrument_name: &str,
+    leaf_name_counts: &BTreeMap<String, usize>,
+) -> Vec<String> {
+    let normalized = instrument_name.trim_end_matches('/');
+    let mut aliases = BTreeSet::new();
+    aliases.insert(instrument_name.to_string());
+    aliases.insert(normalized.to_string());
+
+    if let Some(leaf) = instrument_leaf_name(instrument_name) {
+        if leaf != normalized && leaf_name_counts.get(&leaf).copied() == Some(1) {
+            aliases.insert(leaf.clone());
+            aliases.insert(format!("{leaf}/"));
+        }
+    }
+
+    aliases.into_iter().collect()
+}
+
 pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     overlay: Option<(String, String, String)>,
 ) -> String {
@@ -322,7 +350,13 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
     let mut ui_sources = Vec::new();
     collect(root, root, &mut ui_sources);
 
-    let mut functions = String::new();
+    let mut functions = r#"
+(def custom-ui-string-ends-with? (value suffix)
+  (if (< (len value) (len suffix))
+    false
+    (= (substring value (- (len value) (len suffix)) (len value)) suffix)))
+"#
+    .to_string();
     let mut dispatch = "false".to_string();
     if let Some((instrument_name, ui_path, src)) = overlay {
         if let Some(existing) = ui_sources
@@ -332,6 +366,13 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             *existing = (instrument_name, ui_path, src);
         } else {
             ui_sources.push((instrument_name, ui_path, src));
+        }
+    }
+
+    let mut leaf_name_counts = BTreeMap::new();
+    for (name, _, _) in &ui_sources {
+        if let Some(leaf) = instrument_leaf_name(name) {
+            *leaf_name_counts.entry(leaf).or_insert(0) += 1;
         }
     }
 
@@ -380,17 +421,28 @@ pub(crate) fn build_custom_instrument_ui_source_with_overlay(
             "\n(def {fn_name} (inst) (do (set! synth-ui-current-inst inst) (set! synth-ui-current-name {}) (set! custom-ui-current-kind \"instrument\") (set! custom-ui-selected-section (custom-ui-selected-section-for-current-scope)) {body}))\n",
             lisp_string_literal(normalized_instrument_name)
         ));
-        let name_match = if normalized_instrument_name == instrument_name {
-            format!(
-                "(= (get inst :name) {})",
-                lisp_string_literal(&instrument_name)
-            )
+        let aliases = instrument_ui_dispatch_aliases(&instrument_name, &leaf_name_counts);
+        let mut name_clauses = aliases
+            .iter()
+            .map(|alias| format!("(= (get inst :name) {})", lisp_string_literal(alias)))
+            .collect::<Vec<_>>();
+        if let Some(leaf) = instrument_leaf_name(&instrument_name) {
+            if leaf != normalized_instrument_name && leaf_name_counts.get(&leaf).copied() == Some(1)
+            {
+                name_clauses.push(format!(
+                    "(custom-ui-string-ends-with? (get inst :name) {})",
+                    lisp_string_literal(&format!("/{leaf}/"))
+                ));
+                name_clauses.push(format!(
+                    "(custom-ui-string-ends-with? (get inst :name) {})",
+                    lisp_string_literal(&format!("/{leaf}"))
+                ));
+            }
+        }
+        let name_match = if name_clauses.len() == 1 {
+            name_clauses.remove(0)
         } else {
-            format!(
-                "(or (= (get inst :name) {}) (= (get inst :name) {}))",
-                lisp_string_literal(&instrument_name),
-                lisp_string_literal(normalized_instrument_name)
-            )
+            format!("(or {})", name_clauses.join(" "))
         };
         dispatch = format!("(if {name_match} ({fn_name} inst) {dispatch})");
     }
@@ -625,8 +677,9 @@ pub(crate) fn reload_custom_instrument_ui(editor: &mut Editor) {
 mod tests {
     use super::{
         build_custom_audio_fx_ui_source_with_overlay,
-        build_custom_instrument_ui_source_with_overlay,
+        build_custom_instrument_ui_source_with_overlay, instrument_ui_dispatch_aliases,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn instrument_ui_injection_namespaces_local_helpers() {
@@ -657,6 +710,55 @@ mod tests {
             !source.contains("(def tune-block"),
             "local helper should not be injected under its unqualified name:\n{source}"
         );
+    }
+
+    #[test]
+    fn instrument_ui_dispatch_matches_unique_moved_folder_leaf_name() {
+        let source = build_custom_instrument_ui_source_with_overlay(Some((
+            "emulations/minimoog-lad2/".to_string(),
+            "instruments/emulations/minimoog-lad2/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-lego-column-full
+                (ui-control-block-small-s "OSC" (ui-accent-blue) 0
+                  (ui-lego-knob-s 0 "cutoff" "cut" 4.8 (ui-accent-blue) 2))))
+            "#
+            .to_string(),
+        )));
+
+        assert!(
+            source.contains(r#"(= (get inst :name) "emulations/minimoog-lad2/")"#),
+            "{source}"
+        );
+        assert!(
+            source.contains(r#"(= (get inst :name) "emulations/minimoog-lad2")"#),
+            "{source}"
+        );
+        assert!(
+            source.contains(r#"(= (get inst :name) "minimoog-lad2/")"#),
+            "{source}"
+        );
+        assert!(
+            source.contains(r#"(= (get inst :name) "minimoog-lad2")"#),
+            "{source}"
+        );
+        assert!(
+            source.contains(r#"(custom-ui-string-ends-with? (get inst :name) "/minimoog-lad2/")"#),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn instrument_ui_dispatch_does_not_alias_ambiguous_leaf_name() {
+        let mut counts = BTreeMap::new();
+        counts.insert("shared-name".to_string(), 2);
+
+        let aliases = instrument_ui_dispatch_aliases("folder-a/shared-name/", &counts);
+
+        assert!(aliases.contains(&"folder-a/shared-name/".to_string()));
+        assert!(aliases.contains(&"folder-a/shared-name".to_string()));
+        assert!(!aliases.contains(&"shared-name/".to_string()));
+        assert!(!aliases.contains(&"shared-name".to_string()));
     }
 
     #[test]

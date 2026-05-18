@@ -1189,14 +1189,24 @@ struct InstrumentPresetBank {
 }
 
 fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<PathBuf> {
-    fn collect_matches(dir: &Path, file_name: &str, out: &mut Vec<PathBuf>) {
+    fn is_hidden(path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.starts_with('.'))
+            .unwrap_or(false)
+    }
+
+    fn collect_file_matches(dir: &Path, file_name: &str, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            if is_hidden(&path) {
+                continue;
+            }
             if path.is_dir() {
-                collect_matches(&path, file_name, out);
+                collect_file_matches(&path, file_name, out);
             } else if path.file_name().and_then(|n| n.to_str()) == Some(file_name) {
                 out.push(path);
             }
@@ -1204,9 +1214,9 @@ fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<Pa
     }
 
     let root = Path::new(INSTRUMENTS_DIR);
-    let folder_name = name.trim_end_matches('/');
+    let trimmed = name.trim_end_matches('/');
     if extension == "lisp" && name.ends_with('/') {
-        let dsp = root.join(folder_name).join("dsp.lisp");
+        let dsp = root.join(trimmed).join("dsp.lisp");
         if dsp.exists() {
             return Ok(dsp);
         }
@@ -1222,14 +1232,18 @@ fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<Pa
         }
     }
 
-    let basename = Path::new(folder_name)
+    let basename = Path::new(trimmed)
         .file_name()
         .and_then(|s| s.to_str())
-        .unwrap_or(folder_name);
-    let file_name = format!("{basename}.{extension}");
+        .unwrap_or(trimmed);
     let mut matches = Vec::new();
-    collect_matches(root, &file_name, &mut matches);
+    if extension == "lisp" {
+        collect_folder_source_matches(root, basename, &mut matches);
+    }
+    let file_name = format!("{basename}.{extension}");
+    collect_file_matches(root, &file_name, &mut matches);
     matches.sort_by_key(|path| path.to_string_lossy().to_lowercase());
+    matches.dedup();
 
     match matches.len() {
         0 => Ok(exact),
@@ -1237,9 +1251,46 @@ fn resolve_instrument_storage_path(name: &str, extension: &str) -> io::Result<Pa
         _ => Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "Ambiguous instrument '{name}': found multiple {file_name} files under {INSTRUMENTS_DIR}"
+                "Ambiguous instrument '{name}': found multiple matching instrument sources under {INSTRUMENTS_DIR}"
             ),
         )),
+    }
+}
+
+fn collect_folder_source_matches(dir: &Path, folder_name: &str, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.starts_with('.') || !path.is_dir() {
+            continue;
+        }
+        if name == folder_name {
+            let dsp = path.join("dsp.lisp");
+            if dsp.exists() {
+                out.push(dsp);
+            }
+        }
+        collect_folder_source_matches(&path, folder_name, out);
+    }
+}
+
+fn resolve_instrument_folder_path(name: &str) -> io::Result<PathBuf> {
+    let source = resolve_instrument_storage_path(name, "lisp")?;
+    if source.file_name().and_then(|file| file.to_str()) == Some("dsp.lisp") {
+        source.parent().map(Path::to_path_buf).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Resolved folder-style instrument '{name}' has no parent directory"),
+            )
+        })
+    } else {
+        Ok(source.with_extension(""))
     }
 }
 
@@ -1564,25 +1615,32 @@ pub fn save_instrument(name: &str, source: &str) -> io::Result<()> {
 }
 
 pub fn save_instrument_ui(name: &str, source: &str) -> io::Result<()> {
-    let path = instrument_ui_path(name);
+    let path = instrument_ui_path(name)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, source)
 }
 
-pub fn instrument_ui_path(name: &str) -> PathBuf {
+pub fn instrument_ui_path(name: &str) -> io::Result<PathBuf> {
     if name.ends_with('/') {
-        Path::new(INSTRUMENTS_DIR)
+        let direct = Path::new(INSTRUMENTS_DIR)
             .join(name.trim_end_matches('/'))
-            .join("ui.lisp")
+            .join("ui.lisp");
+        if direct.exists() {
+            return Ok(direct);
+        }
     } else {
-        Path::new(INSTRUMENTS_DIR).join(name).join("ui.lisp")
+        let direct = Path::new(INSTRUMENTS_DIR).join(name).join("ui.lisp");
+        if direct.exists() {
+            return Ok(direct);
+        }
     }
+    Ok(resolve_instrument_folder_path(name)?.join("ui.lisp"))
 }
 
 pub fn load_instrument_ui_source(name: &str) -> io::Result<String> {
-    std::fs::read_to_string(instrument_ui_path(name))
+    std::fs::read_to_string(instrument_ui_path(name)?)
 }
 
 pub fn list_saved_instruments() -> Vec<String> {
@@ -7104,14 +7162,15 @@ mod tests {
 
     #[test]
     fn folder_instrument_dsp_path_maps_to_instrument_name() {
-        let path = std::path::Path::new("instruments/emulations/monomachine-fmplus/dsp.lisp");
+        let path =
+            std::path::Path::new("instruments/monomachine/fmplus/monomachine-fmplus/dsp.lisp");
         assert_eq!(
             super::instrument_name_from_source_path(path).as_deref(),
-            Some("emulations/monomachine-fmplus/")
+            Some("monomachine/fmplus/monomachine-fmplus/")
         );
         assert_eq!(
             super::source_name_from_path(&eseqlisp::CompileKind::Instrument, path).as_deref(),
-            Some("emulations/monomachine-fmplus/")
+            Some("monomachine/fmplus/monomachine-fmplus/")
         );
     }
 
@@ -8911,6 +8970,69 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_file(&legacy_file);
+    }
+
+    #[test]
+    fn moved_folder_instrument_resolves_by_unique_leaf_name() {
+        let leaf = format!("__test-moved-folder-{}", std::process::id());
+        let folder = std::path::Path::new(super::INSTRUMENTS_DIR)
+            .join("__test-resolve-category")
+            .join(&leaf);
+        let direct_folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(&leaf);
+        let legacy_file = std::path::Path::new(super::INSTRUMENTS_DIR).join(format!("{leaf}.lisp"));
+        let _ = std::fs::remove_dir_all(folder.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&direct_folder);
+        let _ = std::fs::remove_file(&legacy_file);
+
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("dsp.lisp"), "(out 0 1 @name audio)").unwrap();
+        std::fs::write(folder.join("ui.lisp"), "(defsynth-ui (label \"ok\"))").unwrap();
+
+        assert_eq!(
+            super::instrument_source_path(&format!("{leaf}/")).unwrap(),
+            folder.join("dsp.lisp")
+        );
+        assert_eq!(
+            super::load_instrument_source(&format!("{leaf}/")).unwrap(),
+            "(out 0 1 @name audio)"
+        );
+        assert_eq!(
+            super::instrument_ui_path(&format!("{leaf}/")).unwrap(),
+            folder.join("ui.lisp")
+        );
+        assert_eq!(
+            super::load_instrument_ui_source(&format!("{leaf}/")).unwrap(),
+            "(defsynth-ui (label \"ok\"))"
+        );
+
+        let _ = std::fs::remove_dir_all(folder.parent().unwrap());
+        let _ = std::fs::remove_dir_all(&direct_folder);
+        let _ = std::fs::remove_file(&legacy_file);
+    }
+
+    #[test]
+    fn moved_folder_instrument_leaf_match_requires_unique_source() {
+        let leaf = format!("__test-ambiguous-folder-{}", std::process::id());
+        let root = std::path::Path::new(super::INSTRUMENTS_DIR);
+        let first = root.join("__test-ambiguous-a").join(&leaf);
+        let second = root.join("__test-ambiguous-b").join(&leaf);
+        let _ = std::fs::remove_dir_all(root.join("__test-ambiguous-a"));
+        let _ = std::fs::remove_dir_all(root.join("__test-ambiguous-b"));
+
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("dsp.lisp"), "(out 0 1 @name audio)").unwrap();
+        std::fs::write(second.join("dsp.lisp"), "(out 0 1 @name audio)").unwrap();
+
+        let error = super::instrument_source_path(&format!("{leaf}/")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().contains("Ambiguous instrument"),
+            "unexpected error: {error}"
+        );
+
+        let _ = std::fs::remove_dir_all(root.join("__test-ambiguous-a"));
+        let _ = std::fs::remove_dir_all(root.join("__test-ambiguous-b"));
     }
 
     #[test]

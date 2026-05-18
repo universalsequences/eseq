@@ -467,6 +467,12 @@ fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     }
 }
 
+fn reset_sampler_waveform_view(editor: &mut Editor) {
+    if let Err(error) = editor.runtime_mut().eval_str("(sampler-reset-view)") {
+        eprintln!("waveform: failed to reset sampler viewport: {error:?}");
+    }
+}
+
 fn load_sample_into_sampler_track(
     app: &mut ui::App,
     editor: &mut Editor,
@@ -502,6 +508,7 @@ fn load_sample_into_sampler_track(
     }
     app.reset_sampler_bpm_for_analysis(track);
     app.publish_sampler_analysis_runtime(track);
+    reset_sampler_waveform_view(editor);
     if let Some(track_name) = track_names.get_mut(track) {
         *track_name = new_name.clone();
     }
@@ -516,6 +523,7 @@ fn load_sample_into_sampler_track(
         "instrument-panel",
         build_instrument_panel_value(app, track, selected_steps),
     );
+    sync_sampler_selection_time_fields(rt, app, track, selected_steps);
     sync_track_mixer_state(rt, app, state);
     sync_sidebar_browser(rt, app, track);
     rt.run_reactive_cycle();
@@ -6689,7 +6697,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     fx_epoch.fetch_add(1, Ordering::Relaxed);
                 }
                 let _ = editor.runtime_mut().eval_str("(set! selected-bus -1)");
-                let _ = editor.runtime_mut().eval_str("(sampler-reset-view)");
+                reset_sampler_waveform_view(&mut editor);
                 let rt = editor.runtime_mut();
                 sync_track_name_state(rt, &mut track_names, &app);
                 sync_pattern_state(rt, &state);

@@ -2658,6 +2658,10 @@ pub(crate) fn build_sampler_panel_value(
         "type".to_string(),
         Rc::new(RefCell::new(Value::String("sampler".to_string()))),
     );
+    panel_map.insert(
+        "track".to_string(),
+        Rc::new(RefCell::new(Value::Number(track as f64))),
+    );
     if let Some(buf_val) = buffer_value {
         panel_map.insert("buffer".to_string(), Rc::new(RefCell::new(buf_val)));
     }
@@ -6081,6 +6085,94 @@ mod tests {
         inst
     }
 
+    fn test_sampler_instrument_map(
+        track: usize,
+    ) -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        let mut enabled = test_param_map("enabled", 4, 1.0, 0.0, 1.0);
+        enabled.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let mut reverse = test_param_map("reverse", 5, 0.0, 0.0, 1.0);
+        reverse.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let mut loop_mode = test_param_map("loop", 6, 0.0, 0.0, 2.0);
+        loop_mode.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String("gate".to_string()))),
+        );
+        loop_mode.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::String("off".to_string()),
+                Value::String("gate".to_string()),
+            ]))),
+        );
+        let mut warp = test_param_map("warp", 9, 0.0, 0.0, 1.0);
+        warp.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("Sampler".to_string()))),
+        );
+        inst.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+        );
+        inst.insert(
+            "track".to_string(),
+            Rc::new(RefCell::new(Value::Number(track as f64))),
+        );
+        inst.insert(
+            "duration".to_string(),
+            Rc::new(RefCell::new(Value::Number(1.0))),
+        );
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("base", 100, 0.0, -48.0, 48.0)),
+                Value::Map(test_param_map("attack", 0, 0.0, 0.0, 500.0)),
+                Value::Map(test_param_map("release", 1, 0.0, 0.0, 2000.0)),
+                Value::Map(test_param_map("start", 2, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("end", 3, 1.0, 0.0, 1.0)),
+                Value::Map(enabled),
+                Value::Map(reverse),
+                Value::Map(loop_mode),
+                Value::Map(test_param_map("xfade", 7, 0.0, 0.0, 250.0)),
+                Value::Map(test_param_map("sr", 8, 44100.0, 2000.0, 44100.0)),
+                Value::Map(warp),
+                Value::Map(test_param_map("mode", 10, 0.0, 0.0, 0.0)),
+                Value::Map(test_param_map("speed", 11, 1.0, -4.0, 4.0)),
+                Value::Map(test_param_map("scrub", 12, 0.0, -1.0, 1.0)),
+                Value::Map(test_param_map("bpm", 13, 120.0, 20.0, 400.0)),
+            ]))),
+        );
+        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
+        inst.insert(
+            "modulators".to_string(),
+            Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst.insert(
+            "source-names".to_string(),
+            Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![]))),
+        );
+        inst
+    }
+
     fn test_modulator_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
         let mut inst = std::collections::HashMap::new();
         inst.insert(
@@ -6528,11 +6620,15 @@ mod tests {
         let mut inst = std::collections::HashMap::new();
         inst.insert(
             "name".to_string(),
-            Rc::new(RefCell::new(Value::String("minimoog-lad2".to_string()))),
+            Rc::new(RefCell::new(Value::String(
+                "emulations/minimoog-lad2".to_string(),
+            ))),
         );
         inst.insert(
             "display-name".to_string(),
-            Rc::new(RefCell::new(Value::String("minimoog-lad2".to_string()))),
+            Rc::new(RefCell::new(Value::String(
+                "emulations/minimoog-lad2".to_string(),
+            ))),
         );
         inst.insert(
             "type".to_string(),
@@ -8190,6 +8286,117 @@ mod tests {
             layout_contains_widget_type(&layout, "response-curve-editor"),
             "filter layout should contain the response curve editor"
         );
+    }
+
+    #[test]
+    fn metal_seq_sampler_panel_accepts_sample_drops_for_current_track() {
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(3.0)),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(test_sampler_instrument_map(2))]),
+                ),
+                ("sampler-playhead", Value::Number(0.0)),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("sampler fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("sampler panel layout");
+        let panel = find_layout_node_by_debug_name(&layout, "sampler-panel")
+            .expect("sampler panel should render");
+        assert!(
+            panel.props.contains_key("on-drop"),
+            "sampler panel should expose an on-drop callback"
+        );
+        assert!(
+            matches!(
+                panel.props.get("drop-types"),
+                Some(Value::List(items))
+                    if items.iter().any(|item| matches!(&*item.borrow(), Value::String(value) if value == "sample"))
+            ),
+            "sampler panel should accept sample drops: {:?}",
+            panel.props.get("drop-types")
+        );
+        assert!(
+            matches!(
+                panel.props.get("drop-meta"),
+                Some(Value::Map(map))
+                    if map
+                        .get("track")
+                        .is_some_and(|value| matches!(*value.borrow(), Value::Number(track) if (track - 2.0).abs() < f64::EPSILON))
+            ),
+            "sampler panel drop metadata should target track 2: {:?}",
+            panel.props.get("drop-meta")
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sampler-panel-drop-sample
+                    (dict :payload (dict :path "samples/snare.wav")
+                          :target (dict :track 2)))"#,
+            )
+            .expect("drop sample on sampler panel");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "load-sample-into-track");
+                let Value::Map(payload) = payload else {
+                    panic!("sampler panel drop payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0))
+                );
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/snare.wav".to_string()))
+                );
+            }
+            other => panic!("expected load-sample-into-track host command, got {other:?}"),
+        }
     }
 
     #[test]
@@ -10308,11 +10515,12 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let korg1_ui = std::fs::read_to_string("instruments/korg1/ui.lisp").expect("read korg1 ui");
+        let korg1_ui =
+            std::fs::read_to_string("instruments/bass/korg1/ui.lisp").expect("read korg1 ui");
         let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
         let korg1_custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "korg1/".to_string(),
-            "instruments/korg1/ui.lisp".to_string(),
+            "instruments/bass/korg1/ui.lisp".to_string(),
             korg1_ui,
         )));
 
@@ -10439,11 +10647,11 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let analog_ui = std::fs::read_to_string("instruments/analog-bread-and-butter/ui.lisp")
+        let analog_ui = std::fs::read_to_string("instruments/core/analog-bread-and-butter/ui.lisp")
             .expect("read analog bread-and-butter ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "test-instrument".to_string(),
-            "instruments/analog-bread-and-butter/ui.lisp".to_string(),
+            "instruments/core/analog-bread-and-butter/ui.lisp".to_string(),
             analog_ui,
         )));
         let mut analog_inst = test_instrument_map();
@@ -10688,11 +10896,11 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let ui =
-            std::fs::read_to_string("instruments/mod-fm-messui/ui.lisp").expect("read mod FM ui");
+        let ui = std::fs::read_to_string("instruments/fm/mod-fm-messui/ui.lisp")
+            .expect("read mod FM ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "mod-fm-messui/".to_string(),
-            "instruments/mod-fm-messui/ui.lisp".to_string(),
+            "instruments/fm/mod-fm-messui/ui.lisp".to_string(),
             ui,
         )));
 
@@ -10861,10 +11069,11 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let ui = std::fs::read_to_string("instruments/909-mutant-fm/ui.lisp").expect("read 909 ui");
+        let ui = std::fs::read_to_string("instruments/drums/909-mutant-fm/ui.lisp")
+            .expect("read 909 ui");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
             "909-mutant-fm/".to_string(),
-            "instruments/909-mutant-fm/ui.lisp".to_string(),
+            "instruments/drums/909-mutant-fm/ui.lisp".to_string(),
             ui,
         )));
 
@@ -11251,51 +11460,51 @@ mod tests {
 
         let cases = [
             (
-                "emulations/monomachine-digipro/",
-                "instruments/emulations/monomachine-digipro/dsp.lisp",
-                "instruments/emulations/monomachine-digipro/ui.lisp",
+                "monomachine/dpro/monomachine-digipro/",
+                "instruments/monomachine/dpro/monomachine-digipro/dsp.lisp",
+                "instruments/monomachine/dpro/monomachine-digipro/ui.lisp",
                 vec!["morph", "cutoff", "gain"],
             ),
             (
-                "emulations/monomachine-dpro-bbox-v1/",
-                "instruments/emulations/monomachine-dpro-bbox-v1/dsp.lisp",
-                "instruments/emulations/monomachine-dpro-bbox-v1/ui.lisp",
+                "monomachine/dpro/monomachine-dpro-bbox-v1/",
+                "instruments/monomachine/dpro/monomachine-dpro-bbox-v1/dsp.lisp",
+                "instruments/monomachine/dpro/monomachine-dpro-bbox-v1/ui.lisp",
                 vec!["ptch", "cutoff", "gain"],
             ),
             (
-                "emulations/monomachine-dpro-dens-v1/",
-                "instruments/emulations/monomachine-dpro-dens-v1/dsp.lisp",
-                "instruments/emulations/monomachine-dpro-dens-v1/ui.lisp",
+                "monomachine/dpro/monomachine-dpro-dens-v1/",
+                "instruments/monomachine/dpro/monomachine-dpro-dens-v1/dsp.lisp",
+                "instruments/monomachine/dpro/monomachine-dpro-dens-v1/ui.lisp",
                 vec!["wave", "chrl", "cutoff"],
             ),
             (
-                "emulations/monomachine-dpro-ddrw-v1/",
-                "instruments/emulations/monomachine-dpro-ddrw-v1/dsp.lisp",
-                "instruments/emulations/monomachine-dpro-ddrw-v1/ui.lisp",
+                "monomachine/dpro/monomachine-dpro-ddrw-v1/",
+                "instruments/monomachine/dpro/monomachine-dpro-ddrw-v1/dsp.lisp",
+                "instruments/monomachine/dpro/monomachine-dpro-ddrw-v1/ui.lisp",
                 vec!["wav1", "time", "cutoff"],
             ),
             (
-                "emulations/monomachine-dpro-wave-v2/",
-                "instruments/emulations/monomachine-dpro-wave-v2/dsp.lisp",
-                "instruments/emulations/monomachine-dpro-wave-v2/ui.lisp",
+                "monomachine/dpro/monomachine-dpro-wave-v2/",
+                "instruments/monomachine/dpro/monomachine-dpro-wave-v2/dsp.lisp",
+                "instruments/monomachine/dpro/monomachine-dpro-wave-v2/ui.lisp",
                 vec!["wave", "cutoff", "gain"],
             ),
             (
-                "emulations/monomachine-fmplus/",
-                "instruments/emulations/monomachine-fmplus/dsp.lisp",
-                "instruments/emulations/monomachine-fmplus/ui.lisp",
+                "monomachine/fmplus/monomachine-fmplus/",
+                "instruments/monomachine/fmplus/monomachine-fmplus/dsp.lisp",
+                "instruments/monomachine/fmplus/monomachine-fmplus/ui.lisp",
                 vec!["ratio_a", "tone", "gain"],
             ),
             (
-                "emulations/monomachine-fmplus-par-v1/",
-                "instruments/emulations/monomachine-fmplus-par-v1/dsp.lisp",
-                "instruments/emulations/monomachine-fmplus-par-v1/ui.lisp",
+                "monomachine/fmplus/monomachine-fmplus-par-v1/",
+                "instruments/monomachine/fmplus/monomachine-fmplus-par-v1/dsp.lisp",
+                "instruments/monomachine/fmplus/monomachine-fmplus-par-v1/ui.lisp",
                 vec!["op1_frq", "op3_frq", "cutoff"],
             ),
             (
-                "emulations/monomachine-fmplus-stat-v1/",
-                "instruments/emulations/monomachine-fmplus-stat-v1/dsp.lisp",
-                "instruments/emulations/monomachine-fmplus-stat-v1/ui.lisp",
+                "monomachine/fmplus/monomachine-fmplus-stat-v1/",
+                "instruments/monomachine/fmplus/monomachine-fmplus-stat-v1/dsp.lisp",
+                "instruments/monomachine/fmplus/monomachine-fmplus-stat-v1/ui.lisp",
                 vec!["op1_frq", "op2_vol", "cutoff"],
             ),
             (
@@ -11305,9 +11514,9 @@ mod tests {
                 vec!["osc2_semi", "pulse_width", "cutoff"],
             ),
             (
-                "emulations/monomachine-superwave/",
-                "instruments/emulations/monomachine-superwave/dsp.lisp",
-                "instruments/emulations/monomachine-superwave/ui.lisp",
+                "monomachine/superwave/monomachine-superwave/",
+                "instruments/monomachine/superwave/monomachine-superwave/dsp.lisp",
+                "instruments/monomachine/superwave/monomachine-superwave/ui.lisp",
                 vec!["saw_mix", "motion_rate", "cutoff"],
             ),
             (
@@ -11473,12 +11682,12 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
-        let minimoog_ui =
-            std::fs::read_to_string("instruments/minimoog-lad2/ui.lisp").expect("read ui");
+        let minimoog_ui = std::fs::read_to_string("instruments/emulations/minimoog-lad2/ui.lisp")
+            .expect("read ui");
         let initial_custom_ui_source = build_custom_instrument_ui_source_with_overlay(None);
         let minimoog_custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
-            "minimoog-lad2".to_string(),
-            "instruments/minimoog-lad2/ui.lisp".to_string(),
+            "emulations/minimoog-lad2".to_string(),
+            "instruments/emulations/minimoog-lad2/ui.lisp".to_string(),
             minimoog_ui,
         )));
 
