@@ -2207,6 +2207,7 @@ fn tree_sample_drag_drops_on_compatible_box_target() {
         crate::widget_render::active_drop_hover_target().is_some(),
         "compatible drop target should become the active hover target during drag"
     );
+    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
     editor.handle_mouse_precise(
         mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
         0,
@@ -2275,6 +2276,10 @@ fn tree_sample_drag_ignores_incompatible_box_target() {
         24.0,
         0.4,
     );
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::DragNotAllowed
+    );
     editor.handle_mouse_precise(
         mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
         0,
@@ -2288,6 +2293,105 @@ fn tree_sample_drag_ignores_incompatible_box_target() {
     assert_eq!(
         editor.runtime.eval_str("dropped").unwrap().unwrap(),
         Value::String(String::new())
+    );
+}
+
+#[test]
+fn typed_widget_drag_can_drop_on_another_tile() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def dropped (state ""))
+                (effect-buffer "*source*"
+                  (tree
+                    :width 18
+                    :height 2
+                    :drag-type "sample"
+                    :items '((:label "kick.wav" :path "/samples/kick.wav"))
+                    :on-select (lambda (item) nil)))
+                (effect-buffer "*target*"
+                  (box
+                    :width 18
+                    :height 2
+                    :drop-types (list "sample")
+                    :on-drop (lambda (event)
+                      (set! dropped (get (get event :payload) :path)))))
+                "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+
+    let source = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*source*")
+        .expect("source buffer");
+    let target = editor
+        .buffers
+        .iter()
+        .position(|buffer| buffer.name == "*target*")
+        .expect("target buffer");
+    editor.set_active_buffer(editor.buffers[source].id);
+    let target_tile = editor
+        .split_active_tile(SplitDir::Vertical, target)
+        .expect("split should create target tile");
+    let source_tile = editor
+        .tile_root
+        .leaf_ids()
+        .into_iter()
+        .find(|id| *id != target_tile)
+        .expect("source tile");
+    editor.switch_active_tile(source_tile);
+    editor.update_tile_rects(100, 20);
+
+    let (source_col, source_row, _, _) = editor
+        .tile_content_area(source_tile, 1)
+        .expect("source content area");
+    let (target_col, target_row, _, _) = editor
+        .tile_content_area(target_tile, 1)
+        .expect("target content area");
+    let down = (source_col as f32 + 2.0, source_row as f32 + 0.4);
+    let drop = (target_col as f32 + 2.0, target_row as f32 + 0.4);
+
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            down.0.floor() as u16,
+            down.1.floor() as u16,
+        ),
+        down.0,
+        down.1,
+        1,
+    );
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            drop.0.floor() as u16,
+            drop.1.floor() as u16,
+        ),
+        drop.0,
+        drop.1,
+        1,
+    );
+    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    editor.handle_tiled_mouse_precise(
+        mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            drop.0.floor() as u16,
+            drop.1.floor() as u16,
+        ),
+        drop.0,
+        drop.1,
+        1,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::String("/samples/kick.wav".to_string())
     );
 }
 

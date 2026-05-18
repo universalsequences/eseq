@@ -1019,6 +1019,74 @@ impl Editor {
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
             );
 
+        if let Some(gesture) = self.active_widget_drag_gesture()
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+            )
+        {
+            let target_tile = self
+                .tile_at_screen(screen_col, screen_row)
+                .unwrap_or(self.active_tile);
+            let mut dropped = false;
+            self.route_pointer_event_to_tile(target_tile, border_inset, false, |editor| {
+                let Some((content_col, content_row, _, _)) =
+                    editor.tile_content_area(target_tile, border_inset)
+                else {
+                    return;
+                };
+                let (event_col, event_row) = editor
+                    .tile_content_precise_event_position(
+                        target_tile,
+                        border_inset,
+                        content_col,
+                        content_row,
+                        precise_col,
+                        precise_row,
+                    )
+                    .unwrap_or((precise_col, precise_row));
+
+                match mouse.kind {
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        let _ = editor.update_widget_drop_hover(
+                            &gesture,
+                            content_col,
+                            content_row,
+                            event_col,
+                            event_row,
+                        );
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        let output = editor.dispatch_widget_drop_event(
+                            &gesture,
+                            content_col,
+                            content_row,
+                            event_col,
+                            event_row,
+                        );
+                        dropped = editor.apply_widget_output(output);
+                        crate::widget_render::set_drop_hover_target(None);
+                        editor.widget_cursor = WidgetCursor::Default;
+                    }
+                    _ => {}
+                }
+            });
+            if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+                self.active_leaf_mut().active_widget_gesture = None;
+                self.last_mouse_precise = None;
+                crate::widget_render::set_drop_hover_target(None);
+                self.widget_cursor = WidgetCursor::Default;
+            }
+            if dropped
+                || matches!(
+                    mouse.kind,
+                    MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
+                )
+            {
+                return;
+            }
+        }
+
         // Find which tile this mouse event targets
         let target_tile = if force_active {
             Some(self.active_tile)
@@ -3324,7 +3392,7 @@ impl Editor {
                         .last_mouse_precise
                         .unwrap_or((precise_col, precise_row));
                     if let Some(gesture) = self.active_leaf().active_widget_gesture.clone() {
-                        self.update_widget_drop_hover(
+                        let _ = self.update_widget_drop_hover(
                             &gesture,
                             content_col,
                             content_row,

@@ -354,6 +354,8 @@ pub enum MouseEventOutcome {
 pub enum WidgetCursor {
     Default,
     EwResize,
+    DragCopy,
+    DragNotAllowed,
 }
 
 #[cfg(target_os = "macos")]

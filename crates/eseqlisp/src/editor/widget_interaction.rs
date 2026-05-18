@@ -1447,6 +1447,12 @@ impl Editor {
         })
     }
 
+    pub(super) fn active_widget_drag_gesture(&self) -> Option<WidgetGesture> {
+        let gesture = self.active_leaf().active_widget_gesture.clone()?;
+        active_widget_drag(&gesture)?;
+        Some(gesture)
+    }
+
     pub(super) fn update_widget_drop_hover(
         &mut self,
         gesture: &WidgetGesture,
@@ -1454,10 +1460,11 @@ impl Editor {
         content_row: u16,
         precise_col: f32,
         precise_row: f32,
-    ) {
+    ) -> bool {
         let Some((drag_type, _)) = active_widget_drag(gesture) else {
             widget_render::set_drop_hover_target(None);
-            return;
+            self.widget_cursor = WidgetCursor::Default;
+            return false;
         };
         let target = self.runtime.current_layout.as_ref().and_then(|layout| {
             let local_col =
@@ -1465,8 +1472,15 @@ impl Editor {
             let local_row = precise_row - content_row as f32 + self.total_scroll_top();
             deepest_drop_target(layout, local_row, local_col, &drag_type)
         });
+        let allowed = target.is_some();
         widget_render::set_drop_hover_target(target.map(|node| node.widget_id));
+        self.widget_cursor = if allowed {
+            WidgetCursor::DragCopy
+        } else {
+            WidgetCursor::DragNotAllowed
+        };
         self.mark_needs_redraw();
+        allowed
     }
 
     pub(super) fn handle_touchpad_magnify_impl(

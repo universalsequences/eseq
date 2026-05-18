@@ -1601,6 +1601,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             pending_drag = None;
                         }
                         editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+                        backend.set_widget_cursor(editor.widget_cursor());
                     }
                 }
                 Event::Resize(_, _) => editor.mark_needs_redraw(),
@@ -1683,6 +1684,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // final motion segment if mouse-up lands before the next frame.
         if let Some((Event::Mouse(mouse), (precise_col, precise_row))) = pending_drag.take() {
             editor.handle_tiled_mouse_precise(mouse, precise_col, precise_row, 0);
+            backend.set_widget_cursor(editor.widget_cursor());
         }
         ui_loop_stats.note_gestures(gestures_started.elapsed());
 

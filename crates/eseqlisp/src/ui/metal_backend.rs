@@ -1275,6 +1275,8 @@ fragment float4 waveform_frag(
             let icon = match cursor {
                 crate::widget_render::WidgetCursor::Default => CursorIcon::Default,
                 crate::widget_render::WidgetCursor::EwResize => CursorIcon::EwResize,
+                crate::widget_render::WidgetCursor::DragCopy => CursorIcon::Copy,
+                crate::widget_render::WidgetCursor::DragNotAllowed => CursorIcon::NotAllowed,
             };
             window.set_cursor_icon(icon);
         }
