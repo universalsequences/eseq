@@ -37,8 +37,10 @@ pub struct InstrumentModulatorDescriptor {
 #[derive(Clone, Debug)]
 pub struct InstrumentModulationTarget {
     pub base_param_idx: usize,
-    pub source_param_idx: usize,
+    pub source_param_idx: Option<usize>,
+    pub modulator_slot: usize,
     pub depth_param_idx: usize,
+    pub active_param_idx: Option<usize>,
     pub depth_min: f32,
     pub depth_max: f32,
     pub depth_unit: Option<String>,
@@ -870,7 +872,11 @@ mod tests {
             .map(|target| {
                 (
                     desc.params[target.base_param_idx].name.as_str(),
-                    desc.params[target.source_param_idx].name.as_str(),
+                    target
+                        .source_param_idx
+                        .and_then(|idx| desc.params.get(idx))
+                        .map(|param| param.name.as_str())
+                        .unwrap_or("<fixed>"),
                     desc.params[target.depth_param_idx].name.as_str(),
                     target.depth_min,
                     target.depth_max,
@@ -2258,8 +2264,10 @@ impl EffectDescriptor {
             });
             instrument_modulation_targets.push(InstrumentModulationTarget {
                 base_param_idx,
-                source_param_idx,
+                source_param_idx: Some(source_param_idx),
+                modulator_slot: 0,
                 depth_param_idx,
+                active_param_idx: None,
                 depth_min,
                 depth_max,
                 depth_unit,
@@ -2591,6 +2599,7 @@ impl EffectSlotState {
                 }
             }
         }
+        self.recompute_modulation_active_params(desc);
     }
 
     /// Rebind this live slot using descriptor identity instead of param index.
@@ -2653,6 +2662,57 @@ impl EffectSlotState {
             }
             for (step, value) in plocks {
                 self.plocks.set(step, new_idx, value);
+            }
+        }
+        self.recompute_modulation_active_params(new_desc);
+    }
+
+    pub fn recompute_modulation_active_params(&self, desc: &EffectDescriptor) {
+        let mut active_indices = desc
+            .instrument_modulation_targets
+            .iter()
+            .filter_map(|target| target.active_param_idx)
+            .collect::<Vec<_>>();
+        active_indices.sort_unstable();
+        active_indices.dedup();
+
+        for active_idx in active_indices {
+            if active_idx >= desc.params.len() {
+                continue;
+            }
+
+            let group = desc
+                .instrument_modulation_targets
+                .iter()
+                .filter(|target| target.active_param_idx == Some(active_idx))
+                .collect::<Vec<_>>();
+            if group.is_empty() {
+                continue;
+            }
+
+            let default_active = group
+                .iter()
+                .any(|target| self.defaults.get(target.depth_param_idx).abs() > f32::EPSILON);
+            self.defaults
+                .set(active_idx, if default_active { 1.0 } else { 0.0 });
+
+            for step in 0..MAX_STEPS {
+                let has_depth_plock = group
+                    .iter()
+                    .any(|target| self.plocks.get(step, target.depth_param_idx).is_some());
+                if has_depth_plock {
+                    let active = group.iter().any(|target| {
+                        self.plocks
+                            .get(step, target.depth_param_idx)
+                            .unwrap_or_else(|| self.defaults.get(target.depth_param_idx))
+                            .abs()
+                            > f32::EPSILON
+                    });
+                    self.plocks
+                        .set(step, active_idx, if active { 1.0 } else { 0.0 });
+                } else {
+                    self.plocks.clear_param(step, active_idx);
+                }
             }
         }
     }
@@ -2857,6 +2917,77 @@ impl EffectSlotSnapshot {
             if let Some(saved_step) = old_plocks.get(step) {
                 for param_idx in 0..preserve.min(saved_step.len()) {
                     self.plocks[step][param_idx] = saved_step[param_idx];
+                }
+            }
+        }
+        self.recompute_modulation_active_params(desc);
+    }
+
+    pub fn recompute_modulation_active_params(&mut self, desc: &EffectDescriptor) {
+        let mut active_indices = desc
+            .instrument_modulation_targets
+            .iter()
+            .filter_map(|target| target.active_param_idx)
+            .collect::<Vec<_>>();
+        active_indices.sort_unstable();
+        active_indices.dedup();
+
+        for active_idx in active_indices {
+            if active_idx >= self.defaults.len() {
+                continue;
+            }
+
+            let group = desc
+                .instrument_modulation_targets
+                .iter()
+                .filter(|target| target.active_param_idx == Some(active_idx))
+                .collect::<Vec<_>>();
+            if group.is_empty() {
+                continue;
+            }
+
+            let default_active = group.iter().any(|target| {
+                self.defaults
+                    .get(target.depth_param_idx)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .abs()
+                    > f32::EPSILON
+            });
+            self.defaults[active_idx] = if default_active { 1.0 } else { 0.0 };
+
+            for step in 0..MAX_STEPS {
+                let Some(step_plocks) = self.plocks.get_mut(step) else {
+                    continue;
+                };
+                if active_idx >= step_plocks.len() {
+                    continue;
+                }
+                let has_depth_plock = group.iter().any(|target| {
+                    step_plocks
+                        .get(target.depth_param_idx)
+                        .copied()
+                        .flatten()
+                        .is_some()
+                });
+                if has_depth_plock {
+                    let active = group.iter().any(|target| {
+                        step_plocks
+                            .get(target.depth_param_idx)
+                            .copied()
+                            .flatten()
+                            .unwrap_or_else(|| {
+                                self.defaults
+                                    .get(target.depth_param_idx)
+                                    .copied()
+                                    .unwrap_or(0.0)
+                            })
+                            .abs()
+                            > f32::EPSILON
+                    });
+                    step_plocks[active_idx] = Some(if active { 1.0 } else { 0.0 });
+                } else {
+                    step_plocks[active_idx] = None;
                 }
             }
         }

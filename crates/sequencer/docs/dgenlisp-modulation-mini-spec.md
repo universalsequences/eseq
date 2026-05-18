@@ -312,8 +312,13 @@ Example:
     "name": "cutoff",
     "paramCellId": 17,
     "mode": "additive",
-    "sourceCellId": 101,
-    "depthCellId": 102,
+    "activeCellId": 101,
+    "depthLanes": [
+      { "slot": 1, "depthCellId": 102 },
+      { "slot": 2, "depthCellId": 103 },
+      { "slot": 3, "depthCellId": 104 },
+      { "slot": 4, "depthCellId": 105 }
+    ],
     "min": 60,
     "max": 12000,
     "unit": "Hz"
@@ -326,8 +331,8 @@ Required fields:
 - `name`
 - `paramCellId`
 - `mode`
-- `sourceCellId`
-- `depthCellId`
+- `activeCellId`
+- `depthLanes`
 - `min`
 - `max`
 
@@ -344,16 +349,17 @@ The host can render a modulation UI using manifest metadata only.
 For each `modDestination`, the host can display:
 
 - destination name
-- source selector bound to `sourceCellId`
-- modulation amount bound to `depthCellId`
+- one modulation amount control per `depthLanes[]` entry, bound to that lane's `depthCellId`
+- a hidden/host-controlled active flag bound to `activeCellId`
 
 For each `modulator`, the host can display valid available sources.
 
-V1 host model:
+Host model:
 
-- one source selector per destination
-- one amount control per destination
-- source `0` = off
+- one fixed lane per declared modulator slot
+- no DGenLisp source selector cell
+- `activeCellId` is `1` when any enabled route has nonzero depth, otherwise `0`
+- compute active outside the audio loop; p-locked depth changes should p-lock active for that trigger
 
 ## Defaults
 
@@ -425,10 +431,10 @@ Implement exactly this scope first:
 - `@mod true` and `@mod-mode <mode>` on `param`
 - optional `@mod-depth-min/max`
 - `(mod paramName)` expression
-- generated hidden source/depth params
+- generated hidden active/depth-lane params
 - `modulators` in manifest
 - `modDestinations` in manifest
-- one source + one depth per destination
+- one active flag plus one depth per modulator lane per destination
 
 Do not implement multiple lanes per destination until this simpler model is proven.
 

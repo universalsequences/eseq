@@ -340,6 +340,12 @@ fn resolve_instrument_params(
             .get(param_idx)
             .copied()
             .unwrap_or(param_idx as u32);
+        let span = slot
+            .param_node_spans
+            .get(param_idx)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
         let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
             (
                 ScheduledInstrumentParamTarget::Modulator,
@@ -358,7 +364,12 @@ fn resolve_instrument_params(
         if !value.is_finite() {
             continue;
         }
-        params.push(ScheduledInstrumentParam { target, idx, value });
+        params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
     }
     params.sort_by_key(|param| match param.target {
         ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
@@ -390,6 +401,12 @@ fn resolve_instrument_plocks(
             .get(param_idx)
             .copied()
             .unwrap_or(param_idx as u32);
+        let span = slot
+            .param_node_spans
+            .get(param_idx)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
         let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
             (
                 ScheduledInstrumentParamTarget::Modulator,
@@ -398,7 +415,12 @@ fn resolve_instrument_plocks(
         } else {
             (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
         };
-        params.push(ScheduledInstrumentParam { target, idx, value });
+        params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
     }
     params.sort_by_key(|param| match param.target {
         ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
@@ -2010,7 +2032,7 @@ mod tests {
         track_active_note_spans_at_beat, track_note_spans_for_trigger, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
-    use crate::effects::EffectDescriptor;
+    use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
     use crate::scheduled_event::{
         ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
     };
@@ -2055,12 +2077,82 @@ mod tests {
                 ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: crate::sampler::PARAM_SPEED,
+                    span: 1,
                     value: 2.0,
                 },
                 ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: crate::sampler::PARAM_SCRUB_OFFSET,
+                    span: 1,
                     value: 0.25,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_instrument_plocks_preserves_param_node_spans() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor {
+            name: "custom".to_string(),
+            input_channels: 0,
+            output_channels: 1,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                ParamDescriptor {
+                    name: "cutoff".to_string(),
+                    min: 80.0,
+                    max: 12_000.0,
+                    default: 7200.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 105,
+                    node_param_span: 4,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "__dgen_mod_active__cutoff".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 109,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+            ],
+        };
+        state.pattern.instrument_slots[track].apply_descriptor(&desc, 12);
+        state.pattern.instrument_slots[track]
+            .plocks
+            .set(step, 0, 9155.0);
+        state.pattern.instrument_slots[track]
+            .plocks
+            .set(step, 1, 1.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let params = resolve_instrument_plocks(&snapshot, track, step);
+
+        assert_eq!(
+            params.as_slice(),
+            vec![
+                ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: 105,
+                    span: 4,
+                    value: 9155.0,
+                },
+                ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: 109,
+                    span: 1,
+                    value: 1.0,
                 },
             ]
         );

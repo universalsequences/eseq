@@ -136,7 +136,7 @@ Critical syntax rules:
   `(+ (mod pulse_width) (* mod2 0.1))`.
 - Correct pattern: declare the destination param `@mod true`, use `(mod
   param_name)` at the point where the DSP reads that param, and let the host mod
-  matrix choose the modulation source/depth. For example, use
+  matrix assign per-source modulation depths. For example, use
   `(clip (mod cutoff) 40 12000)`, not `(+ cutoff (* mod1 2500))`.
 - `(mod param_name)` is the host modulation accessor. Use it only to read the
   host-modulated value of a parameter declared with `@mod true`, for example

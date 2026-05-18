@@ -258,6 +258,10 @@ impl App {
         name.starts_with("mod ")
     }
 
+    fn is_hidden_modulation_param_name(name: &str) -> bool {
+        name.starts_with("__dgen_mod_active__")
+    }
+
     fn is_mod_source_param(node_param_idx: u32) -> bool {
         node_param_idx >= crate::voice_modulator::MOD_PARAM_BASE
     }
@@ -272,6 +276,7 @@ impl App {
                     .enumerate()
                     .filter_map(|(i, p)| {
                         (!Self::is_modulation_param_name(&p.name)
+                            && !Self::is_hidden_modulation_param_name(&p.name)
                             && !Self::is_mod_source_param(p.node_param_idx))
                         .then_some(i)
                     })
@@ -290,6 +295,7 @@ impl App {
                     .enumerate()
                     .filter_map(|(i, p)| {
                         (Self::is_modulation_param_name(&p.name)
+                            && !Self::is_hidden_modulation_param_name(&p.name)
                             && !Self::is_mod_source_param(p.node_param_idx))
                         .then_some(i)
                     })
@@ -1143,6 +1149,7 @@ impl App {
     pub fn send_instrument_param(&self, track: usize, param_idx: usize, value: f32) {
         let slot = &self.state.pattern.instrument_slots[track];
         let idx = slot.resolve_node_idx(param_idx);
+        let span = slot.resolve_node_span(param_idx);
         if crate::voice_modulator::is_bar_resync_param(idx as u32) {
             self.state.schedule_mod_resync();
         }
@@ -1182,28 +1189,32 @@ impl App {
                 if let Some(nodes) = self.graph.track_node_ids.get(track) {
                     for &logical_id in &nodes.sampler_modulator_ids {
                         unsafe {
-                            crate::audiograph::params_push_wrapper(
-                                self.graph.lg.0,
-                                crate::audiograph::ParamMsg {
-                                    idx: resolved_idx,
-                                    logical_id: logical_id as u64,
-                                    fvalue,
-                                },
-                            );
+                            for lane in 0..span as u64 {
+                                crate::audiograph::params_push_wrapper(
+                                    self.graph.lg.0,
+                                    crate::audiograph::ParamMsg {
+                                        idx: resolved_idx + lane,
+                                        logical_id: logical_id as u64,
+                                        fvalue,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
             } else if let Some(voice_lids) = self.graph.track_voice_lids.get(track) {
                 for &logical_id in voice_lids {
                     unsafe {
-                        crate::audiograph::params_push_wrapper(
-                            self.graph.lg.0,
-                            crate::audiograph::ParamMsg {
-                                idx: resolved_idx,
-                                logical_id,
-                                fvalue,
-                            },
-                        );
+                        for lane in 0..span as u64 {
+                            crate::audiograph::params_push_wrapper(
+                                self.graph.lg.0,
+                                crate::audiograph::ParamMsg {
+                                    idx: resolved_idx + lane,
+                                    logical_id,
+                                    fvalue,
+                                },
+                            );
+                        }
                     }
                 }
             }
@@ -1242,14 +1253,16 @@ impl App {
         };
         for &node_id in target_ids {
             unsafe {
-                crate::audiograph::params_push_wrapper(
-                    self.graph.lg.0,
-                    crate::audiograph::ParamMsg {
-                        idx: resolved_idx,
-                        logical_id: node_id as u64,
-                        fvalue: value,
-                    },
-                );
+                for lane in 0..span as u64 {
+                    crate::audiograph::params_push_wrapper(
+                        self.graph.lg.0,
+                        crate::audiograph::ParamMsg {
+                            idx: resolved_idx + lane,
+                            logical_id: node_id as u64,
+                            fvalue: value,
+                        },
+                    );
+                }
             }
         }
     }

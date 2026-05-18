@@ -34,6 +34,19 @@ use crate::voice::{VoicePool, MAX_VOICES};
 pub const HOST_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
 
+unsafe fn push_param_span(lg: *mut LiveGraph, logical_id: u64, idx: u64, span: u32, value: f32) {
+    for lane in 0..span.max(1) as u64 {
+        params_push_wrapper(
+            lg,
+            ParamMsg {
+                idx: idx + lane,
+                logical_id,
+                fvalue: value,
+            },
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OutputDeviceConfig {
     sample_rate: u32,
@@ -1202,14 +1215,7 @@ unsafe fn dispatch_modulator_params(
         if param.target != ScheduledInstrumentParamTarget::Synth {
             continue;
         }
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx: param.idx,
-                logical_id: modulator_lid,
-                fvalue: param.value,
-            },
-        );
+        push_param_span(lg, modulator_lid, param.idx, param.span, param.value);
     }
 }
 
@@ -1456,14 +1462,7 @@ unsafe fn dispatch_instrument_params_to_voice(
             ScheduledInstrumentParamTarget::Synth => (synth_id, param.idx),
             ScheduledInstrumentParamTarget::Modulator => (modulator_id, param.idx),
         };
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx,
-                logical_id,
-                fvalue: param.value,
-            },
-        );
+        push_param_span(lg, logical_id, idx, param.span, param.value);
     }
 }
 
@@ -1487,13 +1486,12 @@ unsafe fn dispatch_instrument_defaults_to_voice(
         } else {
             idx
         };
-        params_push_wrapper(
+        push_param_span(
             lg,
-            ParamMsg {
-                idx: resolved_idx,
-                logical_id,
-                fvalue: slot.defaults.get(param_idx),
-            },
+            logical_id,
+            resolved_idx,
+            slot.resolve_node_span(param_idx),
+            slot.defaults.get(param_idx),
         );
     }
 }
@@ -1510,14 +1508,7 @@ unsafe fn dispatch_sampler_modulator_params_to_voice(
         if param.target != ScheduledInstrumentParamTarget::Modulator {
             continue;
         }
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx: param.idx,
-                logical_id: modulator_id,
-                fvalue: param.value,
-            },
-        );
+        push_param_span(lg, modulator_id, param.idx, param.span, param.value);
     }
 }
 
@@ -1533,14 +1524,7 @@ unsafe fn dispatch_sampler_extra_params_to_voice(
         if param.idx < crate::sampler::PARAM_SCRUB_OFFSET {
             continue;
         }
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx: param.idx,
-                logical_id: sampler_lid,
-                fvalue: param.value,
-            },
-        );
+        push_param_span(lg, sampler_lid, param.idx, param.span, param.value);
     }
 }
 
@@ -1567,25 +1551,17 @@ unsafe fn dispatch_sampler_live_params_to_voice(
     for param in instrument_params {
         match param.target {
             ScheduledInstrumentParamTarget::Synth => {
-                params_push_wrapper(
+                push_param_span(
                     lg,
-                    ParamMsg {
-                        idx: param.idx,
-                        logical_id: sampler_lid,
-                        fvalue: sampler_live_param_value(param.idx, param.value, sample_rate),
-                    },
+                    sampler_lid,
+                    param.idx,
+                    param.span,
+                    sampler_live_param_value(param.idx, param.value, sample_rate),
                 );
             }
             ScheduledInstrumentParamTarget::Modulator => {
                 if modulator_id != 0 {
-                    params_push_wrapper(
-                        lg,
-                        ParamMsg {
-                            idx: param.idx,
-                            logical_id: modulator_id,
-                            fvalue: param.value,
-                        },
-                    );
+                    push_param_span(lg, modulator_id, param.idx, param.span, param.value);
                 }
             }
         }

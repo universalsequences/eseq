@@ -143,6 +143,45 @@ CURATED_OPERATORS = {
     "selector": {"category": "conditional", "summary": "1-based selector over options; mode <= 0 yields 0.", "signatures": ["(selector mode option1 option2 ...)"], "arity": {"minimum": 2, "maximum": None}},
 }
 
+PREAMBLE_OPERATORS = [
+    {
+        "name": "polyblep_saw",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Anti-aliased saw oscillator helper. Pass a phasor phase in 0..1 and frequency in Hz.",
+        "signatures": ["(polyblep_saw phase freq)"],
+        "arity": {"minimum": 2, "maximum": 2},
+        "attributes": [],
+    },
+    {
+        "name": "polyblep_pulse",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Anti-aliased pulse oscillator helper. Width is clipped internally and should usually stay around 0.05..0.95.",
+        "signatures": ["(polyblep_pulse phase width freq)"],
+        "arity": {"minimum": 3, "maximum": 3},
+        "attributes": [],
+    },
+    {
+        "name": "svf",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "State-variable filter helper. Cutoff is Hz, q is resonance, mode is 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass.",
+        "signatures": ["(svf input cutoff q mode)"],
+        "arity": {"minimum": 4, "maximum": 4},
+        "attributes": [],
+    },
+    {
+        "name": "ladder",
+        "aliases": [],
+        "category": "preamble",
+        "summary": "Moog-style 4-pole low-pass helper with drive and resonance compensation. Cutoff is Hz, resonance is 0..1, drive is pre-filter saturation.",
+        "signatures": ["(ladder input cutoff res drive)"],
+        "arity": {"minimum": 4, "maximum": 4},
+        "attributes": [],
+    },
+]
+
 
 SPECIAL_FORMS = [
     {
@@ -288,6 +327,7 @@ MANIFEST_TYPES = {
     "ManifestParam": {
         "name": {"type": "string"},
         "cellId": {"type": "int"},
+        "cellSpan": {"type": "int"},
         "default": {"type": "float"},
         "min": {"type": "float|null"},
         "max": {"type": "float|null"},
@@ -311,13 +351,17 @@ MANIFEST_TYPES = {
         "name": {"type": "string"},
         "paramCellId": {"type": "int"},
         "mode": {"type": "string"},
-        "sourceCellId": {"type": "int"},
-        "depthCellId": {"type": "int"},
+        "activeCellId": {"type": "int"},
+        "depthLanes": {"type": "ManifestModDepthLane[]"},
         "min": {"type": "float"},
         "max": {"type": "float"},
         "unit": {"type": "string|null"},
         "depthMin": {"type": "float|null"},
         "depthMax": {"type": "float|null"},
+    },
+    "ManifestModDepthLane": {
+        "slot": {"type": "int"},
+        "depthCellId": {"type": "int"},
     },
     "ManifestTensorInit": {
         "offset": {"type": "int"},
@@ -349,7 +393,13 @@ def extract_function_attribute_usage(evaluator_source: str):
 
 def extract_operator_cases(evaluator_source: str):
     start = evaluator_source.index("switch op {")
-    end = evaluator_source.index("default:\n            throw LispError.unknownOperator(opName)")
+    default_match = re.search(
+        r"\n\s*default:\s*\n\s*throw LispError\.unknownOperator\(opName\)",
+        evaluator_source[start:],
+    )
+    if default_match is None:
+        raise ValueError("could not locate top-level operator switch default")
+    end = start + default_match.start()
     block = evaluator_source[start:end]
     operator_map = {}
     lines = block.splitlines()
@@ -391,8 +441,12 @@ def collect_examples(repo_root: Path):
         base = repo_root / kind
         if not base.exists():
             continue
-        for path in sorted(base.glob("*.lisp")):
+        for path in sorted(base.rglob("*.lisp")):
+            if path.name == "ui.lisp" or "/ui/" in path.as_posix():
+                continue
             text = read(path)
+            if "(out " not in text:
+                continue
             params = re.findall(r"\(param\s+([^\s\)]+)", text)
             outputs = len(re.findall(r"\(out\s", text))
             modulators = len(re.findall(r"@modulator\s+\d+", text))
@@ -456,6 +510,11 @@ def build_operators(operator_map, attrs_by_fn):
                 },
             }
         )
+    existing_names = {operator["name"] for operator in operators}
+    operators.extend(
+        operator for operator in PREAMBLE_OPERATORS if operator["name"] not in existing_names
+    )
+    operators.sort(key=lambda operator: operator["name"])
     return operators
 
 
@@ -503,14 +562,14 @@ def main():
                 "modes": ["additive", "multiplicative", "semitone"],
                 "special_form": "(mod paramName)",
                 "generated_helpers": [
-                    "__mod__<param>__source",
-                    "__mod__<param>__depth",
+                    "__mod__<param>__active",
+                    "__mod__<param>__depth_slot<N>",
                     "__mod__<param>__resolved",
                 ],
                 "required_param_attributes": ["@mod true", "@mod-mode", "@min", "@max"],
                 "notes": [
                     "Modulatable params require at least one input marked with @modulator.",
-                    "Generated modulation source and depth params are hidden host parameters.",
+                    "Generated modulation active and depth-lane params are hidden host parameters.",
                 ],
             },
             "compiler_cli": {

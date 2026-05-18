@@ -1,4 +1,5 @@
 use std::os::raw::{c_char, c_int, c_void};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Mirrors C `NodeVTable` — function pointers for a DSP node.
 #[repr(C)]
@@ -128,7 +129,8 @@ extern "C" {
     ) -> bool;
 
     // Wrapper for the static-inline params_push
-    pub fn params_push_wrapper(lg: *mut LiveGraph, m: ParamMsg) -> bool;
+    #[link_name = "params_push_wrapper"]
+    fn params_push_wrapper_raw(lg: *mut LiveGraph, m: ParamMsg) -> bool;
 
     // Disconnect
     pub fn graph_disconnect(
@@ -142,6 +144,28 @@ extern "C" {
     // Delete
     pub fn delete_node(lg: *mut LiveGraph, node_id: c_int) -> bool;
     fn free(ptr: *mut c_void);
+}
+
+static PARAM_TRACE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn param_trace_enabled() -> bool {
+    std::env::var("ESEQ_AUDIOGRAPH_PARAM_TRACE")
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty() && value != "0"
+        })
+        .unwrap_or(false)
+}
+
+pub unsafe fn params_push_wrapper(lg: *mut LiveGraph, m: ParamMsg) -> bool {
+    if param_trace_enabled() {
+        let count = PARAM_TRACE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        eprintln!(
+            "[audiograph-param] push={count} logical={} idx={} value={:.9}",
+            m.logical_id, m.idx, m.fvalue
+        );
+    }
+    params_push_wrapper_raw(lg, m)
 }
 
 #[allow(dead_code)]

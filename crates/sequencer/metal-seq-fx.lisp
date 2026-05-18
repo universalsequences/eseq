@@ -528,7 +528,8 @@
 
 (def instrument-param-empty-mod-target (p)
   (nth
-    (filter |target| (= (instrument-mod-target-source-slot target) 0)
+    (filter |target| (and (get target :source-idx)
+                          (= (instrument-mod-target-source-slot target) 0))
       (instrument-param-mod-targets p))
     0))
 
@@ -587,9 +588,13 @@
   (if (get p :modulatable)
     (let ((target (instrument-param-selected-mod-target p)))
       (if target
-        (fx-set-instrument-value
-          (dict :idx (get target :source-idx) :control "param")
-          0)
+        (if (get target :source-idx)
+          (fx-set-instrument-value
+            (dict :idx (get target :source-idx) :control "param")
+            0)
+          (fx-set-instrument-value
+            (dict :idx (get target :depth-idx) :control "param")
+            0))
         (let ((target (instrument-param-empty-mod-target p)))
           (if target
             (do

@@ -15,14 +15,10 @@
         "name": "@N",
         "summary": "FFT/window size for spectral operators.",
         "used_by": [
-          "hann",
-          "ifft",
-          "partition-ir",
           "partitioned-convolve",
           "partitioned-spectral-mac",
-          "phase-vocoder",
-          "spectrum-delay",
-          "spectrum-delay-mod"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
@@ -36,27 +32,24 @@
         "name": "@axes",
         "summary": "Axis order for transpose.",
         "used_by": [
-          "transpose"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@axis",
         "summary": "Axis argument for reductions and softmax.",
         "used_by": [
-          "max-axis",
-          "mean",
-          "mean-axis",
-          "softmax",
-          "sum",
-          "sum-axis"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@backend",
         "summary": "FFT backend: tensor or accelerated.",
         "used_by": [
-          "fft",
-          "ifft"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
@@ -70,29 +63,23 @@
       {
         "name": "@cutoff",
         "summary": "Biquad cutoff attribute form.",
-        "used_by": [
-          "biquad"
-        ]
+        "used_by": []
       },
       {
         "name": "@data",
         "summary": "Inline tensor or tensor-history data.",
-        "used_by": [
-          "tensor"
-        ]
+        "used_by": []
       },
       {
         "name": "@default",
         "summary": "Default value for params and generated modulation helpers.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@default-file",
         "summary": "Attribute observed in evaluator source.",
         "used_by": [
-          "tensor-param",
+          "compressor",
           "wavetable",
           "wavetable-param"
         ]
@@ -110,9 +97,8 @@
         "summary": "Audio or tensor asset path.",
         "used_by": [
           "audio-tensor",
+          "compressor",
           "ir",
-          "tensor",
-          "tensor-param",
           "wavetable",
           "wavetable-param"
         ]
@@ -121,23 +107,18 @@
         "name": "@gain",
         "summary": "Gain for high-level spectral convolution.",
         "used_by": [
-          "biquad",
           "partitioned-convolve"
         ]
       },
       {
         "name": "@generated",
         "summary": "Tags generated helper parameters.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@generated-for",
         "summary": "Associates a generated helper parameter with a user parameter.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@hidden",
@@ -148,31 +129,26 @@
         "name": "@hop",
         "summary": "Hop size for STFT and hop-rate operators.",
         "used_by": [
-          "noise",
-          "partition-ir",
           "partitioned-convolve",
-          "phase-vocoder",
-          "spectrum-delay",
-          "spectrum-delay-mod"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@hopSize",
         "summary": "Attribute observed in evaluator source.",
         "used_by": [
-          "noise",
-          "partition-ir",
           "partitioned-convolve",
-          "phase-vocoder",
-          "spectrum-delay",
-          "spectrum-delay-mod"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@hops",
         "summary": "Fixed delay in hops for spectrum-delay.",
         "used_by": [
-          "spectrum-delay"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
@@ -186,35 +162,38 @@
         "name": "@max",
         "summary": "Maximum parameter value.",
         "used_by": [
-          "param"
+          "__modulated-param"
         ]
       },
       {
         "name": "@max-frames",
         "summary": "Playback frame budget for `to-signal`.",
         "used_by": [
-          "to-signal"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@max-hops",
         "summary": "Maximum modulated delay in hops for spectrum-delay-mod.",
         "used_by": [
-          "spectrum-delay-mod"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@maxHops",
         "summary": "Attribute observed in evaluator source.",
         "used_by": [
-          "spectrum-delay-mod"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@min",
         "summary": "Minimum parameter value.",
         "used_by": [
-          "param"
+          "__modulated-param"
         ]
       },
       {
@@ -225,58 +204,44 @@
       {
         "name": "@mod-depth-max",
         "summary": "Upper bound for generated modulation depth control.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@mod-depth-min",
         "summary": "Lower bound for generated modulation depth control.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@mod-depth-param",
         "summary": "Generated modulation depth parameter name.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@mod-mode",
         "summary": "Modulation mode: additive, multiplicative, or semitone.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@mod-resolved-symbol",
         "summary": "Generated resolved modulation symbol name.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@mod-source-param",
         "summary": "Generated modulation source parameter name.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       },
       {
         "name": "@mode",
         "summary": "Biquad filter mode attribute form.",
         "used_by": [
-          "biquad"
+          "__modulated-param"
         ]
       },
       {
         "name": "@modulator",
         "summary": "Marks an input as a modulation source slot.",
-        "used_by": [
-          "in"
-        ]
+        "used_by": []
       },
       {
         "name": "@mono",
@@ -290,14 +255,10 @@
         "name": "@n",
         "summary": "Attribute observed in evaluator source.",
         "used_by": [
-          "hann",
-          "ifft",
-          "partition-ir",
           "partitioned-convolve",
           "partitioned-spectral-mac",
-          "phase-vocoder",
-          "spectrum-delay",
-          "spectrum-delay-mod"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
@@ -305,9 +266,7 @@
         "summary": "Host-visible input/output or modulator name.",
         "used_by": [
           "audio-tensor",
-          "in",
           "ir",
-          "out",
           "wavetable",
           "wavetable-param"
         ]
@@ -324,21 +283,21 @@
         "name": "@padding",
         "summary": "Per-axis padding for pad.",
         "used_by": [
-          "pad"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@q",
         "summary": "Biquad resonance / Q attribute form.",
-        "used_by": [
-          "biquad"
-        ]
+        "used_by": []
       },
       {
         "name": "@ranges",
         "summary": "Slice ranges for shrink.",
         "used_by": [
-          "shrink"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
@@ -359,19 +318,20 @@
         "name": "@repeats",
         "summary": "Per-axis repeat counts.",
         "used_by": [
-          "repeat"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@shape",
         "summary": "Target shape for reshape / expand.",
         "used_by": [
-          "expand",
-          "partitioned-convolve",
-          "reshape",
-          "tensor",
-          "tensor-param",
-          "windows"
+          "__modulated-param",
+          "audio-tensor",
+          "compressor",
+          "ir",
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
@@ -384,9 +344,7 @@
       {
         "name": "@size",
         "summary": "Tensor size for tensor noise.",
-        "used_by": [
-          "noise"
-        ]
+        "used_by": []
       },
       {
         "name": "@start",
@@ -407,15 +365,14 @@
         "name": "@type",
         "summary": "Window type for window operator.",
         "used_by": [
-          "window"
+          "wavetable",
+          "wavetable-param"
         ]
       },
       {
         "name": "@unit",
         "summary": "Host-visible unit label.",
-        "used_by": [
-          "param"
-        ]
+        "used_by": []
       }
     ],
     "comments": [
@@ -518,9 +475,2159 @@
     ],
     "examples": [
       {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "body_level",
+          "cavity_level",
+          "cavity_size",
+          "click_level",
+          "drive",
+          "gain",
+          "impact_decay",
+          "membrane_damp",
+          "noise_level",
+          "pitch_sweep",
+          "shell_level",
+          "sub_level",
+          "sweep_decay",
+          "tone",
+          "tune",
+          "warp",
+          "x_spread",
+          "y_spread",
+          "z_depth"
+        ],
+        "path": "instruments/3d-drum/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 0,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "air_level",
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "body_decay",
+          "boom_level",
+          "brightness",
+          "chaos",
+          "drive",
+          "flam_amount",
+          "flam_decay",
+          "flam_density",
+          "flam_rate",
+          "gain",
+          "membrane_damping",
+          "membrane_level",
+          "membrane_tension",
+          "rim_level",
+          "room_level",
+          "room_size",
+          "room_tone",
+          "shell_level",
+          "skin_level",
+          "snap_decay",
+          "snap_level",
+          "stick_level",
+          "tail_decay",
+          "tuning",
+          "wire_decay",
+          "wire_level",
+          "wire_rattle",
+          "wire_tension"
+        ],
+        "path": "instruments/3d-snap/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(param amp_attack @default 1 @min 1 @max 200 @unit ms)\n(param amp_decay @default 1350 @min 20 @max 4000 @unit ms)"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 0,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "air_level",
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "body_decay",
+          "boom_level",
+          "brightness",
+          "chaos",
+          "drive",
+          "flam_amount",
+          "flam_decay",
+          "flam_density",
+          "flam_rate",
+          "gain",
+          "membrane_damping",
+          "membrane_level",
+          "membrane_tension",
+          "rim_level",
+          "room_level",
+          "room_size",
+          "room_tone",
+          "shell_level",
+          "skin_level",
+          "snap_decay",
+          "snap_level",
+          "stick_level",
+          "tail_decay",
+          "tuning",
+          "wire_decay",
+          "wire_level",
+          "wire_rattle",
+          "wire_tension"
+        ],
+        "path": "instruments/3d-snareo/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(param amp_attack @default 1 @min 1 @max 200 @unit ms)\n(param amp_decay @default 1350 @min 20 @max 4000 @unit ms)"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_release",
+          "body_level",
+          "decay",
+          "drive",
+          "gain",
+          "grit",
+          "keytrack",
+          "metal_level",
+          "noise_level",
+          "pitch_sweep",
+          "snap",
+          "sweep_decay",
+          "tone",
+          "tune",
+          "voice"
+        ],
+        "path": "instruments/707-kick-start/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_release",
+          "body_level",
+          "body_ratio",
+          "body_wave",
+          "click_level",
+          "cross_ring",
+          "crush",
+          "decay",
+          "drive",
+          "filter_mode",
+          "fold",
+          "gain",
+          "keytrack",
+          "membrane_fm",
+          "metal_level",
+          "metal_spread",
+          "metal_tune",
+          "noise_color",
+          "noise_level",
+          "noise_res",
+          "partial_spread",
+          "pitch_sweep",
+          "pitch_wobble",
+          "pulse_width",
+          "resonance",
+          "snap",
+          "sub_level",
+          "sweep_curve",
+          "sweep_decay",
+          "tone",
+          "tune",
+          "voice",
+          "wobble_rate"
+        ],
+        "path": "instruments/707-mutant/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_release",
+          "body_level",
+          "body_ratio",
+          "body_wave",
+          "click_level",
+          "cross_ring",
+          "crush",
+          "decay",
+          "drive",
+          "filter_mode",
+          "fold",
+          "gain",
+          "hats_decay",
+          "keytrack",
+          "membrane_fm",
+          "metal_level",
+          "metal_spread",
+          "metal_tune",
+          "noise_color",
+          "noise_level",
+          "noise_res",
+          "partial_spread",
+          "pitch_sweep",
+          "pulse_width",
+          "punch",
+          "resonance",
+          "snap",
+          "sub_level",
+          "sweep_curve",
+          "sweep_decay",
+          "tone",
+          "tune",
+          "voice"
+        ],
+        "path": "instruments/909-mutant-fm/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "carrier_level",
+          "carrier_ratio",
+          "click_decay",
+          "click_level",
+          "cutoff",
+          "drive",
+          "filt_attack",
+          "filt_decay",
+          "filt_release",
+          "filt_sustain",
+          "filter_env_amt",
+          "gain",
+          "mod_attack",
+          "mod_decay",
+          "mod_env_amt",
+          "mod_index",
+          "mod_ratio",
+          "mod_release",
+          "mod_sustain",
+          "pitch_decay",
+          "pitch_env_amt",
+          "resonance",
+          "second_mod_level",
+          "second_mod_ratio",
+          "sub_level",
+          "tone"
+        ],
+        "path": "instruments/agent-draft-1/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "amp1_level",
+          "amp1_pan",
+          "amp2_level",
+          "amp2_pan",
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "env_vel_amt",
+          "f1_to_f2",
+          "filt1_cutoff",
+          "filt1_drive",
+          "filt1_env_amt",
+          "filt1_keytrack",
+          "filt1_mode",
+          "filt1_resonance",
+          "filt2_cutoff",
+          "filt2_drive",
+          "filt2_env_amt",
+          "filt2_keytrack",
+          "filt2_mode",
+          "filt2_resonance",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "glide_ms",
+          "lfo1_attack_ms",
+          "lfo1_delay_ms",
+          "lfo1_rate_hz",
+          "lfo1_to_pitch",
+          "lfo1_to_pw",
+          "lfo1_wave",
+          "lfo1_width",
+          "lfo2_attack_ms",
+          "lfo2_delay_ms",
+          "lfo2_rate_hz",
+          "lfo2_to_f1",
+          "lfo2_to_f2",
+          "lfo2_to_pan",
+          "lfo2_wave",
+          "lfo2_width",
+          "noise_color",
+          "noise_level",
+          "noise_to_f2",
+          "osc1_detune_cents",
+          "osc1_level",
+          "osc1_octave",
+          "osc1_pan",
+          "osc1_semitones",
+          "osc1_to_f2",
+          "osc1_wave",
+          "osc2_detune_cents",
+          "osc2_level",
+          "osc2_octave",
+          "osc2_pan",
+          "osc2_semitones",
+          "osc2_to_f2",
+          "osc2_wave",
+          "osc_slop",
+          "output_gain",
+          "pulse_width",
+          "sub_level",
+          "sub_mode",
+          "sub_to_f2",
+          "vibrato"
+        ],
+        "path": "instruments/analog-bread-and-butter/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "bass_boost",
+          "cutoff",
+          "deep_sub_level",
+          "detune",
+          "drive",
+          "fat_spread",
+          "fatness",
+          "filt_attack",
+          "filt_decay",
+          "filt_release",
+          "filt_sustain",
+          "filter_env_amount",
+          "filter_model",
+          "gain",
+          "pulse_level",
+          "pulse_transpose",
+          "pulse_width",
+          "resonance",
+          "saw_level",
+          "sub_level",
+          "tone"
+        ],
+        "path": "instruments/bad-subbass1/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "aphex-808-hat",
+        "output_count": 1,
+        "params": [
+          "attack_ms",
+          "crush",
+          "cutoff",
+          "decay_ms",
+          "drive",
+          "fm_amt",
+          "gain",
+          "noise_mix",
+          "ratio_warp",
+          "resonance"
+        ],
+        "path": "instruments/drums/aphex-808-hat.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "a_detune",
+          "a_env_attack",
+          "a_env_decay",
+          "a_env_sustain",
+          "a_harmonics",
+          "a_index",
+          "a_level",
+          "a_octave",
+          "a_ratio",
+          "algorithm",
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "b_detune",
+          "b_env_attack",
+          "b_env_decay",
+          "b_env_sustain",
+          "b_harmonics",
+          "b_index",
+          "b_level",
+          "b_octave",
+          "b_ratio",
+          "c_detune",
+          "c_harmonics",
+          "c_level",
+          "c_octave",
+          "c_ratio",
+          "feedback",
+          "filt_attack",
+          "filt_cutoff",
+          "filt_decay",
+          "filt_env_depth",
+          "filt_mode",
+          "filt_release",
+          "filt_res",
+          "filt_sustain",
+          "gain",
+          "mix_xy",
+          "vel_sensitivity"
+        ],
+        "path": "instruments/emulations/digitone/dsp.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "digitone",
+        "output_count": 1,
+        "params": [
+          "a_detune",
+          "a_env_attack",
+          "a_env_decay",
+          "a_env_sustain",
+          "a_harmonics",
+          "a_index",
+          "a_level",
+          "a_octave",
+          "a_ratio",
+          "algorithm",
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "b_detune",
+          "b_env_attack",
+          "b_env_decay",
+          "b_env_sustain",
+          "b_harmonics",
+          "b_index",
+          "b_level",
+          "b_octave",
+          "b_ratio",
+          "c_detune",
+          "c_harmonics",
+          "c_level",
+          "c_octave",
+          "c_ratio",
+          "feedback",
+          "filt_attack",
+          "filt_cutoff",
+          "filt_decay",
+          "filt_env_depth",
+          "filt_mode",
+          "filt_release",
+          "filt_res",
+          "filt_sustain",
+          "gain",
+          "mix_xy",
+          "vel_sensitivity"
+        ],
+        "path": "instruments/emulations/digitone.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "algorithm",
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "feedback",
+          "gain",
+          "index2",
+          "index3",
+          "index4",
+          "level1",
+          "level3",
+          "mod_decay_ms",
+          "mod_sustain",
+          "ratio1",
+          "ratio2",
+          "ratio3",
+          "ratio4",
+          "vel_to_index"
+        ],
+        "path": "instruments/emulations/dx7-4op/dsp.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dx7-4op",
+        "output_count": 1,
+        "params": [
+          "algorithm",
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "feedback",
+          "gain",
+          "index2",
+          "index3",
+          "index4",
+          "level1",
+          "level3",
+          "mod_decay_ms",
+          "mod_sustain",
+          "ratio1",
+          "ratio2",
+          "ratio3",
+          "ratio4",
+          "vel_to_index"
+        ],
+        "path": "instruments/emulations/dx7-4op.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "click_amt",
+          "click_decay",
+          "draw1",
+          "draw2",
+          "draw3",
+          "draw4",
+          "draw5",
+          "draw6",
+          "draw7",
+          "draw8",
+          "draw9",
+          "drive",
+          "gain",
+          "perc_decay",
+          "perc_level",
+          "rotary_depth",
+          "rotary_doppler",
+          "rotary_speed"
+        ],
+        "path": "instruments/emulations/hammond-organ/dsp.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "hammond-organ",
+        "output_count": 1,
+        "params": [
+          "click_amt",
+          "click_decay",
+          "draw1",
+          "draw2",
+          "draw3",
+          "draw4",
+          "draw5",
+          "draw6",
+          "draw7",
+          "draw8",
+          "draw9",
+          "drive",
+          "gain",
+          "perc_decay",
+          "perc_level",
+          "rotary_depth",
+          "rotary_doppler",
+          "rotary_speed"
+        ],
+        "path": "instruments/emulations/hammond-organ.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "cutoff",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_vel_amt",
+          "gain",
+          "glide_time",
+          "keytrack",
+          "noise_level",
+          "osc1_level",
+          "osc1_pulse",
+          "osc1_saw",
+          "osc1_semi",
+          "osc2_detune",
+          "osc2_level",
+          "osc2_pulse",
+          "osc2_saw",
+          "osc2_semi",
+          "osc3_detune",
+          "osc3_fm_amt",
+          "osc3_level",
+          "osc3_saw",
+          "osc3_semi",
+          "osc3_tri",
+          "pulse_width",
+          "resonance",
+          "sync_1_to_3"
+        ],
+        "path": "instruments/emulations/minimoog/dsp.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "minimoog",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "cutoff",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_vel_amt",
+          "gain",
+          "glide_time",
+          "keytrack",
+          "noise_level",
+          "osc1_level",
+          "osc1_pulse",
+          "osc1_saw",
+          "osc1_semi",
+          "osc2_detune",
+          "osc2_level",
+          "osc2_pulse",
+          "osc2_saw",
+          "osc2_semi",
+          "osc3_detune",
+          "osc3_fm_amt",
+          "osc3_level",
+          "osc3_saw",
+          "osc3_semi",
+          "osc3_tri",
+          "pulse_width",
+          "resonance",
+          "sync_1_to_3"
+        ],
+        "path": "instruments/emulations/minimoog.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "alias",
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "comb_amt",
+          "comb_time",
+          "cutoff",
+          "detune_cents",
+          "drive",
+          "filter_env_amt",
+          "formant",
+          "gain",
+          "keytrack",
+          "morph",
+          "noise_level",
+          "phase_distort",
+          "resonance",
+          "shape",
+          "sync_amt",
+          "table_jump",
+          "unison",
+          "vowel_amt"
+        ],
+        "path": "instruments/emulations/monomachine-digipro/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "monomachine-digipro",
+        "output_count": 1,
+        "params": [
+          "alias",
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "comb_amt",
+          "comb_time",
+          "cutoff",
+          "detune_cents",
+          "drive",
+          "filter_env_amt",
+          "formant",
+          "gain",
+          "keytrack",
+          "morph",
+          "noise_level",
+          "phase_distort",
+          "resonance",
+          "shape",
+          "sync_amt",
+          "table_jump",
+          "unison",
+          "vowel_amt"
+        ],
+        "path": "instruments/emulations/monomachine-digipro.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "cutoff",
+          "drive",
+          "filter_attack_ms",
+          "filter_decay_ms",
+          "filter_env_amt",
+          "filter_release_ms",
+          "filter_sustain",
+          "gain",
+          "keytrack",
+          "ptch",
+          "resonance",
+          "rtim",
+          "rtrg",
+          "start"
+        ],
+        "path": "instruments/emulations/monomachine-dpro-bbox-v1/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "br1",
+          "br2",
+          "cutoff",
+          "drive",
+          "filter_attack_ms",
+          "filter_decay_ms",
+          "filter_env_amt",
+          "filter_release_ms",
+          "filter_sustain",
+          "gain",
+          "keytrack",
+          "mix",
+          "resonance",
+          "time",
+          "tune_cents",
+          "wav1",
+          "wav2",
+          "wid"
+        ],
+        "path": "instruments/emulations/monomachine-dpro-ddrw-v1/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "chrl",
+          "chrw",
+          "cutoff",
+          "drive",
+          "filter_attack_ms",
+          "filter_decay_ms",
+          "filter_env_amt",
+          "filter_release_ms",
+          "filter_sustain",
+          "gain",
+          "keytrack",
+          "pch2",
+          "pch3",
+          "pch4",
+          "resonance",
+          "tune_cents",
+          "wave"
+        ],
+        "path": "instruments/emulations/monomachine-dpro-dens-v1/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "cutoff",
+          "drive",
+          "filter_attack_ms",
+          "filter_decay_ms",
+          "filter_env_amt",
+          "filter_release_ms",
+          "filter_sustain",
+          "gain",
+          "keytrack",
+          "resonance",
+          "sfrq",
+          "sync_mode",
+          "tune_cents",
+          "wave",
+          "wp"
+        ],
+        "path": "instruments/emulations/monomachine-dpro-wave-v2/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "crossmod",
+          "dyn_index_amt",
+          "feedback_a",
+          "feedback_b",
+          "filter_drive",
+          "gain",
+          "glitch_amt",
+          "glitch_rate",
+          "index_a",
+          "index_b",
+          "keytrack",
+          "parallel_mix",
+          "ratio_a",
+          "ratio_b",
+          "ratio_c",
+          "ratio_d",
+          "ratio_warp",
+          "resonance",
+          "self_fm",
+          "tone"
+        ],
+        "path": "instruments/emulations/monomachine-fmplus/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "car_mix",
+          "car_wave",
+          "cutoff",
+          "drive",
+          "filter_attack_ms",
+          "filter_decay_ms",
+          "filter_env_amt",
+          "filter_release_ms",
+          "filter_sustain",
+          "gain",
+          "keytrack",
+          "op1_attack_ms",
+          "op1_decay_ms",
+          "op1_env",
+          "op1_frq",
+          "op1_mix",
+          "op1_release_ms",
+          "op1_sustain",
+          "op1_wave",
+          "op2_attack_ms",
+          "op2_decay_ms",
+          "op2_env",
+          "op2_frq",
+          "op2_mix",
+          "op2_release_ms",
+          "op2_sustain",
+          "op2_wave",
+          "op3_attack_ms",
+          "op3_decay_ms",
+          "op3_env",
+          "op3_frq",
+          "op3_mix",
+          "op3_release_ms",
+          "op3_sustain",
+          "op3_wave",
+          "resonance",
+          "tone",
+          "tune_cents"
+        ],
+        "path": "instruments/emulations/monomachine-fmplus-par-v1/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "cutoff",
+          "drive",
+          "filter_attack_ms",
+          "filter_decay_ms",
+          "filter_env_amt",
+          "filter_release_ms",
+          "filter_sustain",
+          "gain",
+          "keytrack",
+          "op1_attack_ms",
+          "op1_decay_ms",
+          "op1_env",
+          "op1_fb",
+          "op1_fin",
+          "op1_frq",
+          "op1_release_ms",
+          "op1_sustain",
+          "op2_frq",
+          "op2_vol",
+          "resonance",
+          "tone",
+          "tune_cents"
+        ],
+        "path": "instruments/emulations/monomachine-fmplus-stat-v1/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "monomachine-fmplus",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "crossmod",
+          "dyn_index_amt",
+          "feedback_a",
+          "feedback_b",
+          "filter_drive",
+          "gain",
+          "glitch_amt",
+          "glitch_rate",
+          "index_a",
+          "index_b",
+          "keytrack",
+          "parallel_mix",
+          "ratio_a",
+          "ratio_b",
+          "ratio_c",
+          "ratio_d",
+          "ratio_warp",
+          "resonance",
+          "self_fm",
+          "tone"
+        ],
+        "path": "instruments/emulations/monomachine-fmplus.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "bit_depth",
+          "buzz",
+          "cutoff",
+          "drive",
+          "filter_fm",
+          "filter_mode",
+          "fold_amt",
+          "gain",
+          "glitch_amt",
+          "glitch_rate",
+          "keytrack",
+          "noise_mix",
+          "osc1_level",
+          "osc1_semi",
+          "osc2_detune",
+          "osc2_level",
+          "osc2_semi",
+          "osc3_detune",
+          "osc3_level",
+          "osc3_semi",
+          "pulse_mix",
+          "pulse_width",
+          "resonance",
+          "ring_amt",
+          "saw_mix",
+          "sync_amt",
+          "tri_mix"
+        ],
+        "path": "instruments/emulations/monomachine-sid/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "monomachine-sid",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "bit_depth",
+          "buzz",
+          "cutoff",
+          "drive",
+          "filter_fm",
+          "filter_mode",
+          "fold_amt",
+          "gain",
+          "glitch_amt",
+          "glitch_rate",
+          "keytrack",
+          "noise_mix",
+          "osc1_level",
+          "osc1_semi",
+          "osc2_detune",
+          "osc2_level",
+          "osc2_semi",
+          "osc3_detune",
+          "osc3_level",
+          "osc3_semi",
+          "pulse_mix",
+          "pulse_width",
+          "resonance",
+          "ring_amt",
+          "saw_mix",
+          "sync_amt",
+          "tri_mix"
+        ],
+        "path": "instruments/emulations/monomachine-sid.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "brightness",
+          "chaos",
+          "comb_amt",
+          "comb_time",
+          "cutoff",
+          "detune_cents",
+          "drive",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_env_amt",
+          "fm_smear",
+          "gain",
+          "keytrack",
+          "motion_depth",
+          "motion_rate",
+          "noise_level",
+          "phase_smear",
+          "pulse_mix",
+          "pulse_width",
+          "pwm_warp",
+          "resonance",
+          "saw_mix",
+          "sub_level",
+          "swarm"
+        ],
+        "path": "instruments/emulations/monomachine-superwave/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "monomachine-superwave",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "brightness",
+          "chaos",
+          "comb_amt",
+          "comb_time",
+          "cutoff",
+          "detune_cents",
+          "drive",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_env_amt",
+          "fm_smear",
+          "gain",
+          "keytrack",
+          "motion_depth",
+          "motion_rate",
+          "noise_level",
+          "phase_smear",
+          "pulse_mix",
+          "pulse_width",
+          "pwm_warp",
+          "resonance",
+          "saw_mix",
+          "sub_level",
+          "swarm"
+        ],
+        "path": "instruments/emulations/monomachine-superwave.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "cutoff",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_mode",
+          "filter_vel_amt",
+          "gain",
+          "keytrack",
+          "noise_level",
+          "osc_a_level",
+          "osc_a_pulse",
+          "osc_a_saw",
+          "osc_a_semi",
+          "osc_b_detune",
+          "osc_b_keytrack",
+          "osc_b_level",
+          "osc_b_pulse",
+          "osc_b_saw",
+          "osc_b_semi",
+          "pulse_width",
+          "resonance",
+          "vintage"
+        ],
+        "path": "instruments/emulations/oberheim-sem/dsp.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "oberheim-sem",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "cutoff",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_mode",
+          "filter_vel_amt",
+          "gain",
+          "keytrack",
+          "noise_level",
+          "osc_a_level",
+          "osc_a_pulse",
+          "osc_a_saw",
+          "osc_a_semi",
+          "osc_b_detune",
+          "osc_b_keytrack",
+          "osc_b_level",
+          "osc_b_pulse",
+          "osc_b_saw",
+          "osc_b_semi",
+          "pulse_width",
+          "resonance",
+          "vintage"
+        ],
+        "path": "instruments/emulations/oberheim-sem.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "cutoff",
+          "env_pitch_amt",
+          "env_pw_amt",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_vel_amt",
+          "gain",
+          "keytrack",
+          "noise_level",
+          "osc_a_fine_cents",
+          "osc_a_level",
+          "osc_a_pulse",
+          "osc_a_pw",
+          "osc_a_saw",
+          "osc_a_semi",
+          "osc_b_fine_cents",
+          "osc_b_keytrack",
+          "osc_b_level",
+          "osc_b_pulse",
+          "osc_b_pw",
+          "osc_b_saw",
+          "osc_b_semi",
+          "osc_b_tri",
+          "poly_filter_amt",
+          "poly_pitch_amt",
+          "poly_pw_amt",
+          "resonance",
+          "sync",
+          "vintage"
+        ],
+        "path": "instruments/emulations/prophet-5/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "prophet-5",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "amp_vel_amt",
+          "cutoff",
+          "env_pitch_amt",
+          "env_pw_amt",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_vel_amt",
+          "gain",
+          "keytrack",
+          "noise_level",
+          "osc_a_fine_cents",
+          "osc_a_level",
+          "osc_a_pulse",
+          "osc_a_pw",
+          "osc_a_saw",
+          "osc_a_semi",
+          "osc_b_fine_cents",
+          "osc_b_keytrack",
+          "osc_b_level",
+          "osc_b_pulse",
+          "osc_b_pw",
+          "osc_b_saw",
+          "osc_b_semi",
+          "osc_b_tri",
+          "poly_filter_amt",
+          "poly_pitch_amt",
+          "poly_pw_amt",
+          "resonance",
+          "sync",
+          "vintage"
+        ],
+        "path": "instruments/emulations/prophet-5.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "cutoff",
+          "drift",
+          "drive",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_env_amt",
+          "gain",
+          "keytrack",
+          "lfo_pitch_amt",
+          "lfo_rate",
+          "lfo_shape_amt",
+          "noise_mix",
+          "osc1_mix",
+          "osc1_pw",
+          "osc1_shape",
+          "osc2_detune",
+          "osc2_fine",
+          "osc2_mix",
+          "osc2_pw",
+          "osc2_shape",
+          "resonance",
+          "sub_mix",
+          "vibrato_amt"
+        ],
+        "path": "instruments/emulations/prophet-6/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "brass",
+          "cutoff",
+          "cutoff_skew",
+          "env_to_pitch",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_tone",
+          "gain",
+          "keytrack",
+          "lfo_rate_hz",
+          "lfo_to_cutoff",
+          "lfo_to_pw",
+          "noise_level",
+          "osc1_semitones",
+          "osc1_shape",
+          "osc2_semitones",
+          "osc2_shape",
+          "osc_detune_cents",
+          "osc_mix",
+          "osc_slop",
+          "pulse_width",
+          "resonance",
+          "shape_drift",
+          "stereo_spread",
+          "sub_level",
+          "vel_to_filter",
+          "vibrato"
+        ],
+        "path": "instruments/emulations/prophet-6-emu/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "prophet-6-emu",
+        "output_count": 2,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "brass",
+          "cutoff",
+          "cutoff_skew",
+          "env_to_pitch",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_tone",
+          "gain",
+          "keytrack",
+          "lfo_rate_hz",
+          "lfo_to_cutoff",
+          "lfo_to_pw",
+          "noise_level",
+          "osc1_semitones",
+          "osc1_shape",
+          "osc2_semitones",
+          "osc2_shape",
+          "osc_detune_cents",
+          "osc_mix",
+          "osc_slop",
+          "pulse_width",
+          "resonance",
+          "shape_drift",
+          "stereo_spread",
+          "sub_level",
+          "vel_to_filter",
+          "vibrato"
+        ],
+        "path": "instruments/emulations/prophet-6-emu.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "brass",
+          "cutoff",
+          "cutoff_skew",
+          "env_to_pitch",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_tone",
+          "gain",
+          "keytrack",
+          "lfo_rate_hz",
+          "lfo_to_cutoff",
+          "lfo_to_pw",
+          "noise_level",
+          "osc1_semitones",
+          "osc1_shape",
+          "osc2_semitones",
+          "osc2_shape",
+          "osc_detune_cents",
+          "osc_mix",
+          "osc_slop",
+          "pulse_width",
+          "resonance",
+          "shape_drift",
+          "stereo_spread",
+          "sub_level",
+          "vel_to_filter",
+          "vibrato"
+        ],
+        "path": "instruments/emulations/prophet-6-inspired/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "prophet-6-inspired",
+        "output_count": 2,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "brass",
+          "cutoff",
+          "cutoff_skew",
+          "env_to_pitch",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amt",
+          "filter_tone",
+          "gain",
+          "keytrack",
+          "lfo_rate_hz",
+          "lfo_to_cutoff",
+          "lfo_to_pw",
+          "noise_level",
+          "osc1_semitones",
+          "osc1_shape",
+          "osc2_semitones",
+          "osc2_shape",
+          "osc_detune_cents",
+          "osc_mix",
+          "osc_slop",
+          "pulse_width",
+          "resonance",
+          "shape_drift",
+          "stereo_spread",
+          "sub_level",
+          "vel_to_filter",
+          "vibrato"
+        ],
+        "path": "instruments/emulations/prophet-6-inspired.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "prophet-6",
+        "output_count": 1,
+        "params": [
+          "amp_attack_ms",
+          "amp_decay_ms",
+          "amp_release_ms",
+          "amp_sustain",
+          "cutoff",
+          "drift",
+          "drive",
+          "filt_attack_ms",
+          "filt_decay_ms",
+          "filt_release_ms",
+          "filt_sustain",
+          "filter_env_amt",
+          "gain",
+          "keytrack",
+          "lfo_pitch_amt",
+          "lfo_rate",
+          "lfo_shape_amt",
+          "noise_mix",
+          "osc1_mix",
+          "osc1_pw",
+          "osc1_shape",
+          "osc2_detune",
+          "osc2_fine",
+          "osc2_mix",
+          "osc2_pw",
+          "osc2_shape",
+          "resonance",
+          "sub_mix",
+          "vibrato_amt"
+        ],
+        "path": "instruments/emulations/prophet-6.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "bark_amt",
+          "decay",
+          "detune",
+          "gain",
+          "harmonic_2",
+          "harmonic_4",
+          "tine_vol",
+          "vib_depth",
+          "vib_speed"
+        ],
+        "path": "instruments/emulations/rhodes-additive-v2/dsp.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch)) ; Fundamental frequency in Hz\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "rhodes-additive-v2",
+        "output_count": 2,
+        "params": [
+          "bark_amt",
+          "decay",
+          "detune",
+          "gain",
+          "harmonic_2",
+          "harmonic_4",
+          "tine_vol",
+          "vib_depth",
+          "vib_speed"
+        ],
+        "path": "instruments/emulations/rhodes-additive-v2.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch)) ; Fundamental frequency in Hz\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "air_level",
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "bend",
+          "bend_decay",
+          "body_decay",
+          "body_level",
+          "body_shape",
+          "body_tone",
+          "click_decay",
+          "click_level",
+          "click_noise_mix",
+          "click_sweep",
+          "click_tone",
+          "dirt",
+          "drift",
+          "drive",
+          "fm_decay",
+          "fm_feedback",
+          "fm_level",
+          "fm_ratio",
+          "gain",
+          "harmonic",
+          "low_cut",
+          "noise_color",
+          "noise_decay",
+          "noise_level",
+          "noise_q",
+          "noise_tone",
+          "phase_bite",
+          "punch",
+          "punch_decay",
+          "resonance",
+          "squash",
+          "sub_decay",
+          "sub_level",
+          "sub_ratio",
+          "tone",
+          "tune"
+        ],
+        "path": "instruments/fm-trx-kick/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "analog_drift",
+          "cutoff",
+          "filt_attack",
+          "filt_decay",
+          "filt_release",
+          "filt_sustain",
+          "filter_drive",
+          "filter_env_amount",
+          "gain",
+          "hp_cutoff",
+          "hp_resonance",
+          "input_drive",
+          "keytrack",
+          "lfo_filter_amount",
+          "lfo_pitch",
+          "lfo_rate",
+          "noise_level",
+          "output_bite",
+          "pitch_env_amount",
+          "pulse_width",
+          "pwm_amount",
+          "resonance",
+          "ring_level",
+          "scream",
+          "sub_level",
+          "vco1_pulse",
+          "vco1_saw",
+          "vco2_fine",
+          "vco2_interval",
+          "vco2_level"
+        ],
+        "path": "instruments/korg1/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "air_level",
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "bend",
+          "cavity_level",
+          "click_level",
+          "coupling",
+          "damping",
+          "dirt",
+          "drive",
+          "gain",
+          "hp",
+          "mallet",
+          "material",
+          "pitch_sweep",
+          "shell_level",
+          "skin_level",
+          "strike_pos",
+          "sweep_decay",
+          "tension",
+          "tone",
+          "tune"
+        ],
+        "path": "instruments/machinedrum-physical/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "bend",
+          "bend_decay",
+          "body_level",
+          "body_shape",
+          "body_tone",
+          "click_decay",
+          "click_level",
+          "click_noise_mix",
+          "click_tone",
+          "dirt",
+          "drive",
+          "fine",
+          "gain",
+          "low_cut",
+          "membrane_decay",
+          "model",
+          "noise_color",
+          "noise_decay",
+          "noise_level",
+          "noise_q",
+          "noise_tone",
+          "overtone",
+          "punch",
+          "punch_decay",
+          "resonance",
+          "sub_level",
+          "sub_ratio",
+          "tone",
+          "tune"
+        ],
+        "path": "instruments/memb2-drum/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "cutoff",
+          "drive",
+          "filt_attack",
+          "filt_decay",
+          "filt_release",
+          "filt_sustain",
+          "filter_env_amount",
+          "gain",
+          "key_track",
+          "noise_level",
+          "osc1_level",
+          "osc1_oct",
+          "osc1_wave",
+          "osc2_detune",
+          "osc2_level",
+          "osc2_oct",
+          "osc2_wave",
+          "osc3_detune",
+          "osc3_level",
+          "osc3_oct",
+          "osc3_wave",
+          "pulse_width",
+          "resonance"
+        ],
+        "path": "instruments/minimoog-lad2/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "drive",
+          "f1_cutoff",
+          "f1_drive",
+          "f1_env_amt",
+          "f1_lfo_amt",
+          "f1_mode",
+          "f1_resonance",
+          "f2_cutoff",
+          "f2_drive",
+          "f2_env_amt",
+          "f2_lfo_amt",
+          "f2_mode",
+          "f2_resonance",
+          "filter_blend",
+          "filter_route",
+          "fold",
+          "gain",
+          "lfo_rate",
+          "lfo_to_index",
+          "lfo_to_pitch",
+          "mod_attack",
+          "mod_decay",
+          "mod_env_to_op2",
+          "mod_env_to_op3",
+          "mod_release",
+          "mod_sustain",
+          "op1_detune",
+          "op1_level",
+          "op1_ratio",
+          "op2_detune",
+          "op2_level",
+          "op2_ratio",
+          "op2_to_op1",
+          "op3_detune",
+          "op3_level",
+          "op3_ratio",
+          "op3_to_op1",
+          "op3_to_op2"
+        ],
+        "path": "instruments/mod-fm-messui/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 0,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "body_level",
+          "click_decay",
+          "click_level",
+          "click_tone",
+          "damping",
+          "drive",
+          "gain",
+          "mode2_decay",
+          "mode2_level",
+          "mode2_ratio",
+          "mode3_decay",
+          "mode3_level",
+          "mode3_ratio",
+          "punch",
+          "punch_decay",
+          "sweep_amount",
+          "sweep_curve",
+          "sweep_decay",
+          "tune"
+        ],
+        "path": "instruments/modal-drum/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(param tune @default 1.0 @min 0.25 @max 2.0)\n(param body_level @default 0.95 @min 0 @max 2)"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "acoustic-guitar",
+        "output_count": 2,
+        "params": [
+          "brightness",
+          "gain",
+          "hardness",
+          "mic_dist_ms",
+          "pick_pos",
+          "sustain_s",
+          "vel_bright",
+          "wood"
+        ],
+        "path": "instruments/strings/acoustic-guitar.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "bowed-strings-model",
+        "output_count": 2,
+        "params": [
+          "bow_attack_ms",
+          "bow_position",
+          "bow_pressure",
+          "bow_velocity",
+          "brightness",
+          "decay_time_ms",
+          "ensemble",
+          "gain",
+          "pick_pos",
+          "rosin",
+          "soundboard",
+          "stereo_width",
+          "sympathetic",
+          "vibrato_depth",
+          "vibrato_rate"
+        ],
+        "path": "instruments/strings/bowed-strings-model.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "concert-harp",
+        "output_count": 2,
+        "params": [
+          "brightness",
+          "gain",
+          "nail",
+          "pluck_pos",
+          "soundboard",
+          "stereo_width",
+          "sustain_s",
+          "sympathetic",
+          "vel_bright",
+          "weirdness"
+        ],
+        "path": "instruments/strings/concert-harp.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "accent_to_cutoff",
+          "accent_to_drive",
+          "accent_to_env",
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "cutoff",
+          "drive",
+          "env_mod",
+          "filt_attack",
+          "filt_decay",
+          "filt_release",
+          "filt_sustain",
+          "fine_cents",
+          "keytrack",
+          "osc_level",
+          "output_gain",
+          "post_tone",
+          "pulse_width",
+          "resonance",
+          "slide_time",
+          "tune_semitones",
+          "wave_mix"
+        ],
+        "path": "instruments/tb303-basic/dsp.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "dsp",
+        "output_count": 1,
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_release",
+          "amp_sustain",
+          "arp_amount",
+          "arp_pattern",
+          "arp_rate",
+          "arp_steps",
+          "bit_depth",
+          "cutoff",
+          "drive",
+          "dry_chip",
+          "filter_env_amt",
+          "filter_mode",
+          "lfo_to_cutoff",
+          "noise_level",
+          "noise_rate",
+          "noise_tone",
+          "osc1_level",
+          "osc1_octave",
+          "osc1_semitones",
+          "osc1_wave",
+          "osc2_detune",
+          "osc2_level",
+          "osc2_octave",
+          "osc2_semitones",
+          "osc2_wave",
+          "output_gain",
+          "pitch_decay",
+          "pitch_env_amt",
+          "pulse_width1",
+          "pulse_width2",
+          "pwm_amount",
+          "pwm_rate",
+          "resonance",
+          "tri_level",
+          "tri_octave",
+          "vibrato_depth",
+          "vibrato_rate"
+        ],
+        "path": "instruments/videogame-arp/dsp.lisp",
+        "preview": "(def gate (in 1 @name gate))\n(def pitch (in 2 @name pitch))\n(def velocity (in 3 @name velocity))\n(def trigger (in 4 @name trigger))\n(def mod1 (in 5 @name mod1 @modulator 1))\n(def mod2 (in 6 @name mod2 @modulator 2))"
+      },
+      {
+        "kind": "instrument",
+        "modulator_count": 10,
+        "name": "stable-flute-v3",
+        "output_count": 1,
+        "params": [
+          "attack",
+          "brightness",
+          "coupling",
+          "gain",
+          "jetRatio",
+          "loop_gain",
+          "noise_amt",
+          "pressure",
+          "reflection",
+          "release",
+          "tuning",
+          "vibDepth",
+          "vibRate"
+        ],
+        "path": "instruments/woodwinds/stable-flute-v3.lisp",
+        "preview": "(def gate     (in 1  @name gate))\n(def pitch    (in 2  @name pitch))\n(def velocity (in 3  @name velocity))\n(def trigger  (in 4  @name trigger))\n(def mod1     (in 5  @name mod1 @modulator 1))\n(def mod2     (in 6  @name mod2 @modulator 2))"
+      },
+      {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "MODUM_DELAY",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "cutoff",
@@ -530,13 +2637,45 @@
           "rate",
           "res"
         ],
-        "path": "effects/MODUM_DELAY.lisp",
+        "path": "effects/MODUM_DELAY/dsp.lisp",
         "preview": "(def input (in 1 @name signal))\n(def lfo (cos (* twopi (triangle (phasor (param rate @min 0.1 @max 100 @default 1) ) 0.2 ))))\n(def x\n  (biquad\n    input\n    (+ (* (scale lfo -1 1 0 1) 100) (param cutoff @min 50 @max 4000 @default 900))"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "dimension-d-chorus",
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "drive",
+          "feedback",
+          "mix",
+          "output",
+          "spread",
+          "time",
+          "tone",
+          "wow_depth",
+          "wow_rate"
+        ],
+        "path": "effects/agent-effect-draft-2/dsp.lisp",
+        "preview": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(param time @default 16000 @min 200 @max 88200 @unit samples)\n(param spread @default 0.08 @min -0.3 @max 0.3)\n(param feedback @default 0.42 @min 0 @max 0.92)\n(param drive @default 1.8 @min 0.5 @max 8)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "curve_type",
+          "mix",
+          "shape"
+        ],
+        "path": "effects/curve-saturator/dsp.lisp",
+        "preview": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(param curve_type @default 1 @min 1 @max 4)\n(param shape @default 0.55 @min 0 @max 1)\n(param mix @default 0.65 @min 0 @max 1)\n(def drive (+ 1 (* shape 15)))"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "base",
@@ -548,13 +2687,13 @@
           "tone",
           "width"
         ],
-        "path": "effects/dimension-d-chorus.lisp",
+        "path": "effects/dimension-d-chorus/dsp.lisp",
         "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def mono (* 0.5 (+ in-l in-r)))\n(param rate @min 0.05 @max 1.2 @default 0.32)\n(param depth @min 1.0 @max 20 @default 8.5)\n(param base @min 6 @max 28 @default 12.5)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "dualdelaymod",
+        "name": "dsp",
         "output_count": 1,
         "params": [
           "cutoff",
@@ -564,13 +2703,13 @@
           "m2",
           "res"
         ],
-        "path": "effects/dualdelaymod.lisp",
+        "path": "effects/dualdelaymod/dsp.lisp",
         "preview": "(def input (in 1 @name signal))\n(def lfo (cos (* twopi (triangle (phasor (param lforate @min 0.1 @max 32 @default 1))))))\n(def x\n  (biquad\n    input\n    (+ (* (scale lfo -1 1 0 1) 1000) (param cutoff @min 50 @max 4000 @default 900))"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "jet-flanger-stereo",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "depth",
@@ -580,13 +2719,13 @@
           "rate",
           "width"
         ],
-        "path": "effects/jet-flanger-stereo.lisp",
+        "path": "effects/jet-flanger-stereo/dsp.lisp",
         "preview": "(def sig (in 1 @name signal))\n(def rate (param rate @min 0.01 @max 10 @default 0.15))\n(def depth (param depth @min 0 @max 1 @default 0.8))\n(def manual (param manual @min 1 @max 800 @default 250))\n(def fbk (param feedback @min -0.98 @max 0.98 @default 0.85))\n(def mix-amt (param mix @min 0 @max 1 @default 0.5))"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "lexilush",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "damping",
@@ -598,13 +2737,13 @@
           "pre_dly",
           "size"
         ],
-        "path": "effects/lexilush.lisp",
+        "path": "effects/lexilush/dsp.lisp",
         "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def in-stereo (+ in-l in-r))\n(param pre_dly @min 0 @max 5000 @default 240)\n(param size @min 0.5 @max 2.0 @default 1.0)\n(param decay @min 0.1 @max 0.98 @default 0.8)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "lowdcmp",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "gain",
@@ -612,13 +2751,13 @@
           "ratio",
           "threshold"
         ],
-        "path": "effects/lowdcmp.lisp",
+        "path": "effects/lowdcmp/dsp.lisp",
         "preview": "(def input1 (in 1 @name signal))\n(param threshold @min -40 @max 0 @default -10)\n(param gain @min 0 @max 10 @default 1)\n(param ratio @min 1 @max 32 @default 10)\n(param knee @min 1 @max 10 @default 5)\n(out (compressor"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "lushlexiconreverb",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "damping",
@@ -627,26 +2766,45 @@
           "pre",
           "size"
         ],
-        "path": "effects/lushlexiconreverb.lisp",
+        "path": "effects/lushlexiconreverb/dsp.lisp",
         "preview": "(def in-l (in 1 @name signal))\n(param mix @min 0 @max 1 @default 0.3)\n(param size @min 0.5 @max 2.0 @default 1.0)\n(param decay @min 0.1 @max 0.95 @default 0.7)\n(param damping @min 500 @max 10000 @default 3000)\n(param pre @min 0 @max 2000 @default 500)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "mod_delay",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "delay_max",
           "fbk",
           "freq"
         ],
-        "path": "effects/mod_delay.lisp",
+        "path": "effects/mod_delay/dsp.lisp",
         "preview": "(def input (in 1 @name signal))\n(make-history h)\n(def fin (read-history h))\n(def freq (param freq @min 0.1 @max 500 @default 32))\n(def dmax (param delay_max @min 50 @max 5000 @default 100))\n(def delaytime (scale (triangle (phasor freq) 0.2) 0 1 50 dmax))"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "roland-flanger-stereo",
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "delay_ms",
+          "feedback",
+          "fine",
+          "mix",
+          "output",
+          "shift",
+          "tone",
+          "width",
+          "window_ms"
+        ],
+        "path": "effects/pitchdelay1/dsp.lisp",
+        "preview": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(param shift @default 7.0 @min -24.0 @max 24.0 @unit semitones)\n(param fine @default 9.0 @min -50.0 @max 50.0 @unit cents)\n(param window_ms @default 95.0 @min 25.0 @max 220.0 @unit ms)\n(param delay_ms @default 180.0 @min 0.0 @max 900.0 @unit ms)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "color",
@@ -656,25 +2814,63 @@
           "mix",
           "rate"
         ],
-        "path": "effects/roland-flanger-stereo.lisp",
+        "path": "effects/roland-flanger-stereo/dsp.lisp",
         "preview": "(def sig (in 1 @name signal))\n(def rate (param rate @min 0.01 @max 5 @default 0.2))\n(def depth (param depth @min 0 @max 1 @default 0.5))\n(def manual (param manual @min 1 @max 500 @default 120))\n(def fbk (param feedback @min -0.99 @max 0.99 @default 0.75))\n(def color (param color @min 1000 @max 16000 @default 5000))"
       },
       {
         "kind": "effect",
+        "modulator_count": 0,
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "damping",
+          "delay_ms",
+          "feedback",
+          "fine",
+          "mix",
+          "output",
+          "shift",
+          "shimmer",
+          "width",
+          "window_ms"
+        ],
+        "path": "effects/shimmerpitch/dsp.lisp",
+        "preview": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(param shift @default 12.0 @min -24.0 @max 24.0 @unit semitones)\n(param fine @default 0.0 @min -50.0 @max 50.0 @unit cents)\n(param window_ms @default 90.0 @min 25.0 @max 220.0 @unit ms)\n(param delay_ms @default 360.0 @min 20.0 @max 1400.0 @unit ms)"
+      },
+      {
+        "kind": "effect",
         "modulator_count": 1,
-        "name": "sidechain",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "ratio",
           "threshold"
         ],
-        "path": "effects/sidechain.lisp",
+        "path": "effects/sidechain/dsp.lisp",
         "preview": "(def input (in 1 @name signal))\n(def input2 (in 2 @name signal))\n(def side (in 3 @name signal @modulator 1))\n(param threshold @min -80 @max -2 @default -20)\n(param ratio min 1 @max 20 @default 10)\n(def o (compressor input ratio threshold 6 .01 .01 1 side))"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "spectral-bin-freeze",
+        "name": "dsp",
+        "output_count": 2,
+        "params": [
+          "base",
+          "depth",
+          "feedback",
+          "mix",
+          "rate",
+          "spread",
+          "tone",
+          "width"
+        ],
+        "path": "effects/simp-chorus1/dsp.lisp",
+        "preview": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(param rate @default 0.38 @min 0.05 @max 3.0 @unit Hz)\n(param depth @default 210 @min 0 @max 650)\n(param base @default 520 @min 80 @max 1800)\n(param spread @default 180 @min 0 @max 700)"
+      },
+      {
+        "kind": "effect",
+        "modulator_count": 0,
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "freeze",
@@ -683,40 +2879,42 @@
           "tone",
           "width"
         ],
-        "path": "effects/spectral-bin-freeze.lisp",
-        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param freeze @min 0 @max 1 @default 0.55)\n(param smear @min 0 @max 1 @default 0.35)\n(param tone @min 800 @max 18000 @default 9000)"
+        "path": "effects/spectral-bin-freeze/dsp.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param freeze @min 0 @max 1 @default 0.0)\n(param smear @min 0 @max 1 @default 0.0)\n(param tone @min 800 @max 18000 @default 14000)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "spectral-cloud-gate",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "density",
           "mix",
+          "motion",
           "phase_amt",
-          "smooth"
+          "smear",
+          "width"
         ],
-        "path": "effects/spectral-cloud-gate.lisp",
-        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param density @min 0.05 @max 1 @default 0.45)\n(param phase_amt @min 0 @max 1 @default 0.35)\n(param smooth @min 0 @max 1 @default 0.2)"
+        "path": "effects/spectral-cloud-gate/dsp.lisp",
+        "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param density @min 0.03 @max 1 @default 0.32)\n(param smear @min 0 @max 1 @default 0.35)\n(param motion @min 0.02 @max 12 @default 1.6)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "spectral-short-ir",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "gain",
           "tone",
           "wet"
         ],
-        "path": "effects/spectral-short-ir.lisp",
+        "path": "effects/spectral-short-ir/dsp.lisp",
         "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param wet @min 0 @max 1 @default 0.42)\n(param gain @min 0 @max 2 @default 1.0)\n(param tone @min 600 @max 14000 @default 6500)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "spectral-vocoder-shift",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "color",
@@ -724,20 +2922,20 @@
           "mix",
           "ratio"
         ],
-        "path": "effects/spectral-vocoder-shift.lisp",
+        "path": "effects/spectral-vocoder-shift/dsp.lisp",
         "preview": "(def in-l (in 1 @name signal-l))\n(def in-r (in 2 @name signal-r))\n(def input (* 0.5 (+ in-l in-r)))\n(param ratio @min 0.5 @max 2.0 @default 1.25)\n(param color @min 1000 @max 16000 @default 11000)\n(param mix @min 0 @max 1 @default 0.55)"
       },
       {
         "kind": "effect",
         "modulator_count": 0,
-        "name": "stereo-tremolo",
+        "name": "dsp",
         "output_count": 2,
         "params": [
           "depth",
           "rate",
           "spread"
         ],
-        "path": "effects/stereo-tremolo.lisp",
+        "path": "effects/stereo-tremolo/dsp.lisp",
         "preview": "(def in_l (in 1 @name left))\n(def in_r (in 2 @name right))\n(param rate @min 0.1 @max 20 @default 5)\n(param depth @min 0 @max 1 @default 0.8)\n(param spread @min 0 @max 1 @default 0.5)\n(def p (phasor rate))"
       }
     ],
@@ -809,9 +3007,20 @@
             "type": "string|null"
           }
         },
-        "ManifestModDestination": {
+        "ManifestModDepthLane": {
           "depthCellId": {
             "type": "int"
+          },
+          "slot": {
+            "type": "int"
+          }
+        },
+        "ManifestModDestination": {
+          "activeCellId": {
+            "type": "int"
+          },
+          "depthLanes": {
+            "type": "ManifestModDepthLane[]"
           },
           "depthMax": {
             "type": "float|null"
@@ -832,9 +3041,6 @@
             "type": "string"
           },
           "paramCellId": {
-            "type": "int"
-          },
-          "sourceCellId": {
             "type": "int"
           },
           "unit": {
@@ -862,6 +3068,9 @@
         },
         "ManifestParam": {
           "cellId": {
+            "type": "int"
+          },
+          "cellSpan": {
             "type": "int"
           },
           "default": {
@@ -895,8 +3104,8 @@
     },
     "modulation": {
       "generated_helpers": [
-        "__mod__<param>__source",
-        "__mod__<param>__depth",
+        "__mod__<param>__active",
+        "__mod__<param>__depth_slot<N>",
         "__mod__<param>__resolved"
       ],
       "modes": [
@@ -906,7 +3115,7 @@
       ],
       "notes": [
         "Modulatable params require at least one input marked with @modulator.",
-        "Generated modulation source and depth params are hidden host parameters."
+        "Generated modulation active and depth-lane params are hidden host parameters."
       ],
       "required_param_attributes": [
         "@mod true",
@@ -917,24 +3126,6 @@
       "special_form": "(mod paramName)"
     },
     "operators": [
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 1,
-          "minimum": 1
-        },
-        "attributes": [],
-        "category": "math",
-        "implementation": {
-          "function": "evalUnaryMath",
-          "source_file": "LispEvaluator.swift"
-        },
-        "name": "atan",
-        "signatures": [
-          "(atan x)"
-        ],
-        "summary": "One-argument arctangent."
-      },
       {
         "aliases": [],
         "arity": {
@@ -1037,6 +3228,27 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": null,
+          "minimum": null
+        },
+        "attributes": [
+          "@max",
+          "@min",
+          "@mode",
+          "@shape"
+        ],
+        "category": "uncategorized",
+        "implementation": {
+          "function": "evalModulatedParam",
+          "source_file": "LispEvaluator.swift"
+        },
+        "name": "__modulated-param",
+        "signatures": [],
+        "summary": "Operator implemented in DGenLisp evaluator."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": 4,
           "minimum": 1
         },
@@ -1084,6 +3296,7 @@
           "@mono",
           "@name",
           "@normalize",
+          "@shape",
           "@start"
         ],
         "category": "tensor_creation",
@@ -1105,12 +3318,7 @@
           "maximum": 5,
           "minimum": 1
         },
-        "attributes": [
-          "@cutoff",
-          "@gain",
-          "@mode",
-          "@q"
-        ],
+        "attributes": [],
         "category": "effect",
         "implementation": {
           "function": "evalBiquad",
@@ -1226,9 +3434,12 @@
         },
         "attributes": [
           "@attack",
+          "@default-file",
+          "@file",
           "@knee",
           "@ratio",
           "@release",
+          "@shape",
           "@sidechain",
           "@threshold"
         ],
@@ -1305,9 +3516,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@shape"
-        ],
+        "attributes": [],
         "category": "tensor_shape",
         "implementation": {
           "function": "evalExpand",
@@ -1325,9 +3534,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@backend"
-        ],
+        "attributes": [],
         "category": "fft",
         "implementation": {
           "function": "evalFFT",
@@ -1384,10 +3591,7 @@
           "maximum": 1,
           "minimum": 1
         },
-        "attributes": [
-          "@N",
-          "@n"
-        ],
+        "attributes": [],
         "category": "windowing",
         "implementation": {
           "function": "evalHann",
@@ -1425,11 +3629,7 @@
           "maximum": null,
           "minimum": 2
         },
-        "attributes": [
-          "@N",
-          "@backend",
-          "@n"
-        ],
+        "attributes": [],
         "category": "fft",
         "implementation": {
           "function": "evalIFFT",
@@ -1449,10 +3649,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@modulator",
-          "@name"
-        ],
+        "attributes": [],
         "category": "io",
         "implementation": {
           "function": "evalInput",
@@ -1478,6 +3675,7 @@
           "@mono",
           "@name",
           "@normalize",
+          "@shape",
           "@start"
         ],
         "category": "tensor_creation",
@@ -1490,6 +3688,20 @@
           "(ir @file \"irs/room.wav\")"
         ],
         "summary": "Load a WAV file as an impulse-response tensor."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 4,
+          "minimum": 4
+        },
+        "attributes": [],
+        "category": "preamble",
+        "name": "ladder",
+        "signatures": [
+          "(ladder input cutoff res drive)"
+        ],
+        "summary": "Moog-style 4-pole low-pass helper with drive and resonance compensation. Cutoff is Hz, resonance is 0..1, drive is pre-filter saturation."
       },
       {
         "aliases": [],
@@ -1555,9 +3767,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@axis"
-        ],
+        "attributes": [],
         "category": "reduction",
         "implementation": {
           "function": "evalMaxAxis",
@@ -1575,9 +3785,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@axis"
-        ],
+        "attributes": [],
         "category": "reduction",
         "implementation": {
           "function": "evalMean",
@@ -1598,9 +3806,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@axis"
-        ],
+        "attributes": [],
         "category": "reduction",
         "implementation": {
           "function": "evalMeanAxis",
@@ -1674,11 +3880,7 @@
           "maximum": null,
           "minimum": 0
         },
-        "attributes": [
-          "@hop",
-          "@hopSize",
-          "@size"
-        ],
+        "attributes": [],
         "category": "signal_generator",
         "implementation": {
           "function": "evalNoise",
@@ -1717,9 +3919,7 @@
           "maximum": null,
           "minimum": 2
         },
-        "attributes": [
-          "@name"
-        ],
+        "attributes": [],
         "category": "io",
         "implementation": {
           "function": "evalOutput",
@@ -1757,9 +3957,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@padding"
-        ],
+        "attributes": [],
         "category": "tensor_shape",
         "implementation": {
           "function": "evalPad",
@@ -1777,20 +3975,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@default",
-          "@generated",
-          "@generated-for",
-          "@max",
-          "@min",
-          "@mod-depth-max",
-          "@mod-depth-min",
-          "@mod-depth-param",
-          "@mod-mode",
-          "@mod-resolved-symbol",
-          "@mod-source-param",
-          "@unit"
-        ],
+        "attributes": [],
         "category": "io",
         "implementation": {
           "function": "evalParam",
@@ -1810,12 +3995,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@N",
-          "@hop",
-          "@hopSize",
-          "@n"
-        ],
+        "attributes": [],
         "category": "spectral_effect",
         "implementation": {
           "function": "evalPartitionIR",
@@ -1840,8 +4020,7 @@
           "@gain",
           "@hop",
           "@hopSize",
-          "@n",
-          "@shape"
+          "@n"
         ],
         "category": "spectral_effect",
         "implementation": {
@@ -1925,12 +4104,7 @@
           "maximum": null,
           "minimum": 3
         },
-        "attributes": [
-          "@N",
-          "@hop",
-          "@hopSize",
-          "@n"
-        ],
+        "attributes": [],
         "category": "spectral_effect",
         "implementation": {
           "function": "evalPhaseVocoder",
@@ -1980,6 +4154,34 @@
           "(polar-fft re im)"
         ],
         "summary": "Convert rectangular complex spectrum to `(magnitude phase)`."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 3,
+          "minimum": 3
+        },
+        "attributes": [],
+        "category": "preamble",
+        "name": "polyblep_pulse",
+        "signatures": [
+          "(polyblep_pulse phase width freq)"
+        ],
+        "summary": "Anti-aliased pulse oscillator helper. Width is clipped internally and should usually stay around 0.05..0.95."
+      },
+      {
+        "aliases": [],
+        "arity": {
+          "maximum": 2,
+          "minimum": 2
+        },
+        "attributes": [],
+        "category": "preamble",
+        "name": "polyblep_saw",
+        "signatures": [
+          "(polyblep_saw phase freq)"
+        ],
+        "summary": "Anti-aliased saw oscillator helper. Pass a phasor phase in 0..1 and frequency in Hz."
       },
       {
         "aliases": [],
@@ -2062,9 +4264,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@repeats"
-        ],
+        "attributes": [],
         "category": "tensor_shape",
         "implementation": {
           "function": "evalRepeat",
@@ -2082,9 +4282,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@shape"
-        ],
+        "attributes": [],
         "category": "tensor_shape",
         "implementation": {
           "function": "evalReshape",
@@ -2156,9 +4354,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@ranges"
-        ],
+        "attributes": [],
         "category": "tensor_shape",
         "implementation": {
           "function": "evalShrink",
@@ -2174,6 +4370,7 @@
         "aliases": [
           "cos",
           "tan",
+          "atan",
           "tanh",
           "exp",
           "log",
@@ -2205,9 +4402,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@axis"
-        ],
+        "attributes": [],
         "category": "reduction",
         "implementation": {
           "function": "evalSoftmax",
@@ -2227,13 +4422,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@N",
-          "@hop",
-          "@hopSize",
-          "@hops",
-          "@n"
-        ],
+        "attributes": [],
         "category": "spectral_effect",
         "implementation": {
           "function": "evalSpectrumDelay",
@@ -2253,14 +4442,7 @@
           "maximum": null,
           "minimum": 2
         },
-        "attributes": [
-          "@N",
-          "@hop",
-          "@hopSize",
-          "@max-hops",
-          "@maxHops",
-          "@n"
-        ],
+        "attributes": [],
         "category": "spectral_effect",
         "implementation": {
           "function": "evalSpectrumDelayMod",
@@ -2296,9 +4478,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@axis"
-        ],
+        "attributes": [],
         "category": "reduction",
         "implementation": {
           "function": "evalSum",
@@ -2319,9 +4499,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@axis"
-        ],
+        "attributes": [],
         "category": "reduction",
         "implementation": {
           "function": "evalSumAxis",
@@ -2336,14 +4514,24 @@
       {
         "aliases": [],
         "arity": {
+          "maximum": 4,
+          "minimum": 4
+        },
+        "attributes": [],
+        "category": "preamble",
+        "name": "svf",
+        "signatures": [
+          "(svf input cutoff q mode)"
+        ],
+        "summary": "State-variable filter helper. Cutoff is Hz, q is resonance, mode is 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass."
+      },
+      {
+        "aliases": [],
+        "arity": {
           "maximum": null,
           "minimum": 0
         },
-        "attributes": [
-          "@data",
-          "@file",
-          "@shape"
-        ],
+        "attributes": [],
         "category": "tensor_creation",
         "implementation": {
           "function": "evalTensor",
@@ -2363,11 +4551,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@default-file",
-          "@file",
-          "@shape"
-        ],
+        "attributes": [],
         "category": "tensor_creation",
         "implementation": {
           "function": "evalTensorParam",
@@ -2387,9 +4571,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@max-frames"
-        ],
+        "attributes": [],
         "category": "tensor_op",
         "implementation": {
           "function": "evalToSignal",
@@ -2408,9 +4590,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@axes"
-        ],
+        "attributes": [],
         "category": "tensor_shape",
         "implementation": {
           "function": "evalTranspose",
@@ -2448,9 +4628,25 @@
           "minimum": null
         },
         "attributes": [
+          "@N",
+          "@axes",
+          "@axis",
+          "@backend",
           "@default-file",
           "@file",
-          "@name"
+          "@hop",
+          "@hopSize",
+          "@hops",
+          "@max-frames",
+          "@max-hops",
+          "@maxHops",
+          "@n",
+          "@name",
+          "@padding",
+          "@ranges",
+          "@repeats",
+          "@shape",
+          "@type"
         ],
         "category": "uncategorized",
         "implementation": {
@@ -2468,9 +4664,25 @@
           "minimum": null
         },
         "attributes": [
+          "@N",
+          "@axes",
+          "@axis",
+          "@backend",
           "@default-file",
           "@file",
-          "@name"
+          "@hop",
+          "@hopSize",
+          "@hops",
+          "@max-frames",
+          "@max-hops",
+          "@maxHops",
+          "@n",
+          "@name",
+          "@padding",
+          "@ranges",
+          "@repeats",
+          "@shape",
+          "@type"
         ],
         "category": "uncategorized",
         "implementation": {
@@ -2487,9 +4699,7 @@
           "maximum": null,
           "minimum": 0
         },
-        "attributes": [
-          "@type"
-        ],
+        "attributes": [],
         "category": "windowing",
         "implementation": {
           "function": "evalWindow",
@@ -2507,9 +4717,7 @@
           "maximum": null,
           "minimum": 1
         },
-        "attributes": [
-          "@shape"
-        ],
+        "attributes": [],
         "category": "tensor_shape",
         "implementation": {
           "function": "evalWindows",
@@ -2520,62 +4728,6 @@
           "(windows tensor @shape [3 3])"
         ],
         "summary": "Extract sliding windows / im2col-style tensor view."
-      },
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 2,
-          "minimum": 2
-        },
-        "attributes": [],
-        "category": "preamble",
-        "name": "polyblep_saw",
-        "signatures": [
-          "(polyblep_saw phase freq)"
-        ],
-        "summary": "Anti-aliased saw oscillator helper. Pass a phasor phase in 0..1 and frequency in Hz."
-      },
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 3,
-          "minimum": 3
-        },
-        "attributes": [],
-        "category": "preamble",
-        "name": "polyblep_pulse",
-        "signatures": [
-          "(polyblep_pulse phase width freq)"
-        ],
-        "summary": "Anti-aliased pulse oscillator helper. Width is clipped internally and should usually stay around 0.05..0.95."
-      },
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 4,
-          "minimum": 4
-        },
-        "attributes": [],
-        "category": "preamble",
-        "name": "svf",
-        "signatures": [
-          "(svf input cutoff q mode)"
-        ],
-        "summary": "State-variable filter helper. Cutoff is Hz, q is resonance, mode is 0=LP, 1=BP, 2=HP, 3=notch, 4=peak, 5=allpass."
-      },
-      {
-        "aliases": [],
-        "arity": {
-          "maximum": 4,
-          "minimum": 4
-        },
-        "attributes": [],
-        "category": "preamble",
-        "name": "ladder",
-        "signatures": [
-          "(ladder input cutoff res drive)"
-        ],
-        "summary": "Moog-style 4-pole low-pass helper with drive and resonance compensation. Cutoff is Hz, resonance is 0..1, drive is pre-filter saturation."
       },
       {
         "aliases": [],

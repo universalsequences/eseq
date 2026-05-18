@@ -167,14 +167,16 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     node_id: u32,
 ) -> crate::effects::EffectSlotSnapshot {
     if project_slot_matches_descriptor_param_layout(&slot, desc) {
-        return project_slot_into_synced_snapshot(slot, desc, node_id);
+        let mut snapshot = project_slot_into_synced_snapshot(slot, desc, node_id);
+        snapshot.recompute_modulation_active_params(desc);
+        return snapshot;
     }
 
     let new_np = desc.params.len();
-    let has_generated_host_mod_params = desc
+    let has_generated_mod_params = desc
         .params
         .iter()
-        .any(|param| is_generated_host_mod_param_name(&param.name));
+        .any(|param| is_generated_mod_runtime_param_name(&param.name));
     let inserted_enabled = desc
         .params
         .iter()
@@ -183,7 +185,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             let comparable_new_params = desc
                 .params
                 .iter()
-                .filter(|param| !is_generated_host_mod_param_name(&param.name))
+                .filter(|param| !is_generated_mod_runtime_param_name(&param.name))
                 .count();
             slot.num_params as usize + 1 == comparable_new_params
         });
@@ -191,7 +193,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     let old_non_generated_idx_for_new_idx = |new_idx: usize| {
         desc.params[..new_idx]
             .iter()
-            .filter(|param| !is_generated_host_mod_param_name(&param.name))
+            .filter(|param| !is_generated_mod_runtime_param_name(&param.name))
             .count()
     };
 
@@ -202,7 +204,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     };
 
     let old_idx_for = |new_idx: usize, param: &crate::effects::ParamDescriptor| -> Option<usize> {
-        if is_generated_host_mod_param_name(&param.name) {
+        if is_generated_mod_runtime_param_name(&param.name) {
             return None;
         }
 
@@ -211,7 +213,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         }
 
         if let Some(enabled_idx) = inserted_enabled {
-            if !has_generated_host_mod_params {
+            if !has_generated_mod_params {
                 if param.node_param_idx >= crate::lisp_effect::HEADER_SLOTS as u32
                     && param.node_param_idx < crate::voice_modulator::MOD_PARAM_BASE
                 {
@@ -231,7 +233,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .filter(|&old_idx| old_idx < slot.defaults.len());
         }
 
-        if !has_generated_host_mod_params {
+        if !has_generated_mod_params {
             find_old_idx_by_node(param.node_param_idx)
                 .or_else(|| (new_idx < slot.defaults.len()).then_some(new_idx))
         } else {
@@ -273,7 +275,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         }
     }
 
-    crate::effects::EffectSlotSnapshot {
+    let mut snapshot = crate::effects::EffectSlotSnapshot {
         node_id,
         num_params: new_np as u32,
         defaults,
@@ -284,7 +286,9 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect(),
-    }
+    };
+    snapshot.recompute_modulation_active_params(desc);
+    snapshot
 }
 
 fn project_slot_matches_descriptor_param_layout(
@@ -295,15 +299,22 @@ fn project_slot_matches_descriptor_param_layout(
     slot.num_params as usize == num_params
         && slot.defaults.len() >= num_params
         && slot.param_node_indices.len() >= num_params
+        && slot.param_node_spans.len() >= num_params
         && desc
             .params
             .iter()
             .zip(slot.param_node_indices.iter())
-            .all(|(param, saved_node_idx)| param.node_param_idx == *saved_node_idx)
+            .zip(slot.param_node_spans.iter())
+            .all(|((param, saved_node_idx), saved_node_span)| {
+                param.node_param_idx == *saved_node_idx
+                    && param.node_param_span.max(1) == (*saved_node_span).max(1)
+            })
 }
 
-fn is_generated_host_mod_param_name(name: &str) -> bool {
+fn is_generated_mod_runtime_param_name(name: &str) -> bool {
     name.starts_with("__host_mod__")
+        || name.starts_with("__dgen_mod_active__")
+        || (name.starts_with("mod ") && name.contains(" slot ") && name.ends_with(" amt"))
 }
 
 fn project_bus_gate_sequence_from_ui(
@@ -1978,6 +1989,40 @@ mod tests {
                 .map(|param| param.node_param_idx)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_refreshes_stale_param_spans() {
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                test_param("wave", 0.12, 10),
+                test_param("cutoff", 7200.0, 14),
+                test_param("__dgen_mod_active__cutoff", 0.0, 15),
+                test_param("mod cutoff slot 1 amt", 0.0, 16),
+            ],
+        };
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: desc.params.len() as u32,
+            defaults: vec![0.5, 7400.0, 0.0, 0.0],
+            plocks: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            param_node_indices: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect(),
+            param_node_spans: vec![1, 4, 1, 1],
+        };
+
+        let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
+
+        assert_eq!(restored.defaults[1], 7400.0);
+        assert_eq!(restored.param_node_indices, vec![10, 14, 15, 16]);
+        assert_eq!(restored.param_node_spans, vec![1, 1, 1, 1]);
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub enum ScheduledInstrumentParamTarget {
 pub struct ScheduledInstrumentParam {
     pub target: ScheduledInstrumentParamTarget,
     pub idx: u64,
+    pub span: u32,
     pub value: f32,
 }
 
@@ -199,6 +200,7 @@ mod tests {
                         ScheduledInstrumentParam {
                             target: ScheduledInstrumentParamTarget::Synth,
                             idx: 2,
+                            span: 1,
                             value: 0.75,
                         },
                     ]),
@@ -271,6 +273,7 @@ mod tests {
                         ScheduledInstrumentParam {
                             target: ScheduledInstrumentParamTarget::Synth,
                             idx: 2,
+                            span: 1,
                             value: 0.75,
                         }
                     ]),

@@ -2229,6 +2229,10 @@ pub(crate) fn build_sampler_panel_value(
         name.starts_with("__host_mod__")
     }
 
+    fn is_hidden_dgen_mod_param(name: &str) -> bool {
+        name.starts_with("__dgen_mod_active__")
+    }
+
     fn is_source_param(node_param_idx: u32) -> bool {
         node_param_idx >= MOD_PARAM_BASE
     }
@@ -2327,7 +2331,7 @@ pub(crate) fn build_sampler_panel_value(
         .unwrap_or(1.0);
 
     struct UiModMetadata {
-        source_param_idx: usize,
+        source_param_idx: Option<usize>,
         depth_param_idx: usize,
         source_slot: f32,
         source_value_field: Option<String>,
@@ -2350,10 +2354,12 @@ pub(crate) fn build_sampler_panel_value(
             .iter()
             .map(|meta| {
                 let mut target = HashMap::new();
-                target.insert(
-                    "source-idx".to_string(),
-                    Rc::new(RefCell::new(Value::Number(meta.source_param_idx as f64))),
-                );
+                if let Some(source_param_idx) = meta.source_param_idx {
+                    target.insert(
+                        "source-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(source_param_idx as f64))),
+                    );
+                }
                 target.insert(
                     "depth-idx".to_string(),
                     Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
@@ -2406,22 +2412,27 @@ pub(crate) fn build_sampler_panel_value(
         .instrument_modulation_targets
         .iter()
         .filter_map(|target| {
-            let source_desc = desc.params.get(target.source_param_idx)?;
             let depth_desc = desc.params.get(target.depth_param_idx)?;
-            let source_default =
-                if target.source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                    slot.defaults.get(target.source_param_idx)
+            let source_default = if let Some(source_param_idx) = target.source_param_idx {
+                if source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(source_param_idx)
                 } else {
-                    source_desc.default
-                };
+                    desc.params.get(source_param_idx)?.default
+                }
+            } else {
+                target.modulator_slot as f32
+            };
             let depth_default =
                 if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
                     slot.defaults.get(target.depth_param_idx)
                 } else {
                     depth_desc.default
                 };
-            let source_current = plock_step
-                .and_then(|step| slot.plocks.get(step, target.source_param_idx))
+            let source_current = target
+                .source_param_idx
+                .and_then(|source_param_idx| {
+                    plock_step.and_then(|step| slot.plocks.get(step, source_param_idx))
+                })
                 .unwrap_or(source_default);
             let depth_current = plock_step
                 .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
@@ -2432,13 +2443,19 @@ pub(crate) fn build_sampler_panel_value(
                 UiModMetadata {
                     source_param_idx: target.source_param_idx,
                     depth_param_idx: target.depth_param_idx,
-                    source_slot: source_desc.stored_to_user(source_current),
-                    source_value_field: plock_step.is_none().then(|| {
-                        instrument_param_value_field(
-                            track,
-                            target.source_param_idx,
-                            &source_desc.name,
-                        )
+                    source_slot: target
+                        .source_param_idx
+                        .and_then(|source_param_idx| {
+                            desc.params
+                                .get(source_param_idx)
+                                .map(|source_desc| source_desc.stored_to_user(source_current))
+                        })
+                        .unwrap_or(source_current),
+                    source_value_field: target.source_param_idx.and_then(|source_param_idx| {
+                        plock_step.is_none().then(|| {
+                            let source_desc = &desc.params[source_param_idx];
+                            instrument_param_value_field(track, source_param_idx, &source_desc.name)
+                        })
                     }),
                     depth_value: depth_desc.stored_to_user(depth_current),
                     depth_value_field: plock_step.is_none().then(|| {
@@ -2580,7 +2597,7 @@ pub(crate) fn build_sampler_panel_value(
                 }
             }
         }
-        if is_generated_host_mod_param(&pdesc.name) {
+        if is_generated_host_mod_param(&pdesc.name) || is_hidden_dgen_mod_param(&pdesc.name) {
             continue;
         }
         if is_source_param(pdesc.node_param_idx) {
@@ -2836,7 +2853,7 @@ pub(crate) fn build_instrument_panel_value(
     let base_note_current = base_note_default;
 
     struct UiModMetadata {
-        source_param_idx: usize,
+        source_param_idx: Option<usize>,
         depth_param_idx: usize,
         source_slot: f32,
         source_value_field: Option<String>,
@@ -2924,10 +2941,12 @@ pub(crate) fn build_instrument_panel_value(
                 .iter()
                 .map(|meta| {
                     let mut target = HashMap::new();
-                    target.insert(
-                        "source-idx".to_string(),
-                        Rc::new(RefCell::new(Value::Number(meta.source_param_idx as f64))),
-                    );
+                    if let Some(source_param_idx) = meta.source_param_idx {
+                        target.insert(
+                            "source-idx".to_string(),
+                            Rc::new(RefCell::new(Value::Number(source_param_idx as f64))),
+                        );
+                    }
                     target.insert(
                         "depth-idx".to_string(),
                         Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
@@ -2983,6 +3002,10 @@ pub(crate) fn build_instrument_panel_value(
 
     fn is_generated_host_mod_param(name: &str) -> bool {
         name.starts_with("__host_mod__")
+    }
+
+    fn is_hidden_dgen_mod_param(name: &str) -> bool {
+        name.starts_with("__dgen_mod_active__")
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
@@ -3177,22 +3200,27 @@ pub(crate) fn build_instrument_panel_value(
         .instrument_modulation_targets
         .iter()
         .filter_map(|target| {
-            let source_desc = desc.params.get(target.source_param_idx)?;
             let depth_desc = desc.params.get(target.depth_param_idx)?;
-            let source_default =
-                if target.source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
-                    slot.defaults.get(target.source_param_idx)
+            let source_default = if let Some(source_param_idx) = target.source_param_idx {
+                if source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(source_param_idx)
                 } else {
-                    source_desc.default
-                };
+                    desc.params.get(source_param_idx)?.default
+                }
+            } else {
+                target.modulator_slot as f32
+            };
             let depth_default =
                 if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
                     slot.defaults.get(target.depth_param_idx)
                 } else {
                     depth_desc.default
                 };
-            let source_current = plock_step
-                .and_then(|step| slot.plocks.get(step, target.source_param_idx))
+            let source_current = target
+                .source_param_idx
+                .and_then(|source_param_idx| {
+                    plock_step.and_then(|step| slot.plocks.get(step, source_param_idx))
+                })
                 .unwrap_or(source_default);
             let depth_current = plock_step
                 .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
@@ -3203,13 +3231,19 @@ pub(crate) fn build_instrument_panel_value(
                 UiModMetadata {
                     source_param_idx: target.source_param_idx,
                     depth_param_idx: target.depth_param_idx,
-                    source_slot: source_desc.stored_to_user(source_current),
-                    source_value_field: plock_step.is_none().then(|| {
-                        instrument_param_value_field(
-                            track,
-                            target.source_param_idx,
-                            &source_desc.name,
-                        )
+                    source_slot: target
+                        .source_param_idx
+                        .and_then(|source_param_idx| {
+                            desc.params
+                                .get(source_param_idx)
+                                .map(|source_desc| source_desc.stored_to_user(source_current))
+                        })
+                        .unwrap_or(source_current),
+                    source_value_field: target.source_param_idx.and_then(|source_param_idx| {
+                        plock_step.is_none().then(|| {
+                            let source_desc = &desc.params[source_param_idx];
+                            instrument_param_value_field(track, source_param_idx, &source_desc.name)
+                        })
                     }),
                     depth_value: depth_desc.stored_to_user(depth_current),
                     depth_value_field: plock_step.is_none().then(|| {
@@ -3257,7 +3291,10 @@ pub(crate) fn build_instrument_panel_value(
             sequencer::effects::ParamKind::Enum { labels } => Some(labels),
             _ => None,
         };
-        if is_source_param(pdesc.node_param_idx) || is_generated_host_mod_param(&pdesc.name) {
+        if is_source_param(pdesc.node_param_idx)
+            || is_generated_host_mod_param(&pdesc.name)
+            || is_hidden_dgen_mod_param(&pdesc.name)
+        {
             continue;
         }
         if is_mod_param(&pdesc.name) {
@@ -4297,8 +4334,10 @@ mod tests {
         };
         let target = sequencer::effects::InstrumentModulationTarget {
             base_param_idx: 0,
-            source_param_idx: 1,
+            source_param_idx: Some(1),
+            modulator_slot: 0,
             depth_param_idx: 2,
+            active_param_idx: None,
             depth_min: -1.0,
             depth_max: 1.0,
             depth_unit: Some("%".to_string()),

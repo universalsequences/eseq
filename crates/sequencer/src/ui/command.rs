@@ -20,6 +20,68 @@ use crate::sequencer::{
 
 use super::App;
 
+fn sync_instrument_mod_active_default(app: &mut App, track: usize, changed_param_idx: usize) {
+    let Some(desc) = app.graph.instrument_descriptors.get(track) else {
+        return;
+    };
+    let active_param_idx = desc
+        .instrument_modulation_targets
+        .iter()
+        .find(|target| target.depth_param_idx == changed_param_idx)
+        .and_then(|target| target.active_param_idx);
+    let Some(active_param_idx) = active_param_idx else {
+        return;
+    };
+    let active = desc
+        .instrument_modulation_targets
+        .iter()
+        .filter(|target| target.active_param_idx == Some(active_param_idx))
+        .any(|target| {
+            app.state.pattern.instrument_slots[track]
+                .defaults
+                .get(target.depth_param_idx)
+                .abs()
+                > f32::EPSILON
+        });
+    let value = if active { 1.0 } else { 0.0 };
+    let slot = &app.state.pattern.instrument_slots[track];
+    slot.defaults.set(active_param_idx, value);
+    app.send_instrument_param(track, active_param_idx, value);
+}
+
+fn sync_instrument_mod_active_plock(
+    app: &mut App,
+    track: usize,
+    step: usize,
+    changed_param_idx: usize,
+) {
+    let Some(desc) = app.graph.instrument_descriptors.get(track) else {
+        return;
+    };
+    let active_param_idx = desc
+        .instrument_modulation_targets
+        .iter()
+        .find(|target| target.depth_param_idx == changed_param_idx)
+        .and_then(|target| target.active_param_idx);
+    let Some(active_param_idx) = active_param_idx else {
+        return;
+    };
+    let slot = &app.state.pattern.instrument_slots[track];
+    let active = desc
+        .instrument_modulation_targets
+        .iter()
+        .filter(|target| target.active_param_idx == Some(active_param_idx))
+        .any(|target| {
+            slot.plocks
+                .get(step, target.depth_param_idx)
+                .unwrap_or_else(|| slot.defaults.get(target.depth_param_idx))
+                .abs()
+                > f32::EPSILON
+        });
+    slot.plocks
+        .set(step, active_param_idx, if active { 1.0 } else { 0.0 });
+}
+
 fn sanitize_pasted_step_snapshot(
     snapshot: &StepSnapshot,
     preserve_audio_plocks: bool,
@@ -866,6 +928,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             let slot = &app.state.pattern.instrument_slots[track];
             slot.defaults.set(param_idx, value);
             app.send_instrument_param(track, param_idx, value);
+            sync_instrument_mod_active_default(app, track, param_idx);
             app.mark_track_sound_dirty(track);
         }
 
@@ -878,6 +941,7 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             app.state.pattern.instrument_slots[track]
                 .plocks
                 .set(step, param_idx, value);
+            sync_instrument_mod_active_plock(app, track, step, param_idx);
         }
 
         AppCommand::SetInstrumentPlockMulti {
@@ -886,9 +950,11 @@ fn execute_command(app: &mut App, cmd: AppCommand) {
             param_idx,
             value,
         } => {
-            let slot = &app.state.pattern.instrument_slots[track];
             for step in steps {
-                slot.plocks.set(step, param_idx, value);
+                app.state.pattern.instrument_slots[track]
+                    .plocks
+                    .set(step, param_idx, value);
+                sync_instrument_mod_active_plock(app, track, step, param_idx);
             }
         }
 
