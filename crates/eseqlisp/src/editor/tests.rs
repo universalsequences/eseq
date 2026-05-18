@@ -2230,6 +2230,90 @@ fn tree_sample_drag_drops_on_compatible_box_target() {
 }
 
 #[test]
+fn tree_sample_drag_cursor_starts_after_pointer_moves_past_threshold() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def dropped (state ""))
+                (effect
+                  (h-stack :width 40 :height 4
+                    (tree
+                      :width 18
+                      :height 2
+                      :drag-type "sample"
+                      :items '((:label "kick.wav" :path "/samples/kick.wav"))
+                      :on-select (lambda (item) nil))
+                    (box
+                      :key "drop-target"
+                      :width 18
+                      :height 2
+                      :drop-types (list "sample")
+                      :on-drop (lambda (event)
+                        (set! dropped (get (get event :payload) :path)))))) 
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(80, 10);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        0,
+        0,
+        80,
+        10,
+        2.0,
+        0.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 0),
+        0,
+        0,
+        80,
+        10,
+        2.2,
+        0.4,
+    );
+    assert_eq!(crate::widget_render::active_drop_hover_target(), None);
+    assert_eq!(
+        editor.widget_cursor(),
+        crate::widget_render::WidgetCursor::Default
+    );
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+    assert!(
+        crate::widget_render::active_drop_hover_target().is_some(),
+        "drag hover should start once the pointer moves past the gesture threshold"
+    );
+    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::String("/samples/kick.wav".to_string())
+    );
+}
+
+#[test]
 fn tree_sample_drag_ignores_incompatible_box_target() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

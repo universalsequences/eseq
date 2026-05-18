@@ -17,6 +17,7 @@ use super::widget_focus::find_node_by_id;
 
 const PATCH_PORT_CANCEL_RADIUS_CELLS: f32 = 1.5;
 const PATCH_PORT_DROP_RADIUS_CELLS: f32 = 1.75;
+const WIDGET_DRAG_START_THRESHOLD_CELLS: f32 = 1.0;
 
 fn is_slider_widget(node: &LayoutNode) -> bool {
     matches!(node.widget_type.as_str(), "hslider" | "vslider" | "slider")
@@ -95,6 +96,20 @@ fn widget_drag_data(value: &Value) -> Option<(String, Value)> {
 
 fn active_widget_drag(gesture: &WidgetGesture) -> Option<(String, Value)> {
     widget_drag_data(gesture.gesture_data.as_ref()?)
+}
+
+pub(super) fn widget_gesture_is_drag(gesture: &WidgetGesture) -> bool {
+    active_widget_drag(gesture).is_some()
+}
+
+fn widget_drag_threshold_reached(
+    gesture: &WidgetGesture,
+    precise_col: f32,
+    precise_row: f32,
+) -> bool {
+    let dx = precise_col - gesture.start_precise_col;
+    let dy = precise_row - gesture.start_precise_row;
+    dx.hypot(dy) >= WIDGET_DRAG_START_THRESHOLD_CELLS
 }
 
 fn deepest_double_click_node(node: &LayoutNode, row: f32, col: f32) -> Option<LayoutNode> {
@@ -1068,6 +1083,7 @@ impl Editor {
                 node,
                 start_precise_col: precise_col,
                 start_precise_row: precise_row,
+                drag_active: false,
                 gesture_data,
             });
         }
@@ -1480,6 +1496,31 @@ impl Editor {
         let gesture = self.active_leaf().active_widget_gesture.clone()?;
         active_widget_drag(&gesture)?;
         Some(gesture)
+    }
+
+    pub(super) fn active_widget_drag_gesture_for_drag(
+        &mut self,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<WidgetGesture> {
+        let gesture = self.active_widget_drag_gesture()?;
+        if !gesture.drag_active
+            && !widget_drag_threshold_reached(&gesture, precise_col, precise_row)
+        {
+            return None;
+        }
+        if !gesture.drag_active
+            && let Some(active) = self.active_leaf_mut().active_widget_gesture.as_mut()
+            && active.widget_id == gesture.widget_id
+        {
+            active.drag_active = true;
+        }
+        self.active_widget_drag_gesture()
+    }
+
+    pub(super) fn active_widget_drag_gesture_for_drop(&self) -> Option<WidgetGesture> {
+        let gesture = self.active_widget_drag_gesture()?;
+        gesture.drag_active.then_some(gesture)
     }
 
     pub(super) fn update_widget_drop_hover(

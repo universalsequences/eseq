@@ -1019,12 +1019,19 @@ impl Editor {
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
             );
 
-        if let Some(gesture) = self.active_widget_drag_gesture()
+        if let Some(_gesture) = self.active_widget_drag_gesture()
             && matches!(
                 mouse.kind,
                 MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left)
             )
         {
+            let started_drag = match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.active_widget_drag_gesture_for_drag(screen_col, screen_row)
+                }
+                MouseEventKind::Up(MouseButton::Left) => self.active_widget_drag_gesture_for_drop(),
+                _ => None,
+            };
             let target_tile = self
                 .tile_at_screen(screen_col, screen_row)
                 .unwrap_or(self.active_tile);
@@ -1048,23 +1055,30 @@ impl Editor {
 
                 match mouse.kind {
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        let _ = editor.update_widget_drop_hover(
-                            &gesture,
-                            content_col,
-                            content_row,
-                            event_col,
-                            event_row,
-                        );
+                        if let Some(started_drag) = started_drag.as_ref() {
+                            let _ = editor.update_widget_drop_hover(
+                                started_drag,
+                                content_col,
+                                content_row,
+                                event_col,
+                                event_row,
+                            );
+                        } else {
+                            crate::widget_render::set_drop_hover_target(None);
+                            editor.widget_cursor = WidgetCursor::Default;
+                        }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        let output = editor.dispatch_widget_drop_event(
-                            &gesture,
-                            content_col,
-                            content_row,
-                            event_col,
-                            event_row,
-                        );
-                        dropped = editor.apply_widget_output(output);
+                        if let Some(started_drag) = started_drag.as_ref() {
+                            let output = editor.dispatch_widget_drop_event(
+                                started_drag,
+                                content_col,
+                                content_row,
+                                event_col,
+                                event_row,
+                            );
+                            dropped = editor.apply_widget_output(output);
+                        }
                         crate::widget_render::set_drop_hover_target(None);
                         editor.widget_cursor = WidgetCursor::Default;
                     }
@@ -3392,13 +3406,22 @@ impl Editor {
                         .last_mouse_precise
                         .unwrap_or((precise_col, precise_row));
                     if let Some(gesture) = self.active_leaf().active_widget_gesture.clone() {
-                        let _ = self.update_widget_drop_hover(
-                            &gesture,
-                            content_col,
-                            content_row,
-                            precise_col,
-                            precise_row,
-                        );
+                        let started_drag =
+                            self.active_widget_drag_gesture_for_drag(precise_col, precise_row);
+                        if let Some(started_drag) = started_drag.as_ref() {
+                            let _ = self.update_widget_drop_hover(
+                                started_drag,
+                                content_col,
+                                content_row,
+                                precise_col,
+                                precise_row,
+                            );
+                        } else if self.active_widget_drag_gesture().is_some() {
+                            crate::widget_render::set_drop_hover_target(None);
+                            self.widget_cursor = WidgetCursor::Default;
+                            self.last_mouse_precise = Some((precise_col, precise_row));
+                            return;
+                        }
                         let is_box_pointer = matches!(
                             gesture.gesture_data.as_ref(),
                             Some(crate::vm::Value::String(s)) if s == "box-pointer"
@@ -3466,15 +3489,23 @@ impl Editor {
                         false,
                     );
                     if let Some(gesture) = self.active_leaf_mut().active_widget_gesture.take() {
-                        let output = self
-                            .dispatch_widget_drop_event(
+                        let is_widget_drag =
+                            crate::editor::widget_interaction::widget_gesture_is_drag(&gesture);
+                        let output = if is_widget_drag && gesture.drag_active {
+                            self.dispatch_widget_drop_event(
                                 &gesture,
                                 content_col,
                                 content_row,
                                 precise_col,
                                 precise_row,
                             )
-                            .or_else(|| {
+                        } else {
+                            None
+                        }
+                        .or_else(|| {
+                            if is_widget_drag {
+                                None
+                            } else {
                                 self.dispatch_gesture_widget_mouse_event(
                                     gesture,
                                     mouse.kind,
@@ -3484,7 +3515,8 @@ impl Editor {
                                     precise_row,
                                     mouse.modifiers,
                                 )
-                            });
+                            }
+                        });
                         let _ = self.apply_widget_output(output);
                         crate::widget_render::set_drop_hover_target(None);
                     } else {

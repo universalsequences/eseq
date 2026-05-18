@@ -5156,6 +5156,79 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_browser_syncs_selected_sample_from_sampler_track_changes() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str("(set! sbrowser-tab \"samples\")")
+            .expect("select samples tab");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(2.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-kind",
+            Value::String("sampler".to_string()),
+        );
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-selected-sample",
+            Value::String("samples/loaded-a.wav".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync initial sampler sample");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-selected-sample")
+                .expect("read selected sample"),
+            Some(Value::String("samples/loaded-a.wav".to_string()))
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-sample
+                    (dict :label "browse.wav" :path "samples/browse.wav"))"#,
+            )
+            .expect("select browsed sample");
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("render without host sample change");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-selected-sample")
+                .expect("read browsed sample"),
+            Some(Value::String("samples/browse.wav".to_string())),
+            "local browsing selection should survive renders until the loaded sample changes"
+        );
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "sidebar-track-index", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-selected-sample",
+            Value::String("samples/loaded-b.wav".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .eval_str("(sbrowser-build-widgets)")
+            .expect("sync switched sampler sample");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-selected-sample")
+                .expect("read switched selected sample"),
+            Some(Value::String("samples/loaded-b.wav".to_string()))
+        );
+    }
+
+    #[test]
     fn metal_seq_browser_sample_activation_rejects_current_instrument_track() {
         let mut editor = browser_editor_on_instrument_tab();
         editor

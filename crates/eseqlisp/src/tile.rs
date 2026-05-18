@@ -99,6 +99,7 @@ pub struct WidgetGesture {
     pub node: LayoutNode,
     pub start_precise_col: f32,
     pub start_precise_row: f32,
+    pub drag_active: bool,
     pub gesture_data: Option<Value>,
 }
 

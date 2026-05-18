@@ -9,6 +9,7 @@
 (defstate sbrowser-tab "samples")
 (defstate sbrowser-project-name "")
 (defstate sbrowser-last-track-index -1)
+(defstate sbrowser-last-sidebar-sample "")
 (defstate sbrowser-selected-sample "")
 
 ;; Editor state for inline instrument/effect creation
@@ -44,13 +45,14 @@
   (if (sbrowser-audition-mode?) "audition" "create"))
 
 (def sbrowser-sync-track-search ()
-  (if (not (= sbrowser-last-track-index SEQ.sidebar-track-index))
+  (if (or
+       (not (= sbrowser-last-track-index SEQ.sidebar-track-index))
+       (not (= sbrowser-last-sidebar-sample SEQ.sidebar-selected-sample)))
     (do
       (set! sbrowser-last-track-index SEQ.sidebar-track-index)
+      (set! sbrowser-last-sidebar-sample SEQ.sidebar-selected-sample)
       (if (and (sbrowser-audition-mode?) (= SEQ.sidebar-kind "sampler"))
-        (do
-          (set! sbrowser-filter "")
-          (set! sbrowser-selected-sample SEQ.sidebar-selected-sample))))))
+        (set! sbrowser-selected-sample SEQ.sidebar-selected-sample)))))
 
 (def sbrowser-reset-to-audition ()
   (set! sbrowser-mode "audition")
@@ -737,21 +739,23 @@
 ;; ── Build widgets ──
 
 (def sbrowser-build-widgets ()
-  (if (sbrowser-editor-mode?)
-    (list
-      (sbrowser-editor-header)
-      (sbrowser-editor-panel))
-    (if (sbrowser-preset-save-mode?)
+  (do
+    (sbrowser-sync-track-search)
+    (if (sbrowser-editor-mode?)
       (list
-        (sbrowser-preset-save-header)
-        (sbrowser-preset-save-panel))
-      (if (sbrowser-project-save-mode?)
+        (sbrowser-editor-header)
+        (sbrowser-editor-panel))
+      (if (sbrowser-preset-save-mode?)
         (list
-          (sbrowser-project-save-header)
-          (sbrowser-project-save-panel))
-        (list
-          (sbrowser-header)
-          (sbrowser-tabbed-content))))))
+          (sbrowser-preset-save-header)
+          (sbrowser-preset-save-panel))
+        (if (sbrowser-project-save-mode?)
+          (list
+            (sbrowser-project-save-header)
+            (sbrowser-project-save-panel))
+          (list
+            (sbrowser-header)
+            (sbrowser-tabbed-content)))))))
 
 ;; ── Reactive rendering (like metal-seq-grid.lisp) ──
 
