@@ -28,6 +28,24 @@ pub enum HostControl {
     FxSidechain { input_channel: usize },
 }
 
+#[derive(Clone, Debug)]
+pub struct InstrumentModulatorDescriptor {
+    pub slot: usize,
+    pub label: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstrumentModulationTarget {
+    pub base_param_idx: usize,
+    pub source_param_idx: Option<usize>,
+    pub modulator_slot: usize,
+    pub depth_param_idx: usize,
+    pub active_param_idx: Option<usize>,
+    pub depth_min: f32,
+    pub depth_max: f32,
+    pub depth_unit: Option<String>,
+}
+
 // ── ParamScaling ──
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -274,6 +292,8 @@ mod tests {
             name: "dense".to_string(),
             input_channels: 0,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params,
         };
 
@@ -305,6 +325,8 @@ mod tests {
             name: "dense".to_string(),
             input_channels: 0,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params,
         };
 
@@ -324,6 +346,8 @@ mod tests {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "a".to_string(),
@@ -353,6 +377,8 @@ mod tests {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "a".to_string(),
@@ -402,6 +428,8 @@ mod tests {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -433,6 +461,8 @@ mod tests {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "gain".to_string(),
@@ -484,6 +514,8 @@ mod tests {
             name: "orig".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -515,6 +547,8 @@ mod tests {
             name: "rebound".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -563,6 +597,8 @@ mod tests {
             name: "custom".to_string(),
             input_channels: 0,
             output_channels: 1,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "cutoff".to_string(),
@@ -805,9 +841,155 @@ mod tests {
             crate::dj_mixer::DJ_MIXER_PARAM_LENGTH_SEC as u32
         );
     }
+
+    #[test]
+    fn builtin_sampler_exposes_inline_modulation_metadata() {
+        let desc = EffectDescriptor::builtin_sampler();
+        let modulators = desc
+            .instrument_modulators
+            .iter()
+            .map(|modulator| (modulator.slot, modulator.label.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            modulators,
+            vec![
+                (1, "LFO 1"),
+                (2, "ENV 1"),
+                (3, "RAND"),
+                (4, "DRIFT"),
+                (5, "LFO 2"),
+                (6, "LFO 3"),
+                (7, "Ext 1"),
+                (8, "Ext 2"),
+                (9, "Ext 3"),
+                (10, "Ext 4"),
+            ]
+        );
+
+        let target_names = desc
+            .instrument_modulation_targets
+            .iter()
+            .map(|target| {
+                (
+                    desc.params[target.base_param_idx].name.as_str(),
+                    target
+                        .source_param_idx
+                        .and_then(|idx| desc.params.get(idx))
+                        .map(|param| param.name.as_str())
+                        .unwrap_or("<fixed>"),
+                    desc.params[target.depth_param_idx].name.as_str(),
+                    target.depth_min,
+                    target.depth_max,
+                    target.depth_unit.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            target_names.len(),
+            crate::sampler::SAMPLER_MOD_LANES_PER_PARAM * 6
+        );
+        assert_eq!(
+            &target_names[..4],
+            &[
+                ("speed", "mod speed src", "mod speed amt", -8.0, 8.0, None),
+                (
+                    "speed",
+                    "mod speed lane 2 src",
+                    "mod speed lane 2 amt",
+                    -8.0,
+                    8.0,
+                    None
+                ),
+                (
+                    "speed",
+                    "mod speed lane 3 src",
+                    "mod speed lane 3 amt",
+                    -8.0,
+                    8.0,
+                    None
+                ),
+                (
+                    "speed",
+                    "mod speed lane 4 src",
+                    "mod speed lane 4 amt",
+                    -8.0,
+                    8.0,
+                    None
+                ),
+            ]
+        );
+        assert!(
+            target_names.iter().any(|target| *target
+                == (
+                    "scrub",
+                    "mod scrub src",
+                    "mod scrub amt",
+                    -1.0,
+                    1.0,
+                    Some("%")
+                )),
+            "sampler scrub modulation depth should use the same percent display domain as scrub: {target_names:?}"
+        );
+        assert!(
+            target_names.iter().any(|target| *target
+                == (
+                    "sr",
+                    "mod sr src",
+                    "mod sr amt",
+                    -42_100.0,
+                    42_100.0,
+                    Some("Hz")
+                )),
+            "sampler sr modulation depth should be exposed in Hz: {target_names:?}"
+        );
+        assert!(
+            target_names.iter().any(|target| *target
+                == (
+                    "bpm",
+                    "mod bpm src",
+                    "mod bpm amt",
+                    -380.0,
+                    380.0,
+                    Some("bpm")
+                )),
+            "sampler bpm modulation depth should be exposed in BPM: {target_names:?}"
+        );
+        assert_eq!(
+            target_names.last(),
+            Some(&(
+                "end",
+                "mod end lane 4 src",
+                "mod end lane 4 amt",
+                -1.0,
+                1.0,
+                Some("%")
+            ))
+        );
+        let smooth = desc
+            .params
+            .iter()
+            .find(|param| param.name == "smooth")
+            .expect("sampler should expose scrub smooth time");
+        assert_eq!(
+            smooth.node_param_idx,
+            crate::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32
+        );
+        assert_eq!((smooth.min, smooth.max, smooth.default), (0.0, 250.0, 6.0));
+    }
 }
 
 // ── EffectDescriptor ──
+
+fn sampler_mod_depth_range(destination: &str) -> (f32, f32, Option<String>) {
+    match destination {
+        "speed" => (-8.0, 8.0, None),
+        "scrub" => (-1.0, 1.0, Some("%".to_string())),
+        "sr" => (-42_100.0, 42_100.0, Some("Hz".to_string())),
+        "bpm" => (-380.0, 380.0, Some("bpm".to_string())),
+        "start" | "end" => (-1.0, 1.0, Some("%".to_string())),
+        _ => (-1.0, 1.0, None),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct EffectDescriptor {
@@ -815,6 +997,8 @@ pub struct EffectDescriptor {
     pub params: Vec<ParamDescriptor>,
     pub input_channels: usize,
     pub output_channels: usize,
+    pub instrument_modulators: Vec<InstrumentModulatorDescriptor>,
+    pub instrument_modulation_targets: Vec<InstrumentModulationTarget>,
 }
 
 impl EffectDescriptor {
@@ -899,6 +1083,8 @@ impl EffectDescriptor {
             name: "Filter".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::filter::FILTER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1126,6 +1312,8 @@ impl EffectDescriptor {
             name: "Delay".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "wet".to_string(),
@@ -1222,6 +1410,8 @@ impl EffectDescriptor {
             name: "Str8 Delay".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::str8_delay::STR8_DELAY_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1420,6 +1610,8 @@ impl EffectDescriptor {
             name: "DJ Mixer".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 Self::enabled_param(crate::dj_mixer::DJ_MIXER_PARAM_ENABLED as u32, 1.0),
                 ParamDescriptor {
@@ -1468,6 +1660,8 @@ impl EffectDescriptor {
             name: "Reverb".to_string(),
             input_channels: 1,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mix".to_string(),
@@ -1535,6 +1729,8 @@ impl EffectDescriptor {
             name: name.to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "mode".to_string(),
@@ -1692,6 +1888,8 @@ impl EffectDescriptor {
             name: "Compressor".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "threshold".to_string(),
@@ -1780,6 +1978,8 @@ impl EffectDescriptor {
             name: "Limiter".to_string(),
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 ParamDescriptor {
                     name: "input".to_string(),
@@ -2015,53 +2215,23 @@ impl EffectDescriptor {
             },
         ];
         params.extend(crate::voice_modulator::ui_param_descriptors());
-        let mod_source_labels = vec![
-            "off".to_string(),
-            "LFO 1".to_string(),
-            "ENV 1".to_string(),
-            "RAND".to_string(),
-            "DRIFT".to_string(),
-            "LFO 2".to_string(),
-            "LFO 3".to_string(),
-            "Ext 1".to_string(),
-            "Ext 2".to_string(),
-            "Ext 3".to_string(),
-            "Ext 4".to_string(),
-        ];
-        for (name, source_idx, depth_idx) in [
-            (
-                "speed",
-                crate::sampler::PARAM_MOD_SPEED_SOURCE,
-                crate::sampler::PARAM_MOD_SPEED_DEPTH,
-            ),
-            (
-                "scrub",
-                crate::sampler::PARAM_MOD_SCRUB_SOURCE,
-                crate::sampler::PARAM_MOD_SCRUB_DEPTH,
-            ),
-            (
-                "sr",
-                crate::sampler::PARAM_MOD_SR_SOURCE,
-                crate::sampler::PARAM_MOD_SR_DEPTH,
-            ),
-            (
-                "bpm",
-                crate::sampler::PARAM_MOD_WARP_BPM_SOURCE,
-                crate::sampler::PARAM_MOD_WARP_BPM_DEPTH,
-            ),
-            (
-                "start",
-                crate::sampler::PARAM_MOD_START_SOURCE,
-                crate::sampler::PARAM_MOD_START_DEPTH,
-            ),
-            (
-                "end",
-                crate::sampler::PARAM_MOD_END_SOURCE,
-                crate::sampler::PARAM_MOD_END_DEPTH,
-            ),
-        ] {
+        let mod_source_labels: Vec<String> = std::iter::once("off".to_string())
+            .chain((1..=10).map(|slot| crate::voice_modulator::modulator_slot_label(slot, "")))
+            .collect();
+        let mut instrument_modulation_targets = Vec::new();
+        for lane in crate::sampler::SAMPLER_MOD_TARGET_PARAMS {
+            let name = lane.destination;
+            let base_param_idx = params
+                .iter()
+                .position(|p| p.name == name)
+                .expect("sampler modulation target base param should exist");
+            let source_param_idx = params.len();
             params.push(ParamDescriptor {
-                name: format!("mod {name} src"),
+                name: if lane.lane == 1 {
+                    format!("mod {name} src")
+                } else {
+                    format!("mod {name} lane {} src", lane.lane)
+                },
                 min: 0.0,
                 max: 10.0,
                 default: 0.0,
@@ -2069,28 +2239,64 @@ impl EffectDescriptor {
                     labels: mod_source_labels.clone(),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: source_idx as u32,
+                node_param_idx: lane.source_param as u32,
                 node_param_span: 1,
                 host_control: None,
             });
+            let depth_param_idx = params.len();
+            let (depth_min, depth_max, depth_unit) = sampler_mod_depth_range(name);
             params.push(ParamDescriptor {
-                name: format!("mod {name} amt"),
-                min: -1.0,
-                max: 1.0,
+                name: if lane.lane == 1 {
+                    format!("mod {name} amt")
+                } else {
+                    format!("mod {name} lane {} amt", lane.lane)
+                },
+                min: depth_min,
+                max: depth_max,
                 default: 0.0,
                 kind: ParamKind::Continuous {
-                    unit: Some("%".to_string()),
+                    unit: depth_unit.clone(),
                 },
                 scaling: ParamScaling::Linear,
-                node_param_idx: depth_idx as u32,
+                node_param_idx: lane.depth_param as u32,
                 node_param_span: 1,
                 host_control: None,
             });
+            instrument_modulation_targets.push(InstrumentModulationTarget {
+                base_param_idx,
+                source_param_idx: Some(source_param_idx),
+                modulator_slot: 0,
+                depth_param_idx,
+                active_param_idx: None,
+                depth_min,
+                depth_max,
+                depth_unit,
+            });
         }
+        params.push(ParamDescriptor {
+            name: "smooth".to_string(),
+            min: 0.0,
+            max: 250.0,
+            default: 6.0,
+            kind: ParamKind::Continuous {
+                unit: Some("ms".to_string()),
+            },
+            scaling: ParamScaling::Linear,
+            node_param_idx: crate::sampler::PARAM_SCRUB_SMOOTH_TIME_MS as u32,
+            node_param_span: 1,
+            host_control: None,
+        });
         Self {
             name: "Sampler".to_string(),
             input_channels: 0,
             output_channels: 2,
+            instrument_modulators: (1..=10)
+                .map(|slot| InstrumentModulatorDescriptor {
+                    slot,
+                    label: crate::voice_modulator::modulator_slot_label(slot, ""),
+                })
+                .collect(),
+            instrument_modulation_targets,
             params,
         }
     }
@@ -2115,6 +2321,8 @@ impl EffectDescriptor {
             params: Vec::new(),
             input_channels: 0,
             output_channels: 0,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
         }
     }
 
@@ -2151,6 +2359,8 @@ impl EffectDescriptor {
             params: descriptors,
             input_channels,
             output_channels,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
         }
     }
 }
@@ -2389,6 +2599,7 @@ impl EffectSlotState {
                 }
             }
         }
+        self.recompute_modulation_active_params(desc);
     }
 
     /// Rebind this live slot using descriptor identity instead of param index.
@@ -2451,6 +2662,57 @@ impl EffectSlotState {
             }
             for (step, value) in plocks {
                 self.plocks.set(step, new_idx, value);
+            }
+        }
+        self.recompute_modulation_active_params(new_desc);
+    }
+
+    pub fn recompute_modulation_active_params(&self, desc: &EffectDescriptor) {
+        let mut active_indices = desc
+            .instrument_modulation_targets
+            .iter()
+            .filter_map(|target| target.active_param_idx)
+            .collect::<Vec<_>>();
+        active_indices.sort_unstable();
+        active_indices.dedup();
+
+        for active_idx in active_indices {
+            if active_idx >= desc.params.len() {
+                continue;
+            }
+
+            let group = desc
+                .instrument_modulation_targets
+                .iter()
+                .filter(|target| target.active_param_idx == Some(active_idx))
+                .collect::<Vec<_>>();
+            if group.is_empty() {
+                continue;
+            }
+
+            let default_active = group
+                .iter()
+                .any(|target| self.defaults.get(target.depth_param_idx).abs() > f32::EPSILON);
+            self.defaults
+                .set(active_idx, if default_active { 1.0 } else { 0.0 });
+
+            for step in 0..MAX_STEPS {
+                let has_depth_plock = group
+                    .iter()
+                    .any(|target| self.plocks.get(step, target.depth_param_idx).is_some());
+                if has_depth_plock {
+                    let active = group.iter().any(|target| {
+                        self.plocks
+                            .get(step, target.depth_param_idx)
+                            .unwrap_or_else(|| self.defaults.get(target.depth_param_idx))
+                            .abs()
+                            > f32::EPSILON
+                    });
+                    self.plocks
+                        .set(step, active_idx, if active { 1.0 } else { 0.0 });
+                } else {
+                    self.plocks.clear_param(step, active_idx);
+                }
             }
         }
     }
@@ -2655,6 +2917,77 @@ impl EffectSlotSnapshot {
             if let Some(saved_step) = old_plocks.get(step) {
                 for param_idx in 0..preserve.min(saved_step.len()) {
                     self.plocks[step][param_idx] = saved_step[param_idx];
+                }
+            }
+        }
+        self.recompute_modulation_active_params(desc);
+    }
+
+    pub fn recompute_modulation_active_params(&mut self, desc: &EffectDescriptor) {
+        let mut active_indices = desc
+            .instrument_modulation_targets
+            .iter()
+            .filter_map(|target| target.active_param_idx)
+            .collect::<Vec<_>>();
+        active_indices.sort_unstable();
+        active_indices.dedup();
+
+        for active_idx in active_indices {
+            if active_idx >= self.defaults.len() {
+                continue;
+            }
+
+            let group = desc
+                .instrument_modulation_targets
+                .iter()
+                .filter(|target| target.active_param_idx == Some(active_idx))
+                .collect::<Vec<_>>();
+            if group.is_empty() {
+                continue;
+            }
+
+            let default_active = group.iter().any(|target| {
+                self.defaults
+                    .get(target.depth_param_idx)
+                    .copied()
+                    .unwrap_or(0.0)
+                    .abs()
+                    > f32::EPSILON
+            });
+            self.defaults[active_idx] = if default_active { 1.0 } else { 0.0 };
+
+            for step in 0..MAX_STEPS {
+                let Some(step_plocks) = self.plocks.get_mut(step) else {
+                    continue;
+                };
+                if active_idx >= step_plocks.len() {
+                    continue;
+                }
+                let has_depth_plock = group.iter().any(|target| {
+                    step_plocks
+                        .get(target.depth_param_idx)
+                        .copied()
+                        .flatten()
+                        .is_some()
+                });
+                if has_depth_plock {
+                    let active = group.iter().any(|target| {
+                        step_plocks
+                            .get(target.depth_param_idx)
+                            .copied()
+                            .flatten()
+                            .unwrap_or_else(|| {
+                                self.defaults
+                                    .get(target.depth_param_idx)
+                                    .copied()
+                                    .unwrap_or(0.0)
+                            })
+                            .abs()
+                            > f32::EPSILON
+                    });
+                    step_plocks[active_idx] = Some(if active { 1.0 } else { 0.0 });
+                } else {
+                    step_plocks[active_idx] = None;
                 }
             }
         }

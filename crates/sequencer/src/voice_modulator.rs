@@ -1044,6 +1044,23 @@ pub fn is_bar_resync_param(node_param_idx: u32) -> bool {
     timed_params.contains(&node_param_idx)
 }
 
+pub fn modulator_slot_label(slot: usize, fallback_name: &str) -> String {
+    match slot {
+        1 => "LFO 1",
+        2 => "ENV 1",
+        3 => "RAND",
+        4 => "DRIFT",
+        5 => "LFO 2",
+        6 => "LFO 3",
+        7 => "Ext 1",
+        8 => "Ext 2",
+        9 => "Ext 3",
+        10 => "Ext 4",
+        _ => fallback_name,
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

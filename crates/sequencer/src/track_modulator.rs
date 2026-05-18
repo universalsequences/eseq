@@ -189,6 +189,8 @@ pub fn descriptor() -> EffectDescriptor {
         name: "Modulator".to_string(),
         input_channels: 0,
         output_channels: 0,
+        instrument_modulators: Vec::new(),
+        instrument_modulation_targets: Vec::new(),
         params: vec![
             EffectDescriptor::enabled_param(PARAM_ENABLED as u32, 1.0),
             ParamDescriptor {

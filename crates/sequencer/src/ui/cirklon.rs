@@ -136,10 +136,14 @@ impl App {
 
             // Up/Down: switch tracks
             KeyCode::Up => {
+                let previous_track = self.ui.cursor_track;
                 if self.ui.cursor_track > 0 {
                     self.ui.cursor_track -= 1;
                 } else if !self.tracks.is_empty() {
                     self.ui.cursor_track = self.tracks.len() - 1;
+                }
+                if self.ui.cursor_track != previous_track {
+                    self.clear_step_selection();
                 }
                 self.ui.track_selection_anchor = None;
                 self.clamp_cursor_to_steps();
@@ -151,8 +155,12 @@ impl App {
                 );
             }
             KeyCode::Down => {
+                let previous_track = self.ui.cursor_track;
                 if !self.tracks.is_empty() {
                     self.ui.cursor_track = (self.ui.cursor_track + 1) % self.tracks.len();
+                }
+                if self.ui.cursor_track != previous_track {
+                    self.clear_step_selection();
                 }
                 self.ui.track_selection_anchor = None;
                 self.clamp_cursor_to_steps();
@@ -170,6 +178,7 @@ impl App {
                     for step in self.selected_steps() {
                         apply_command(self, AppCommand::ToggleStep { track, step });
                     }
+                    self.clear_step_selection();
                 }
             }
 

@@ -285,18 +285,10 @@ void apply_params(LiveGraph *g) {
           if (total_slots > 0) {
             int write_base = DGEN_HEADER_SLOTS + total_slots + DGEN_STATE_REDZONE_SLOTS;
             int dgen_idx = (int)(m.idx - DGEN_HEADER_SLOTS);
-            for (int lane = 0; lane < 4; lane++) {
-              int read_idx = (int)m.idx + lane;
-              int mirrored_idx = write_base + dgen_idx + lane;
-              if (dgen_idx + lane >= total_slots) {
-                break;
-              }
-              if (read_idx >= 0 && read_idx < state_slots) {
-                memory[read_idx] = m.fvalue;
-              }
-              if (mirrored_idx >= 0 && mirrored_idx < state_slots) {
-                memory[mirrored_idx] = m.fvalue;
-              }
+            int mirrored_idx = write_base + dgen_idx;
+            if (dgen_idx >= 0 && dgen_idx < total_slots &&
+                mirrored_idx >= 0 && mirrored_idx < state_slots) {
+              memory[mirrored_idx] = m.fvalue;
             }
           }
         }

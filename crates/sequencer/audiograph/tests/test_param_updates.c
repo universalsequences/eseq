@@ -5,6 +5,11 @@
 #include <math.h>
 #include <stdio.h>
 
+#define DGEN_HEADER_SLOTS 5
+#define DGEN_CANARY_INDEX 2
+#define DGEN_HEADER_CANARY_BITS 0x4cd35a1dU
+#define DGEN_STATE_REDZONE_SLOTS 256
+
 // ===================== Custom State Output Node =====================
 
 // State output node memory layout (size 1 float, outputs state[0])
@@ -177,8 +182,69 @@ void test_param_updates() {
   printf("=== Parameter Updates Test Completed Successfully ===\n\n");
 }
 
+void test_dgen_scalar_param_update_does_not_touch_adjacent_slots() {
+  printf("=== Testing DGen Scalar Parameter Update Slot Isolation ===\n");
+
+  const int block_size = 64;
+  const int total_slots = 8;
+  const int write_base =
+      DGEN_HEADER_SLOTS + total_slots + DGEN_STATE_REDZONE_SLOTS;
+  const int state_slots = write_base + total_slots;
+  LiveGraph *lg = create_live_graph(16, block_size, "dgen_param_slot_test", 1);
+  assert(lg != NULL);
+
+  int dgen_node =
+      add_node(lg, STATE_OUTPUT_VTABLE, state_slots * (int)sizeof(float),
+               "dgen_shaped_state", 0, 1, NULL, 0);
+  assert(dgen_node >= 0);
+  assert(apply_graph_edits(lg->graphEditQueue, lg));
+
+  RTNode *node = &lg->nodes[dgen_node];
+  assert(node->state != NULL);
+  float *mem = (float *)node->state;
+
+  mem[1] = (float)total_slots;
+  union {
+    float f;
+    uint32_t u;
+  } canary = {.u = DGEN_HEADER_CANARY_BITS};
+  mem[DGEN_CANARY_INDEX] = canary.f;
+
+  const int dgen_idx = 2;
+  const int read_idx = DGEN_HEADER_SLOTS + dgen_idx;
+  const int mirrored_idx = write_base + dgen_idx;
+  mem[read_idx + 1] = 11.0f;
+  mem[read_idx + 2] = 12.0f;
+  mem[read_idx + 3] = 13.0f;
+  mem[mirrored_idx + 1] = 21.0f;
+  mem[mirrored_idx + 2] = 22.0f;
+  mem[mirrored_idx + 3] = 23.0f;
+
+  ParamMsg msg = {
+      .logical_id = dgen_node, .idx = (uint64_t)read_idx, .fvalue = 7200.0f};
+  assert(params_push(lg->params, msg));
+
+  float output_buffer[block_size];
+  memset(output_buffer, 0, sizeof(output_buffer));
+  process_next_block(lg, output_buffer, block_size);
+
+  assert(mem[read_idx] == 7200.0f);
+  assert(mem[mirrored_idx] == 7200.0f);
+  assert(mem[read_idx + 1] == 11.0f);
+  assert(mem[read_idx + 2] == 12.0f);
+  assert(mem[read_idx + 3] == 13.0f);
+  assert(mem[mirrored_idx + 1] == 21.0f);
+  assert(mem[mirrored_idx + 2] == 22.0f);
+  assert(mem[mirrored_idx + 3] == 23.0f);
+
+  destroy_live_graph(lg);
+  printf("✓ Scalar DGen param update preserved adjacent read/write slots\n");
+  printf("=== DGen Scalar Parameter Update Slot Isolation Completed Successfully ===\n\n");
+}
+
 int main() {
   initialize_engine(64, 48000);
   test_param_updates();
+  test_dgen_scalar_param_update_does_not_touch_adjacent_slots();
   return 0;
 }

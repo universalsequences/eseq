@@ -31,14 +31,11 @@ pub(crate) fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 
         if !copied || state_size < min_state_bytes {
             continue;
         }
-        let mut ph = state[sequencer::sampler::PARAM_PLAYHEAD as usize];
         let playing = state[sequencer::sampler::PARAM_TRIGGER as usize] > 0.0;
         if !playing {
             continue;
         }
 
-        let start = state[sequencer::sampler::PARAM_START_POINT as usize].clamp(0.0, 1.0);
-        let end = state[sequencer::sampler::PARAM_END_POINT as usize].clamp(0.0, 1.0);
         let gate_counter = state[sequencer::sampler::PARAM_GATE_COUNTER as usize];
         if gate_counter >= best_gate_counter {
             continue;
@@ -51,14 +48,7 @@ pub(crate) fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 
             .map(|s| s.frames as f32)
             .filter(|frames| *frames > 0.0)
             .unwrap_or(app.graph.sample_rate.max(1) as f32);
-        let start_frame = start * sample_frames;
-        let end_frame = if end > start {
-            end * sample_frames
-        } else {
-            sample_frames
-        };
-        ph = ph.clamp(start_frame, end_frame.max(start_frame));
-        best_playhead = ph as f64;
+        best_playhead = sampler_visual_playhead_frame(&state, sample_frames) as f64;
         best_gate_counter = gate_counter;
         found_playing = true;
     }
@@ -86,6 +76,55 @@ pub(crate) fn read_sampler_playhead_seconds(app: &ui::App, track: usize) -> f64 
             let sr = app.graph.sample_rate.max(1) as f64;
             best_playhead / sr
         }
+    }
+}
+
+fn sampler_visual_playhead_frame(
+    state: &[f32; sequencer::sampler::SAMPLER_STATE_SIZE],
+    sample_frames: f32,
+) -> f32 {
+    let start = state[sequencer::sampler::PARAM_START_POINT as usize].clamp(0.0, 1.0);
+    let end = state[sequencer::sampler::PARAM_END_POINT as usize].clamp(0.0, 1.0);
+    let start_frame = start * sample_frames;
+    let end_frame = if end > start {
+        end * sample_frames
+    } else {
+        sample_frames
+    };
+    let region_len = (end_frame - start_frame).max(1.0);
+    let playhead = state[sequencer::sampler::PARAM_PLAYHEAD as usize];
+    let scrub = state[sequencer::sampler::PARAM_SCRUB_SMOOTH as usize].clamp(-1.0, 1.0);
+
+    (playhead + scrub * region_len).clamp(start_frame, end_frame.max(start_frame))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sampler_visual_playhead_frame;
+
+    #[test]
+    fn sampler_visual_playhead_includes_scrub_smooth() {
+        let mut state = [0.0_f32; sequencer::sampler::SAMPLER_STATE_SIZE];
+        state[sequencer::sampler::PARAM_START_POINT as usize] = 0.25;
+        state[sequencer::sampler::PARAM_END_POINT as usize] = 0.75;
+        state[sequencer::sampler::PARAM_PLAYHEAD as usize] = 500.0;
+        state[sequencer::sampler::PARAM_SCRUB_SMOOTH as usize] = 0.5;
+
+        let frame = sampler_visual_playhead_frame(&state, 1_000.0);
+
+        assert_eq!(frame, 750.0);
+    }
+
+    #[test]
+    fn sampler_visual_playhead_matches_playhead_without_scrub() {
+        let mut state = [0.0_f32; sequencer::sampler::SAMPLER_STATE_SIZE];
+        state[sequencer::sampler::PARAM_START_POINT as usize] = 0.0;
+        state[sequencer::sampler::PARAM_END_POINT as usize] = 1.0;
+        state[sequencer::sampler::PARAM_PLAYHEAD as usize] = 500.0;
+
+        let frame = sampler_visual_playhead_frame(&state, 1_000.0);
+
+        assert_eq!(frame, 500.0);
     }
 }
 

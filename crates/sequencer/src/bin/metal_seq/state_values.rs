@@ -1,6 +1,24 @@
 use super::*;
 use std::collections::HashMap;
 
+fn sampler_modulation_depth_display_range(
+    depth_desc: &sequencer::effects::ParamDescriptor,
+    target: &sequencer::effects::InstrumentModulationTarget,
+) -> (f32, f32) {
+    (
+        depth_desc.stored_to_user(target.depth_min),
+        depth_desc.stored_to_user(target.depth_max),
+    )
+}
+
+fn instrument_modulation_depth_display_range(
+    target: &sequencer::effects::InstrumentModulationTarget,
+) -> (f32, f32) {
+    // Custom-instrument manifests define modulation depth ranges in display
+    // units already; sampler ranges are stored in DSP units and scaled above.
+    (target.depth_min, target.depth_max)
+}
+
 /// Build a Lisp Value::List of bools from the step pattern for a given track.
 pub(crate) fn build_steps_value(state: &Arc<SequencerState>, track: usize) -> Value {
     let items: Vec<Rc<RefCell<Value>>> = (0..MAX_STEPS)
@@ -2207,6 +2225,14 @@ pub(crate) fn build_sampler_panel_value(
         name.starts_with("mod ")
     }
 
+    fn is_generated_host_mod_param(name: &str) -> bool {
+        name.starts_with("__host_mod__")
+    }
+
+    fn is_hidden_dgen_mod_param(name: &str) -> bool {
+        name.starts_with("__dgen_mod_active__")
+    }
+
     fn is_source_param(node_param_idx: u32) -> bool {
         node_param_idx >= MOD_PARAM_BASE
     }
@@ -2303,6 +2329,154 @@ pub(crate) fn build_sampler_panel_value(
         .as_ref()
         .map(|s| s.duration_seconds)
         .unwrap_or(1.0);
+
+    struct UiModMetadata {
+        source_param_idx: Option<usize>,
+        depth_param_idx: usize,
+        source_slot: f32,
+        source_value_field: Option<String>,
+        depth_value: f32,
+        depth_value_field: Option<String>,
+        depth_min: f32,
+        depth_max: f32,
+        depth_unit: Option<String>,
+    }
+
+    fn insert_mod_metadata(
+        pmap: &mut HashMap<String, Rc<RefCell<Value>>>,
+        targets: &[UiModMetadata],
+    ) {
+        pmap.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let target_values = targets
+            .iter()
+            .map(|meta| {
+                let mut target = HashMap::new();
+                if let Some(source_param_idx) = meta.source_param_idx {
+                    target.insert(
+                        "source-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(source_param_idx as f64))),
+                    );
+                }
+                target.insert(
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
+                );
+                target.insert(
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
+                );
+                if let Some(field) = &meta.source_value_field {
+                    target.insert(
+                        "source-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(field.clone()))),
+                    );
+                }
+                target.insert(
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
+                );
+                if let Some(field) = &meta.depth_value_field {
+                    target.insert(
+                        "depth-value-field".to_string(),
+                        Rc::new(RefCell::new(Value::String(field.clone()))),
+                    );
+                }
+                target.insert(
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_min as f64))),
+                );
+                target.insert(
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(meta.depth_max as f64))),
+                );
+                if let Some(unit) = &meta.depth_unit {
+                    target.insert(
+                        "depth-unit".to_string(),
+                        Rc::new(RefCell::new(Value::String(unit.clone()))),
+                    );
+                }
+                Rc::new(RefCell::new(Value::Map(target)))
+            })
+            .collect();
+        pmap.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(Value::List(target_values))),
+        );
+    }
+
+    let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
+    for target in desc
+        .instrument_modulation_targets
+        .iter()
+        .filter_map(|target| {
+            let depth_desc = desc.params.get(target.depth_param_idx)?;
+            let source_default = if let Some(source_param_idx) = target.source_param_idx {
+                if source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(source_param_idx)
+                } else {
+                    desc.params.get(source_param_idx)?.default
+                }
+            } else {
+                target.modulator_slot as f32
+            };
+            let depth_default =
+                if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(target.depth_param_idx)
+                } else {
+                    depth_desc.default
+                };
+            let source_current = target
+                .source_param_idx
+                .and_then(|source_param_idx| {
+                    plock_step.and_then(|step| slot.plocks.get(step, source_param_idx))
+                })
+                .unwrap_or(source_default);
+            let depth_current = plock_step
+                .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
+                .unwrap_or(depth_default);
+            let (depth_min, depth_max) = sampler_modulation_depth_display_range(depth_desc, target);
+            Some((
+                target.base_param_idx,
+                UiModMetadata {
+                    source_param_idx: target.source_param_idx,
+                    depth_param_idx: target.depth_param_idx,
+                    source_slot: target
+                        .source_param_idx
+                        .and_then(|source_param_idx| {
+                            desc.params
+                                .get(source_param_idx)
+                                .map(|source_desc| source_desc.stored_to_user(source_current))
+                        })
+                        .unwrap_or(source_current),
+                    source_value_field: target.source_param_idx.and_then(|source_param_idx| {
+                        plock_step.is_none().then(|| {
+                            let source_desc = &desc.params[source_param_idx];
+                            instrument_param_value_field(track, source_param_idx, &source_desc.name)
+                        })
+                    }),
+                    depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_value_field: plock_step.is_none().then(|| {
+                        instrument_param_value_field(
+                            track,
+                            target.depth_param_idx,
+                            &depth_desc.name,
+                        )
+                    }),
+                    depth_min,
+                    depth_max,
+                    depth_unit: target.depth_unit.clone(),
+                },
+            ))
+        })
+    {
+        modulation_targets
+            .entry(target.0)
+            .or_default()
+            .push(target.1);
+    }
 
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
@@ -2423,6 +2597,9 @@ pub(crate) fn build_sampler_panel_value(
                 }
             }
         }
+        if is_generated_host_mod_param(&pdesc.name) || is_hidden_dgen_mod_param(&pdesc.name) {
+            continue;
+        }
         if is_source_param(pdesc.node_param_idx) {
             if let Some(Value::String(name)) = pmap.get("name").map(|v| v.borrow().clone()) {
                 pmap.insert(
@@ -2445,6 +2622,9 @@ pub(crate) fn build_sampler_panel_value(
             }
             mod_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
         } else {
+            if let Some(targets) = modulation_targets.get(&param_idx) {
+                insert_mod_metadata(&mut pmap, targets);
+            }
             synth_params.push(Rc::new(RefCell::new(Value::Map(pmap))));
         }
     }
@@ -2551,6 +2731,26 @@ pub(crate) fn build_sampler_panel_value(
         Rc::new(RefCell::new(Value::List(mod_params))),
     );
     panel_map.insert(
+        "modulators".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            desc.instrument_modulators
+                .iter()
+                .map(|modulator| {
+                    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                    map.insert(
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(modulator.slot as f64))),
+                    );
+                    map.insert(
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String(modulator.label.clone()))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(map)))
+                })
+                .collect(),
+        ))),
+    );
+    panel_map.insert(
         "source-names".to_string(),
         Rc::new(RefCell::new(Value::List(source_names))),
     );
@@ -2652,6 +2852,18 @@ pub(crate) fn build_instrument_panel_value(
     );
     let base_note_current = base_note_default;
 
+    struct UiModMetadata {
+        source_param_idx: Option<usize>,
+        depth_param_idx: usize,
+        source_slot: f32,
+        source_value_field: Option<String>,
+        depth_value: f32,
+        depth_value_field: Option<String>,
+        depth_min: f32,
+        depth_max: f32,
+        depth_unit: Option<String>,
+    }
+
     fn push_param(
         out: &mut Vec<Rc<RefCell<Value>>>,
         name: String,
@@ -2662,6 +2874,7 @@ pub(crate) fn build_instrument_panel_value(
         max: f32,
         options: Option<&Vec<String>>,
         value_field: Option<String>,
+        mod_targets: Option<&Vec<UiModMetadata>>,
     ) {
         let is_boolean_name = name == "enabled" || name == "sync";
         let mut pmap: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
@@ -2719,11 +2932,80 @@ pub(crate) fn build_instrument_panel_value(
         if let Some(value_field) = value_field {
             insert_string_prop(&mut pmap, "value-field", value_field);
         }
+        if let Some(targets) = mod_targets {
+            pmap.insert(
+                "modulatable".to_string(),
+                Rc::new(RefCell::new(Value::Bool(true))),
+            );
+            let target_values = targets
+                .iter()
+                .map(|meta| {
+                    let mut target = HashMap::new();
+                    if let Some(source_param_idx) = meta.source_param_idx {
+                        target.insert(
+                            "source-idx".to_string(),
+                            Rc::new(RefCell::new(Value::Number(source_param_idx as f64))),
+                        );
+                    }
+                    target.insert(
+                        "depth-idx".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.depth_param_idx as f64))),
+                    );
+                    target.insert(
+                        "source-slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.source_slot as f64))),
+                    );
+                    if let Some(field) = &meta.source_value_field {
+                        target.insert(
+                            "source-value-field".to_string(),
+                            Rc::new(RefCell::new(Value::String(field.clone()))),
+                        );
+                    }
+                    target.insert(
+                        "depth".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.depth_value as f64))),
+                    );
+                    if let Some(field) = &meta.depth_value_field {
+                        target.insert(
+                            "depth-value-field".to_string(),
+                            Rc::new(RefCell::new(Value::String(field.clone()))),
+                        );
+                    }
+                    target.insert(
+                        "depth-min".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.depth_min as f64))),
+                    );
+                    target.insert(
+                        "depth-max".to_string(),
+                        Rc::new(RefCell::new(Value::Number(meta.depth_max as f64))),
+                    );
+                    if let Some(unit) = &meta.depth_unit {
+                        target.insert(
+                            "depth-unit".to_string(),
+                            Rc::new(RefCell::new(Value::String(unit.clone()))),
+                        );
+                    }
+                    Rc::new(RefCell::new(Value::Map(target)))
+                })
+                .collect();
+            pmap.insert(
+                "mod-targets".to_string(),
+                Rc::new(RefCell::new(Value::List(target_values))),
+            );
+        }
         out.push(Rc::new(RefCell::new(Value::Map(pmap))));
     }
 
     fn is_mod_param(name: &str) -> bool {
         name.starts_with("mod ")
+    }
+
+    fn is_generated_host_mod_param(name: &str) -> bool {
+        name.starts_with("__host_mod__")
+    }
+
+    fn is_hidden_dgen_mod_param(name: &str) -> bool {
+        name.starts_with("__dgen_mod_active__")
     }
 
     fn is_source_param(node_param_idx: u32) -> bool {
@@ -2913,6 +3195,76 @@ pub(crate) fn build_instrument_panel_value(
 
     let mut synth_params: Vec<Rc<RefCell<Value>>> = Vec::new();
     let mut mod_params: Vec<Rc<RefCell<Value>>> = Vec::new();
+    let mut modulation_targets: HashMap<usize, Vec<UiModMetadata>> = HashMap::new();
+    for target in desc
+        .instrument_modulation_targets
+        .iter()
+        .filter_map(|target| {
+            let depth_desc = desc.params.get(target.depth_param_idx)?;
+            let source_default = if let Some(source_param_idx) = target.source_param_idx {
+                if source_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(source_param_idx)
+                } else {
+                    desc.params.get(source_param_idx)?.default
+                }
+            } else {
+                target.modulator_slot as f32
+            };
+            let depth_default =
+                if target.depth_param_idx < slot.num_params.load(Ordering::Relaxed) as usize {
+                    slot.defaults.get(target.depth_param_idx)
+                } else {
+                    depth_desc.default
+                };
+            let source_current = target
+                .source_param_idx
+                .and_then(|source_param_idx| {
+                    plock_step.and_then(|step| slot.plocks.get(step, source_param_idx))
+                })
+                .unwrap_or(source_default);
+            let depth_current = plock_step
+                .and_then(|step| slot.plocks.get(step, target.depth_param_idx))
+                .unwrap_or(depth_default);
+            let (depth_min, depth_max) = instrument_modulation_depth_display_range(target);
+            Some((
+                target.base_param_idx,
+                UiModMetadata {
+                    source_param_idx: target.source_param_idx,
+                    depth_param_idx: target.depth_param_idx,
+                    source_slot: target
+                        .source_param_idx
+                        .and_then(|source_param_idx| {
+                            desc.params
+                                .get(source_param_idx)
+                                .map(|source_desc| source_desc.stored_to_user(source_current))
+                        })
+                        .unwrap_or(source_current),
+                    source_value_field: target.source_param_idx.and_then(|source_param_idx| {
+                        plock_step.is_none().then(|| {
+                            let source_desc = &desc.params[source_param_idx];
+                            instrument_param_value_field(track, source_param_idx, &source_desc.name)
+                        })
+                    }),
+                    depth_value: depth_desc.stored_to_user(depth_current),
+                    depth_value_field: plock_step.is_none().then(|| {
+                        instrument_param_value_field(
+                            track,
+                            target.depth_param_idx,
+                            &depth_desc.name,
+                        )
+                    }),
+                    depth_min,
+                    depth_max,
+                    depth_unit: target.depth_unit.clone(),
+                },
+            ))
+        })
+    {
+        modulation_targets
+            .entry(target.0)
+            .or_default()
+            .push(target.1);
+    }
     push_param(
         &mut synth_params,
         "base_note".to_string(),
@@ -2923,6 +3275,7 @@ pub(crate) fn build_instrument_panel_value(
         48.0,
         None,
         Some(instrument_base_note_value_field(track)),
+        None,
     );
 
     for (param_idx, pdesc) in desc.params.iter().enumerate() {
@@ -2938,7 +3291,10 @@ pub(crate) fn build_instrument_panel_value(
             sequencer::effects::ParamKind::Enum { labels } => Some(labels),
             _ => None,
         };
-        if is_source_param(pdesc.node_param_idx) {
+        if is_source_param(pdesc.node_param_idx)
+            || is_generated_host_mod_param(&pdesc.name)
+            || is_hidden_dgen_mod_param(&pdesc.name)
+        {
             continue;
         }
         if is_mod_param(&pdesc.name) {
@@ -2959,6 +3315,7 @@ pub(crate) fn build_instrument_panel_value(
                 plock_step
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                None,
             );
         } else {
             push_param(
@@ -2973,6 +3330,7 @@ pub(crate) fn build_instrument_panel_value(
                 plock_step
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                modulation_targets.get(&param_idx),
             );
         }
     }
@@ -3012,6 +3370,7 @@ pub(crate) fn build_instrument_panel_value(
                 plock_step
                     .is_none()
                     .then(|| instrument_param_value_field(track, param_idx, &pdesc.name)),
+                None,
             );
         }
         if params.is_empty() {
@@ -3082,6 +3441,26 @@ pub(crate) fn build_instrument_panel_value(
     panel_map.insert(
         "mod".to_string(),
         Rc::new(RefCell::new(Value::List(mod_params))),
+    );
+    panel_map.insert(
+        "modulators".to_string(),
+        Rc::new(RefCell::new(Value::List(
+            desc.instrument_modulators
+                .iter()
+                .map(|modulator| {
+                    let mut map: HashMap<String, Rc<RefCell<Value>>> = HashMap::new();
+                    map.insert(
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(modulator.slot as f64))),
+                    );
+                    map.insert(
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String(modulator.label.clone()))),
+                    );
+                    Rc::new(RefCell::new(Value::Map(map)))
+                })
+                .collect(),
+        ))),
     );
     panel_map.insert(
         "source-names".to_string(),
@@ -3913,6 +4292,65 @@ mod tests {
             );
             Ok(Value::Map(map))
         });
+    }
+
+    #[test]
+    fn sampler_scrub_mod_depth_range_uses_display_domain() {
+        let desc = sequencer::effects::EffectDescriptor::builtin_sampler();
+        let target = desc
+            .instrument_modulation_targets
+            .iter()
+            .find(|target| {
+                desc.params
+                    .get(target.base_param_idx)
+                    .map(|param| param.name == "scrub")
+                    .unwrap_or(false)
+            })
+            .expect("sampler scrub should be modulatable");
+        let depth_desc = desc
+            .params
+            .get(target.depth_param_idx)
+            .expect("sampler scrub mod depth param should exist");
+
+        let (min, max) = sampler_modulation_depth_display_range(depth_desc, target);
+
+        assert_eq!((min, max), (-100.0, 100.0));
+    }
+
+    #[test]
+    fn custom_instrument_mod_depth_range_uses_manifest_domain() {
+        let depth_desc = sequencer::effects::ParamDescriptor {
+            name: "mod depth".to_string(),
+            min: -1.0,
+            max: 1.0,
+            default: 0.0,
+            kind: sequencer::effects::ParamKind::Continuous {
+                unit: Some("%".to_string()),
+            },
+            scaling: sequencer::effects::ParamScaling::Linear,
+            node_param_idx: 0,
+            node_param_span: 1,
+            host_control: None,
+        };
+        let target = sequencer::effects::InstrumentModulationTarget {
+            base_param_idx: 0,
+            source_param_idx: Some(1),
+            modulator_slot: 0,
+            depth_param_idx: 2,
+            active_param_idx: None,
+            depth_min: -1.0,
+            depth_max: 1.0,
+            depth_unit: Some("%".to_string()),
+        };
+
+        assert_eq!(
+            sampler_modulation_depth_display_range(&depth_desc, &target),
+            (-100.0, 100.0)
+        );
+        assert_eq!(
+            instrument_modulation_depth_display_range(&target),
+            (-1.0, 1.0)
+        );
     }
 
     fn parse_expression_at(tokens: &[Token], pos: &mut usize) -> Result<(), ParserError> {
@@ -5606,6 +6044,190 @@ mod tests {
         inst
     }
 
+    fn mutant_909_test_instrument_map() -> std::collections::HashMap<String, Rc<RefCell<Value>>> {
+        fn test_mod_target(source_idx: f64, depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "source-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_idx))),
+                ),
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-1.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]))
+        }
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("909-mutant-fm/".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("909-mutant-f".to_string()))),
+        );
+        inst.insert(
+            "modulators".to_string(),
+            Rc::new(RefCell::new(test_list(
+                [
+                    (1.0, "LFO 1"),
+                    (2.0, "ENV 1"),
+                    (3.0, "RAND"),
+                    (4.0, "DRIFT"),
+                    (5.0, "LFO 2"),
+                    (6.0, "LFO 3"),
+                    (7.0, "Ext 1"),
+                    (8.0, "Ext 2"),
+                    (9.0, "Ext 3"),
+                    (10.0, "Ext 4"),
+                ]
+                .into_iter()
+                .map(|(slot, label)| {
+                    Value::Map(HashMap::from([
+                        (
+                            "slot".to_string(),
+                            Rc::new(RefCell::new(Value::Number(slot))),
+                        ),
+                        (
+                            "label".to_string(),
+                            Rc::new(RefCell::new(Value::String(label.to_string()))),
+                        ),
+                    ]))
+                })
+                .collect(),
+            ))),
+        );
+
+        let params = [
+            ("voice", 0.0, 0.0, 10.0),
+            ("body_wave", 0.0, 0.0, 3.0),
+            ("filter_mode", 0.0, 0.0, 5.0),
+            ("tune", 0.0, -24.0, 24.0),
+            ("decay", 220.0, 1.0, 4000.0),
+            ("tone", 0.0, 0.0, 1.0),
+            ("sweep_decay", 36.0, 1.0, 1000.0),
+            ("sweep_curve", 1.25, 0.0, 4.0),
+            ("keytrack", 0.40, 0.0, 1.0),
+            ("punch", 0.0, 0.0, 1.0),
+            ("pitch_sweep", 0.0, -48.0, 48.0),
+            ("membrane_fm", 0.0, -4.0, 4.0),
+            ("pulse_width", 0.0, 0.0, 1.0),
+            ("sub_level", 0.0, 0.0, 1.0),
+            ("click_level", 0.0, 0.0, 1.0),
+            ("snap", 0.0, 0.0, 1.0),
+            ("amp_attack", 0.6, 0.0, 1000.0),
+            ("amp_release", 18.0, 1.0, 5000.0),
+            ("body_level", 0.0, 0.0, 1.0),
+            ("noise_level", 0.0, 0.0, 1.0),
+            ("metal_level", 0.0, 0.0, 1.0),
+            ("metal_tune", 0.0, -24.0, 24.0),
+            ("metal_spread", 0.0, 0.0, 1.0),
+            ("hats_decay", 0.0, 0.0, 2000.0),
+            ("noise_res", 0.0, 0.0, 1.0),
+            ("body_ratio", 0.0, 0.0, 8.0),
+            ("partial_spread", 0.0, 0.0, 1.0),
+            ("noise_color", 0.0, 0.0, 1.0),
+            ("gain", 0.0, 0.0, 1.0),
+            ("resonance", 0.0, 0.0, 1.0),
+            ("cross_ring", 0.0, 0.0, 1.0),
+            ("drive", 0.0, 0.0, 8.0),
+            ("fold", 0.0, 0.0, 1.0),
+            ("crush", 0.0, 0.0, 1.0),
+        ];
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(
+                std::iter::once(Value::Map(test_base_note_param_map(0)))
+                    .chain(
+                        params
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, (name, value, min, max))| {
+                                let mut param = if *name == "voice" {
+                                    test_enum_param_map(
+                                        name,
+                                        idx + 1,
+                                        *value,
+                                        vec![
+                                            "kick", "snare", "lo tom", "mid tom", "hi tom", "rim",
+                                            "clap", "closed", "open", "ride", "crash",
+                                        ],
+                                    )
+                                } else if *name == "body_wave" {
+                                    test_enum_param_map(
+                                        name,
+                                        idx + 1,
+                                        *value,
+                                        vec!["sin", "saw", "pulse", "tri"],
+                                    )
+                                } else if *name == "filter_mode" {
+                                    test_enum_param_map(
+                                        name,
+                                        idx + 1,
+                                        *value,
+                                        vec!["LP", "BP", "HP", "notch", "peak", "all"],
+                                    )
+                                } else {
+                                    test_param_map(name, idx + 1, *value, *min, *max)
+                                };
+                                if matches!(
+                                    *name,
+                                    "tune"
+                                        | "decay"
+                                        | "tone"
+                                        | "pitch_sweep"
+                                        | "membrane_fm"
+                                        | "pulse_width"
+                                        | "body_level"
+                                        | "noise_level"
+                                        | "metal_level"
+                                        | "body_ratio"
+                                        | "partial_spread"
+                                        | "noise_color"
+                                        | "drive"
+                                        | "fold"
+                                        | "crush"
+                                ) {
+                                    param.insert(
+                                        "modulatable".to_string(),
+                                        Rc::new(RefCell::new(Value::Bool(true))),
+                                    );
+                                    param.insert(
+                                        "mod-targets".to_string(),
+                                        Rc::new(RefCell::new(test_list(vec![test_mod_target(
+                                            1000.0 + idx as f64,
+                                            1100.0 + idx as f64,
+                                            1.0,
+                                            0.25,
+                                        )]))),
+                                    );
+                                }
+                                Value::Map(param)
+                            }),
+                    )
+                    .collect(),
+            ))),
+        );
+        inst
+    }
+
     fn prophet_6_inspired_test_instrument_map() -> HashMap<String, Rc<RefCell<Value>>> {
         let mut inst = test_instrument_map();
         inst.insert(
@@ -6081,6 +6703,18 @@ mod tests {
 
         editor
             .runtime_mut()
+            .eval_str(r#"(set-window-buffer "*transport*")"#)
+            .expect("switch to transport buffer");
+        editor.refresh_runtime_side_effects();
+        editor.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-count").unwrap(),
+            Some(Value::Number(2.0))
+        );
+
+        editor
+            .runtime_mut()
             .eval_str(r#"(set-window-buffer "*piano-roll*")"#)
             .expect("switch to piano roll buffer");
         editor.refresh_runtime_side_effects();
@@ -6088,7 +6722,7 @@ mod tests {
 
         assert_eq!(
             editor.runtime_mut().eval_str("selected-count").unwrap(),
-            Some(Value::Number(1.0))
+            Some(Value::Number(2.0))
         );
 
         editor.open_scratch_buffer("*editable*", "abc");
@@ -6097,7 +6731,7 @@ mod tests {
 
         assert_eq!(
             editor.runtime_mut().eval_str("selected-count").unwrap(),
-            Some(Value::Number(1.0))
+            Some(Value::Number(2.0))
         );
         assert_eq!(editor.active_buffer().cursor, (0, 0));
     }
@@ -8442,6 +9076,898 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_lisp_lays_out_inline_custom_instrument_mod_selector() {
+        fn layout_has_double_click(node: &eseqlisp::layout::LayoutNode) -> bool {
+            node.props.contains_key("on-double-click")
+                || node.children.iter().any(layout_has_double_click)
+        }
+        fn assert_set_instrument_param(
+            command: &eseqlisp::host::HostCommand,
+            expected_idx: f64,
+            expected_value: f64,
+        ) {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-instrument-param");
+                    let Value::Map(payload) = payload else {
+                        panic!("set-instrument-param payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("param-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_idx))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                }
+                other => panic!("expected set-instrument-param host command, got {other:?}"),
+            }
+        }
+        fn assert_knob_measured(node: &eseqlisp::layout::LayoutNode, context: &str) {
+            assert!(
+                node.rect.width > 0.0 && node.rect.height > 0.0,
+                "{context} knob should have a nonzero measured rect: {:?}",
+                node.rect
+            );
+        }
+        #[cfg(target_os = "macos")]
+        fn knob_metal_instance_modes(node: &eseqlisp::layout::LayoutNode) -> Vec<f32> {
+            use eseqlisp::widget_render::MetalPrimitive;
+
+            let primitives =
+                eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport());
+            primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    MetalPrimitive::WidgetInstance {
+                        widget_type,
+                        instance,
+                        ..
+                    } if widget_type == "knob-number" => Some(instance.uniform_b[0]),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }
+        #[cfg(target_os = "macos")]
+        fn knob_mod_range_instance_count(node: &eseqlisp::layout::LayoutNode) -> usize {
+            use eseqlisp::widget_render::MetalPrimitive;
+
+            eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport())
+                .iter()
+                .filter(|primitive| {
+                    matches!(
+                        primitive,
+                        MetalPrimitive::WidgetInstance { widget_type, .. }
+                            if widget_type == "knob-number-mod-range"
+                    )
+                })
+                .count()
+        }
+        #[cfg(target_os = "macos")]
+        fn test_widget_viewport() -> eseqlisp::widget_render::WidgetViewport {
+            eseqlisp::widget_render::WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 10.0,
+                vp_w: 1200.0,
+                vp_h: 180.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                tile_content_rows: 18.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            }
+        }
+        #[cfg(target_os = "macos")]
+        fn knob_proportional_texts(node: &eseqlisp::layout::LayoutNode) -> Vec<String> {
+            use eseqlisp::widget_render::MetalPrimitive;
+
+            eseqlisp::widget_render::widget_primitives_for_node(node, test_widget_viewport())
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    MetalPrimitive::ProportionalText(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        }
+        #[cfg(target_os = "macos")]
+        fn assert_knob_base_metal_instance(node: &eseqlisp::layout::LayoutNode, context: &str) {
+            let modes = knob_metal_instance_modes(node);
+            assert!(
+                modes.iter().any(|mode| *mode == 0.0),
+                "{context} knob-number should emit a base knob Metal instance: {modes:?}"
+            );
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        fn test_mod_target(
+            source_idx: f64,
+            depth_idx: f64,
+            source_slot: f64,
+            depth: f64,
+            source_value_field: Option<&str>,
+            depth_value_field: Option<&str>,
+        ) -> Value {
+            let mut target = HashMap::from([
+                (
+                    "source-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_idx))),
+                ),
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-1.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]);
+            if let Some(field) = source_value_field {
+                target.insert(
+                    "source-value-field".to_string(),
+                    Rc::new(RefCell::new(Value::String(field.to_string()))),
+                );
+            }
+            if let Some(field) = depth_value_field {
+                target.insert(
+                    "depth-value-field".to_string(),
+                    Rc::new(RefCell::new(Value::String(field.to_string()))),
+                );
+            }
+            Value::Map(target)
+        }
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "test-instrument".to_string(),
+            "instruments/test-instrument/ui.lisp".to_string(),
+            r#"
+            (defsynth-ui
+              (ui-panel "SYNTH" 0
+                (h-stack :gap 0.2
+                  (ui-lego-knob-s 0 "cutoff" "cut" 4.8 (ui-accent-blue) 2))))
+            "#
+            .to_string(),
+        )));
+        let mut cutoff = test_param_map("cutoff", 0, 0.5, 0.0, 1.0);
+        cutoff.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        cutoff.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                test_mod_target(10.0, 11.0, 1.0, 0.25, None, None),
+                test_mod_target(
+                    12.0,
+                    13.0,
+                    0.0,
+                    0.0,
+                    Some("test-mod-source-12"),
+                    Some("test-mod-depth-13"),
+                ),
+            ]))),
+        );
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(cutoff),
+                Value::Map(test_param_map("gain", 1, 0.8, 0.0, 1.0)),
+            ]))),
+        );
+        inst.insert(
+            "modulators".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                    ),
+                ])),
+            ]))),
+        );
+        let mut lfo_sync = test_param_map("sync", 31, 1.0, 0.0, 1.0);
+        lfo_sync.insert(
+            "value-field".to_string(),
+            Rc::new(RefCell::new(Value::String("test-lfo-sync".to_string()))),
+        );
+        let mut lfo_division = test_param_map("division", 32, 0.0, 0.0, 1.0);
+        lfo_division.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String("1/8".to_string()))),
+        );
+        lfo_division.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::String("1/8".to_string()),
+                Value::String("1/16".to_string()),
+            ]))),
+        );
+        let mut lfo_shape = test_param_map("shape", 33, 0.0, 0.0, 1.0);
+        lfo_shape.insert(
+            "text-value".to_string(),
+            Rc::new(RefCell::new(Value::String("sine".to_string()))),
+        );
+        lfo_shape.insert(
+            "options".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::String("sine".to_string()),
+                Value::String("square".to_string()),
+            ]))),
+        );
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("rate", 30, 2.0, 0.1, 20.0)),
+                            Value::Map(lfo_sync),
+                            Value::Map(lfo_division),
+                            Value::Map(lfo_shape),
+                            Value::Map(test_param_map("pulse width", 34, 0.5, 0.0, 1.0)),
+                        ]))),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("attack", 20, 5.0, 1.0, 5000.0)),
+                            Value::Map(test_param_map("decay", 21, 120.0, 1.0, 5000.0)),
+                            Value::Map(test_param_map("sustain", 22, 0.7, 0.0, 1.0)),
+                            Value::Map(test_param_map("release", 23, 240.0, 1.0, 5000.0)),
+                        ]))),
+                    ),
+                ])),
+            ]))),
+        );
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(120, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("test-lfo-sync", Value::Number(1.0)),
+                ("test-mod-source-12", Value::Number(0.0)),
+                ("test-mod-depth-13", Value::Number(0.0)),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load custom instrument UI");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open false) (set! instrument-selected-mod-slot 1))")
+            .expect("show custom synth panel");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("custom synth fx lisp status after refresh: {status}");
+        }
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let synth_layout = editor.widget_layout().expect("custom synth layout");
+        assert_finite_layout_tree(&synth_layout);
+        let synth_knob = find_layout_node_by_widget_type(&synth_layout, "knob-number")
+            .expect("custom synth panel should render a knob-number with mods closed");
+        assert_knob_measured(synth_knob, "mods-closed");
+        #[cfg(target_os = "macos")]
+        assert_knob_base_metal_instance(synth_knob, "mods-closed");
+        #[cfg(target_os = "macos")]
+        assert!(
+            knob_proportional_texts(synth_knob)
+                .iter()
+                .any(|text| text == "cut"),
+            "mods-closed knob should emit its label/value text primitives: {:?}",
+            knob_proportional_texts(synth_knob)
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-mods-open true) (set! instrument-selected-mod-slot 1))")
+            .expect("open inline mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("inline mods fx lisp status after refresh: {status}");
+        }
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("inline mods layout");
+        assert_finite_layout_tree(&layout);
+        let selector = find_layout_node_by_debug_name(&layout, "instrument-mod-selector")
+            .expect("inline mods selector should render");
+        assert!(
+            selector.rect.width > 0.0 && selector.rect.height > 0.0,
+            "selector must have a nonzero rect: {:?}",
+            selector.rect
+        );
+        assert!(find_layout_node_by_text(&layout, "LFO 1").is_some());
+        let lfo_editor = find_layout_node_by_debug_name(&layout, "instrument-lfo-source-editor")
+            .expect("selected LFO source editor should render");
+        assert!(
+            lfo_editor.rect.width > 0.0 && lfo_editor.rect.height > 0.0,
+            "LFO source editor should have a visible measured rect: {:?}",
+            lfo_editor.rect
+        );
+        assert!(
+            find_layout_node_by_text(&layout, "ON").is_some(),
+            "reactive LFO sync source button should resolve its value and render as ON"
+        );
+        let custom_knob_wrapper = find_layout_node_by_stable_key(
+            &layout,
+            "custom-ui-lego-knob-mod-test-instrument-cutoff",
+        )
+        .expect("custom lego controls should render their modulation wrapper");
+        assert!(
+            layout_has_double_click(&layout),
+            "modulatable parameter wrapper should expose on-double-click"
+        );
+
+        let knob = find_layout_node_by_widget_type(custom_knob_wrapper, "knob-number")
+            .expect("custom mod test should render a knob-number");
+        assert_knob_measured(knob, "mods-open");
+        for prop in ["mod-range-0-slot", "mod-range-0-depth"] {
+            assert!(
+                knob.props.contains_key(prop),
+                "modulatable knob should expose modulation range metadata prop {prop}"
+            );
+        }
+        assert!(
+            knob.props.contains_key("base-value"),
+            "modulatable knob should expose base value for range overlays"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_knob_base_metal_instance(knob, "mods-open");
+            assert!(
+                knob_mod_range_instance_count(knob) > 0,
+                "knob-number should emit at least one dedicated modulation range Metal instance"
+            );
+            assert!(
+                knob_proportional_texts(knob)
+                    .iter()
+                    .any(|text| text == "cut"),
+                "mods-open knob should emit its label/value text primitives: {:?}",
+                knob_proportional_texts(knob)
+            );
+        }
+        let callback = knob
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("modulatable knob should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback.clone(), vec![Value::Number(0.5)])
+            .expect("selected modulation lane depth edit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 11.0, 0.5);
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! instrument-selected-mod-slot 2)")
+            .expect("select second modulator");
+        editor
+            .runtime_mut()
+            .invoke(callback.clone(), vec![Value::Number(0.75)])
+            .expect("empty modulation lane assignment and depth edit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 2, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 12.0, 2.0);
+        assert_set_instrument_param(&commands[1], 13.0, 0.75);
+
+        editor.set_active_buffer(fx_id);
+        let env_layout = editor.widget_layout().expect("ENV 1 source editor layout");
+        let env_editor = find_layout_node_by_widget_type(&env_layout, "adsr-editor")
+            .expect("ENV 1 source editor should use an adsr-editor widget");
+        assert!(
+            env_editor.rect.width > 8.0 && env_editor.rect.height > 1.5,
+            "ENV 1 adsr-editor should have a visible measured rect, got {:?}",
+            env_editor.rect
+        );
+        let env_callback = env_editor
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("ENV 1 adsr-editor should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(
+                env_callback,
+                vec![Value::Map(HashMap::from([
+                    (
+                        "attack".to_string(),
+                        Rc::new(RefCell::new(Value::Number(11.0))),
+                    ),
+                    (
+                        "decay".to_string(),
+                        Rc::new(RefCell::new(Value::Number(220.0))),
+                    ),
+                    (
+                        "sustain".to_string(),
+                        Rc::new(RefCell::new(Value::Number(0.42))),
+                    ),
+                    (
+                        "release".to_string(),
+                        Rc::new(RefCell::new(Value::Number(330.0))),
+                    ),
+                ]))],
+            )
+            .expect("edit ENV 1 source ADSR");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 4, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 20.0, 11.0);
+        assert_set_instrument_param(&commands[1], 21.0, 220.0);
+        assert_set_instrument_param(&commands[2], 22.0, 0.42);
+        assert_set_instrument_param(&commands[3], 23.0, 330.0);
+
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "test-mod-source-12", Value::Number(2.0));
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "test-mod-depth-13", Value::Number(0.75));
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.9)])
+            .expect("claimed modulation lane stays live after reactive sync");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 13.0, 0.9);
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_inline_sampler_mod_selector() {
+        fn layout_has_double_click(node: &eseqlisp::layout::LayoutNode) -> bool {
+            node.props.contains_key("on-double-click")
+                || node.children.iter().any(layout_has_double_click)
+        }
+
+        fn assert_set_instrument_param(
+            command: &eseqlisp::host::HostCommand,
+            expected_idx: f64,
+            expected_value: f64,
+        ) {
+            match command {
+                eseqlisp::host::HostCommand::Custom { name, payload } => {
+                    assert_eq!(name, "set-instrument-param");
+                    let Value::Map(payload) = payload else {
+                        panic!("set-instrument-param payload should be a dict: {payload:?}");
+                    };
+                    assert_eq!(
+                        payload.get("param-idx").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_idx))
+                    );
+                    assert_eq!(
+                        payload.get("value").map(|value| value.borrow().clone()),
+                        Some(Value::Number(expected_value))
+                    );
+                }
+                other => panic!("expected set-instrument-param host command, got {other:?}"),
+            }
+        }
+
+        fn test_mod_target(source_idx: f64, depth_idx: f64, source_slot: f64, depth: f64) -> Value {
+            Value::Map(HashMap::from([
+                (
+                    "source-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_idx))),
+                ),
+                (
+                    "depth-idx".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth_idx))),
+                ),
+                (
+                    "source-slot".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source_slot))),
+                ),
+                (
+                    "depth".to_string(),
+                    Rc::new(RefCell::new(Value::Number(depth))),
+                ),
+                (
+                    "depth-min".to_string(),
+                    Rc::new(RefCell::new(Value::Number(-1.0))),
+                ),
+                (
+                    "depth-max".to_string(),
+                    Rc::new(RefCell::new(Value::Number(1.0))),
+                ),
+            ]))
+        }
+
+        let mut enabled = test_param_map("enabled", 4, 1.0, 0.0, 1.0);
+        enabled.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let mut warp = test_param_map("warp", 9, 0.0, 0.0, 1.0);
+        warp.insert(
+            "boolean".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        let mut speed = test_param_map("speed", 11, 1.0, -4.0, 4.0);
+        speed.insert(
+            "modulatable".to_string(),
+            Rc::new(RefCell::new(Value::Bool(true))),
+        );
+        speed.insert(
+            "mod-targets".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                test_mod_target(20.0, 21.0, 2.0, 0.25),
+                test_mod_target(22.0, 23.0, 0.0, 0.0),
+            ]))),
+        );
+
+        let mut inst = test_instrument_map();
+        inst.insert(
+            "name".to_string(),
+            Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+        );
+        inst.insert(
+            "display-name".to_string(),
+            Rc::new(RefCell::new(Value::String("Sampler".to_string()))),
+        );
+        inst.insert(
+            "type".to_string(),
+            Rc::new(RefCell::new(Value::String("sampler".to_string()))),
+        );
+        inst.insert(
+            "duration".to_string(),
+            Rc::new(RefCell::new(Value::Number(1.0))),
+        );
+        inst.insert(
+            "synth".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(test_param_map("attack", 0, 0.0, 0.0, 500.0)),
+                Value::Map(test_param_map("release", 1, 0.0, 0.0, 2000.0)),
+                Value::Map(test_param_map("start", 2, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("end", 3, 1.0, 0.0, 1.0)),
+                Value::Map(enabled),
+                Value::Map(test_param_map("reverse", 5, 0.0, 0.0, 1.0)),
+                Value::Map(test_param_map("loop", 6, 1.0, 0.0, 3.0)),
+                Value::Map(test_param_map("xfade", 7, 0.0, 0.0, 250.0)),
+                Value::Map(test_param_map("sr", 8, 44100.0, 2000.0, 44100.0)),
+                Value::Map(warp),
+                Value::Map(test_param_map("mode", 10, 0.0, 0.0, 0.0)),
+                Value::Map(speed),
+                Value::Map(test_param_map("scrub", 12, 0.0, -1.0, 1.0)),
+                Value::Map(test_param_map("bpm", 13, 120.0, 20.0, 400.0)),
+            ]))),
+        );
+        inst.insert("mod".to_string(), Rc::new(RefCell::new(test_list(vec![]))));
+        inst.insert(
+            "modulators".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(1.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "slot".to_string(),
+                        Rc::new(RefCell::new(Value::Number(2.0))),
+                    ),
+                    (
+                        "label".to_string(),
+                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                    ),
+                ])),
+            ]))),
+        );
+        inst.insert(
+            "sources".to_string(),
+            Rc::new(RefCell::new(test_list(vec![
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("LFO 1".to_string()))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("rate", 40, 5.0, 0.05, 40.0)),
+                            Value::Map({
+                                let mut p = test_param_map("sync", 41, 0.0, 0.0, 1.0);
+                                p.insert(
+                                    "boolean".to_string(),
+                                    Rc::new(RefCell::new(Value::Bool(true))),
+                                );
+                                p
+                            }),
+                            Value::Map({
+                                let mut p = test_param_map("division", 42, 6.0, 0.0, 10.0);
+                                p.insert(
+                                    "text-value".to_string(),
+                                    Rc::new(RefCell::new(Value::String("1/4".to_string()))),
+                                );
+                                p.insert(
+                                    "options".to_string(),
+                                    Rc::new(RefCell::new(test_list(vec![
+                                        Value::String("1/8".to_string()),
+                                        Value::String("1/4".to_string()),
+                                    ]))),
+                                );
+                                p
+                            }),
+                            Value::Map({
+                                let mut p = test_param_map("shape", 43, 2.0, 0.0, 3.0);
+                                p.insert(
+                                    "text-value".to_string(),
+                                    Rc::new(RefCell::new(Value::String("triangle".to_string()))),
+                                );
+                                p.insert(
+                                    "options".to_string(),
+                                    Rc::new(RefCell::new(test_list(vec![
+                                        Value::String("sine".to_string()),
+                                        Value::String("triangle".to_string()),
+                                    ]))),
+                                );
+                                p
+                            }),
+                            Value::Map(test_param_map("pulse width", 44, 0.5, 0.05, 0.95)),
+                            Value::Map({
+                                let mut p = test_param_map("retrigger", 45, 0.0, 0.0, 1.0);
+                                p.insert(
+                                    "boolean".to_string(),
+                                    Rc::new(RefCell::new(Value::Bool(true))),
+                                );
+                                p
+                            }),
+                        ]))),
+                    ),
+                ])),
+                Value::Map(HashMap::from([
+                    (
+                        "name".to_string(),
+                        Rc::new(RefCell::new(Value::String("ENV 1".to_string()))),
+                    ),
+                    (
+                        "params".to_string(),
+                        Rc::new(RefCell::new(test_list(vec![
+                            Value::Map(test_param_map("attack", 30, 5.0, 1.0, 5000.0)),
+                            Value::Map(test_param_map("decay", 31, 120.0, 1.0, 5000.0)),
+                            Value::Map(test_param_map("sustain", 32, 0.7, 0.0, 1.0)),
+                            Value::Map(test_param_map("release", 33, 240.0, 1.0, 5000.0)),
+                        ]))),
+                    ),
+                ])),
+            ]))),
+        );
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(160, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("tp-gate", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                ("instrument-panel", test_list(vec![Value::Map(inst)])),
+                ("sampler-playhead", Value::Number(0.0)),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-instrument-synth-ui (inst) false)
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open true) (set! instrument-selected-mod-slot 2))")
+            .expect("open sampler inline mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("sampler fx lisp status after refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let layout = editor.widget_layout().expect("sampler inline mods layout");
+        assert_finite_layout_tree(&layout);
+        let mut layout_summaries = Vec::new();
+        collect_layout_node_summaries(&layout, &mut layout_summaries);
+        let selector = find_layout_node_by_debug_name(&layout, "instrument-mod-selector")
+            .unwrap_or_else(|| {
+                panic!("sampler inline mods selector should render; layout={layout_summaries:#?}")
+            });
+        assert!(
+            selector.rect.width > 0.0 && selector.rect.height > 0.0,
+            "selector must have a nonzero rect: {:?}",
+            selector.rect
+        );
+        assert!(
+            find_layout_node_by_debug_name(&layout, "sampler-mods-inline-body").is_some(),
+            "sampler should use inline mods body"
+        );
+        assert!(
+            find_layout_node_by_stable_key(&layout, "sampler-param-11-mod-wrapper").is_some(),
+            "sampler speed control should render its modulation wrapper"
+        );
+        assert!(
+            layout_has_double_click(&layout),
+            "sampler modulatable parameter wrapper should expose on-double-click"
+        );
+
+        let speed_knob = find_layout_node_by_stable_key(&layout, "sampler-param-11-mod-depth")
+            .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+            .expect("sampler speed should render as a mod-depth knob");
+        assert!(
+            speed_knob.props.contains_key("base-value")
+                && speed_knob.props.contains_key("mod-range-0-slot")
+                && speed_knob.props.contains_key("mod-range-0-depth"),
+            "sampler speed knob should expose mod metadata props"
+        );
+        assert!(
+            speed_knob.props.contains_key("mod-range-1-slot")
+                && speed_knob.props.contains_key("mod-range-1-depth"),
+            "sampler speed knob should expose multiple modulation lanes"
+        );
+        let callback = speed_knob
+            .props
+            .get("on-change")
+            .cloned()
+            .expect("sampler speed knob should expose on-change");
+        editor
+            .runtime_mut()
+            .invoke(callback.clone(), vec![Value::Number(0.75)])
+            .expect("sampler speed depth edit");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 21.0, 0.75);
+
+        let env_editor = find_layout_node_by_widget_type(&layout, "adsr-editor")
+            .expect("sampler ENV 1 source editor should use an adsr-editor widget");
+        assert!(
+            env_editor.rect.width > 8.0 && env_editor.rect.height > 1.5,
+            "sampler ENV 1 adsr-editor should be visible, got {:?}",
+            env_editor.rect
+        );
+
+        editor
+            .runtime_mut()
+            .eval_str("(set! instrument-selected-mod-slot 1)")
+            .expect("select sampler LFO source editor");
+        editor
+            .runtime_mut()
+            .invoke(callback, vec![Value::Number(0.5)])
+            .expect("assign sampler speed second modulation lane");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 2, "commands={commands:?}");
+        assert_set_instrument_param(&commands[0], 22.0, 1.0);
+        assert_set_instrument_param(&commands[1], 23.0, 0.5);
+        editor.set_active_buffer(fx_id);
+        let lfo_layout = editor.widget_layout().expect("sampler LFO source layout");
+        assert_finite_layout_tree(&lfo_layout);
+        let lfo_editor =
+            find_layout_node_by_debug_name(&lfo_layout, "instrument-lfo-source-editor")
+                .expect("sampler LFO source should use compact LFO editor");
+        assert!(
+            lfo_editor.rect.width > 0.0 && lfo_editor.rect.height > 0.0,
+            "LFO source editor should be visible, got {:?}",
+            lfo_editor.rect
+        );
+        let pulse_width =
+            find_layout_node_by_debug_name(&lfo_layout, "instrument-source-compact-knob-pw")
+                .and_then(|node| find_layout_node_by_widget_type(node, "knob-number"))
+                .expect("LFO pulse width should render as a compact knob");
+        assert!(
+            pulse_width.rect.width <= 4.5 && pulse_width.rect.height > 0.0,
+            "pulse width knob should be compact, got {:?}",
+            pulse_width.rect
+        );
+        let retrigger =
+            find_layout_node_by_debug_name(&lfo_layout, "instrument-lfo-retrigger-button")
+                .and_then(|node| find_layout_node_by_widget_type(node, "button"))
+                .expect("LFO retrigger should render as a button widget");
+        assert!(
+            retrigger.rect.width <= 4.5 && retrigger.rect.height > 0.0,
+            "retrigger button should be compact, got {:?}",
+            retrigger.rect
+        );
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_lays_out_agent_instrument_stub_skeleton() {
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
         let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
@@ -9069,6 +10595,245 @@ mod tests {
     }
 
     #[test]
+    fn metal_seq_fx_lisp_collects_modded_909_mutant_knob_primitives() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        fn find_descendant_widget<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            widget_type: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node.widget_type == widget_type {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_descendant_widget(child, widget_type))
+        }
+
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        let ui = std::fs::read_to_string("instruments/909-mutant-fm/ui.lisp").expect("read 909 ui");
+        let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+            "909-mutant-fm/".to_string(),
+            "instruments/909-mutant-fm/ui.lisp".to_string(),
+            ui,
+        )));
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_layout_viewport(220, 18);
+        editor.runtime_mut().register_reactive(
+            "SEQ",
+            vec![
+                ("num-tracks", Value::Number(1.0)),
+                ("compiling", Value::Bool(false)),
+                ("available-effects", test_list(vec![])),
+                ("available-builtin-effects", test_list(vec![])),
+                ("available-midi-effects", test_list(vec![])),
+                ("bus-names", test_list(vec![])),
+                ("effects", test_list(vec![])),
+                ("midi-effects", test_list(vec![])),
+                (
+                    "instrument-panel",
+                    test_list(vec![Value::Map(mutant_909_test_instrument_map())]),
+                ),
+                ("bus-effects", test_list(vec![])),
+            ],
+            true,
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (def selected-bus-name () "Mix")
+                (def seq-has-selection? () false)
+                (def sbrowser-editor-name "")
+                (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                (def custom-midi-fx-ui (fx) false)
+                (def custom-audio-fx-ui (fx) false)
+                (defstate selected-bus -1)
+                "#,
+            )
+            .expect("install fx test helpers");
+        editor
+            .runtime_mut()
+            .eval_str(&custom_ui_source)
+            .expect("load 909 custom instrument ui");
+        editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+        editor
+            .runtime_mut()
+            .eval_str("(do (set! instrument-panel-tab 0) (set! instrument-mods-open false) (set! instrument-selected-mod-slot 1))")
+            .expect("show synth tab before opening inline mods");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("909 custom instrument fx lisp status after synth refresh: {status}");
+        }
+
+        let fx_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*fx*")
+            .expect("fx lisp should create the *fx* buffer")
+            .id;
+        editor.set_active_buffer(fx_id);
+        let synth_layout = editor
+            .widget_layout()
+            .expect("909 synth layout should build");
+        assert_finite_layout_tree(&synth_layout);
+        let synth_sweep =
+            find_stable_key_suffix(&synth_layout, "pitch_sweep").expect("synth sweep knob wrapper");
+        let synth_sweep_knob = find_descendant_widget(synth_sweep, "knob-number")
+            .expect("synth sweep wrapper should contain its knob-number");
+        assert!(
+            synth_sweep_knob.rect.width > 0.0 && synth_sweep_knob.rect.height > 0.0,
+            "synth sweep knob-number should be measured before opening mods: {:?}",
+            synth_sweep_knob.rect
+        );
+        let _synth_frame =
+            eseqlisp::ui::frame::build_tiled_render_frame_borderless(&mut editor, 220, 18);
+
+        let mods_label =
+            find_layout_node_by_text(&synth_layout, "mods").expect("mods header label");
+        let click_col = mods_label.rect.col + mods_label.rect.width * 0.5;
+        let click_row = mods_label.rect.row + mods_label.rect.height * 0.5;
+        editor.handle_mouse_precise(
+            mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                click_col as u16,
+                click_row as u16,
+            ),
+            0,
+            0,
+            220,
+            18,
+            click_col,
+            click_row,
+        );
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("909 custom instrument fx lisp status after mods refresh: {status}");
+        }
+        editor.set_active_buffer(fx_id);
+        let _mods_frame =
+            eseqlisp::ui::frame::build_tiled_render_frame_borderless(&mut editor, 220, 18);
+        let layout = editor.widget_layout().expect("909 mod layout should build");
+        assert_finite_layout_tree(&layout);
+        let selector = find_layout_node_by_debug_name(&layout, "instrument-mod-selector")
+            .expect("909 mods-open layout should include the inline mod selector");
+        assert!(
+            selector.rect.width > 0.0 && selector.rect.height > 0.0,
+            "909 mods selector should be measured: {:?}",
+            selector.rect
+        );
+        let selector_button_count = count_widget_type(selector, "button");
+        assert!(selector_button_count >= 8, "{}", {
+            let mut summaries = Vec::new();
+            collect_layout_node_summaries(selector, &mut summaries);
+            format!(
+                "909 mods-open layout should render the mod selector buttons; got {selector_button_count}\n{}",
+                summaries.join("\n")
+            )
+        });
+        let sweep = find_stable_key_suffix(&layout, "pitch_sweep").expect("sweep knob wrapper");
+        assert!(
+            sweep.rect.width > 0.0 && sweep.rect.height > 0.0,
+            "sweep knob wrapper should be measured: {:?}",
+            sweep.rect
+        );
+        let sweep_knob = find_descendant_widget(sweep, "knob-number")
+            .expect("sweep wrapper should contain its knob-number while mods are open");
+        assert!(
+            sweep_knob.rect.width > 0.0 && sweep_knob.rect.height > 0.0,
+            "sweep knob-number should be measured while mods are open: {:?}",
+            sweep_knob.rect
+        );
+        for prop in [
+            "base-value",
+            "base-min",
+            "base-max",
+            "selected-mod-slot",
+            "mod-range-0-slot",
+            "mod-range-0-depth",
+        ] {
+            assert!(
+                !matches!(sweep_knob.props.get(prop), None | Some(Value::Bool(false))),
+                "sweep knob-number should carry active mod prop {prop:?} in mods tab; props={:?}",
+                sweep_knob.props.keys().collect::<Vec<_>>()
+            );
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            use eseqlisp::widget_render::{MetalPrimitive, WidgetViewport};
+
+            let viewport = WidgetViewport {
+                cell_w: 10.0,
+                cell_h: 10.0,
+                vp_w: 2200.0,
+                vp_h: 180.0,
+                time_seconds: 0.0,
+                focused_widget_id: None,
+                focused_branch: false,
+                tile_content_rows: 18.0,
+                scroll_top: 0.0,
+                scroll_left: 0.0,
+                inherited_hover: false,
+            };
+            let (primitives, _) =
+                eseqlisp::widget_render::collect_metal_primitives(&layout, viewport, 0.0, 18);
+            let knob_instances = primitives
+                .iter()
+                .filter(|primitive| {
+                    matches!(
+                        primitive,
+                        MetalPrimitive::WidgetInstance { widget_type, .. }
+                            if widget_type == "knob-number"
+                    )
+                })
+                .count();
+            let knob_text = primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .filter(|text| matches!(*text, "sweep" | "FM" | "body" | "drv"))
+                .collect::<Vec<_>>();
+            assert!(
+                knob_instances >= 12,
+                "909 mods-open primitive stream should include knob-number instances; got {knob_instances}"
+            );
+            assert!(
+                knob_text.len() >= 4,
+                "909 mods-open primitive stream should include knob labels; got {knob_text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn metal_seq_fx_lisp_lays_out_prophet_6_inspired_condensed_controls() {
         fn find_stable_key_suffix<'a>(
             node: &'a eseqlisp::layout::LayoutNode,
@@ -9187,6 +10952,249 @@ mod tests {
                 node.rect,
                 instrument_panel.rect
             );
+        }
+    }
+
+    #[test]
+    fn metal_seq_fx_lisp_lays_out_converted_monomachine_and_prophet_uis() {
+        fn find_stable_key_suffix<'a>(
+            node: &'a eseqlisp::layout::LayoutNode,
+            suffix: &str,
+        ) -> Option<&'a eseqlisp::layout::LayoutNode> {
+            if node
+                .stable_key
+                .as_deref()
+                .is_some_and(|key| key.ends_with(suffix))
+            {
+                return Some(node);
+            }
+            node.children
+                .iter()
+                .find_map(|child| find_stable_key_suffix(child, suffix))
+        }
+
+        fn dsp_param_names(path: &str) -> Vec<String> {
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {path}: {error}"))
+                .lines()
+                .filter_map(|line| {
+                    let line = line.trim_start();
+                    line.strip_prefix("(param ")
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .map(str::to_string)
+                })
+                .collect()
+        }
+
+        fn test_instrument_map_from_dsp(
+            instrument_name: &str,
+            dsp_path: &str,
+        ) -> HashMap<String, Rc<RefCell<Value>>> {
+            let mut inst = test_instrument_map();
+            inst.insert(
+                "name".to_string(),
+                Rc::new(RefCell::new(Value::String(instrument_name.to_string()))),
+            );
+            inst.insert(
+                "display-name".to_string(),
+                Rc::new(RefCell::new(Value::String(
+                    instrument_name.trim_end_matches('/').to_string(),
+                ))),
+            );
+
+            let synth_params: Vec<Value> = std::iter::once(Value::Map(test_base_note_param_map(0)))
+                .chain(
+                    dsp_param_names(dsp_path)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, name)| {
+                            let (min, max) = if name.ends_with("_mode") {
+                                (0.0, 3.0)
+                            } else {
+                                (-10000.0, 10000.0)
+                            };
+                            Value::Map(test_param_map(&name, idx + 1, 0.0, min, max))
+                        }),
+                )
+                .collect();
+            inst.insert(
+                "synth".to_string(),
+                Rc::new(RefCell::new(test_list(synth_params))),
+            );
+            inst
+        }
+
+        let cases = [
+            (
+                "emulations/monomachine-digipro/",
+                "instruments/emulations/monomachine-digipro/dsp.lisp",
+                "instruments/emulations/monomachine-digipro/ui.lisp",
+                vec!["morph", "cutoff", "gain"],
+            ),
+            (
+                "emulations/monomachine-dpro-bbox-v1/",
+                "instruments/emulations/monomachine-dpro-bbox-v1/dsp.lisp",
+                "instruments/emulations/monomachine-dpro-bbox-v1/ui.lisp",
+                vec!["ptch", "cutoff", "gain"],
+            ),
+            (
+                "emulations/monomachine-dpro-dens-v1/",
+                "instruments/emulations/monomachine-dpro-dens-v1/dsp.lisp",
+                "instruments/emulations/monomachine-dpro-dens-v1/ui.lisp",
+                vec!["wave", "chrl", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-dpro-ddrw-v1/",
+                "instruments/emulations/monomachine-dpro-ddrw-v1/dsp.lisp",
+                "instruments/emulations/monomachine-dpro-ddrw-v1/ui.lisp",
+                vec!["wav1", "time", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-dpro-wave-v2/",
+                "instruments/emulations/monomachine-dpro-wave-v2/dsp.lisp",
+                "instruments/emulations/monomachine-dpro-wave-v2/ui.lisp",
+                vec!["wave", "cutoff", "gain"],
+            ),
+            (
+                "emulations/monomachine-fmplus/",
+                "instruments/emulations/monomachine-fmplus/dsp.lisp",
+                "instruments/emulations/monomachine-fmplus/ui.lisp",
+                vec!["ratio_a", "tone", "gain"],
+            ),
+            (
+                "emulations/monomachine-fmplus-par-v1/",
+                "instruments/emulations/monomachine-fmplus-par-v1/dsp.lisp",
+                "instruments/emulations/monomachine-fmplus-par-v1/ui.lisp",
+                vec!["op1_frq", "op3_frq", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-fmplus-stat-v1/",
+                "instruments/emulations/monomachine-fmplus-stat-v1/dsp.lisp",
+                "instruments/emulations/monomachine-fmplus-stat-v1/ui.lisp",
+                vec!["op1_frq", "op2_vol", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-sid/",
+                "instruments/emulations/monomachine-sid/dsp.lisp",
+                "instruments/emulations/monomachine-sid/ui.lisp",
+                vec!["osc2_semi", "pulse_width", "cutoff"],
+            ),
+            (
+                "emulations/monomachine-superwave/",
+                "instruments/emulations/monomachine-superwave/dsp.lisp",
+                "instruments/emulations/monomachine-superwave/ui.lisp",
+                vec!["saw_mix", "motion_rate", "cutoff"],
+            ),
+            (
+                "emulations/prophet-6/",
+                "instruments/emulations/prophet-6/dsp.lisp",
+                "instruments/emulations/prophet-6/ui.lisp",
+                vec!["osc1_shape", "osc2_mix", "cutoff"],
+            ),
+            (
+                "emulations/prophet-6-emu/",
+                "instruments/emulations/prophet-6-emu/dsp.lisp",
+                "instruments/emulations/prophet-6-emu/ui.lisp",
+                vec!["osc1_shape", "filter_drive", "gain"],
+            ),
+        ];
+
+        let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        for (instrument_name, dsp_path, ui_path, expected_suffixes) in cases {
+            let ui = std::fs::read_to_string(ui_path).unwrap_or_else(|error| {
+                panic!("read {ui_path}: {error}");
+            });
+            let custom_ui_source = build_custom_instrument_ui_source_with_overlay(Some((
+                instrument_name.to_string(),
+                ui_path.to_string(),
+                ui,
+            )));
+
+            let mut editor =
+                eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+            editor.set_layout_viewport(180, 18);
+            editor.runtime_mut().register_reactive(
+                "SEQ",
+                vec![
+                    ("num-tracks", Value::Number(1.0)),
+                    ("compiling", Value::Bool(false)),
+                    ("available-effects", test_list(vec![])),
+                    ("available-builtin-effects", test_list(vec![])),
+                    ("available-midi-effects", test_list(vec![])),
+                    ("bus-names", test_list(vec![])),
+                    ("effects", test_list(vec![])),
+                    ("midi-effects", test_list(vec![])),
+                    (
+                        "instrument-panel",
+                        test_list(vec![Value::Map(test_instrument_map_from_dsp(
+                            instrument_name,
+                            dsp_path,
+                        ))]),
+                    ),
+                    ("bus-effects", test_list(vec![])),
+                ],
+                true,
+            );
+            editor
+                .runtime_mut()
+                .eval_str(
+                    r#"
+                    (def selected-bus-name () "Mix")
+                    (def seq-has-selection? () false)
+                    (def sbrowser-editor-name "")
+                    (defmacro aqua-slider-material () `(material :color (rgba 0.15 0.15 0.88 1.0)))
+                    (def custom-midi-fx-ui (fx) false)
+                    (def custom-audio-fx-ui (fx) false)
+                    (defstate selected-bus -1)
+                    "#,
+                )
+                .expect("install fx test helpers");
+            editor
+                .runtime_mut()
+                .eval_str(&custom_ui_source)
+                .unwrap_or_else(|error| panic!("load {instrument_name} custom UI: {error:?}"));
+            editor.runtime_mut().eval_str(&src).expect("load fx lisp");
+            editor.refresh_runtime_side_effects();
+            if let Some(status) = editor.runtime_mut().take_status_message() {
+                panic!(
+                    "{instrument_name} custom instrument fx lisp status after refresh: {status}"
+                );
+            }
+
+            let fx_id = editor
+                .buffers
+                .iter()
+                .find(|buffer| buffer.name == "*fx*")
+                .expect("fx lisp should create the *fx* buffer")
+                .id;
+            editor.set_active_buffer(fx_id);
+            editor.set_layout_viewport(180, 18);
+            let layout = editor
+                .widget_layout()
+                .unwrap_or_else(|| panic!("{instrument_name} layout should build"));
+            let rendered = render_layout_cells(&layout, 180, 18);
+            assert!(
+                !rendered.contains("missing:"),
+                "{instrument_name} should not render missing-param diagnostics:\n{rendered}"
+            );
+            let instrument_panel = find_layout_node_by_debug_name(&layout, "instrument-panel")
+                .unwrap_or_else(|| panic!("{instrument_name} instrument panel layout node"));
+
+            for suffix in expected_suffixes {
+                let node = find_stable_key_suffix(&layout, suffix).unwrap_or_else(|| {
+                    panic!("{instrument_name} should render a control ending in {suffix}")
+                });
+                assert!(
+                    node.rect.width > 1.0
+                        && node.rect.height > 0.4
+                        && node.rect.row >= instrument_panel.rect.row
+                        && node.rect.row + node.rect.height
+                            <= instrument_panel.rect.row + instrument_panel.rect.height,
+                    "{instrument_name} {suffix} should have a finite visible rect inside the instrument panel, got {:?}; panel={:?}",
+                    node.rect,
+                    instrument_panel.rect
+                );
+            }
         }
     }
 

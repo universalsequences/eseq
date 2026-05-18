@@ -111,7 +111,7 @@ feedback, and physical models.
 ```
 
 The name becomes a symbol you can use in expressions. Parameters appear in the manifest with their physical memory cell ID for host-side control.
-Modulatable params generate hidden modulation source/depth params plus `modDestinations` metadata in the manifest.
+Modulatable params generate a hidden active flag and one hidden depth lane per declared `@modulator` input, plus `modDestinations` metadata in the manifest. The host writes depth lane cells and maintains the active flag outside the audio loop.
 
 #### in — audio input channel
 

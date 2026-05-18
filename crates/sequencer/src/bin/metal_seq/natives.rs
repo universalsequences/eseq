@@ -465,8 +465,10 @@ pub(crate) fn init_runtime(
     // seq-toggle-step — toggle step on current track
     let st = state.clone();
     let ct = current_track.clone();
+    let sel = selected_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-toggle-step", move |args, _ctx| {
         let Some(Value::Number(step)) = args.first() else {
             return Err("seq-toggle-step: expected step number".into());
@@ -477,6 +479,13 @@ pub(crate) fn init_runtime(
         }
         let track = ct.load(Ordering::Relaxed);
         st.toggle_step_and_clear_plocks(track, step);
+        {
+            let mut set = sel.lock().unwrap();
+            if !set.is_empty() {
+                set.clear();
+                fx_ep.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
@@ -484,8 +493,10 @@ pub(crate) fn init_runtime(
 
     // seq-toggle-track-step — toggle a step on a specific track (no track switch)
     let st = state.clone();
+    let sel = selected_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-toggle-track-step", move |args, _ctx| {
         let (Some(Value::Number(track)), Some(Value::Number(step))) = (args.first(), args.get(1))
         else {
@@ -500,6 +511,13 @@ pub(crate) fn init_runtime(
             return Err(format!("seq-toggle-track-step: step {step} out of range").into());
         }
         st.toggle_step_and_clear_plocks(track, step);
+        {
+            let mut set = sel.lock().unwrap();
+            if !set.is_empty() {
+                set.clear();
+                fx_ep.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);
         ui_ep.fetch_add(1, Ordering::Relaxed);
         Ok(Value::Bool(st.pattern.patterns[track].is_active(step)))
@@ -522,8 +540,10 @@ pub(crate) fn init_runtime(
     // seq-set-step-param — set param on current track
     let st = state.clone();
     let ct = current_track.clone();
+    let sel = selected_steps.clone();
     let auto_follow_override = auto_follow_override_until.clone();
     let ui_ep = ui_epoch.clone();
+    let fx_ep = fx_epoch.clone();
     runtime.register_native("seq-set-step-param", move |args, _ctx| {
         let (Some(Value::Number(step)), Some(Value::Keyword(param_name)), Some(Value::Number(val))) =
             (args.first(), args.get(1), args.get(2))
@@ -546,6 +566,13 @@ pub(crate) fn init_runtime(
         };
         let track = ct.load(Ordering::Relaxed);
         let val = (*val as f32).clamp(param.min(), param.max());
+        {
+            let mut set = sel.lock().unwrap();
+            if !set.is_empty() && !set.contains(&step) {
+                set.clear();
+                fx_ep.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         st.pattern.step_data[track].set(step, param, val);
         st.publish_scheduler_snapshot();
         *auto_follow_override.lock().unwrap() = Some(Instant::now() + AUTO_FOLLOW_COOLDOWN);

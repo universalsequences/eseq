@@ -326,9 +326,7 @@
                           (cool-off-follow)
                           (set! cursor-step step)
                           (let ((value (step-slider-param-value v)))
-                          (if (seq-has-selection?)
-                            (seq-set-step-param-plock (param-keyword) value)
-                            (seq-set-step-param step (param-keyword) value))))
+                          (seq-set-step-param-from-step step (param-keyword) value)))
                         nil)))
                   (vslider :height 4
                     :width (if (= param-mode 5) 2 1)
@@ -353,9 +351,7 @@
                           (cool-off-follow)
                           (set! cursor-step step)
                           (let ((value (step-slider-param-value v)))
-                          (if (seq-has-selection?)
-                            (seq-set-step-param-plock (param-keyword) value)
-                            (seq-set-step-param step (param-keyword) value))))
+                          (seq-set-step-param-from-step step (param-keyword) value)))
                         nil)))))
               (box
                 :active (if visible (if (nth SEQ.steps step) 1 0) 0)
@@ -407,7 +403,10 @@
           :on-change (lambda (v)
             (do
               (cool-off-follow)
-              (seq-set-step-param (current-step) (param-keyword) (step-param-value v))))
+              (seq-set-step-param-from-step
+                (current-step)
+                (param-keyword)
+                (step-param-value v))))
           :width 8 :height 1.3 :font-size 11))
       (h-stack :gap 0.4 :align :center
         (box :background "pattern-pill-btn-bg" :width 2.5 :height 1.1 :active true

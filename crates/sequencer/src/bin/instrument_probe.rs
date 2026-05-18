@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use sequencer::lisp_effect::{self, InstrumentRenderOptions};
+use sequencer::lisp_effect::{self, InstrumentParamEvent, InstrumentRenderOptions};
 
 fn usage() {
     eprintln!(
@@ -14,6 +14,9 @@ fn usage() {
            --velocity V        Velocity 0..1 (default: 1)\n\
            --gate-frames N     Gate duration in frames (default: frames)\n\
            --param name=value  Override an instrument parameter; repeatable\n\
+           --param-at frame:name=value\n\
+                               Apply an instrument parameter at a render frame; repeatable\n\
+           --input N=value     Fill input channel N with value; repeatable\n\
            --min-peak V        Fail if peak is below V\n\
            --min-rms V         Fail if RMS is below V\n\
            --json              Print JSON instead of text"
@@ -66,6 +69,8 @@ fn main() {
     let mut velocity = 1.0f32;
     let mut gate_frames: Option<usize> = None;
     let mut param_overrides = Vec::new();
+    let mut param_events = Vec::new();
+    let mut input_overrides = Vec::new();
     let mut min_peak: Option<f32> = None;
     let mut min_rms: Option<f32> = None;
     let mut json = false;
@@ -94,6 +99,49 @@ fn main() {
                         .parse::<f32>()
                         .map_err(|_| format!("invalid --param value for '{name}'"))?;
                     param_overrides.push((name.to_string(), value));
+                    Ok(())
+                })
+            }
+            "--param-at" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--param-at requires frame:name=value".to_string());
+                value.and_then(|raw| {
+                    let Some((frame, assignment)) = raw.split_once(':') else {
+                        return Err("--param-at requires frame:name=value".to_string());
+                    };
+                    let frame = frame
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid --param-at frame '{frame}'"))?;
+                    let Some((name, value)) = assignment.split_once('=') else {
+                        return Err("--param-at requires frame:name=value".to_string());
+                    };
+                    let value = value
+                        .parse::<f32>()
+                        .map_err(|_| format!("invalid --param-at value for '{name}'"))?;
+                    param_events.push(InstrumentParamEvent {
+                        frame,
+                        name: name.to_string(),
+                        value,
+                    });
+                    Ok(())
+                })
+            }
+            "--input" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--input requires channel=value".to_string());
+                value.and_then(|raw| {
+                    let Some((channel, value)) = raw.split_once('=') else {
+                        return Err("--input requires channel=value".to_string());
+                    };
+                    let channel = channel
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid --input channel '{channel}'"))?;
+                    let value = value
+                        .parse::<f32>()
+                        .map_err(|_| format!("invalid --input value for channel {channel}"))?;
+                    input_overrides.push((channel, value));
                     Ok(())
                 })
             }
@@ -127,6 +175,8 @@ fn main() {
         gate_frames: gate_frames.unwrap_or(frames),
         voice_index: 0,
         param_overrides,
+        param_events,
+        input_overrides,
     };
 
     let report = match lisp_effect::render_instrument_source_for_test(

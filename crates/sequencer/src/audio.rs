@@ -21,7 +21,8 @@ use crate::sampler::{
 };
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
-    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, TimedEvent,
+    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
+    TimedEvent,
 };
 use crate::sequencer::{
     sync_beats, BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, SwingResolution,
@@ -32,6 +33,19 @@ use crate::voice::{VoicePool, MAX_VOICES};
 
 pub const HOST_SAMPLE_RATE: u32 = 44_100;
 const CUSTOM_ENGINE_RELEASE_TAIL_SECONDS: f64 = 20.0;
+
+unsafe fn push_param_span(lg: *mut LiveGraph, logical_id: u64, idx: u64, span: u32, value: f32) {
+    for lane in 0..span.max(1) as u64 {
+        params_push_wrapper(
+            lg,
+            ParamMsg {
+                idx: idx + lane,
+                logical_id,
+                fvalue: value,
+            },
+        );
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OutputDeviceConfig {
@@ -350,6 +364,8 @@ impl CustomEnginePool {
         }
 
         let mut active_same_note_idx = None;
+        let mut releasing_same_note_idx = None;
+        let mut releasing_same_note_age = u64::MAX;
         let mut idle_same_track_idx = None;
         let mut idle_same_track_age = u64::MAX;
         let mut releasing_same_track_idx = None;
@@ -373,6 +389,12 @@ impl CustomEnginePool {
                 match voice.assigned_track {
                     Some(assigned) if assigned == track => {
                         if is_releasing {
+                            if (voice.note - note).abs() < 0.01
+                                && voice.age < releasing_same_note_age
+                            {
+                                releasing_same_note_idx = Some(i);
+                                releasing_same_note_age = voice.age;
+                            }
                             if voice.age < releasing_same_track_age {
                                 releasing_same_track_idx = Some(i);
                                 releasing_same_track_age = voice.age;
@@ -422,12 +444,14 @@ impl CustomEnginePool {
 
         let idx = if assigned_same_track_count >= max_polyphony {
             active_same_note_idx
+                .or(releasing_same_note_idx)
                 .or(idle_same_track_idx)
                 .or(releasing_same_track_idx)
                 .or(oldest_same_track)
                 .unwrap_or(oldest_idx)
         } else {
             active_same_note_idx
+                .or(releasing_same_note_idx)
                 .or(idle_same_track_idx)
                 .or(unassigned_idle_idx)
                 .or(idle_other_track_idx)
@@ -1191,14 +1215,7 @@ unsafe fn dispatch_modulator_params(
         if param.target != ScheduledInstrumentParamTarget::Synth {
             continue;
         }
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx: param.idx,
-                logical_id: modulator_lid,
-                fvalue: param.value,
-            },
-        );
+        push_param_span(lg, modulator_lid, param.idx, param.span, param.value);
     }
 }
 
@@ -1440,24 +1457,12 @@ unsafe fn dispatch_instrument_params_to_voice(
     modulator_id: u64,
     instrument_params: &[ScheduledInstrumentParam],
 ) {
-    let mut sorted_params = instrument_params.iter().collect::<Vec<_>>();
-    sorted_params.sort_by_key(|param| match param.target {
-        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
-        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
-    });
-    for param in sorted_params {
+    for param in instrument_params {
         let (logical_id, idx) = match param.target {
             ScheduledInstrumentParamTarget::Synth => (synth_id, param.idx),
             ScheduledInstrumentParamTarget::Modulator => (modulator_id, param.idx),
         };
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx,
-                logical_id,
-                fvalue: param.value,
-            },
-        );
+        push_param_span(lg, logical_id, idx, param.span, param.value);
     }
 }
 
@@ -1481,13 +1486,12 @@ unsafe fn dispatch_instrument_defaults_to_voice(
         } else {
             idx
         };
-        params_push_wrapper(
+        push_param_span(
             lg,
-            ParamMsg {
-                idx: resolved_idx,
-                logical_id,
-                fvalue: slot.defaults.get(param_idx),
-            },
+            logical_id,
+            resolved_idx,
+            slot.resolve_node_span(param_idx),
+            slot.defaults.get(param_idx),
         );
     }
 }
@@ -1504,14 +1508,7 @@ unsafe fn dispatch_sampler_modulator_params_to_voice(
         if param.target != ScheduledInstrumentParamTarget::Modulator {
             continue;
         }
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx: param.idx,
-                logical_id: modulator_id,
-                fvalue: param.value,
-            },
-        );
+        push_param_span(lg, modulator_id, param.idx, param.span, param.value);
     }
 }
 
@@ -1527,14 +1524,101 @@ unsafe fn dispatch_sampler_extra_params_to_voice(
         if param.idx < crate::sampler::PARAM_SCRUB_OFFSET {
             continue;
         }
-        params_push_wrapper(
-            lg,
-            ParamMsg {
-                idx: param.idx,
-                logical_id: sampler_lid,
-                fvalue: param.value,
-            },
-        );
+        push_param_span(lg, sampler_lid, param.idx, param.span, param.value);
+    }
+}
+
+fn sampler_live_param_value(idx: u64, value: f32, sample_rate: f64) -> f32 {
+    if idx == PARAM_ATTACK_SAMPLES
+        || idx == PARAM_RELEASE_SAMPLES
+        || idx == PARAM_LOOP_XFADE_SAMPLES
+    {
+        // Sampler p-lock values for these UI params are stored in ms; the DSP
+        // node consumes samples.
+        value * sample_rate as f32 / 1000.0
+    } else {
+        value
+    }
+}
+
+unsafe fn dispatch_sampler_live_params_to_voice(
+    lg: *mut LiveGraph,
+    sampler_lid: u64,
+    modulator_id: u64,
+    instrument_params: &[ScheduledInstrumentParam],
+    sample_rate: f64,
+) {
+    for param in instrument_params {
+        match param.target {
+            ScheduledInstrumentParamTarget::Synth => {
+                push_param_span(
+                    lg,
+                    sampler_lid,
+                    param.idx,
+                    param.span,
+                    sampler_live_param_value(param.idx, param.value, sample_rate),
+                );
+            }
+            ScheduledInstrumentParamTarget::Modulator => {
+                if modulator_id != 0 {
+                    push_param_span(lg, modulator_id, param.idx, param.span, param.value);
+                }
+            }
+        }
+    }
+}
+
+fn dispatch_instrument_params_to_active_voices(
+    data: &mut AudioCallbackData,
+    track_idx: usize,
+    instrument_params: &[ScheduledInstrumentParam],
+) {
+    if instrument_params.is_empty() {
+        return;
+    }
+    if let Some(engine_id) = track_engine_id(&data.state, track_idx) {
+        let pool = &mut data.custom_engine_pools[engine_id];
+        for voice_idx in 0..pool.num_voices {
+            if !pool.voices[voice_idx].active
+                || pool.voices[voice_idx].assigned_track != Some(track_idx)
+            {
+                continue;
+            }
+            let synth_id = data.state.runtime.engine_synth_node_ids[engine_id][voice_idx]
+                .load(Ordering::Relaxed);
+            let modulator_id = data.state.runtime.engine_modulator_node_ids[engine_id][voice_idx]
+                .load(Ordering::Relaxed);
+            if synth_id == 0 {
+                continue;
+            }
+            unsafe {
+                dispatch_instrument_params_to_voice(
+                    data.lg.0,
+                    synth_id as u64,
+                    modulator_id as u64,
+                    instrument_params,
+                );
+            }
+            // Force re-resolve on the next trigger because live p-locks can
+            // diverge the active voice from descriptor defaults.
+            pool.voices[voice_idx].fingerprint = 0;
+        }
+    } else {
+        let pool = &data.voice_pools[track_idx];
+        for voice in pool.voices[..pool.num_voices]
+            .iter()
+            .filter(|voice| voice.active && voice.logical_id != 0)
+        {
+            unsafe {
+                dispatch_sampler_live_params_to_voice(
+                    data.lg.0,
+                    voice.logical_id,
+                    voice.modulator_id as u64,
+                    instrument_params,
+                    data.sample_rate,
+                );
+            }
+        }
     }
 }
 
@@ -1599,7 +1683,7 @@ fn dispatch_scheduled_step(
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
     instrument_fingerprint: u64,
 ) {
     unsafe {
@@ -1640,6 +1724,12 @@ fn dispatch_scheduled_event(data: &mut AudioCallbackData, event: ScheduledEvent)
                 instrument_params,
                 instrument_fingerprint,
             );
+        }
+        ScheduledEventKind::InstrumentParams {
+            track,
+            instrument_params,
+        } => {
+            dispatch_instrument_params_to_active_voices(data, track, &instrument_params);
         }
     }
 }
@@ -1887,7 +1977,7 @@ fn fire_resolved(
     samples_per_step: f64,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
     instrument_fingerprint: u64,
 ) {
     let tp = &data.state.pattern.track_params[track_idx];
@@ -3306,7 +3396,7 @@ pub fn build_output_stream(
         bus_gate_play_start_sample: 0,
         dropped_scheduled_events: 0,
         late_scheduled_events: 0,
-        events_heap: BinaryHeap::new(),
+        events_heap: BinaryHeap::with_capacity(4096),
         event_seq: 0,
         trace_audio,
         trace_callback_counter: 0,
@@ -3621,7 +3711,26 @@ mod tests {
     }
 
     #[test]
-    fn custom_engine_pool_does_not_reuse_releasing_voice_before_cap() {
+    fn custom_engine_pool_reuses_releasing_same_note_before_expanding() {
+        let mut pool = CustomEnginePool::new();
+        for lid in 1..=6 {
+            pool.add_voice(lid);
+        }
+
+        let low = pool.allocate_voice(0, 0.0, true, 6);
+        let low_lid = low.logical_id;
+        pool.release_voice_by_logical_id(low_lid, 1_000);
+
+        let retriggered = pool.allocate_voice(0, 0.0, true, 6);
+
+        assert_eq!(low_lid, 1);
+        assert_eq!(retriggered.logical_id, low_lid);
+        assert!(!retriggered.stole_active_voice);
+        assert_eq!(pool.voices[0].release_started_sample, None);
+    }
+
+    #[test]
+    fn custom_engine_pool_uses_unassigned_voice_for_different_note_before_cap() {
         let mut pool = CustomEnginePool::new();
         for lid in 1..=6 {
             pool.add_voice(lid);

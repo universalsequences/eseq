@@ -2890,6 +2890,123 @@ fn widget_tree_survives_buffer_switch() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn knob_number_rich_mod_props_survive_lisp_layout_and_emit_scene_primitives() {
+    fn find_widget<'a>(
+        node: &'a crate::layout::LayoutNode,
+        widget_type: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.widget_type == widget_type {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_widget(child, widget_type))
+    }
+
+    let mut runtime = Runtime::new();
+    runtime.register_reactive(
+        "APP",
+        vec![
+            ("base", Value::Number(0.0)),
+            ("depth-1", Value::Number(0.5)),
+        ],
+        true,
+    );
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(60, 16);
+    editor
+        .runtime_mut()
+        .eval_str(
+            r#"
+            (effect-buffer "*controls*"
+              (knob-number :label "cut"
+                :value 0 :min -1 :max 1 :decimals 2
+                :base-value (bind "APP" "base") :base-min -1 :base-max 1
+                :selected-mod-slot 1
+                :mod-range-0-slot 1
+                :mod-range-0-depth (bind "APP" "depth-1")
+                :mod-ranges (list
+                  (dict :slot 2 :depth -0.25))
+                :width 4 :height 2.8
+                :value-align :center))
+            "#,
+        )
+        .unwrap();
+    editor.refresh_runtime_side_effects();
+    let controls_id = editor
+        .buffers
+        .iter()
+        .find(|buffer| buffer.name == "*controls*")
+        .unwrap()
+        .id;
+    editor.set_active_buffer(controls_id);
+
+    let layout = editor.widget_layout().expect("rich knob layout");
+    let knob = find_widget(&layout, "knob-number").expect("knob-number layout node");
+    assert!(
+        matches!(knob.props.get("mod-ranges"), Some(Value::List(items)) if items.len() == 1),
+        "rich mod-ranges prop should survive Lisp -> layout: {:?}",
+        knob.props.get("mod-ranges")
+    );
+    assert!(
+        matches!(knob.props.get("mod-range-0-depth"), Some(Value::ReactiveRef { .. })),
+        "flat reactive mod range props should be accepted by knob-number: {:?}",
+        knob.props.get("mod-range-0-depth")
+    );
+
+    let viewport = crate::widget_render::WidgetViewport {
+        cell_w: 10.0,
+        cell_h: 10.0,
+        vp_w: 600.0,
+        vp_h: 160.0,
+        time_seconds: 0.0,
+        focused_widget_id: None,
+        focused_branch: false,
+        tile_content_rows: 16.0,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        inherited_hover: false,
+    };
+    let primitives = crate::widget_render::widget_primitives_for_node(knob, viewport);
+    let base_count = primitives
+        .iter()
+        .filter(|primitive| {
+            matches!(
+                primitive,
+                crate::widget_render::MetalPrimitive::WidgetInstance { widget_type, .. }
+                    if widget_type == "knob-number"
+            )
+        })
+        .count();
+    let range_uniforms = primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            crate::widget_render::MetalPrimitive::WidgetInstance {
+                widget_type,
+                instance,
+                ..
+            } if widget_type == "knob-number-mod-range" => Some(instance.uniform_b),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let text = primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            crate::widget_render::MetalPrimitive::ProportionalText(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(base_count, 1);
+    assert_eq!(range_uniforms.len(), 2);
+    assert_eq!(range_uniforms[0], [0.956, 0.5, 0.375, 0.0]);
+    assert!((range_uniforms[1][0] - 0.895).abs() < 0.000_01);
+    assert_eq!(&range_uniforms[1][1..], &[0.5, 0.75, 1.0]);
+    assert!(text.contains(&"cut"), "expected knob label text primitive: {text:?}");
+}
+
 #[test]
 fn cycle_view_mode_toggles_between_text_and_ui_when_ui_exists() {
     let runtime = Runtime::new();

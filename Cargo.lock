@@ -2386,6 +2386,7 @@ dependencies = [
 name = "sequencer"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "aubio",
  "backtrace",
  "cc",

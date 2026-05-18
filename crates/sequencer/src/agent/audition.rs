@@ -53,6 +53,8 @@ fn default_options(sample_rate: u32) -> InstrumentRenderOptions {
         gate_frames: 22_050,
         voice_index: 0,
         param_overrides: Vec::new(),
+        param_events: Vec::new(),
+        input_overrides: Vec::new(),
     }
 }
 

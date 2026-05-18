@@ -1192,6 +1192,11 @@ impl App {
         self.ui.selection_anchor.is_some() || !self.ui.visual_steps.is_empty()
     }
 
+    fn clear_step_selection(&mut self) {
+        self.ui.selection_anchor = None;
+        self.ui.visual_steps.clear();
+    }
+
     fn track_selected_range(&self) -> (usize, usize) {
         match self.ui.track_selection_anchor {
             Some(anchor) => {

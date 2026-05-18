@@ -1,227 +1,115 @@
-;; Custom Synth tab body for instruments/emulations/monomachine-superwave/dsp.lisp
-(defstate monomachine-superwave-selected-section 0)
-(def monomachine_superwave-select (section)
-  (set! monomachine-superwave-selected-section section))
-(def monomachine_superwave-panel-bg (section)
-  (if (= section 0)
-    :instrument-group-bg
-    (if (= monomachine-superwave-selected-section section)
-      :instrument-group-selected-bg
-      :instrument-group-bg)))
-(def monomachine_superwave-cell-width 4.0)
-(def monomachine_superwave-param-cell-step-section-width (name title decimals step section width)
-  (let ((p (inst-param synth-ui-current-inst name)))
-    (if p
-      (subtree :key (str "monomachine_superwave-cell-" name)
-        (knob-number :label title
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals decimals
-          :step step
-          :font-size 10.5 :label-font-size 10
-          :text-color :dim :label-color :dim
-          :width width :height 2.05
-          :on-change (lambda (v)
-            (do
-              (monomachine_superwave-select section)
-              (fx-set-instrument-value p v)))))
-      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
-(def monomachine_superwave-param-cell-step-section (name title decimals step section)
-  (monomachine_superwave-param-cell-step-section-width name title decimals step section monomachine_superwave-cell-width))
-(def monomachine_superwave-param-cell-section (name title decimals section)
-  (monomachine_superwave-param-cell-step-section name title decimals 0 section))
-(def monomachine_superwave-base-note-cell (section)
-  (let ((p (inst-base-note-param synth-ui-current-inst)))
-    (if p
-      (subtree :key (str "monomachine_superwave-base-note-cell")
-        (knob-number :label "note"
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals 0
-          :step 1
-          :font-size 10.5 :label-font-size 10
-          :text-color :dim :label-color :dim
-          :width monomachine_superwave-cell-width :height 2.05
-          :on-change (lambda (v)
-            (do
-              (monomachine_superwave-select section)
-              (fx-set-instrument-value p v)))))
-      (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
-(def monomachine_superwave-param-number-section (name title decimals unit section)
-  (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p
-        (subtree :key (str "monomachine_superwave-adsr-number-" name)
-          (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-            (label title :font-size 10 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (get p :min) :max (get p :max) :decimals decimals
-              :unit unit
-              :noui true :font-size 10.5
-              :text-align :center
-              :text-color :widget_focus_bg :edit-color :yellow
-              :width 5.0 :height 0.95
-              :on-change (lambda (v)
-                (do
-                  (monomachine_superwave-select section)
-                  (fx-set-instrument-value p v))))))
-        (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
-    (box :width 5.2 :height 1.75
-      (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-        (label title :font-size 10 :color :dim :bg :transparent)
-        (number-picker :value 0 :min 0 :max 0 :decimals decimals
-          :unit unit :noui true :font-size 10.5
-          :text-align :center :text-color :dim :edit-color :dim
-          :width 5.0 :height 0.95)))))
-(def monomachine_superwave-param-value (name fallback)
-  (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (fx-param-value p) fallback))
-    fallback))
-(def monomachine_superwave-set-param (name value)
-  (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (fx-set-instrument-value p value) false))
-    false))
-(def monomachine_superwave-adsr-view (attack decay sustain release section)
-  (adsr-editor
-    :attack (monomachine_superwave-param-value attack 4)
-    :decay (monomachine_superwave-param-value decay 400)
-    :sustain (monomachine_superwave-param-value sustain 0.5)
-    :release (monomachine_superwave-param-value release 0)
-    :width 22.0 :height 3.55
-    :background-color :instrument-control-bg
-    :on-change (lambda (env)
-      (do
-        (monomachine_superwave-select section)
-        (monomachine_superwave-set-param attack (get env :attack))
-        (monomachine_superwave-set-param decay (get env :decay))
-        (monomachine_superwave-set-param sustain (get env :sustain))
-        (monomachine_superwave-set-param release (get env :release))))))
-(def monomachine_superwave-adsr-controls (attack decay sustain release section)
-  (box :width :fill :height 1.75 :padding 0.15
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-param-number-section attack "atk" 0 "ms" section)
-      (monomachine_superwave-param-number-section decay "dec" 0 "ms" section)
-      (monomachine_superwave-param-number-section sustain "sus" 2 false section)
-      (monomachine_superwave-param-number-section release "rel" 0 "ms" section))))
+(def msw-osc-block ()
+  (ui-control-panel-dense-s 0
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 0 "WAVE" 3.8 (ui-accent-cyan))
+          (ui-lego-micro-num-s 0 "detune_cents" "det" 4.4 0 "ct" (ui-accent-orange)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 0 "pulse_width" "pw" 3.3 2 false (ui-accent-blue))
+          (ui-lego-micro-num-s 0 "sub_level" "sub" 3.3 2 false (ui-accent-violet))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 0 "saw_mix" "saw" 3.7 (ui-accent-cyan) 2)
+        (ui-lego-knob-s 0 "pulse_mix" "pulse" 3.7 (ui-accent-blue) 2)
+        (ui-lego-knob-s 0 "detune_cents" "det" 3.7 (ui-accent-orange) 0)))))
 
-(def monomachine_superwave-adsr-caption (title)
-  (box :width :fill :height 0.35 :h-align :center :v-align :center
-    (label title :font-size 8.5 :color :dim :bg :transparent)))
-(def monomachine_superwave-selected-adsr ()
-  (if (= monomachine-superwave-selected-section 1)
-    (box :width :fill :height 6.55
-       :background-color :instrument-control-bg
-       :border-width 1 :corner-radius 16 :padding 0.15
-  (v-stack :width :fill :gap 0.10
-    (monomachine_superwave-adsr-view "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)
-    (monomachine_superwave-adsr-controls "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)
-    (monomachine_superwave-adsr-caption "FILTER ENV")))
-    (box :width :fill :height 6.55
-       :background-color :instrument-control-bg
-       :border-width 1 :corner-radius 16 :padding 0.15
-  (v-stack :width :fill :gap 0.10
-    (monomachine_superwave-adsr-view "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 0)
-    (monomachine_superwave-adsr-controls "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 0)
-    (monomachine_superwave-adsr-caption "AMP ENV")))))
-(def monomachine_superwave-row-label (title)
-  (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
-    (label title :font-size 8.0 :width 2.7 :color :dim :bg :transparent)))
-(def monomachine_superwave-panel-1 (title section c1)
-  (box :width :fill :height 2.35
-       :background-color (monomachine_superwave-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (monomachine_superwave-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-row-label title)
-      c1)))
-(def monomachine_superwave-panel-2 (title section c1 c2)
-  (box :width :fill :height 2.35
-       :background-color (monomachine_superwave-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (monomachine_superwave-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-row-label title)
-      c1 c2)))
-(def monomachine_superwave-panel-3 (title section c1 c2 c3)
-  (box :width :fill :height 2.35
-       :background-color (monomachine_superwave-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (monomachine_superwave-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-row-label title)
-      c1 c2 c3)))
-(def monomachine_superwave-panel-4 (title section c1 c2 c3 c4)
-  (box :width :fill :height 2.35
-       :background-color (monomachine_superwave-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (monomachine_superwave-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-row-label title)
-      c1 c2 c3 c4)))
-(def monomachine_superwave-panel-5 (title section c1 c2 c3 c4 c5)
-  (box :width :fill :height 2.35
-       :background-color (monomachine_superwave-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (monomachine_superwave-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-row-label title)
-      c1 c2 c3 c4 c5)))
-(def monomachine_superwave-panel-6 (title section c1 c2 c3 c4 c5 c6)
-  (box :width :fill :height 2.35
-       :background-color (monomachine_superwave-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (monomachine_superwave-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-row-label title)
-      c1 c2 c3 c4 c5 c6)))
-(def monomachine_superwave-panel-7 (title section c1 c2 c3 c4 c5 c6 c7)
-  (box :width :fill :height 2.35
-       :background-color (monomachine_superwave-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (monomachine_superwave-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-row-label title)
-      c1 c2 c3 c4 c5 c6 c7)))
-(def monomachine_superwave-panel-8 (title section c1 c2 c3 c4 c5 c6 c7 c8)
-  (box :width :fill :height 2.35
-       :background-color (monomachine_superwave-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (monomachine_superwave-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (monomachine_superwave-row-label title)
-      c1 c2 c3 c4 c5 c6 c7 c8)))
+(def msw-motion-block ()
+  (ui-control-panel-dense-s 2
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 2 "MOVE" 3.8 (ui-accent-blue))
+          (ui-lego-micro-num-s 2 "motion_rate" "rate" 4.4 2 "Hz" (ui-accent-blue)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 2 "phase_smear" "phase" 3.5 2 false (ui-accent-violet))
+          (ui-lego-micro-num-s 2 "swarm" "swarm" 3.5 2 false (ui-accent-violet))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 2 "motion_rate" "rate" 3.7 (ui-accent-blue) 2)
+        (ui-lego-knob-s 2 "motion_depth" "depth" 3.7 (ui-accent-blue) 2)
+        (ui-lego-knob-s 2 "phase_smear" "phase" 3.7 (ui-accent-violet) 2)))))
+
+(def msw-filter-block ()
+  (ui-control-panel-dense-s 1
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 1 "FILT" 3.8 (ui-accent-green))
+          (ui-lego-micro-num-s 1 "keytrack" "key" 4.4 2 false (ui-accent-green)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 1 "filter_env_amt" "env" 3.5 0 false (ui-accent-blue))
+          (ui-lego-micro-num-s 1 "brightness" "brt" 3.5 2 false (ui-accent-orange))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 1 "cutoff" "cut" 3.7 (ui-accent-green) 0)
+        (ui-lego-knob-s 1 "resonance" "res" 3.7 (ui-accent-green) 2)
+        (ui-lego-knob-s 1 "filter_env_amt" "env" 3.7 (ui-accent-blue) 0)))))
+
+(def msw-color-block ()
+  (ui-control-panel-dense-s 0
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 0 "COLOR" 4.2 (ui-accent-orange))
+          (ui-lego-micro-num-s 0 "brightness" "brt" 4.0 2 false (ui-accent-orange)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 0 "noise_level" "noise" 3.5 2 false (ui-accent-blue))
+          (ui-lego-micro-num-s 0 "drive" "drive" 3.5 2 false (ui-accent-orange))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 0 "comb_amt" "comb" 3.7 (ui-accent-cyan) 2)
+        (ui-lego-knob-s 0 "fm_smear" "fm" 3.7 (ui-accent-violet) 2)
+        (ui-lego-knob-s 0 "pwm_warp" "pwm" 3.7 (ui-accent-blue) 2)))))
+
+(def msw-global-block ()
+  (ui-control-panel-small-s 0
+    (h-stack :gap 0.18 :align :start
+      (ui-lego-badge-s 0 "GLB" 3.6 (ui-accent-orange))
+      (ui-lego-micro-base-note-s 0 3.0 (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "drive" "drive" 3.0 2 false (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "gain" "gain" 3.0 2 false (ui-accent-orange)))))
+
+(def msw-detail-column ()
+  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap)
+    (ui-control-panel-small-s 2 (box :width :fill :height :fill))
+    (ui-detail-adsr-switch-s
+      0 "AMP" "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms"
+      1 "FILTER" "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms")
+    (msw-global-block)))
+
+(def msw-motion-strip ()
+  (ui-lego-strip-panel-s 2
+    (v-stack :width :fill :gap 0.08 :align :center
+      (ui-lego-badge-s 2 "MOVE" 5.8 (ui-accent-blue))
+      (ui-lego-micro-num-s 2 "motion_rate" "rate" 5.8 2 "Hz" (ui-accent-blue))
+      (ui-lego-micro-num-s 2 "motion_depth" "depth" 5.8 2 false (ui-accent-blue))
+      (ui-lego-micro-num-s 2 "phase_smear" "phase" 5.8 2 false (ui-accent-violet))
+      (ui-lego-micro-num-s 2 "swarm" "swarm" 5.8 2 false (ui-accent-violet))
+      (ui-lego-micro-num-s 2 "chaos" "chaos" 5.8 2 false (ui-accent-orange)))))
+
+(def msw-color-strip ()
+  (ui-lego-strip-panel-s 0
+    (v-stack :width :fill :gap 0.08 :align :center
+      (ui-lego-badge-s 0 "COLOR" 5.8 (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "comb_amt" "comb" 5.8 2 false (ui-accent-cyan))
+      (ui-lego-micro-num-s 0 "comb_time" "time" 5.8 0 "smp" (ui-accent-cyan))
+      (ui-lego-micro-num-s 0 "fm_smear" "fm" 5.8 2 false (ui-accent-violet))
+      (ui-lego-micro-num-s 0 "pwm_warp" "pwm" 5.8 2 false (ui-accent-blue))
+      (ui-lego-micro-num-s 0 "chaos" "chaos" 5.8 2 false (ui-accent-orange)))))
+
 (defsynth-ui
-  (h-stack :width :fill :gap 0.45 :align :start
-    (v-stack :width 27.2 :gap 0.10
-      (monomachine_superwave-panel-1 "GLOB" 0
-        (monomachine_superwave-base-note-cell 0))
-      (monomachine_superwave-panel-5 "MIX" 0
-        (monomachine_superwave-param-cell-section "saw_mix" "saw" 2 0)
-        (monomachine_superwave-param-cell-section "pulse_mix" "pulse" 2 0)
-        (monomachine_superwave-param-cell-section "pulse_width" "pw" 2 0)
-        (monomachine_superwave-param-cell-section "sub_level" "sub" 2 0)
-        (monomachine_superwave-param-cell-section "noise_level" "noise" 2 0))
-      (monomachine_superwave-panel-4 "SUPER" 0
-        (monomachine_superwave-param-cell-section "detune_cents" "det" 0 0)
-        (monomachine_superwave-param-cell-section "motion_rate" "rate" 2 0)
-        (monomachine_superwave-param-cell-section "motion_depth" "depth" 2 0)
-        (monomachine_superwave-param-cell-section "phase_smear" "smear" 2 0)))
-    (v-stack :width 23.1 :gap 0.10
-      (monomachine_superwave-selected-adsr))
-    (v-stack :width 29.0 :gap 0.10
-      (monomachine_superwave-panel-6 "FILT" 1
-        (monomachine_superwave-param-cell-section "cutoff" "cut" 0 1)
-        (monomachine_superwave-param-cell-section "resonance" "res" 2 1)
-        (monomachine_superwave-param-cell-section "filter_env_amt" "env" 0 1)
-        (monomachine_superwave-param-cell-section "keytrack" "key" 2 1)
-        (monomachine_superwave-param-cell-section "drive" "drive" 2 1)
-        (monomachine_superwave-param-cell-section "brightness" "bright" 2 1))
-      (monomachine_superwave-panel-6 "TEX" 0
-        (monomachine_superwave-param-cell-section "swarm" "swarm" 2 0)
-        (monomachine_superwave-param-cell-section "comb_amt" "comb" 2 0)
-        (monomachine_superwave-param-cell-section "comb_time" "time" 2 0)
-        (monomachine_superwave-param-cell-section "fm_smear" "fm" 2 0)
-        (monomachine_superwave-param-cell-section "pwm_warp" "pwm" 2 0)
-        (monomachine_superwave-param-cell-section "chaos" "chaos" 2 0))
-      (monomachine_superwave-panel-1 "OUT" 0
-        (monomachine_superwave-param-cell-section "gain" "gain" 2 0)))))
+  (h-stack :width :fill :gap 0.30 :align :stretch
+    (ui-lego-column
+      (msw-osc-block)
+      (msw-motion-block)
+      (msw-global-block))
+    (msw-detail-column)
+    (ui-lego-column
+      (msw-filter-block)
+      (msw-color-block)
+      (ui-control-panel-small-s 0
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-badge-s 0 "SRC" 3.6 (ui-accent-violet))
+          (ui-lego-micro-num-s 0 "sub_level" "sub" 3.0 2 false (ui-accent-violet))
+          (ui-lego-micro-num-s 0 "noise_level" "noise" 3.2 2 false (ui-accent-blue))
+          (ui-lego-micro-num-s 0 "gain" "gain" 3.0 2 false (ui-accent-orange)))))
+    (h-stack :width 14.7 :gap 0.30 :align :stretch
+      (msw-motion-strip)
+      (msw-color-strip))))

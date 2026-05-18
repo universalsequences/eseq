@@ -166,12 +166,36 @@ fn project_custom_instrument_slot_into_synced_snapshot(
     desc: &crate::effects::EffectDescriptor,
     node_id: u32,
 ) -> crate::effects::EffectSlotSnapshot {
+    if project_slot_matches_descriptor_param_layout(&slot, desc) {
+        let mut snapshot = project_slot_into_synced_snapshot(slot, desc, node_id);
+        snapshot.recompute_modulation_active_params(desc);
+        return snapshot;
+    }
+
     let new_np = desc.params.len();
+    let has_generated_mod_params = desc
+        .params
+        .iter()
+        .any(|param| is_generated_mod_runtime_param_name(&param.name));
     let inserted_enabled = desc
         .params
         .iter()
         .position(|param| param.name.eq_ignore_ascii_case("enabled"))
-        .filter(|_| slot.num_params as usize + 1 == new_np);
+        .filter(|_| {
+            let comparable_new_params = desc
+                .params
+                .iter()
+                .filter(|param| !is_generated_mod_runtime_param_name(&param.name))
+                .count();
+            slot.num_params as usize + 1 == comparable_new_params
+        });
+
+    let old_non_generated_idx_for_new_idx = |new_idx: usize| {
+        desc.params[..new_idx]
+            .iter()
+            .filter(|param| !is_generated_mod_runtime_param_name(&param.name))
+            .count()
+    };
 
     let find_old_idx_by_node = |target: u32| {
         slot.param_node_indices
@@ -179,32 +203,43 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .position(|&saved| saved == target)
     };
 
-    let old_idx_for = |new_idx: usize, target_node_idx: u32| -> Option<usize> {
+    let old_idx_for = |new_idx: usize, param: &crate::effects::ParamDescriptor| -> Option<usize> {
+        if is_generated_mod_runtime_param_name(&param.name) {
+            return None;
+        }
+
         if inserted_enabled == Some(new_idx) {
             return None;
         }
 
         if let Some(enabled_idx) = inserted_enabled {
-            if target_node_idx >= crate::lisp_effect::HEADER_SLOTS as u32
-                && target_node_idx < crate::voice_modulator::MOD_PARAM_BASE
-            {
-                if let Some(old_idx) = find_old_idx_by_node(target_node_idx - 1) {
+            if !has_generated_mod_params {
+                if param.node_param_idx >= crate::lisp_effect::HEADER_SLOTS as u32
+                    && param.node_param_idx < crate::voice_modulator::MOD_PARAM_BASE
+                {
+                    if let Some(old_idx) = find_old_idx_by_node(param.node_param_idx - 1) {
+                        return Some(old_idx);
+                    }
+                } else if let Some(old_idx) = find_old_idx_by_node(param.node_param_idx) {
                     return Some(old_idx);
                 }
-            } else if let Some(old_idx) = find_old_idx_by_node(target_node_idx) {
-                return Some(old_idx);
             }
 
             return Some(if new_idx > enabled_idx {
-                new_idx - 1
+                old_non_generated_idx_for_new_idx(new_idx) - 1
             } else {
-                new_idx
+                old_non_generated_idx_for_new_idx(new_idx)
             })
             .filter(|&old_idx| old_idx < slot.defaults.len());
         }
 
-        find_old_idx_by_node(target_node_idx)
-            .or_else(|| (new_idx < slot.defaults.len()).then_some(new_idx))
+        if !has_generated_mod_params {
+            find_old_idx_by_node(param.node_param_idx)
+                .or_else(|| (new_idx < slot.defaults.len()).then_some(new_idx))
+        } else {
+            Some(old_non_generated_idx_for_new_idx(new_idx))
+                .filter(|&old_idx| old_idx < slot.defaults.len())
+        }
     };
 
     let mut defaults = desc
@@ -213,7 +248,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         .map(|param| param.default)
         .collect::<Vec<_>>();
     for (new_idx, param) in desc.params.iter().enumerate() {
-        if let Some(old_idx) = old_idx_for(new_idx, param.node_param_idx) {
+        if let Some(old_idx) = old_idx_for(new_idx, param) {
             if let Some(value) = slot.defaults.get(old_idx).copied() {
                 defaults[new_idx] = value;
             }
@@ -225,7 +260,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         .collect::<Vec<_>>();
     for step in 0..MAX_STEPS {
         for (new_idx, param) in desc.params.iter().enumerate() {
-            let Some(old_idx) = old_idx_for(new_idx, param.node_param_idx) else {
+            let Some(old_idx) = old_idx_for(new_idx, param) else {
                 continue;
             };
             if let Some(value) = slot
@@ -240,7 +275,7 @@ fn project_custom_instrument_slot_into_synced_snapshot(
         }
     }
 
-    crate::effects::EffectSlotSnapshot {
+    let mut snapshot = crate::effects::EffectSlotSnapshot {
         node_id,
         num_params: new_np as u32,
         defaults,
@@ -251,7 +286,35 @@ fn project_custom_instrument_slot_into_synced_snapshot(
             .iter()
             .map(|p| p.node_param_span.max(1))
             .collect(),
-    }
+    };
+    snapshot.recompute_modulation_active_params(desc);
+    snapshot
+}
+
+fn project_slot_matches_descriptor_param_layout(
+    slot: &project::ProjectEffectSlot,
+    desc: &crate::effects::EffectDescriptor,
+) -> bool {
+    let num_params = desc.params.len();
+    slot.num_params as usize == num_params
+        && slot.defaults.len() >= num_params
+        && slot.param_node_indices.len() >= num_params
+        && slot.param_node_spans.len() >= num_params
+        && desc
+            .params
+            .iter()
+            .zip(slot.param_node_indices.iter())
+            .zip(slot.param_node_spans.iter())
+            .all(|((param, saved_node_idx), saved_node_span)| {
+                param.node_param_idx == *saved_node_idx
+                    && param.node_param_span.max(1) == (*saved_node_span).max(1)
+            })
+}
+
+fn is_generated_mod_runtime_param_name(name: &str) -> bool {
+    name.starts_with("__host_mod__")
+        || name.starts_with("__dgen_mod_active__")
+        || (name.starts_with("mod ") && name.contains(" slot ") && name.ends_with(" amt"))
 }
 
 fn project_bus_gate_sequence_from_ui(
@@ -897,7 +960,11 @@ impl App {
                     pending.tick,
                     self.tracks.len()
                 );
-                self.graph_controller().clear_all_tracks();
+                {
+                    let mut graph = self.graph_controller();
+                    graph.clear_all_tracks();
+                    graph.clear_all_bus_effect_chains();
+                }
                 pending.phase = super::PendingProjectLoadPhase::AddTrack(0);
             }
             super::PendingProjectLoadPhase::AddTrack(track_idx) => {
@@ -1785,6 +1852,8 @@ mod tests {
             name: "test".to_string(),
             input_channels: 0,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
             params: vec![
                 test_param("attack", 0.01, crate::lisp_effect::HEADER_SLOTS as u32),
                 test_param("tone", 0.02, crate::lisp_effect::HEADER_SLOTS as u32 + 1),
@@ -1817,6 +1886,206 @@ mod tests {
                 crate::voice_modulator::MOD_PARAM_BASE,
                 crate::voice_modulator::MOD_PARAM_BASE + 1,
             ]
+        );
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_skips_generated_host_mod_lanes() {
+        let mut plocks = vec![vec![None; 4]; MAX_STEPS];
+        plocks[3][2] = Some(0.91);
+
+        let old_slot = project::ProjectEffectSlot {
+            num_params: 4,
+            defaults: vec![0.12, 0.34, 0.56, 0.78],
+            plocks,
+            param_node_indices: vec![10, 14, 18, 22],
+            param_node_spans: vec![1, 1, 1, 1],
+        };
+
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                test_param("attack", 0.01, 10),
+                test_param("__host_mod__attack__lane2__source", 0.0, 14),
+                test_param("__host_mod__attack__lane2__depth", 0.0, 18),
+                test_param("tone", 0.02, 22),
+                test_param("__host_mod__tone__lane2__source", 0.0, 26),
+                test_param("__host_mod__tone__lane2__depth", 0.0, 30),
+                test_param("cutoff", 0.03, 34),
+                test_param("gain", 0.04, 38),
+            ],
+        };
+
+        let restored = project_custom_instrument_slot_into_synced_snapshot(old_slot, &desc, 42);
+
+        assert_eq!(restored.node_id, 42);
+        assert_eq!(restored.num_params, 8);
+        assert_eq!(
+            restored.defaults,
+            vec![0.12, 0.0, 0.0, 0.34, 0.0, 0.0, 0.56, 0.78]
+        );
+        assert_eq!(restored.plocks[3][6], Some(0.91));
+        assert_eq!(restored.plocks[3][1], None);
+        assert_eq!(restored.plocks[3][2], None);
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_preserves_saved_generated_host_mod_lanes() {
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                test_param("attack", 0.01, 10),
+                test_param("__host_mod__attack__lane2__source", 0.0, 14),
+                test_param("__host_mod__attack__lane2__depth", 0.0, 18),
+                test_param("tone", 0.02, 22),
+                test_param("__host_mod__tone__lane2__source", 0.0, 26),
+                test_param("__host_mod__tone__lane2__depth", 0.0, 30),
+                test_param("cutoff", 0.03, 34),
+                test_param("gain", 0.04, 38),
+            ],
+        };
+        let mut plocks = vec![vec![None; desc.params.len()]; MAX_STEPS];
+        plocks[3][2] = Some(0.91);
+        plocks[4][5] = Some(-0.42);
+
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: desc.params.len() as u32,
+            defaults: vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78],
+            plocks,
+            param_node_indices: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect(),
+            param_node_spans: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_span.max(1))
+                .collect(),
+        };
+
+        let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
+
+        assert_eq!(restored.node_id, 42);
+        assert_eq!(restored.num_params, desc.params.len() as u32);
+        assert_eq!(
+            restored.defaults,
+            vec![0.12, 2.0, 0.31, 0.34, 4.0, -0.27, 0.56, 0.78]
+        );
+        assert_eq!(restored.plocks[3][2], Some(0.91));
+        assert_eq!(restored.plocks[4][5], Some(-0.42));
+        assert_eq!(
+            restored.param_node_indices,
+            desc.params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_refreshes_stale_param_spans() {
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                test_param("wave", 0.12, 10),
+                test_param("cutoff", 7200.0, 14),
+                test_param("__dgen_mod_active__cutoff", 0.0, 15),
+                test_param("mod cutoff slot 1 amt", 0.0, 16),
+            ],
+        };
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: desc.params.len() as u32,
+            defaults: vec![0.5, 7400.0, 0.0, 0.0],
+            plocks: vec![vec![None; desc.params.len()]; MAX_STEPS],
+            param_node_indices: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect(),
+            param_node_spans: vec![1, 4, 1, 1],
+        };
+
+        let restored = project_custom_instrument_slot_into_synced_snapshot(saved_slot, &desc, 42);
+
+        assert_eq!(restored.defaults[1], 7400.0);
+        assert_eq!(restored.param_node_indices, vec![10, 14, 15, 16]);
+        assert_eq!(restored.param_node_spans, vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn custom_instrument_project_restore_preserves_plocks_by_node_idx_when_lane_names_change() {
+        let desc = crate::effects::EffectDescriptor {
+            name: "test".to_string(),
+            input_channels: 0,
+            output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                test_param("cutoff", 0.01, 10),
+                test_param("mod cutoff lane 1 src", 1.0, 14),
+                test_param("mod cutoff lane 1 amt", 0.25, 18),
+                test_param("mod cutoff lane 2 src", 2.0, 22),
+                test_param("mod cutoff lane 2 amt", -0.5, 26),
+            ],
+        };
+        let mut plocks = vec![vec![None; desc.params.len()]; MAX_STEPS];
+        plocks[3][2] = Some(0.75);
+        plocks[4][4] = Some(-0.25);
+
+        let saved_slot = project::ProjectEffectSlot {
+            num_params: desc.params.len() as u32,
+            defaults: vec![0.12, 1.0, 0.31, 2.0, -0.27],
+            plocks,
+            param_node_indices: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect(),
+            param_node_spans: desc
+                .params
+                .iter()
+                .map(|param| param.node_param_span.max(1))
+                .collect(),
+        };
+
+        let renamed_desc = crate::effects::EffectDescriptor {
+            params: vec![
+                test_param("cutoff", 0.01, 10),
+                test_param("mod filter cutoff lane 1 src", 1.0, 14),
+                test_param("mod filter cutoff lane 1 amt", 0.25, 18),
+                test_param("mod filter cutoff lane 2 src", 2.0, 22),
+                test_param("mod filter cutoff lane 2 amt", -0.5, 26),
+            ],
+            ..desc
+        };
+
+        let restored =
+            project_custom_instrument_slot_into_synced_snapshot(saved_slot, &renamed_desc, 42);
+
+        assert_eq!(restored.node_id, 42);
+        assert_eq!(restored.defaults, vec![0.12, 1.0, 0.31, 2.0, -0.27]);
+        assert_eq!(restored.plocks[3][2], Some(0.75));
+        assert_eq!(restored.plocks[4][4], Some(-0.25));
+        assert_eq!(
+            restored.param_node_indices,
+            renamed_desc
+                .params
+                .iter()
+                .map(|param| param.node_param_idx)
+                .collect::<Vec<_>>()
         );
     }
 }

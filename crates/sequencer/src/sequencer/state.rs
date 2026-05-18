@@ -2213,6 +2213,8 @@ mod tests {
             }],
             input_channels: 2,
             output_channels: 2,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
         }
     }
 

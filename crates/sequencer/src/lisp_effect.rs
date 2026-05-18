@@ -290,14 +290,20 @@ pub struct DGenModulator {
 pub struct DGenModDestination {
     pub name: String,
     pub param_cell_id: usize,
-    pub source_cell_id: usize,
-    pub depth_cell_id: usize,
+    pub active_cell_id: usize,
+    pub depth_lanes: Vec<DGenModDepthLane>,
     pub mode: String,
     pub min: f32,
     pub max: f32,
     pub unit: Option<String>,
     pub depth_min: Option<f32>,
     pub depth_max: Option<f32>,
+}
+
+#[derive(Clone)]
+pub struct DGenModDepthLane {
+    pub slot: usize,
+    pub depth_cell_id: usize,
 }
 
 // ── Loaded dylib handle ──
@@ -327,6 +333,15 @@ pub struct InstrumentRenderOptions {
     pub gate_frames: usize,
     pub voice_index: usize,
     pub param_overrides: Vec<(String, f32)>,
+    pub param_events: Vec<InstrumentParamEvent>,
+    pub input_overrides: Vec<(usize, f32)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct InstrumentParamEvent {
+    pub frame: usize,
+    pub name: String,
+    pub value: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -492,209 +507,6 @@ fn output_dir() -> PathBuf {
     std::env::temp_dir().join("sequencer_dgenlisp")
 }
 
-fn normalize_lisp_source(source: &str) -> String {
-    source
-        .lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
-}
-
-fn source_matches_repo_file(source: &str, relative_path: &str) -> bool {
-    let repo_path = std::env::current_dir()
-        .unwrap_or_default()
-        .join(relative_path);
-    let Ok(repo_source) = std::fs::read_to_string(repo_path) else {
-        return false;
-    };
-    normalize_lisp_source(source) == normalize_lisp_source(&repo_source)
-}
-
-fn should_build_guarded_instrument_dylib(source: &str) -> bool {
-    // Temporary debug hook for instrument index-guard dylibs. Leave disabled now
-    // that the DGen wrap fix is in, but keep the helper available for future regressions.
-    let _ = source;
-    return false;
-    #[allow(unreachable_code)]
-    match std::env::var("TINYSEQ_DGEN_GUARD_INSTRUMENTS") {
-        Ok(value) => {
-            let value = value.trim();
-            if value == "1"
-                || value.eq_ignore_ascii_case("true")
-                || value.eq_ignore_ascii_case("yes")
-            {
-                return true;
-            }
-        }
-        Err(_) => {}
-    }
-    source_matches_repo_file(source, "instruments/flute.lisp")
-}
-
-fn guard_rewrite_memory_index(inner: &str) -> Option<String> {
-    let (base, expr_part) = inner.split_once(" + ")?;
-    let base = base.trim();
-    let expr_part = expr_part.trim();
-
-    if let Some(expr) = expr_part.strip_prefix("(int)") {
-        let expr = expr.trim();
-        return Some(format!(
-            "{base} + dgen_guard_delay_index_f32(({expr}), 88000, {expr:?}, __LINE__)"
-        ));
-    }
-
-    const FINITE_PREFIX: &str = "(isfinite((int) ";
-    const FINITE_MID: &str = ") ? (int) ";
-    const FINITE_SUFFIX: &str = " : 0)";
-    if expr_part.starts_with(FINITE_PREFIX) && expr_part.ends_with(FINITE_SUFFIX) {
-        let tail = &expr_part[FINITE_PREFIX.len()..expr_part.len() - FINITE_SUFFIX.len()];
-        let (lhs, rhs) = tail.split_once(FINITE_MID)?;
-        let lhs = lhs.trim();
-        let rhs = rhs.trim();
-        if lhs == rhs {
-            return Some(format!(
-                "{base} + dgen_guard_delay_index_f32(({lhs}), 88000, {lhs:?}, __LINE__)"
-            ));
-        }
-    }
-
-    None
-}
-
-fn rewrite_generated_c_memory_guards(source: &str) -> Result<String, String> {
-    let helper = r#"
-#include <stdlib.h>
-
-static inline int dgen_guard_delay_index_f32(float idx, int limit, const char *expr, int line) {
-  if (!isfinite(idx) || idx < 0.0f || idx >= (float)limit) {
-    fprintf(stderr,
-            "DGen delay index guard tripped: expr=%s idx=%f limit=%d line=%d\n",
-            expr, idx, limit, line);
-    abort();
-  }
-  return (int)idx;
-}
-
-"#;
-    let injected = if source.contains("dgen_guard_delay_index_f32(") {
-        source.to_string()
-    } else if source.contains("const int VOICE_COUNT =") {
-        source.replacen(
-            "const int VOICE_COUNT =",
-            &format!("{helper}const int VOICE_COUNT ="),
-            1,
-        )
-    } else {
-        return Err("Generated C did not contain VOICE_COUNT anchor for guard injection".into());
-    };
-
-    let mut rewritten = String::with_capacity(injected.len() + 1024);
-    for line in injected.lines() {
-        if !line.contains("memory[") {
-            rewritten.push_str(line);
-            rewritten.push('\n');
-            continue;
-        }
-
-        let mut cursor = 0usize;
-        let mut changed = String::with_capacity(line.len() + 64);
-        while let Some(rel_start) = line[cursor..].find("memory[") {
-            let start = cursor + rel_start;
-            let open = start + "memory[".len();
-            let mut depth = 1i32;
-            let mut close = None;
-            for (off, ch) in line[open..].char_indices() {
-                match ch {
-                    '[' => depth += 1,
-                    ']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            close = Some(open + off);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let Some(close_idx) = close else {
-                return Err(format!(
-                    "Failed to find closing ] in generated C line: {line}"
-                ));
-            };
-            changed.push_str(&line[cursor..open]);
-            let inner = &line[open..close_idx];
-            if let Some(rewritten_inner) = guard_rewrite_memory_index(inner) {
-                changed.push_str(&rewritten_inner);
-            } else {
-                changed.push_str(inner);
-            }
-            changed.push(']');
-            cursor = close_idx + 1;
-        }
-        changed.push_str(&line[cursor..]);
-        rewritten.push_str(&changed);
-        rewritten.push('\n');
-    }
-
-    Ok(rewritten)
-}
-
-fn compile_guarded_dylib(c_path: &Path, dylib_path: &Path) -> Result<(), String> {
-    let output = std::process::Command::new("/usr/bin/clang")
-        .args(["-O3", "-fno-fast-math", "-mcpu=native", "-flto=thin"])
-        .args(["-fPIC", "-shared"])
-        .args(["-framework", "Accelerate"])
-        .args(["-std=c11", "-x", "c"])
-        .args([
-            "-o",
-            dylib_path.to_str().ok_or("Invalid dylib output path")?,
-        ])
-        .arg(c_path)
-        .output()
-        .map_err(|e| format!("Failed to run clang for guarded dylib: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        return Err(format!("Guarded dylib compile failed:\n{stderr}{stdout}"));
-    }
-
-    Ok(())
-}
-
-fn maybe_rebuild_guarded_instrument_dylib(source: &str, manifest_json: &str) -> Result<(), String> {
-    if !should_build_guarded_instrument_dylib(source) {
-        return Ok(());
-    }
-
-    let manifest: serde_json::Value = serde_json::from_str(manifest_json)
-        .map_err(|e| format!("Failed to parse DGen manifest for guard rebuild: {e}"))?;
-    let c_source_path = manifest["cSourcePath"]
-        .as_str()
-        .ok_or("DGen manifest missing cSourcePath for guard rebuild")?;
-    let dylib_name = manifest["dylib"]
-        .as_str()
-        .ok_or("DGen manifest missing dylib for guard rebuild")?;
-    let c_source_path = PathBuf::from(c_source_path);
-    let dylib_path = c_source_path
-        .parent()
-        .unwrap_or(output_dir().as_path())
-        .join(dylib_name);
-    let generated_c = std::fs::read_to_string(&c_source_path)
-        .map_err(|e| format!("Failed to read generated C for guard rebuild: {e}"))?;
-    let guarded_c = rewrite_generated_c_memory_guards(&generated_c)?;
-    let stem = c_source_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("dgen_guarded");
-    let guarded_c_path = c_source_path.with_file_name(format!("{stem}.guarded.c"));
-    std::fs::write(&guarded_c_path, guarded_c)
-        .map_err(|e| format!("Failed to write guarded DGen C: {e}"))?;
-    compile_guarded_dylib(&guarded_c_path, &dylib_path)
-}
-
 pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
     let dir = output_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
@@ -732,11 +544,12 @@ pub fn compile_lisp(source: &str, sample_rate: u32) -> Result<String, String> {
 // ── Parse manifest ──
 
 fn parse_dgen_param_span(param: &serde_json::Value) -> usize {
-    const DEFAULT_DGEN_PARAM_SPAN: usize = 4;
+    const DEFAULT_DGEN_PARAM_SPAN: usize = 1;
     const MAX_DGEN_PARAM_SPAN: usize = 64;
 
     [
         "cellSpan",
+        "vectorWidth",
         "cellWidth",
         "laneWidth",
         "laneCount",
@@ -809,8 +622,19 @@ pub fn parse_manifest(json: &str) -> Result<DGenManifest, String> {
                 .map(|m| DGenModDestination {
                     name: m["name"].as_str().unwrap_or("").to_string(),
                     param_cell_id: m["paramCellId"].as_u64().unwrap_or(0) as usize,
-                    source_cell_id: m["sourceCellId"].as_u64().unwrap_or(0) as usize,
-                    depth_cell_id: m["depthCellId"].as_u64().unwrap_or(0) as usize,
+                    active_cell_id: m["activeCellId"].as_u64().unwrap_or(0) as usize,
+                    depth_lanes: m["depthLanes"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|lane| DGenModDepthLane {
+                                    slot: lane["slot"].as_u64().unwrap_or(0) as usize,
+                                    depth_cell_id: lane["depthCellId"].as_u64().unwrap_or(0)
+                                        as usize,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
                     mode: m["mode"].as_str().unwrap_or("").to_string(),
                     min: m["min"].as_f64().unwrap_or(0.0) as f32,
                     max: m["max"].as_f64().unwrap_or(1.0) as f32,
@@ -2078,9 +1902,7 @@ pub fn compile_instrument_with_asset_base(
         return Err(format!("{}{}", stderr, stdout));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    maybe_rebuild_guarded_instrument_dylib(source, &stdout)?;
-    Ok(stdout)
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 pub fn compile_and_load_instrument(
@@ -2138,11 +1960,15 @@ pub fn render_loaded_instrument_for_test(
     }
     memory_write.copy_from_slice(&memory_read);
 
-    for (name, value) in &options.param_overrides {
+    let apply_param = |memory_read: &mut [f32],
+                       memory_write: &mut [f32],
+                       name: &str,
+                       value: f32|
+     -> Result<(), String> {
         let param = manifest
             .params
             .iter()
-            .find(|param| param.name == *name)
+            .find(|param| param.name == name)
             .ok_or_else(|| format!("unknown instrument parameter '{name}'"))?;
         if param.cell_id >= total_slots {
             return Err(format!(
@@ -2153,11 +1979,20 @@ pub fn render_loaded_instrument_for_test(
         for lane in 0..param.cell_span {
             let idx = param.cell_id + lane;
             if idx < total_slots {
-                memory_read[idx] = *value;
-                memory_write[idx] = *value;
+                memory_read[idx] = value;
+                memory_write[idx] = value;
             }
         }
+        Ok(())
+    };
+
+    for (name, value) in &options.param_overrides {
+        apply_param(&mut memory_read, &mut memory_write, name, *value)?;
     }
+
+    let mut param_events = options.param_events.clone();
+    param_events.sort_by_key(|event| event.frame);
+    let mut next_param_event = 0usize;
 
     let pitch_hz = 440.0 * 2f32.powf((options.midi_note - 69.0) / 12.0);
     let n_inputs = manifest.n_inputs.max(4);
@@ -2166,7 +2001,26 @@ pub fn render_loaded_instrument_for_test(
     let mut frames_done = 0usize;
 
     while frames_done < options.frames {
-        let block = options.block_size.min(options.frames - frames_done);
+        while next_param_event < param_events.len()
+            && param_events[next_param_event].frame <= frames_done
+        {
+            let event = &param_events[next_param_event];
+            apply_param(
+                &mut memory_read,
+                &mut memory_write,
+                &event.name,
+                event.value,
+            )?;
+            next_param_event += 1;
+        }
+
+        let next_event_frame = param_events
+            .get(next_param_event)
+            .map(|event| event.frame)
+            .unwrap_or(options.frames)
+            .max(frames_done);
+        let block_limit = options.block_size.min(options.frames - frames_done);
+        let block = block_limit.min((next_event_frame - frames_done).max(1));
         let gate_value = if frames_done < options.gate_frames {
             1.0
         } else {
@@ -2179,6 +2033,11 @@ pub fn render_loaded_instrument_for_test(
         input_buffers[1].fill(pitch_hz);
         input_buffers[2].fill(options.velocity);
         input_buffers[3][0] = trigger_value;
+        for &(channel, value) in &options.input_overrides {
+            if let Some(buffer) = input_buffers.get_mut(channel) {
+                buffer.fill(value);
+            }
+        }
         let input_ptrs: Vec<*mut f32> = input_buffers
             .iter_mut()
             .map(|buffer| buffer.as_mut_ptr())
@@ -2199,7 +2058,6 @@ pub fn render_loaded_instrument_for_test(
                 memory_write.as_mut_ptr() as *mut c_void,
             );
         }
-        memory_read.copy_from_slice(&memory_write);
         rendered.extend_from_slice(&output_buffers[0]);
         frames_done += block;
     }
@@ -2344,7 +2202,6 @@ pub fn render_loaded_effect_for_test(
                 memory_write.as_mut_ptr() as *mut c_void,
             );
         }
-        memory_read.copy_from_slice(&memory_write);
         for frame in 0..block {
             rendered.push(output_buffers[0][frame]);
             rendered.push(output_buffers[1][frame]);
@@ -2890,6 +2747,8 @@ impl ScratchControlRuntime {
                     params: entry.params.clone(),
                     input_channels: 0,
                     output_channels: 0,
+                    instrument_modulators: Vec::new(),
+                    instrument_modulation_targets: Vec::new(),
                 },
                 0,
             )
@@ -3314,6 +3173,8 @@ fn register_sequencer_natives_with_accumulators(
                         params: entry.params.clone(),
                         input_channels: 0,
                         output_channels: 0,
+                        instrument_modulators: Vec::new(),
+                        instrument_modulation_targets: Vec::new(),
                     };
                     state_for_use_midi_fx.pattern.midi_fx_slots[track_idx][slot_idx]
                         .sync_descriptor(&desc, 0);
@@ -5953,7 +5814,7 @@ fn add_effect_param_normalized(
 fn instrument_param_target_and_idx(
     slot: &EffectSlotSnapshot,
     param_idx: usize,
-) -> Result<(ScheduledInstrumentParamTarget, u64), String> {
+) -> Result<(ScheduledInstrumentParamTarget, u64, u32), String> {
     let num_params = slot.num_params as usize;
     if param_idx >= num_params {
         return Err("instrument param index out of range".to_string());
@@ -5963,14 +5824,21 @@ fn instrument_param_target_and_idx(
         .get(param_idx)
         .copied()
         .unwrap_or(param_idx as u32);
-    Ok(if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+    let span = slot
+        .param_node_spans
+        .get(param_idx)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
         (
             ScheduledInstrumentParamTarget::Modulator,
             (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
         )
     } else {
         (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
-    })
+    };
+    Ok((target, idx, span))
 }
 
 fn current_instrument_param_raw(
@@ -5978,7 +5846,7 @@ fn current_instrument_param_raw(
     param_idx: usize,
     desc: &EffectDescriptorParamSnapshot,
 ) -> Result<f32, String> {
-    let (target, idx) = instrument_param_target_and_idx(&eval.instrument_slot, param_idx)?;
+    let (target, idx, _) = instrument_param_target_and_idx(&eval.instrument_slot, param_idx)?;
     Ok(eval
         .instrument_params
         .iter()
@@ -5993,17 +5861,22 @@ fn set_instrument_param_raw(
     value: f32,
     desc: &EffectDescriptorParamSnapshot,
 ) -> Result<(), String> {
-    let (target, idx) = instrument_param_target_and_idx(&eval.instrument_slot, param_idx)?;
+    let (target, idx, span) = instrument_param_target_and_idx(&eval.instrument_slot, param_idx)?;
     let value = desc.clamp(value);
     if let Some(existing) = eval
         .instrument_params
         .iter_mut()
         .find(|param| param.target == target && param.idx == idx)
     {
+        existing.span = span;
         existing.value = value;
     } else {
-        eval.instrument_params
-            .push(ScheduledInstrumentParam { target, idx, value });
+        eval.instrument_params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
     }
     Ok(())
 }
@@ -7249,15 +7122,17 @@ mod tests {
                 "dylib": "test.dylib",
                 "totalMemorySlots": 16,
                 "params": [
+                    {"name": "implicit_scalar", "cellId": 2, "default": 0.1},
                     {"name": "scalar", "cellId": 4, "cellSpan": 1, "default": 0.25},
-                    {"name": "vector", "cellId": 8, "laneWidth": 4, "default": 0.5}
+                    {"name": "vector", "cellId": 8, "vectorWidth": 4, "default": 0.5}
                 ]
             }"#,
         )
         .expect("manifest parses");
 
         assert_eq!(manifest.params[0].cell_span, 1);
-        assert_eq!(manifest.params[1].cell_span, 4);
+        assert_eq!(manifest.params[1].cell_span, 1);
+        assert_eq!(manifest.params[2].cell_span, 4);
     }
 
     #[test]
@@ -7307,6 +7182,52 @@ mod tests {
         assert!(!entries.contains(&(5, 0.25)));
         assert!(entries.contains(&(8, 0.5)));
         assert!(entries.contains(&(11, 0.5)));
+    }
+
+    #[test]
+    fn parse_manifest_reads_mod_active_flag_and_depth_lanes() {
+        let json = r#"
+        {
+          "totalMemorySlots": 128,
+          "params": [
+            { "name": "gain", "cellId": 10, "default": 0.5, "min": 0, "max": 1 }
+          ],
+          "inputs": [],
+          "outputs": [],
+          "modulators": [
+            { "slot": 1, "inputChannel": 4, "name": "mod1" },
+            { "slot": 2, "inputChannel": 5, "name": "mod2" }
+          ],
+          "modDestinations": [
+            {
+              "name": "gain",
+              "paramCellId": 10,
+              "activeCellId": 20,
+              "depthLanes": [
+                { "slot": 1, "depthCellId": 21 },
+                { "slot": 2, "depthCellId": 22 }
+              ],
+              "mode": "additive",
+              "min": 0,
+              "max": 1
+            }
+          ],
+          "tensors": [],
+          "tensorInitData": []
+        }
+        "#;
+
+        let manifest = parse_manifest(json).expect("manifest parses");
+        assert_eq!(manifest.mod_destinations.len(), 1);
+        let dest = &manifest.mod_destinations[0];
+        assert_eq!(dest.active_cell_id, 20);
+        assert_eq!(
+            dest.depth_lanes
+                .iter()
+                .map(|lane| (lane.slot, lane.depth_cell_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 21), (2, 22)]
+        );
     }
     use std::sync::Arc;
 
@@ -7950,6 +7871,7 @@ mod tests {
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,
+                    span: 1,
                     value: instrument_initial,
                 }],
             )
@@ -8029,6 +7951,7 @@ mod tests {
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,
+                    span: 1,
                     value: instrument_initial,
                 }],
             )
@@ -8855,6 +8778,7 @@ mod tests {
                 vec![ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
                     idx: 0,
+                    span: 1,
                     value: 0.1,
                 }],
             )
@@ -9034,6 +8958,8 @@ mod tests {
                 gate_frames: 4096,
                 voice_index: 0,
                 param_overrides: Vec::new(),
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
             },
         )
         .unwrap();
@@ -9071,6 +8997,8 @@ mod tests {
                     ("wav2".to_string(), 40.0),
                     ("mix".to_string(), 0.5),
                 ],
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
             },
         )
         .unwrap();
@@ -9111,6 +9039,8 @@ mod tests {
                     ("chrl".to_string(), 0.35),
                     ("chrw".to_string(), 0.4),
                 ],
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
             },
         )
         .unwrap();
@@ -9149,6 +9079,8 @@ mod tests {
                     ("rtrg".to_string(), 0.0),
                     ("rtim".to_string(), 72.0),
                 ],
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
             },
         )
         .unwrap();
@@ -9190,6 +9122,8 @@ mod tests {
                     ("op2_vol".to_string(), 0.38),
                     ("tone".to_string(), 0.64),
                 ],
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
             },
         )
         .unwrap();
@@ -9239,6 +9173,8 @@ mod tests {
                     ("car_mix".to_string(), 0.18),
                     ("tone".to_string(), 0.62),
                 ],
+                param_events: Vec::new(),
+                input_overrides: Vec::new(),
             },
         )
         .unwrap();

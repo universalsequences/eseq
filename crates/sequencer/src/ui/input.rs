@@ -875,6 +875,9 @@ impl App {
                 let shift_select = modifiers.contains(KeyModifiers::SHIFT);
                 let previous_track = self.ui.cursor_track;
                 self.ui.cursor_track = idx;
+                if previous_track != idx {
+                    self.clear_step_selection();
+                }
                 let arm_hit_left = layout.arm_x.saturating_sub(1);
                 let arm_hit_right = layout.arm_x + 2;
                 if col >= arm_hit_left && col < arm_hit_right {
@@ -1403,10 +1406,11 @@ impl App {
                 self.ui.selection_anchor = Some(previous_step);
             }
         } else {
-            self.ui.selection_anchor = None;
+            self.clear_step_selection();
         }
 
         if is_double && !self.tracks.is_empty() {
+            self.clear_step_selection();
             self.state
                 .toggle_step_and_clear_plocks(self.ui.cursor_track, step);
             self.ui.last_step_click = None;
@@ -1967,17 +1971,25 @@ impl App {
         let ns = self.num_steps();
         match code {
             KeyCode::Up => {
+                let previous_track = self.ui.cursor_track;
                 if self.ui.cursor_track > 0 {
                     self.ui.cursor_track -= 1;
                 } else if !self.tracks.is_empty() {
                     self.ui.cursor_track = self.tracks.len() - 1;
                 }
+                if self.ui.cursor_track != previous_track {
+                    self.clear_step_selection();
+                }
                 self.clamp_cursor_to_steps();
                 true
             }
             KeyCode::Down => {
+                let previous_track = self.ui.cursor_track;
                 if !self.tracks.is_empty() {
                     self.ui.cursor_track = (self.ui.cursor_track + 1) % self.tracks.len();
+                }
+                if self.ui.cursor_track != previous_track {
+                    self.clear_step_selection();
                 }
                 self.clamp_cursor_to_steps();
                 true

@@ -99,7 +99,7 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
         if matches!(&*value.borrow(), Value::ReactiveRef { .. })
             && !prop_accepts_binding(widget_type, key, &map)
         {
-            return Value::String(format!(
+            return widget_diagnostic(format!(
                 "{widget_type}: :{key} does not accept reactive bindings"
             ));
         }
@@ -124,6 +124,39 @@ pub fn build_widget(widget_type: &str, args: Vec<Value>) -> Value {
         );
     }
 
+    Value::Map(map)
+}
+
+fn widget_diagnostic(message: impl Into<String>) -> Value {
+    let message = message.into();
+    eprintln!("[eseqlisp widget diagnostic] {message}");
+
+    let mut map = HashMap::new();
+    map.insert(
+        "type".to_string(),
+        Rc::new(RefCell::new(Value::Keyword("label".to_string()))),
+    );
+    map.insert(
+        "text".to_string(),
+        Rc::new(RefCell::new(Value::String(format!("UI error: {message}")))),
+    );
+    map.insert(
+        "color".to_string(),
+        Rc::new(RefCell::new(Value::Keyword("red".to_string()))),
+    );
+    map.insert(
+        "font-size".to_string(),
+        Rc::new(RefCell::new(Value::Number(10.0))),
+    );
+    map.insert("wrap".to_string(), Rc::new(RefCell::new(Value::Bool(true))));
+    map.insert(
+        "debug-name".to_string(),
+        Rc::new(RefCell::new(Value::String("widget-diagnostic".to_string()))),
+    );
+    map.insert(
+        "__widget-diagnostic".to_string(),
+        Rc::new(RefCell::new(Value::String(message))),
+    );
     Value::Map(map)
 }
 

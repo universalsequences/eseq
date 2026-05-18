@@ -1,235 +1,155 @@
-;; Custom Synth tab body for instruments/emulations/prophet-6-emu/dsp.lisp
-(defstate prophet-6-emu-selected-section 0)
-(def prophet_6_emu-select (section)
-  (set! prophet-6-emu-selected-section section))
-(def prophet_6_emu-panel-bg (section)
-  (if (= section 0)
-    :instrument-group-bg
-    (if (= prophet-6-emu-selected-section section)
-      :instrument-group-selected-bg
-      :instrument-group-bg)))
-(def prophet_6_emu-cell-width 4.0)
-(def prophet_6_emu-param-cell-step-section-width (name title decimals step section width)
-  (let ((p (inst-param synth-ui-current-inst name)))
-    (if p
-      (subtree :key (str "prophet_6_emu-cell-" name)
-        (knob-number :label title
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals decimals
-          :step step
-          :font-size 10.5 :label-font-size 10
-          :text-color :dim :label-color :dim
-          :width width :height 2.05
-          :on-change (lambda (v)
-            (do
-              (prophet_6_emu-select section)
-              (fx-set-instrument-value p v)))))
-      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
-(def prophet_6_emu-param-cell-step-section (name title decimals step section)
-  (prophet_6_emu-param-cell-step-section-width name title decimals step section prophet_6_emu-cell-width))
-(def prophet_6_emu-param-cell-section (name title decimals section)
-  (prophet_6_emu-param-cell-step-section name title decimals 0 section))
-(def prophet_6_emu-base-note-cell (section)
-  (let ((p (inst-base-note-param synth-ui-current-inst)))
-    (if p
-      (subtree :key (str "prophet_6_emu-base-note-cell")
-        (knob-number :label "note"
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals 0
-          :step 1
-          :font-size 10.5 :label-font-size 10
-          :text-color :dim :label-color :dim
-          :width prophet_6_emu-cell-width :height 2.05
-          :on-change (lambda (v)
-            (do
-              (prophet_6_emu-select section)
-              (fx-set-instrument-value p v)))))
-      (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
-(def prophet_6_emu-param-number-section (name title decimals unit section)
-  (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p
-        (subtree :key (str "prophet_6_emu-adsr-number-" name)
-          (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-            (label title :font-size 10 :color :dim :bg :transparent)
-            (number-picker :value (fx-param-value p)
-              :min (get p :min) :max (get p :max) :decimals decimals
-              :unit unit
-              :noui true :font-size 10.5
-              :text-align :center
-              :text-color :widget_focus_bg :edit-color :yellow
-              :width 5.0 :height 0.95
-              :on-change (lambda (v)
-                (do
-                  (prophet_6_emu-select section)
-                  (fx-set-instrument-value p v))))))
-        (label (str "missing: " name) :font-size 10 :color :red :bg :transparent)))
-    (box :width 5.2 :height 1.75
-      (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-        (label title :font-size 10 :color :dim :bg :transparent)
-        (number-picker :value 0 :min 0 :max 0 :decimals decimals
-          :unit unit :noui true :font-size 10.5
-          :text-align :center :text-color :dim :edit-color :dim
-          :width 5.0 :height 0.95)))))
-(def prophet_6_emu-param-value (name fallback)
-  (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (fx-param-value p) fallback))
-    fallback))
-(def prophet_6_emu-set-param (name value)
-  (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (fx-set-instrument-value p value) false))
-    false))
-(def prophet_6_emu-adsr-view (attack decay sustain release section)
-  (adsr-editor
-    :attack (prophet_6_emu-param-value attack 4)
-    :decay (prophet_6_emu-param-value decay 400)
-    :sustain (prophet_6_emu-param-value sustain 0.5)
-    :release (prophet_6_emu-param-value release 0)
-    :width 22.0 :height 3.55
-    :background-color :instrument-control-bg
-    :on-change (lambda (env)
-      (do
-        (prophet_6_emu-select section)
-        (prophet_6_emu-set-param attack (get env :attack))
-        (prophet_6_emu-set-param decay (get env :decay))
-        (prophet_6_emu-set-param sustain (get env :sustain))
-        (prophet_6_emu-set-param release (get env :release))))))
-(def prophet_6_emu-adsr-controls (attack decay sustain release section)
-  (box :width :fill :height 1.75 :padding 0.15
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-param-number-section attack "atk" 0 "ms" section)
-      (prophet_6_emu-param-number-section decay "dec" 0 "ms" section)
-      (prophet_6_emu-param-number-section sustain "sus" 2 false section)
-      (prophet_6_emu-param-number-section release "rel" 0 "ms" section))))
+(def p6e-osc1-block ()
+  (ui-control-panel-dense-s 0
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 0 "OSC1" 3.6 (ui-accent-cyan))
+          (ui-lego-micro-num-s 0 "osc1_shape" "shape" 4.4 2 false (ui-accent-cyan)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 0 "osc1_semitones" "semi" 3.3 0 "st" (ui-accent-cyan))
+          (ui-lego-micro-num-s 0 "pulse_width" "pw" 3.3 2 false (ui-accent-blue))
+          (ui-lego-micro-num-s 0 "brass" "brass" 3.3 2 false (ui-accent-orange))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 0 "osc1_shape" "shape" 3.7 (ui-accent-cyan) 2)
+        (ui-lego-knob-s 0 "pulse_width" "pw" 3.7 (ui-accent-blue) 2)
+        (ui-lego-knob-s 0 "brass" "brass" 3.7 (ui-accent-orange) 2)))))
 
-(def prophet_6_emu-adsr-caption (title)
-  (box :width :fill :height 0.35 :h-align :center :v-align :center
-    (label title :font-size 8.5 :color :dim :bg :transparent)))
-(def prophet_6_emu-selected-adsr ()
-  (if (= prophet-6-emu-selected-section 1)
-    (box :width :fill :height 6.55
-       :background-color :instrument-control-bg
-       :border-width 1 :corner-radius 16 :padding 0.15
-  (v-stack :width :fill :gap 0.10
-    (prophet_6_emu-adsr-view "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)
-    (prophet_6_emu-adsr-controls "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms" 1)
-    (prophet_6_emu-adsr-caption "FILTER ENV")))
-    (box :width :fill :height 6.55
-       :background-color :instrument-control-bg
-       :border-width 1 :corner-radius 16 :padding 0.15
-  (v-stack :width :fill :gap 0.10
-    (prophet_6_emu-adsr-view "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 0)
-    (prophet_6_emu-adsr-controls "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 0)
-    (prophet_6_emu-adsr-caption "AMP ENV")))))
-(def prophet_6_emu-row-label (title)
-  (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
-    (label title :font-size 8.0 :width 2.7 :color :dim :bg :transparent)))
-(def prophet_6_emu-panel-1 (title section c1)
-  (box :width :fill :height 2.35
-       :background-color (prophet_6_emu-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (prophet_6_emu-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-row-label title)
-      c1)))
-(def prophet_6_emu-panel-2 (title section c1 c2)
-  (box :width :fill :height 2.35
-       :background-color (prophet_6_emu-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (prophet_6_emu-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-row-label title)
-      c1 c2)))
-(def prophet_6_emu-panel-3 (title section c1 c2 c3)
-  (box :width :fill :height 2.35
-       :background-color (prophet_6_emu-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (prophet_6_emu-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-row-label title)
-      c1 c2 c3)))
-(def prophet_6_emu-panel-4 (title section c1 c2 c3 c4)
-  (box :width :fill :height 2.35
-       :background-color (prophet_6_emu-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (prophet_6_emu-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-row-label title)
-      c1 c2 c3 c4)))
-(def prophet_6_emu-panel-5 (title section c1 c2 c3 c4 c5)
-  (box :width :fill :height 2.35
-       :background-color (prophet_6_emu-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (prophet_6_emu-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-row-label title)
-      c1 c2 c3 c4 c5)))
-(def prophet_6_emu-panel-6 (title section c1 c2 c3 c4 c5 c6)
-  (box :width :fill :height 2.35
-       :background-color (prophet_6_emu-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (prophet_6_emu-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-row-label title)
-      c1 c2 c3 c4 c5 c6)))
-(def prophet_6_emu-panel-7 (title section c1 c2 c3 c4 c5 c6 c7)
-  (box :width :fill :height 2.35
-       :background-color (prophet_6_emu-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (prophet_6_emu-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-row-label title)
-      c1 c2 c3 c4 c5 c6 c7)))
-(def prophet_6_emu-panel-8 (title section c1 c2 c3 c4 c5 c6 c7 c8)
-  (box :width :fill :height 2.35
-       :background-color (prophet_6_emu-panel-bg section)
-       :border-width 1 :corner-radius 16 :padding 0.1
-       :on-click (lambda (info) (prophet_6_emu-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (prophet_6_emu-row-label title)
-      c1 c2 c3 c4 c5 c6 c7 c8)))
+(def p6e-osc2-block ()
+  (ui-control-panel-dense-s 0
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 0 "OSC2" 3.6 (ui-accent-blue))
+          (ui-lego-micro-num-s 0 "osc2_shape" "shape" 4.4 2 false (ui-accent-blue)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 0 "osc2_semitones" "semi" 3.3 0 "st" (ui-accent-blue))
+          (ui-lego-micro-num-s 0 "osc_detune_cents" "det" 3.3 0 "ct" (ui-accent-orange))
+          (ui-lego-micro-num-s 0 "osc_slop" "slop" 3.3 2 false (ui-accent-orange))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 0 "osc2_shape" "shape" 3.7 (ui-accent-blue) 2)
+        (ui-lego-knob-s 0 "osc_detune_cents" "det" 3.7 (ui-accent-orange) 0)
+        (ui-lego-knob-s 0 "osc_mix" "mix" 3.7 (ui-accent-violet) 2)))))
+
+(def p6e-mix-block ()
+  (ui-control-panel-small-s 0
+    (h-stack :gap 0.18 :align :start
+      (ui-lego-badge-s 0 "MIX" 3.6 (ui-accent-violet))
+      (ui-lego-micro-num-s 0 "osc_mix" "mix" 3.0 2 false (ui-accent-violet))
+      (ui-lego-micro-num-s 0 "sub_level" "sub" 3.0 2 false (ui-accent-violet))
+      (ui-lego-micro-num-s 0 "noise_level" "nz" 3.0 2 false (ui-accent-blue))
+      (ui-lego-micro-num-s 0 "shape_drift" "drift" 3.0 2 false (ui-accent-orange)))))
+
+(def p6e-filter-block ()
+  (ui-control-panel-dense-s 1
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 1 "FILT" 3.8 (ui-accent-green))
+          (ui-lego-micro-num-s 1 "keytrack" "key" 4.4 2 false (ui-accent-green)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 1 "vel_to_filter" "vel" 3.1 2 false (ui-accent-green))
+          (ui-lego-micro-num-s 1 "filter_env_amt" "env" 3.1 0 false (ui-accent-blue))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 1 "cutoff" "cut" 3.7 (ui-accent-green) 0)
+        (ui-lego-knob-s 1 "resonance" "res" 3.7 (ui-accent-green) 2)
+        (ui-lego-knob-s 1 "filter_env_amt" "env" 3.7 (ui-accent-blue) 0)))))
+
+(def p6e-color-block ()
+  (ui-control-panel-dense-s 1
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 1 "COL" 3.8 (ui-accent-orange))
+          (ui-lego-micro-num-s 1 "filter_tone" "tone" 4.4 2 false (ui-accent-orange)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 1 "filter_drive" "drive" 3.5 2 false (ui-accent-orange))
+          (ui-lego-micro-num-s 1 "cutoff_skew" "skew" 3.4 2 false (ui-accent-blue))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 1 "filter_drive" "drive" 3.7 (ui-accent-orange) 2)
+        (ui-lego-knob-s 1 "filter_tone" "tone" 3.7 (ui-accent-orange) 2)
+        (ui-lego-knob-s 1 "cutoff_skew" "skew" 3.7 (ui-accent-blue) 2)))))
+
+(def p6e-global-block ()
+  (ui-control-panel-small-s 0
+    (h-stack :gap 0.18 :align :start
+      (ui-lego-badge-s 0 "GLB" 3.6 (ui-accent-orange))
+      (ui-lego-micro-base-note-s 0 3.0 (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "stereo_spread" "spr" 3.1 2 false (ui-accent-violet))
+      (ui-lego-micro-num-s 0 "gain" "gain" 3.0 2 false (ui-accent-orange))
+      (ui-lego-micro-num-s 2 "vibrato" "vib" 3.0 2 false (ui-accent-blue)))))
+
+(def p6e-mod-detail ()
+  (ui-readout-panel-medium-s 2
+    (h-stack :width :fill :height :fill :gap 0.24 :align :stretch
+      (box :width 11.8 :height :fill
+           :background-color :instrument-control-bg
+           :border-width 1 :corner-radius 7 :padding 0.16
+           :h-align :center :v-align :center
+        (v-stack :gap 0.20 :align :center
+          (label "LFO" :font-size 13.0 :color :dim :bg :transparent)
+          (label "pitch/filter/pw" :font-size 9.0 :color :dim :bg :transparent)))
+      (v-stack :width 10.0 :height :fill :gap 0.12 :align :start
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 2 "lfo_rate_hz" "rate" 4.6 2 "Hz" (ui-accent-blue))
+          (ui-lego-micro-num-s 2 "vibrato" "vib" 4.6 2 false (ui-accent-blue)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 2 "lfo_to_pw" "pw" 4.6 2 false (ui-accent-cyan))
+          (ui-lego-micro-num-s 2 "lfo_to_cutoff" "cut" 4.6 0 "Hz" (ui-accent-green)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 2 "env_to_pitch" "envp" 4.6 2 "st" (ui-accent-orange))
+          (ui-lego-micro-num-s 0 "stereo_spread" "spr" 4.6 2 false (ui-accent-violet)))))))
+
+(def p6e-env-detail ()
+  (ui-detail-adsr-switch-s
+    0 "AMP" "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms"
+    1 "FILTER" "filt_attack_ms" "filt_decay_ms" "filt_sustain" "filt_release_ms"))
+
+(def p6e-detail-main ()
+  (if (= custom-ui-selected-section 2)
+    (p6e-mod-detail)
+    (p6e-env-detail)))
+
+(def p6e-detail-column ()
+  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap)
+    (ui-control-panel-small-s 2 (box :width :fill :height :fill))
+    (p6e-detail-main)
+    (ui-control-panel-small-s 0
+      (h-stack :gap 0.18 :align :start
+        (ui-lego-badge-s 0 "OUT" 3.6 (ui-accent-orange))
+        (ui-lego-micro-num-s 0 "stereo_spread" "spread" 4.1 2 false (ui-accent-violet))
+        (ui-lego-micro-num-s 0 "gain" "gain" 3.8 2 false (ui-accent-orange))))))
+
+(def p6e-lfo-strip ()
+  (ui-lego-strip-panel-s 2
+    (v-stack :width :fill :gap 0.08 :align :center
+      (ui-lego-badge-s 2 "LFO" 5.8 (ui-accent-blue))
+      (ui-lego-micro-num-s 2 "lfo_rate_hz" "rate" 5.8 2 "Hz" (ui-accent-blue))
+      (ui-lego-micro-num-s 2 "lfo_to_pw" "pw" 5.8 2 false (ui-accent-cyan))
+      (ui-lego-micro-num-s 2 "lfo_to_cutoff" "cut" 5.8 0 "Hz" (ui-accent-green))
+      (ui-lego-micro-num-s 2 "env_to_pitch" "env p" 5.8 2 "st" (ui-accent-orange))
+      (ui-lego-micro-num-s 2 "vibrato" "vib" 5.8 2 false (ui-accent-blue)))))
+
+(def p6e-performance-strip ()
+  (ui-lego-strip-panel-s 0
+    (v-stack :width :fill :gap 0.08 :align :center
+      (ui-lego-badge-s 0 "PERF" 5.8 (ui-accent-violet))
+      (ui-lego-micro-base-note-s 0 5.8 (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "osc_slop" "slop" 5.8 2 false (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "shape_drift" "drift" 5.8 2 false (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "stereo_spread" "spread" 5.8 2 false (ui-accent-violet))
+      (ui-lego-micro-num-s 0 "gain" "gain" 5.8 2 false (ui-accent-orange)))))
+
 (defsynth-ui
-  (h-stack :width :fill :gap 0.45 :align :start
-    (v-stack :width 27.2 :gap 0.10
-      (prophet_6_emu-panel-1 "GLOB" 0
-        (prophet_6_emu-base-note-cell 0))
-      (prophet_6_emu-panel-4 "OSC1" 0
-        (prophet_6_emu-param-cell-section "osc1_shape" "shape" 2 0)
-        (prophet_6_emu-param-cell-step-section "osc1_semitones" "semi" 0 1 0)
-        (prophet_6_emu-param-cell-section "pulse_width" "pw" 2 0)
-        (prophet_6_emu-param-cell-section "brass" "brass" 2 0))
-      (prophet_6_emu-panel-4 "OSC2" 0
-        (prophet_6_emu-param-cell-section "osc2_shape" "shape" 2 0)
-        (prophet_6_emu-param-cell-step-section "osc2_semitones" "semi" 0 1 0)
-        (prophet_6_emu-param-cell-section "osc_detune_cents" "det" 0 0)
-        (prophet_6_emu-param-cell-section "pulse_width" "pw" 2 0))
-      (prophet_6_emu-panel-5 "MIX" 0
-        (prophet_6_emu-param-cell-section "osc_mix" "mix" 2 0)
-        (prophet_6_emu-param-cell-section "sub_level" "sub" 2 0)
-        (prophet_6_emu-param-cell-section "noise_level" "noise" 2 0)
-        (prophet_6_emu-param-cell-section "osc_slop" "slop" 2 0)
-        (prophet_6_emu-param-cell-section "shape_drift" "drift" 2 0)))
-    (v-stack :width 23.1 :gap 0.10
-      (prophet_6_emu-selected-adsr))
-    (v-stack :width 29.0 :gap 0.10
-      (prophet_6_emu-panel-4 "FILT" 1
-        (prophet_6_emu-param-cell-section "cutoff" "cut" 0 1)
-        (prophet_6_emu-param-cell-section "resonance" "res" 2 1)
-        (prophet_6_emu-param-cell-section "filter_env_amt" "env" 0 1)
-        (prophet_6_emu-param-cell-section "keytrack" "key" 2 1))
-      (prophet_6_emu-panel-4 "COL" 1
-        (prophet_6_emu-param-cell-section "vel_to_filter" "vel" 2 1)
-        (prophet_6_emu-param-cell-section "filter_drive" "drive" 2 1)
-        (prophet_6_emu-param-cell-section "filter_tone" "tone" 2 1)
-        (prophet_6_emu-param-cell-section "cutoff_skew" "skew" 2 1))
-      (prophet_6_emu-panel-5 "MOD" 1
-        (prophet_6_emu-param-cell-section "lfo_rate_hz" "rate" 2 1)
-        (prophet_6_emu-param-cell-section "lfo_to_pw" "pw" 2 1)
-        (prophet_6_emu-param-cell-section "lfo_to_cutoff" "cut" 0 1)
-        (prophet_6_emu-param-cell-section "env_to_pitch" "env p" 2 1)
-        (prophet_6_emu-param-cell-section "vibrato" "vib" 2 1))
-      (prophet_6_emu-panel-2 "OUT" 0
-        (prophet_6_emu-param-cell-section "stereo_spread" "spread" 2 0)
-        (prophet_6_emu-param-cell-section "gain" "gain" 2 0)))))
+  (h-stack :width :fill :gap 0.30 :align :stretch
+    (ui-lego-column
+      (p6e-osc1-block)
+      (p6e-osc2-block)
+      (p6e-mix-block))
+    (p6e-detail-column)
+    (ui-lego-column
+      (p6e-filter-block)
+      (p6e-color-block)
+      (p6e-global-block))
+    (h-stack :width 14.7 :gap 0.30 :align :stretch
+      (p6e-lfo-strip)
+      (p6e-performance-strip))))

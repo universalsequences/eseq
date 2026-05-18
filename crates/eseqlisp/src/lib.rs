@@ -383,6 +383,29 @@ mod tests {
         (min, median, avg)
     }
 
+    fn assert_widget_diagnostic(value: &Value, expected_message: &str) {
+        let Value::Map(map) = value else {
+            panic!("expected widget diagnostic map, got {value:?}");
+        };
+        assert!(matches!(
+            map.get("type").map(|value| value.borrow().clone()),
+            Some(Value::Keyword(widget_type)) if widget_type == "label"
+        ));
+        assert!(matches!(
+            map.get("debug-name").map(|value| value.borrow().clone()),
+            Some(Value::String(debug_name)) if debug_name == "widget-diagnostic"
+        ));
+        assert!(matches!(
+            map.get("__widget-diagnostic")
+                .map(|value| value.borrow().clone()),
+            Some(Value::String(message)) if message == expected_message
+        ));
+        assert!(matches!(
+            map.get("text").map(|value| value.borrow().clone()),
+            Some(Value::String(text)) if text.contains(expected_message)
+        ));
+    }
+
     #[test]
     fn test_basic_sum() {
         assert_eq!(run_prog("(+ 1 2)"), Ok(Some(Value::Number(3.0))));
@@ -1461,10 +1484,77 @@ mod tests {
             .expect("evaluate invalid binding")
             .expect("invalid binding returns an error value");
 
-        assert_eq!(
-            value,
-            Value::String("mixer-meter: :width does not accept reactive bindings".to_string())
+        assert_widget_diagnostic(
+            &value,
+            "mixer-meter: :width does not accept reactive bindings",
         );
+    }
+
+    #[test]
+    fn nested_widget_diagnostics_are_preserved_as_children() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
+
+        let value = runtime
+            .eval_str(
+                r#"(box
+                    (mixer-meter :width (bind "APP" "peak") :level-l 0 :level-r 0))"#,
+            )
+            .expect("evaluate wrapper with invalid child binding")
+            .expect("wrapper should return a widget");
+
+        let Value::Map(map) = value else {
+            panic!("box should return a widget map, got {value:?}");
+        };
+        let children = map
+            .get("children")
+            .expect("diagnostic child should not be dropped")
+            .borrow()
+            .clone();
+        let Value::List(children) = children else {
+            panic!("children should be a list, got {children:?}");
+        };
+        assert_eq!(children.len(), 1);
+        assert_widget_diagnostic(
+            &children[0].borrow(),
+            "mixer-meter: :width does not accept reactive bindings",
+        );
+    }
+
+    #[test]
+    fn nested_widget_diagnostics_layout_with_visible_rects() {
+        let mut runtime = Runtime::new();
+        runtime.register_reactive("APP", vec![("peak", Value::Number(0.1))], true);
+
+        let value = runtime
+            .eval_str(
+                r#"(box :width 30
+                    (mixer-meter :width (bind "APP" "peak") :level-l 0 :level-r 0))"#,
+            )
+            .expect("evaluate wrapper with invalid child binding")
+            .expect("wrapper should return a widget");
+
+        let layout = LayoutEngine::new(80, 24, 1.0)
+            .layout(&value)
+            .expect("diagnostic widget should lay out");
+        let diagnostic = layout
+            .children
+            .first()
+            .expect("diagnostic child should be in layout");
+        assert_eq!(diagnostic.widget_type, "label");
+        assert!(
+            diagnostic.rect.width.is_finite()
+                && diagnostic.rect.width > 0.0
+                && diagnostic.rect.height.is_finite()
+                && diagnostic.rect.height > 0.0,
+            "diagnostic should have a visible finite rect, got {:?}",
+            diagnostic.rect
+        );
+        assert!(matches!(
+            diagnostic.props.get("__widget-diagnostic"),
+            Some(Value::String(message))
+                if message == "mixer-meter: :width does not accept reactive bindings"
+        ));
     }
 
     #[test]

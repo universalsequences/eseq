@@ -83,6 +83,19 @@ impl Drop for GraphEditBatchGuard {
     }
 }
 
+unsafe fn disconnect_all_ports(lg: *mut crate::audiograph::LiveGraph, src_id: i32, dst_id: i32) {
+    for src_port in 0..2 {
+        for dst_port in 0..2 {
+            crate::audiograph::graph_disconnect(lg, src_id, src_port, dst_id, dst_port);
+        }
+    }
+}
+
+unsafe fn connect_stereo_pair(lg: *mut crate::audiograph::LiveGraph, src_id: i32, dst_id: i32) {
+    crate::audiograph::graph_connect(lg, src_id, 0, dst_id, 0);
+    crate::audiograph::graph_connect(lg, src_id, 1, dst_id, 1);
+}
+
 impl App {
     pub fn graph_controller(&mut self) -> GraphController<'_> {
         GraphController { app: self }
@@ -955,6 +968,45 @@ impl GraphController<'_> {
         self.app.state.schedule_mod_resync();
         self.app.state.request_all_accumulator_resets();
         self.app.state.publish_scheduler_snapshot();
+    }
+
+    pub fn clear_all_bus_effect_chains(&mut self) {
+        let _batch = GraphEditBatchGuard::new(self.app.graph.lg.0);
+        let bus_nodes = self.app.graph.bus_node_ids.clone();
+
+        for bus in &mut self.app.buses {
+            let Some(nodes) = bus_nodes.iter().find(|nodes| nodes.id == bus.id) else {
+                continue;
+            };
+
+            let active_effect_ids = bus
+                .effect_slots
+                .iter()
+                .filter_map(|slot| (slot.node_id != 0).then_some(slot.node_id as i32))
+                .collect::<Vec<_>>();
+
+            unsafe {
+                let mut predecessor_id = nodes.gate_id;
+                for effect_id in &active_effect_ids {
+                    disconnect_all_ports(self.app.graph.lg.0, predecessor_id, *effect_id);
+                    predecessor_id = *effect_id;
+                }
+                disconnect_all_ports(self.app.graph.lg.0, predecessor_id, nodes.volume_id);
+                disconnect_all_ports(self.app.graph.lg.0, nodes.gate_id, nodes.volume_id);
+
+                for effect_id in active_effect_ids {
+                    crate::audiograph::delete_node(self.app.graph.lg.0, effect_id);
+                }
+
+                connect_stereo_pair(self.app.graph.lg.0, nodes.gate_id, nodes.volume_id);
+            }
+
+            bus.effect_descriptors = super::BusChannelState::default_effect_descriptors();
+            bus.effect_slots = super::BusChannelState::default_effect_slots();
+            bus.custom_effect_names = vec![None; crate::lisp_effect::MAX_CUSTOM_FX];
+        }
+
+        self.app.publish_bus_gate_runtime();
     }
 
     pub fn delete_track(&mut self, track_idx: usize) -> Result<usize, String> {
@@ -2820,68 +2872,109 @@ impl GraphController<'_> {
             ms.sort_by_key(|m| m.slot);
             ms
         };
-        let mod_source_labels: Vec<String> = std::iter::once("off".to_string())
-            .chain(sorted_modulators.iter().map(|m| match m.slot {
-                1 => "LFO 1".to_string(),
-                2 => "ENV 1".to_string(),
-                3 => "RAND".to_string(),
-                4 => "DRIFT".to_string(),
-                5 => "LFO 2".to_string(),
-                6 => "LFO 3".to_string(),
-                7 => "Ext 1".to_string(),
-                8 => "Ext 2".to_string(),
-                9 => "Ext 3".to_string(),
-                10 => "Ext 4".to_string(),
-                _ => m.name.clone(),
-            }))
+        inst_desc.instrument_modulators = sorted_modulators
+            .iter()
+            .map(|m| crate::effects::InstrumentModulatorDescriptor {
+                slot: m.slot,
+                label: crate::voice_modulator::modulator_slot_label(m.slot, &m.name),
+            })
             .collect();
         let param_by_cell: std::collections::HashMap<usize, &crate::lisp_effect::DGenParam> =
             manifest.params.iter().map(|p| (p.cell_id, p)).collect();
         for dest in &manifest.mod_destinations {
-            let source_default = param_by_cell
-                .get(&dest.source_cell_id)
+            let base_param_idx = inst_desc.params.iter().position(|p| {
+                p.node_param_idx == (lisp_effect::HEADER_SLOTS + dest.param_cell_id) as u32
+            });
+            let active_param_idx = inst_desc.params.len();
+            let active_default = param_by_cell
+                .get(&dest.active_cell_id)
                 .map(|p| p.default)
                 .unwrap_or(0.0);
-            let depth_default = param_by_cell
-                .get(&dest.depth_cell_id)
-                .map(|p| p.default)
-                .unwrap_or(0.0);
+            let active_span = param_by_cell
+                .get(&dest.active_cell_id)
+                .map(|p| p.cell_span as u32)
+                .unwrap_or(1)
+                .max(1);
             inst_desc.params.push(crate::effects::ParamDescriptor {
-                name: format!("mod {} src", dest.name),
+                name: format!("__dgen_mod_active__{}", dest.name),
                 min: 0.0,
-                max: sorted_modulators.len() as f32,
-                default: source_default,
-                kind: crate::effects::ParamKind::Enum {
-                    labels: mod_source_labels.clone(),
-                },
+                max: 1.0,
+                default: active_default,
+                kind: crate::effects::ParamKind::Boolean,
                 scaling: crate::effects::ParamScaling::Linear,
-                node_param_idx: (lisp_effect::HEADER_SLOTS + dest.source_cell_id) as u32,
-                node_param_span: 1,
+                node_param_idx: (lisp_effect::HEADER_SLOTS + dest.active_cell_id) as u32,
+                node_param_span: active_span,
                 host_control: None,
             });
-            inst_desc.params.push(crate::effects::ParamDescriptor {
-                name: format!("mod {} amt", dest.name),
-                min: dest.depth_min.unwrap_or_else(|| {
+            for lane in &dest.depth_lanes {
+                let depth_default = param_by_cell
+                    .get(&lane.depth_cell_id)
+                    .map(|p| p.default)
+                    .unwrap_or(0.0);
+                let depth_min = dest.depth_min.unwrap_or_else(|| {
                     param_by_cell
-                        .get(&dest.depth_cell_id)
+                        .get(&lane.depth_cell_id)
                         .map(|p| p.min)
                         .unwrap_or(-1.0)
-                }),
-                max: dest.depth_max.unwrap_or_else(|| {
+                });
+                let depth_max = dest.depth_max.unwrap_or_else(|| {
                     param_by_cell
-                        .get(&dest.depth_cell_id)
+                        .get(&lane.depth_cell_id)
                         .map(|p| p.max)
                         .unwrap_or(1.0)
-                }),
-                default: depth_default,
-                kind: crate::effects::ParamKind::Continuous {
-                    unit: dest.unit.clone(),
-                },
-                scaling: crate::effects::ParamScaling::Linear,
-                node_param_idx: (lisp_effect::HEADER_SLOTS + dest.depth_cell_id) as u32,
-                node_param_span: 1,
-                host_control: None,
-            });
+                });
+                let depth_span = param_by_cell
+                    .get(&lane.depth_cell_id)
+                    .map(|p| p.cell_span as u32)
+                    .unwrap_or(1)
+                    .max(1);
+                let depth_param_idx = inst_desc.params.len();
+                inst_desc.params.push(crate::effects::ParamDescriptor {
+                    name: format!("mod {} slot {} amt", dest.name, lane.slot),
+                    min: depth_min,
+                    max: depth_max,
+                    default: depth_default,
+                    kind: crate::effects::ParamKind::Continuous {
+                        unit: dest.unit.clone(),
+                    },
+                    scaling: crate::effects::ParamScaling::Linear,
+                    node_param_idx: (lisp_effect::HEADER_SLOTS + lane.depth_cell_id) as u32,
+                    node_param_span: depth_span,
+                    host_control: None,
+                });
+                if let Some(base_param_idx) = base_param_idx {
+                    inst_desc.instrument_modulation_targets.push(
+                        crate::effects::InstrumentModulationTarget {
+                            base_param_idx,
+                            source_param_idx: None,
+                            modulator_slot: lane.slot,
+                            depth_param_idx,
+                            active_param_idx: Some(active_param_idx),
+                            depth_min,
+                            depth_max,
+                            depth_unit: dest.unit.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        for target in &inst_desc.instrument_modulation_targets {
+            if let Some(active_param_idx) = target.active_param_idx {
+                let active = inst_desc
+                    .instrument_modulation_targets
+                    .iter()
+                    .filter(|candidate| candidate.active_param_idx == Some(active_param_idx))
+                    .any(|candidate| {
+                        inst_desc
+                            .params
+                            .get(candidate.depth_param_idx)
+                            .map(|param| param.default.abs() > f32::EPSILON)
+                            .unwrap_or(false)
+                    });
+                if let Some(param) = inst_desc.params.get_mut(active_param_idx) {
+                    param.default = if active { 1.0 } else { 0.0 };
+                }
+            }
         }
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
         if preserve_runtime_values {
@@ -2899,6 +2992,10 @@ impl GraphController<'_> {
                 inst_slot.defaults.set(i, p.default);
                 if i < inst_slot.param_node_indices.len() {
                     inst_slot.param_node_indices[i].store(p.node_param_idx, Ordering::Relaxed);
+                }
+                if i < inst_slot.param_node_spans.len() {
+                    inst_slot.param_node_spans[i]
+                        .store(p.node_param_span.max(1), Ordering::Relaxed);
                 }
             }
         }

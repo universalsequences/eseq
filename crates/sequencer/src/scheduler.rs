@@ -14,12 +14,19 @@ use crate::lisp_effect::{self, AccumulatorNoteSpan};
 use crate::scheduled_event::{
     ScheduledChordData, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+    ScheduledInstrumentParams,
 };
 use crate::sequencer::{
     sync_beats, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState, StepParam,
     SwingResolution, MAX_STEPS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
+
+fn scheduled_instrument_params_from_vec(
+    params: Vec<ScheduledInstrumentParam>,
+) -> ScheduledInstrumentParams {
+    params.into_iter().collect::<ScheduledInstrumentParams>()
+}
 
 fn ceil_to_grid(value: f64, grid: f64) -> f64 {
     let rem = value % grid;
@@ -323,16 +330,22 @@ fn resolve_instrument_params(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
     step_idx: usize,
-) -> Vec<ScheduledInstrumentParam> {
+) -> ScheduledInstrumentParams {
     let slot = &snapshot.tracks[track_idx].instrument_slot;
     let num_params = slot.num_params as usize;
-    let mut params = Vec::with_capacity(num_params);
+    let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..num_params {
         let raw_idx = slot
             .param_node_indices
             .get(param_idx)
             .copied()
             .unwrap_or(param_idx as u32);
+        let span = slot
+            .param_node_spans
+            .get(param_idx)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
         let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
             (
                 ScheduledInstrumentParamTarget::Modulator,
@@ -351,13 +364,91 @@ fn resolve_instrument_params(
         if !value.is_finite() {
             continue;
         }
-        params.push(ScheduledInstrumentParam { target, idx, value });
+        params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
     }
     params.sort_by_key(|param| match param.target {
         ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
         ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
     });
     params
+}
+
+fn resolve_instrument_plocks(
+    snapshot: &SequencerSnapshot,
+    track_idx: usize,
+    step_idx: usize,
+) -> ScheduledInstrumentParams {
+    let slot = &snapshot.tracks[track_idx].instrument_slot;
+    let num_params = slot.num_params as usize;
+    let Some(step_plocks) = slot.plocks.get(step_idx) else {
+        return ScheduledInstrumentParams::new();
+    };
+    let mut params = ScheduledInstrumentParams::new();
+    for param_idx in 0..num_params {
+        let Some(value) = step_plocks.get(param_idx).copied().flatten() else {
+            continue;
+        };
+        if !value.is_finite() {
+            continue;
+        }
+        let raw_idx = slot
+            .param_node_indices
+            .get(param_idx)
+            .copied()
+            .unwrap_or(param_idx as u32);
+        let span = slot
+            .param_node_spans
+            .get(param_idx)
+            .copied()
+            .unwrap_or(1)
+            .max(1);
+        let (target, idx) = if raw_idx >= crate::voice_modulator::MOD_PARAM_BASE {
+            (
+                ScheduledInstrumentParamTarget::Modulator,
+                (raw_idx - crate::voice_modulator::MOD_PARAM_BASE) as u64,
+            )
+        } else {
+            (ScheduledInstrumentParamTarget::Synth, raw_idx as u64)
+        };
+        params.push(ScheduledInstrumentParam {
+            target,
+            idx,
+            span,
+            value,
+        });
+    }
+    params.sort_by_key(|param| match param.target {
+        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
+        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
+    });
+    params
+}
+
+fn enqueue_instrument_param_change(
+    queue: &ScheduledEventQueue<4096>,
+    pattern_epoch: u64,
+    sample_time: u64,
+    track_idx: usize,
+    instrument_params: ScheduledInstrumentParams,
+) -> bool {
+    if instrument_params.is_empty() {
+        return true;
+    }
+    queue
+        .push(ScheduledEvent {
+            pattern_epoch,
+            sample_time,
+            kind: ScheduledEventKind::InstrumentParams {
+                track: track_idx,
+                instrument_params,
+            },
+        })
+        .is_ok()
 }
 
 fn resolve_midi_fx_slot_param(
@@ -655,7 +746,7 @@ fn enqueue_resolved_trigger(
     resolved: ResolvedStep,
     chord: ScheduledChordData,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 ) -> bool {
     let instrument_fingerprint =
         instrument_sound_fingerprint(snapshot, track_idx, &instrument_params);
@@ -691,7 +782,7 @@ struct MidiFxEvent {
     note_spans: Option<Vec<AccumulatorNoteSpan>>,
     arp_phase_beats: f32,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 }
 
 #[derive(Clone, Copy)]
@@ -716,7 +807,7 @@ fn midi_fx_event_from_step(
     arp_phase_beats: f32,
     resolved: ResolvedStep,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 ) -> MidiFxEvent {
     let step = &snapshot.tracks[track_idx].steps[step_idx];
     MidiFxEvent {
@@ -746,7 +837,7 @@ fn midi_fx_window_events_from_step(
     arp_phase_beats: f32,
     resolved: ResolvedStep,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 ) -> Vec<MidiFxEvent> {
     const EPS: f32 = 1e-5;
     const MAX_WINDOWS: usize = 1024;
@@ -911,14 +1002,15 @@ fn run_midi_fx_chain_for_track(
                 snapshot.tracks[event.track].effect_slots.clone(),
                 snapshot.tracks[event.track].instrument_slot.clone(),
                 event.effect_params.clone(),
-                event.instrument_params.clone(),
+                event.instrument_params.to_vec(),
             ) {
                 Ok(output) => {
                     if !output.suppressed {
                         let mut passthrough = event.clone();
                         passthrough.resolved = output.resolved;
                         passthrough.effect_params = output.effect_params.clone();
-                        passthrough.instrument_params = output.instrument_params.clone();
+                        passthrough.instrument_params =
+                            scheduled_instrument_params_from_vec(output.instrument_params.clone());
                         next.push(passthrough);
                     }
                     for emitted in output.emitted {
@@ -939,7 +1031,9 @@ fn run_midi_fx_chain_for_track(
                             note_spans: None,
                             arp_phase_beats: event.arp_phase_beats,
                             effect_params: emitted.effect_params,
-                            instrument_params: emitted.instrument_params,
+                            instrument_params: scheduled_instrument_params_from_vec(
+                                emitted.instrument_params,
+                            ),
                         };
                         if target_track == source_track {
                             next.push(routed);
@@ -1507,6 +1601,17 @@ pub fn spawn_scheduler_thread(
                     let mut chunk_enqueued = true;
                     for trigger in triggers {
                         if !snapshot.tracks[trigger.track].steps[trigger.step].active {
+                            let sample_time = scheduled_until_sample + trigger.offset as u64;
+                            chunk_enqueued &= enqueue_instrument_param_change(
+                                &queue,
+                                pattern_epoch,
+                                sample_time,
+                                trigger.track,
+                                resolve_instrument_plocks(&snapshot, trigger.track, trigger.step),
+                            );
+                            if !chunk_enqueued {
+                                break;
+                            }
                             continue;
                         }
                         if track_has_live_midi_fx_notes(
@@ -1649,7 +1754,7 @@ pub fn spawn_scheduler_thread(
                                     track.effect_slots.clone(),
                                     track.instrument_slot.clone(),
                                     effect_params,
-                                    instrument_params,
+                                    instrument_params.to_vec(),
                                 ) {
                                     Ok(output) => {
                                         if debug_accum && debug_accum_invocations < 200 {
@@ -1697,7 +1802,10 @@ pub fn spawn_scheduler_thread(
                                                 note_spans: Some(note_spans.clone()),
                                                 arp_phase_beats: trigger.absolute_beats as f32,
                                                 effect_params: output.effect_params.clone(),
-                                                instrument_params: output.instrument_params.clone(),
+                                                instrument_params:
+                                                    scheduled_instrument_params_from_vec(
+                                                        output.instrument_params.clone(),
+                                                    ),
                                             });
                                         }
                                         for emitted in output.emitted {
@@ -1718,7 +1826,10 @@ pub fn spawn_scheduler_thread(
                                                 note_spans: None,
                                                 arp_phase_beats: trigger.absolute_beats as f32,
                                                 effect_params: emitted.effect_params,
-                                                instrument_params: emitted.instrument_params,
+                                                instrument_params:
+                                                    scheduled_instrument_params_from_vec(
+                                                        emitted.instrument_params,
+                                                    ),
                                             });
                                         }
                                         for event in accumulator_events {
@@ -1917,10 +2028,14 @@ pub fn spawn_scheduler_thread(
 #[cfg(test)]
 mod tests {
     use super::{
-        midi_fx_window_events_from_step, quantized_live_tick_sample,
+        midi_fx_window_events_from_step, quantized_live_tick_sample, resolve_instrument_plocks,
         track_active_note_spans_at_beat, track_note_spans_for_trigger, SnapshotSequencerClock,
     };
     use crate::accumulator::ResolvedStep;
+    use crate::effects::{EffectDescriptor, ParamDescriptor, ParamKind, ParamScaling};
+    use crate::scheduled_event::{
+        ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
+    };
     use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
 
     #[test]
@@ -1935,6 +2050,112 @@ mod tests {
         assert!(!triggers.is_empty());
         assert_eq!(triggers[0].track, 0);
         assert_eq!(triggers[0].step, 0);
+    }
+
+    #[test]
+    fn resolve_instrument_plocks_returns_only_plocked_params_on_inactive_steps() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        state.pattern.instrument_slots[track]
+            .apply_descriptor(&EffectDescriptor::builtin_sampler(), 12);
+        state.pattern.instrument_slots[track]
+            .plocks
+            .set(step, 12, 2.0);
+        state.pattern.instrument_slots[track]
+            .plocks
+            .set(step, 13, 0.25);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        assert!(!snapshot.tracks[track].steps[step].active);
+
+        let params = resolve_instrument_plocks(&snapshot, track, step);
+
+        assert_eq!(
+            params.as_slice(),
+            vec![
+                ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: crate::sampler::PARAM_SPEED,
+                    span: 1,
+                    value: 2.0,
+                },
+                ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: crate::sampler::PARAM_SCRUB_OFFSET,
+                    span: 1,
+                    value: 0.25,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_instrument_plocks_preserves_param_node_spans() {
+        let state = SequencerState::new(1, vec![default_empty_effect_chain()]);
+        let track = 0;
+        let step = 3;
+        let desc = EffectDescriptor {
+            name: "custom".to_string(),
+            input_channels: 0,
+            output_channels: 1,
+            instrument_modulators: Vec::new(),
+            instrument_modulation_targets: Vec::new(),
+            params: vec![
+                ParamDescriptor {
+                    name: "cutoff".to_string(),
+                    min: 80.0,
+                    max: 12_000.0,
+                    default: 7200.0,
+                    kind: ParamKind::Continuous {
+                        unit: Some("Hz".to_string()),
+                    },
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 105,
+                    node_param_span: 4,
+                    host_control: None,
+                },
+                ParamDescriptor {
+                    name: "__dgen_mod_active__cutoff".to_string(),
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    kind: ParamKind::Boolean,
+                    scaling: ParamScaling::Linear,
+                    node_param_idx: 109,
+                    node_param_span: 1,
+                    host_control: None,
+                },
+            ],
+        };
+        state.pattern.instrument_slots[track].apply_descriptor(&desc, 12);
+        state.pattern.instrument_slots[track]
+            .plocks
+            .set(step, 0, 9155.0);
+        state.pattern.instrument_slots[track]
+            .plocks
+            .set(step, 1, 1.0);
+
+        let snapshot = state.publish_scheduler_snapshot();
+        let params = resolve_instrument_plocks(&snapshot, track, step);
+
+        assert_eq!(
+            params.as_slice(),
+            vec![
+                ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: 105,
+                    span: 4,
+                    value: 9155.0,
+                },
+                ScheduledInstrumentParam {
+                    target: ScheduledInstrumentParamTarget::Synth,
+                    idx: 109,
+                    span: 1,
+                    value: 1.0,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -2078,7 +2299,7 @@ mod tests {
                 chop: 1.0,
             },
             Vec::new(),
-            Vec::new(),
+            ScheduledInstrumentParams::new(),
         );
 
         assert_eq!(events.len(), 8);

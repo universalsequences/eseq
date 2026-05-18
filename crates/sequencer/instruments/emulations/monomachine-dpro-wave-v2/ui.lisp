@@ -1,179 +1,93 @@
-;; Custom Synth tab body for instruments/emulations/monomachine-dpro-wave-v2/dsp.lisp
-(defstate monomachine-dpro-wave-v2-selected-section 0)
-(def mdp2-select (section)
-  (set! monomachine-dpro-wave-v2-selected-section section))
-(def mdp2-panel-bg (section)
-  (if (= section 0)
-    :instrument-group-bg
-    (if (= monomachine-dpro-wave-v2-selected-section section)
-      :instrument-group-selected-bg
-      :instrument-group-bg)))
-(def mdp2-cell-width 4.0)
-(def mdp2-param-cell-step-section-width (name title decimals step section width)
-  (let ((p (inst-param synth-ui-current-inst name)))
-    (if p
-      (subtree :key (str "mdp2-cell-" name)
-        (knob-number :label title
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals decimals
-          :step step
-          :font-size 10.5 :label-font-size 10
-          :text-color :dim :label-color :dim
-          :width width :height 2.05
-          :on-change (lambda (v)
-            (do
-              (mdp2-select section)
-              (fx-set-instrument-value p v)))))
-      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
-(def mdp2-param-cell-step-section (name title decimals step section)
-  (mdp2-param-cell-step-section-width name title decimals step section mdp2-cell-width))
-(def mdp2-param-cell-section (name title decimals section)
-  (mdp2-param-cell-step-section name title decimals 0 section))
-(def mdp2-base-note-cell (section)
-  (let ((p (inst-base-note-param synth-ui-current-inst)))
-    (if p
-      (subtree :key "mdp2-base-note-cell"
-        (knob-number :label "note"
-          :value (fx-param-value p)
-          :min (get p :min) :max (get p :max) :decimals 0
-          :step 1
-          :font-size 10.5 :label-font-size 10
-          :text-color :dim :label-color :dim
-          :width mdp2-cell-width :height 2.05
-          :on-change (lambda (v)
-            (do
-              (mdp2-select section)
-              (fx-set-instrument-value p v)))))
-      (label "missing: base_note" :font-size 10 :color :red :bg :transparent))))
-(def mdp2-param-value (name fallback)
-  (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (fx-param-value p) fallback))
-    fallback))
-(def mdp2-set-param (name value)
-  (if name
-    (let ((p (inst-param synth-ui-current-inst name)))
-      (if p (fx-set-instrument-value p value) false))
-    false))
-(def mdp2-param-number-section (name title decimals unit section)
-  (let ((p (inst-param synth-ui-current-inst name)))
-    (if p
-      (subtree :key (str "mdp2-number-" name)
-        (v-stack :width 5.2 :height 1.75 :gap 0.0 :align :center
-          (label title :font-size 10 :color :dim :bg :transparent)
-          (number-picker :value (fx-param-value p)
-            :min (get p :min) :max (get p :max) :decimals decimals
-            :unit unit
-            :noui true :font-size 10.5
-            :text-align :center
-            :text-color :widget_focus_bg :edit-color :yellow
-            :width 5.0 :height 0.95
-            :on-change (lambda (v)
-              (do
-                (mdp2-select section)
-                (fx-set-instrument-value p v))))))
-      (label (str "missing: " name) :font-size 10 :color :red :bg :transparent))))
-(def mdp2-adsr-view (attack decay sustain release section)
-  (adsr-editor
-    :attack (mdp2-param-value attack 2)
-    :decay (mdp2-param-value decay 120)
-    :sustain (mdp2-param-value sustain 0.78)
-    :release (mdp2-param-value release 90)
-    :width 22.0 :height 3.55
-    :background-color :instrument-control-bg
-    :on-change (lambda (env)
-      (do
-        (mdp2-select section)
-        (mdp2-set-param attack (get env :attack))
-        (mdp2-set-param decay (get env :decay))
-        (mdp2-set-param sustain (get env :sustain))
-        (mdp2-set-param release (get env :release))))))
-(def mdp2-adsr-controls (attack decay sustain release section)
-  (box :width :fill :height 1.75 :padding 0.15
-    (h-stack :width :fill :gap 0.20 :align :start
-      (mdp2-param-number-section attack "atk" 0 "ms" section)
-      (mdp2-param-number-section decay "dec" 0 "ms" section)
-      (mdp2-param-number-section sustain "sus" 2 false section)
-      (mdp2-param-number-section release "rel" 0 "ms" section))))
+(def mdp2-sync-options ()
+  '("off" "soft" "hard"))
 
-(def mdp2-adsr-caption (title)
-  (box :width :fill :height 0.35 :h-align :center :v-align :center
-    (label title :font-size 8.5 :color :dim :bg :transparent)))
-(def mdp2-adsr-panel-for (title attack decay sustain release section)
-  (box :width :fill :height 6.55
-       :background-color :instrument-control-bg
-       :border-width 1 :corner-radius 8 :padding 0.15
-    (v-stack :width :fill :gap 0.10
-      (mdp2-adsr-view attack decay sustain release section)
-      (mdp2-adsr-controls attack decay sustain release section)
-      (mdp2-adsr-caption title))))
-(def mdp2-adsr-panel ()
-  (if (= monomachine-dpro-wave-v2-selected-section 2)
-    (mdp2-adsr-panel-for "FILTER ENV" "filter_attack_ms" "filter_decay_ms" "filter_sustain" "filter_release_ms" 2)
-    (mdp2-adsr-panel-for "AMP ENV" "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms" 1)))
-(def mdp2-row-label (title)
-  (box :width 3.0 :height 2.1 :h-align :center :v-align :center :padding 0.1
-    (label title :font-size 8.0 :width 2.7 :color :dim :bg :transparent)))
-(def mdp2-panel-1 (title section c1)
-  (box :width :fill :height 2.35
-       :background-color (mdp2-panel-bg section)
-       :border-width 1 :corner-radius 8 :padding 0.1
-       :on-click (lambda (info) (mdp2-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (mdp2-row-label title)
-      c1)))
-(def mdp2-panel-2 (title section c1 c2)
-  (box :width :fill :height 2.35
-       :background-color (mdp2-panel-bg section)
-       :border-width 1 :corner-radius 8 :padding 0.1
-       :on-click (lambda (info) (mdp2-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (mdp2-row-label title)
-      c1 c2)))
-(def mdp2-panel-3 (title section c1 c2 c3)
-  (box :width :fill :height 2.35
-       :background-color (mdp2-panel-bg section)
-       :border-width 1 :corner-radius 8 :padding 0.1
-       :on-click (lambda (info) (mdp2-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (mdp2-row-label title)
-      c1 c2 c3)))
-(def mdp2-panel-4 (title section c1 c2 c3 c4)
-  (box :width :fill :height 2.35
-       :background-color (mdp2-panel-bg section)
-       :border-width 1 :corner-radius 8 :padding 0.1
-       :on-click (lambda (info) (mdp2-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (mdp2-row-label title)
-      c1 c2 c3 c4)))
-(def mdp2-panel-5 (title section c1 c2 c3 c4 c5)
-  (box :width :fill :height 2.35
-       :background-color (mdp2-panel-bg section)
-       :border-width 1 :corner-radius 8 :padding 0.1
-       :on-click (lambda (info) (mdp2-select section))
-    (h-stack :width :fill :gap 0.20 :align :start
-      (mdp2-row-label title)
-      c1 c2 c3 c4 c5)))
+(def mdp2-wave-block ()
+  (ui-control-panel-dense-s 0
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 0 "WAVE" 3.8 (ui-accent-cyan))
+          (ui-lego-micro-num-s 0 "wave" "wave" 4.4 0 false (ui-accent-cyan)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-option-s 0 "sync_mode" "sync" 3.5 (mdp2-sync-options) (ui-accent-blue))
+          (ui-lego-micro-num-s 0 "tune_cents" "tune" 3.5 0 "ct" (ui-accent-orange))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 0 "wave" "wave" 3.7 (ui-accent-cyan) 0)
+        (ui-lego-knob-s 0 "wp" "wp" 3.7 (ui-accent-blue) 2)
+        (ui-lego-knob-s 0 "sfrq" "sfrq" 3.7 (ui-accent-violet) 0)))))
+
+(def mdp2-filter-block ()
+  (ui-control-panel-dense-s 1
+    (h-stack :width :fill :height :fill :gap 0.30 :align :center
+      (v-stack :width 10.2 :gap 0.18 :align :start
+        (h-stack :gap 0.16 :align :start
+          (ui-lego-badge-s 1 "FILT" 3.8 (ui-accent-green))
+          (ui-lego-micro-num-s 1 "keytrack" "key" 4.4 2 false (ui-accent-green)))
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-micro-num-s 1 "filter_env_amt" "env" 3.5 0 false (ui-accent-blue))
+          (ui-lego-micro-num-s 1 "drive" "drive" 3.5 2 false (ui-accent-orange))))
+      (h-stack :gap 0.08 :align :start
+        (ui-lego-knob-s 1 "cutoff" "cut" 3.7 (ui-accent-green) 0)
+        (ui-lego-knob-s 1 "resonance" "res" 3.7 (ui-accent-green) 2)
+        (ui-lego-knob-s 1 "filter_env_amt" "env" 3.7 (ui-accent-blue) 0)))))
+
+(def mdp2-global-block ()
+  (ui-control-panel-small-s 0
+    (h-stack :gap 0.18 :align :start
+      (ui-lego-badge-s 0 "GLB" 3.6 (ui-accent-orange))
+      (ui-lego-micro-base-note-s 0 3.0 (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "tune_cents" "tune" 3.2 0 "ct" (ui-accent-orange))
+      (ui-lego-micro-num-s 0 "gain" "gain" 3.0 2 false (ui-accent-orange)))))
+
+(def mdp2-detail-column ()
+  (v-stack :width (ui-lego-col-w) :gap (ui-lego-gap)
+    (ui-control-panel-small-s 0 (box :width :fill :height :fill))
+    (ui-detail-adsr-switch-s
+      0 "AMP" "amp_attack_ms" "amp_decay_ms" "amp_sustain" "amp_release_ms"
+      1 "FILTER" "filter_attack_ms" "filter_decay_ms" "filter_sustain" "filter_release_ms")
+    (mdp2-global-block)))
+
+(def mdp2-wave-strip ()
+  (ui-lego-strip-panel-s 0
+    (v-stack :width :fill :gap 0.08 :align :center
+      (ui-lego-badge-s 0 "WAVE" 5.8 (ui-accent-cyan))
+      (ui-lego-micro-num-s 0 "wave" "wave" 5.8 0 false (ui-accent-cyan))
+      (ui-lego-micro-num-s 0 "wp" "wp" 5.8 2 false (ui-accent-blue))
+      (ui-lego-micro-option-s 0 "sync_mode" "sync" 5.8 (mdp2-sync-options) (ui-accent-blue))
+      (ui-lego-micro-num-s 0 "sfrq" "sfrq" 5.8 0 false (ui-accent-violet)))))
+
+(def mdp2-filter-strip ()
+  (ui-lego-strip-panel-s 1
+    (v-stack :width :fill :gap 0.08 :align :center
+      (ui-lego-badge-s 1 "FILT" 5.8 (ui-accent-green))
+      (ui-lego-micro-num-s 1 "cutoff" "cut" 5.8 0 false (ui-accent-green))
+      (ui-lego-micro-num-s 1 "resonance" "res" 5.8 2 false (ui-accent-green))
+      (ui-lego-micro-num-s 1 "filter_env_amt" "env" 5.8 0 false (ui-accent-blue))
+      (ui-lego-micro-num-s 1 "drive" "drive" 5.8 2 false (ui-accent-orange)))))
+
 (defsynth-ui
-  (h-stack :width :fill :gap 0.45 :align :start
-    (v-stack :width 27.2 :gap 0.10
-      (mdp2-panel-1 "GLOB" 0
-        (mdp2-base-note-cell 0))
-      (mdp2-panel-3 "DPRO" 0
-        (mdp2-param-cell-step-section "wave" "wave" 0 1 0)
-        (mdp2-param-cell-step-section "wp" "wp" 0 1 0)
-        (mdp2-param-cell-section "tune_cents" "tune" 0 0))
-      (mdp2-panel-2 "SYNC" 0
-        (mdp2-param-cell-step-section "sync_mode" "mode" 0 1 0)
-        (mdp2-param-cell-section "sfrq" "sfrq" 0 0)))
-    (v-stack :width 23.1 :gap 0.10
-      (mdp2-adsr-panel))
-    (v-stack :width 27.2 :gap 0.10
-      (mdp2-panel-4 "FILT" 2
-        (mdp2-param-cell-section "cutoff" "cut" 0 2)
-        (mdp2-param-cell-section "resonance" "res" 2 2)
-        (mdp2-param-cell-section "keytrack" "key" 2 2)
-        (mdp2-param-cell-section "filter_env_amt" "env" 0 2))
-      (mdp2-panel-2 "OUT" 0
-        (mdp2-param-cell-section "drive" "drv" 2 0)
-        (mdp2-param-cell-section "gain" "gain" 2 0)))))
+  (h-stack :width :fill :gap 0.30 :align :stretch
+    (ui-lego-column
+      (mdp2-wave-block)
+      (mdp2-filter-block)
+      (mdp2-global-block))
+    (mdp2-detail-column)
+    (ui-lego-column
+      (ui-control-panel-small-s 0
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-badge-s 0 "SYNC" 3.8 (ui-accent-blue))
+          (ui-lego-micro-option-s 0 "sync_mode" "mode" 4.0 (mdp2-sync-options) (ui-accent-blue))
+          (ui-lego-micro-num-s 0 "sfrq" "frq" 3.2 0 false (ui-accent-violet))))
+      (ui-control-panel-small-s 1
+        (h-stack :gap 0.18 :align :start
+          (ui-lego-badge-s 1 "OUT" 3.6 (ui-accent-orange))
+          (ui-lego-micro-num-s 1 "drive" "drive" 3.2 2 false (ui-accent-orange))
+          (ui-lego-micro-num-s 0 "gain" "gain" 3.2 2 false (ui-accent-orange))))
+      (ui-readout-panel-small-s 0
+        (h-stack :gap 0.34 :align :start
+          (label "dpro" :font-size 9.0 :color (ui-accent-cyan) :bg :transparent)
+          (label "wave" :font-size 9.0 :color (ui-accent-blue) :bg :transparent)
+          (label "filter" :font-size 9.0 :color (ui-accent-green) :bg :transparent))))
+    (h-stack :width 14.7 :gap 0.30 :align :stretch
+      (mdp2-wave-strip)
+      (mdp2-filter-strip))))

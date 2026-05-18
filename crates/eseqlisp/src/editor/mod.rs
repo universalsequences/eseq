@@ -330,6 +330,12 @@ impl Editor {
             .is_some_and(|filter| filter == "*" || filter == buffer_name)
     }
 
+    fn trace_ui_layout_enabled_for(&self, buffer_name: &str) -> bool {
+        std::env::var("ESEQLISP_TRACE_UI_LAYOUT")
+            .ok()
+            .is_some_and(|filter| filter == "*" || filter == buffer_name)
+    }
+
     fn trace_ui_tree_event_with(
         &self,
         buffer_name: &str,
@@ -338,6 +344,28 @@ impl Editor {
     ) {
         if self.trace_ui_tree_enabled_for(buffer_name) {
             eprintln!("[ui-tree][{buffer_name}] {stage} {}", detail());
+        }
+    }
+
+    fn trace_ui_layout_event(
+        &self,
+        buffer_name: &str,
+        stage: &str,
+        layout: Option<&crate::layout::LayoutNode>,
+    ) {
+        if !self.trace_ui_layout_enabled_for(buffer_name) {
+            return;
+        }
+        eprintln!("[ui-layout][{buffer_name}] {stage}");
+        match layout {
+            Some(layout) => {
+                for line in crate::layout::format_layout_tree_lines(layout, 0) {
+                    eprintln!("[ui-layout][{buffer_name}] {line}");
+                }
+            }
+            None => {
+                eprintln!("[ui-layout][{buffer_name}] <no layout>");
+            }
         }
     }
 
@@ -2081,7 +2109,9 @@ impl Editor {
     /// Sync the Runtime's current layout to the active tile leaf's cached_layout.
     /// Call this after any operation that may change the layout (eval, widget tree, etc.)
     pub fn sync_layout_to_active_leaf(&mut self) {
+        let buffer_name = self.active_buffer().name.clone();
         let layout = self.runtime.current_layout.clone();
+        self.trace_ui_layout_event(&buffer_name, "active-sync", layout.as_deref());
         let revision = self.runtime.layout_revision();
         let leaf = self.active_leaf_mut();
         leaf.cached_layout = layout;
@@ -3887,6 +3917,7 @@ impl Editor {
 
     fn refresh_inactive_tile_layouts_for_buffer(&mut self, buffer_idx: usize) {
         let tree = self.buffers[buffer_idx].widget_tree.clone();
+        let buffer_name = self.buffers[buffer_idx].name.clone();
         let buffer_id = self.buffers[buffer_idx].id as u64;
         let tile_ids = self.tile_root.leaf_ids();
         let (cell_w, cell_h) = self.runtime.layout_cell_dims();
@@ -3948,6 +3979,11 @@ impl Editor {
                     });
                     (layout, Vec::new())
                 };
+            self.trace_ui_layout_event(
+                &buffer_name,
+                &format!("inactive-tile-{tile_id}"),
+                layout.as_deref(),
+            );
             if let Some(leaf) = self.tile_root.find_leaf_mut(tile_id) {
                 leaf.cached_layout = layout;
                 leaf.dirty_widget_ids = dirty_widget_ids;
