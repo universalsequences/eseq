@@ -2230,6 +2230,136 @@ fn tree_sample_drag_drops_on_compatible_box_target() {
 }
 
 #[test]
+fn tree_drag_payload_does_not_require_path_field() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def dropped (state ""))
+                (effect
+                  (h-stack :width 40 :height 4
+                    (tree
+                      :width 18
+                      :height 2
+                      :drag-type "audio-effect"
+                      :items '((:label "Filter" :kind "builtin-audio-effect" :name "Filter"))
+                      :on-select (lambda (item) nil))
+                    (box
+                      :key "drop-target"
+                      :width 18
+                      :height 2
+                      :drop-types (list "audio-effect")
+                      :on-drop (lambda (event)
+                        (set! dropped (get (get event :payload) :name))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(80, 10);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        0,
+        0,
+        80,
+        10,
+        2.0,
+        0.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::String("Filter".to_string())
+    );
+}
+
+#[test]
+fn box_drag_payload_drops_on_compatible_box_target() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def dropped (state ""))
+                (effect
+                  (h-stack :width 40 :height 4
+                    (box
+                      :key "drag-source"
+                      :width 18
+                      :height 2
+                      :drag-type "effect-instance"
+                      :drag-payload (dict :kind "audio-effect-instance" :slot 3 :name "Delay")
+                      (label "Delay"))
+                    (box
+                      :key "drop-target"
+                      :width 18
+                      :height 2
+                      :drop-types (list "effect-instance")
+                      :on-drop (lambda (event)
+                        (set! dropped (get (get event :payload) :name))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(80, 10);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        0,
+        0,
+        80,
+        10,
+        2.0,
+        0.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::String("Delay".to_string())
+    );
+}
+
+#[test]
 fn tree_sample_drag_cursor_starts_after_pointer_moves_past_threshold() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

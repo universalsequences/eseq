@@ -6,7 +6,8 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use crate::effects::{
-    EffectDescriptor, HostControl, ParamDescriptor, ParamKind, ParamScaling, BUILTIN_SLOT_COUNT,
+    EffectDescriptor, EffectSlotSnapshot, HostControl, ParamDescriptor, ParamKind, ParamScaling,
+    BUILTIN_SLOT_COUNT,
 };
 use crate::lisp_effect::{self, MAX_CUSTOM_FX, MAX_MIDI_FX_SLOTS};
 use crate::sequencer::InstrumentType;
@@ -22,6 +23,20 @@ use super::{
 pub(super) enum OverlayPickerKind {
     Effect,
     Instrument,
+}
+
+#[derive(Clone)]
+struct CustomEffectEntry {
+    desc: EffectDescriptor,
+    snapshot: EffectSlotSnapshot,
+}
+
+#[derive(Clone, Copy)]
+struct CustomEffectEdge {
+    source_id: i32,
+    source_channels: usize,
+    dest_id: i32,
+    dest_channels: usize,
 }
 
 fn instrument_display_name(name: &str) -> String {
@@ -370,6 +385,401 @@ impl App {
 
         self.state.publish_scheduler_snapshot();
         Ok(())
+    }
+
+    fn custom_effect_entries(&self, track: usize) -> Vec<CustomEffectEntry> {
+        let chain = &self.state.pattern.effect_chains[track];
+        (0..MAX_CUSTOM_FX)
+            .filter_map(|offset| {
+                let slot_idx = BUILTIN_SLOT_COUNT + offset;
+                let slot = chain.get(slot_idx)?;
+                let node_id = slot.node_id.load(Ordering::Relaxed);
+                if node_id == 0 {
+                    return None;
+                }
+                Some(CustomEffectEntry {
+                    desc: self.graph.effect_descriptors[track][slot_idx].clone(),
+                    snapshot: EffectSlotSnapshot::capture(slot),
+                })
+            })
+            .collect()
+    }
+
+    fn write_custom_effect_entries(&mut self, track: usize, entries: &[CustomEffectEntry]) {
+        let chain = &self.state.pattern.effect_chains[track];
+        for offset in 0..MAX_CUSTOM_FX {
+            let slot_idx = BUILTIN_SLOT_COUNT + offset;
+            if slot_idx >= chain.len() {
+                break;
+            }
+            if let Some(entry) = entries.get(offset) {
+                self.graph.effect_descriptors[track][slot_idx] = entry.desc.clone();
+                entry.snapshot.restore(&chain[slot_idx]);
+            } else {
+                self.graph.effect_descriptors[track][slot_idx] =
+                    EffectDescriptor::empty_custom_slot();
+                chain[slot_idx].clear();
+            }
+        }
+    }
+
+    fn custom_effect_edges(&self, track: usize) -> Vec<CustomEffectEdge> {
+        let mut edges = Vec::new();
+        let mut prev_id = self.graph.track_node_ids[track].pan_id;
+        let mut prev_channels = 2usize;
+        for offset in 0..MAX_CUSTOM_FX {
+            let slot_idx = BUILTIN_SLOT_COUNT + offset;
+            let Some(slot) = self.state.pattern.effect_chains[track].get(slot_idx) else {
+                continue;
+            };
+            let node_id = slot.node_id.load(Ordering::Relaxed);
+            if node_id == 0 {
+                continue;
+            }
+            let desc = &self.graph.effect_descriptors[track][slot_idx];
+            edges.push(CustomEffectEdge {
+                source_id: prev_id,
+                source_channels: prev_channels,
+                dest_id: node_id as i32,
+                dest_channels: desc.input_channels.max(1),
+            });
+            prev_id = node_id as i32;
+            prev_channels = desc.output_channels.max(1);
+        }
+        edges.push(CustomEffectEdge {
+            source_id: prev_id,
+            source_channels: prev_channels,
+            dest_id: self.graph.track_node_ids[track].delay_id,
+            dest_channels: 2,
+        });
+        edges
+    }
+
+    unsafe fn disconnect_custom_effect_edge(&self, edge: CustomEffectEdge) {
+        for src_port in 0..2 {
+            for dst_port in 0..2 {
+                let _ = crate::audiograph::graph_disconnect(
+                    self.graph.lg.0,
+                    edge.source_id,
+                    src_port,
+                    edge.dest_id,
+                    dst_port,
+                );
+            }
+        }
+    }
+
+    unsafe fn connect_custom_effect_edge(&self, edge: CustomEffectEdge) {
+        let source_channels = edge.source_channels.max(1).min(2);
+        let dest_channels = edge.dest_channels.max(1).min(2);
+        if source_channels <= 1 {
+            for dst_port in 0..dest_channels {
+                let _ = crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    edge.source_id,
+                    0,
+                    edge.dest_id,
+                    dst_port as i32,
+                );
+            }
+        } else if dest_channels <= 1 {
+            for src_port in 0..source_channels {
+                let _ = crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    edge.source_id,
+                    src_port as i32,
+                    edge.dest_id,
+                    0,
+                );
+            }
+        } else {
+            for ch in 0..source_channels.min(dest_channels) {
+                let _ = crate::audiograph::graph_connect(
+                    self.graph.lg.0,
+                    edge.source_id,
+                    ch as i32,
+                    edge.dest_id,
+                    ch as i32,
+                );
+            }
+        }
+    }
+
+    fn reconnect_custom_effect_chain(&self, old_edges: Vec<CustomEffectEdge>, track: usize) {
+        unsafe {
+            for edge in old_edges {
+                self.disconnect_custom_effect_edge(edge);
+            }
+            for edge in self.custom_effect_edges(track) {
+                self.disconnect_custom_effect_edge(edge);
+                self.connect_custom_effect_edge(edge);
+            }
+        }
+    }
+
+    fn publish_effect_reorder(&mut self) {
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let current_snapshot = self.state.capture_current_pattern_snapshot(
+            self.tracks.len(),
+            &self.graph.track_buffer_ids,
+            &self.graph.track_sample_rates,
+            &self.tracks,
+            &self.graph.track_instrument_types,
+        );
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+            if pattern_idx == current_pattern {
+                *snapshot = current_snapshot.clone();
+            }
+        }
+        drop(bank);
+        self.state.publish_scheduler_snapshot();
+        self.refresh_effect_sidechain_labels();
+        self.push_all_restored_defaults();
+    }
+
+    fn sync_other_pattern_effect_insert(&mut self, track: usize, slot_idx: usize) {
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+            if pattern_idx != current_pattern {
+                snapshot.insert_empty_effect_slot(track, slot_idx);
+            }
+        }
+    }
+
+    fn sync_other_pattern_effect_move(
+        &mut self,
+        track: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) {
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+            if pattern_idx != current_pattern {
+                snapshot.move_effect_slot_to(track, source_slot, target_slot);
+            }
+        }
+    }
+
+    fn sync_other_pattern_midi_fx_insert(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        name: String,
+        desc: &EffectDescriptor,
+    ) {
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+            if pattern_idx != current_pattern {
+                snapshot.insert_midi_fx_slot(track, slot_idx, name.clone(), desc);
+            }
+        }
+    }
+
+    fn sync_other_pattern_midi_fx_move(
+        &mut self,
+        track: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) {
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        let mut bank = self.state.pattern.pattern_bank.lock().unwrap();
+        for (pattern_idx, snapshot) in bank.iter_mut().enumerate() {
+            if pattern_idx != current_pattern {
+                snapshot.move_midi_fx_slot_to(track, source_slot, target_slot);
+            }
+        }
+    }
+
+    fn prepare_custom_effect_insert_slot(
+        &mut self,
+        track: usize,
+        target_slot: usize,
+    ) -> Result<usize, String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        if target_slot < BUILTIN_SLOT_COUNT {
+            return Err("Cannot insert before a built-in effect slot".to_string());
+        }
+        let mut entries = self.custom_effect_entries(track);
+        if entries.len() >= MAX_CUSTOM_FX {
+            return Err("No free effect slots available".to_string());
+        }
+        let old_edges = self.custom_effect_edges(track);
+        let target_offset = target_slot.saturating_sub(BUILTIN_SLOT_COUNT);
+        let insert_offset = target_offset.min(entries.len());
+        entries.insert(
+            insert_offset,
+            CustomEffectEntry {
+                desc: EffectDescriptor::empty_custom_slot(),
+                snapshot: EffectSlotSnapshot::new_empty(),
+            },
+        );
+        self.write_custom_effect_entries(track, &entries);
+        self.reconnect_custom_effect_chain(old_edges, track);
+        let slot_idx = BUILTIN_SLOT_COUNT + insert_offset;
+        self.sync_other_pattern_effect_insert(track, slot_idx);
+        Ok(slot_idx)
+    }
+
+    pub fn insert_builtin_effect_before_slot_sync(
+        &mut self,
+        track: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        EffectDescriptor::builtin_insert(name)
+            .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        let slot_idx = self.prepare_custom_effect_insert_slot(track, target_slot)?;
+        self.load_builtin_effect_to_slot_sync(track, slot_idx, name)?;
+        Ok(slot_idx)
+    }
+
+    pub fn insert_saved_effect_before_slot_sync(
+        &mut self,
+        track: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
+        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let slot_idx = self.prepare_custom_effect_insert_slot(track, target_slot)?;
+        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
+            self.resolve_custom_slot_wiring(track, slot_idx);
+        let node_id = unsafe {
+            lisp_effect::add_effect_to_chain_at(
+                self.graph.lg.0,
+                slot_id,
+                &result.manifest,
+                &result.lib,
+                pred,
+                pred_outputs,
+                succ,
+                succ_inputs,
+                existing,
+            )
+        }?;
+        self.apply_effect_to_slot(track, slot_idx, node_id, name, &result.manifest);
+        self.editor.lisp_libs.push(result.lib);
+        Ok(slot_idx)
+    }
+
+    pub fn move_effect_slot_sync(
+        &mut self,
+        track: usize,
+        source_slot: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        if source_slot < BUILTIN_SLOT_COUNT {
+            return Err("Cannot move a built-in effect slot".to_string());
+        }
+        let source_offset = source_slot - BUILTIN_SLOT_COUNT;
+        let mut entries = self.custom_effect_entries(track);
+        if source_offset >= entries.len() {
+            return Err("Invalid source effect slot".to_string());
+        }
+        let entry = entries.remove(source_offset);
+        let mut target_offset = target_slot
+            .map(|slot| slot.saturating_sub(BUILTIN_SLOT_COUNT))
+            .unwrap_or(entries.len());
+        if let Some(slot) = target_slot {
+            if slot < BUILTIN_SLOT_COUNT {
+                return Err("Cannot move before a built-in effect slot".to_string());
+            }
+            if source_offset < target_offset {
+                target_offset = target_offset.saturating_sub(1);
+            }
+        }
+        target_offset = target_offset.min(entries.len());
+        if target_offset == source_offset {
+            entries.insert(source_offset, entry);
+            return Ok(source_slot);
+        }
+        let old_edges = self.custom_effect_edges(track);
+        entries.insert(target_offset, entry);
+        self.write_custom_effect_entries(track, &entries);
+        self.reconnect_custom_effect_chain(old_edges, track);
+        let slot_idx = BUILTIN_SLOT_COUNT + target_offset;
+        self.sync_other_pattern_effect_move(track, source_slot, slot_idx);
+        self.publish_effect_reorder();
+        Ok(slot_idx)
+    }
+
+    pub fn insert_midi_fx_before_slot_sync(
+        &mut self,
+        track: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let desc = lisp_effect::load_midi_fx_descriptor(name)
+            .ok_or_else(|| format!("Unknown MIDI FX '{name}'"))?;
+        let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
+        if chain.len() >= MAX_MIDI_FX_SLOTS {
+            return Err("No free MIDI FX slots available".to_string());
+        }
+        let slot_idx = target_slot.min(chain.len());
+        chain.insert(slot_idx, desc.name.clone());
+        self.state.pattern.track_params[track].set_midi_fx_chain(chain);
+        let slots = &self.state.pattern.midi_fx_slots[track];
+        for idx in (slot_idx + 1..slots.len()).rev() {
+            slots[idx].copy_from(&slots[idx - 1]);
+        }
+        slots[slot_idx].apply_descriptor(&desc, 0);
+        self.sync_other_pattern_midi_fx_insert(track, slot_idx, desc.name.clone(), &desc);
+        self.publish_effect_reorder();
+        Ok(slot_idx)
+    }
+
+    pub fn move_midi_fx_slot_sync(
+        &mut self,
+        track: usize,
+        source_slot: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        if track >= self.tracks.len() {
+            return Err("Invalid track index".to_string());
+        }
+        let mut chain = self.state.pattern.track_params[track].midi_fx_chain();
+        if source_slot >= chain.len() {
+            return Err("Invalid source MIDI FX slot".to_string());
+        }
+        let name = chain.remove(source_slot);
+        let source_snapshot =
+            EffectSlotSnapshot::capture(&self.state.pattern.midi_fx_slots[track][source_slot]);
+        let slots = &self.state.pattern.midi_fx_slots[track];
+        for idx in source_slot..chain.len() {
+            slots[idx].copy_from(&slots[idx + 1]);
+        }
+        if let Some(last_slot) = slots.last() {
+            last_slot.clear();
+        }
+        let mut target_idx = target_slot.unwrap_or(chain.len()).min(chain.len());
+        if let Some(slot) = target_slot {
+            if source_slot < slot {
+                target_idx = target_idx.saturating_sub(1);
+            }
+        }
+        chain.insert(target_idx, name);
+        for idx in (target_idx + 1..=chain.len()).rev() {
+            if idx < slots.len() {
+                slots[idx].copy_from(&slots[idx - 1]);
+            }
+        }
+        source_snapshot.restore(&slots[target_idx]);
+        self.state.pattern.track_params[track].set_midi_fx_chain(chain);
+        self.sync_other_pattern_midi_fx_move(track, source_slot, target_idx);
+        self.publish_effect_reorder();
+        Ok(target_idx)
     }
 
     fn find_custom_slot_predecessor(&self, track: usize, offset: usize) -> (i32, usize) {

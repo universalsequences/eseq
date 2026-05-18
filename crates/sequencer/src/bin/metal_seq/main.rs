@@ -4786,6 +4786,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "add-effect-to-track" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let effect_name = extract_string_from_payload(&payload, "name");
+                        if let (Some(track), Some(effect_name)) = (track, effect_name) {
+                            if track >= app.tracks.len() {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Track {} does not exist",
+                                    track + 1
+                                )));
+                                continue;
+                            }
+                            current_track.store(track, Ordering::Relaxed);
+                            app.ui.cursor_track = track;
+                            if let Some(slot_idx) = app.next_free_custom_slot() {
+                                app.start_effect_compile(&effect_name, slot_idx);
+                                let rt = editor.runtime_mut();
+                                rt.set_reactive(
+                                    "SEQ",
+                                    "current-track",
+                                    Value::Number(track as f64),
+                                );
+                                rt.set_reactive("SEQ", "compiling", Value::Bool(true));
+                                sync_track_mixer_state(rt, &app, &state);
+                                sync_sidebar_browser(rt, &app, track);
+                                rt.run_reactive_cycle();
+                                editor.refresh_runtime_side_effects();
+                                ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Adding effect '{}' to track {}",
+                                    effect_name,
+                                    track + 1
+                                )));
+                            } else {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "No free effect slots available".to_string(),
+                                ));
+                            }
+                        }
+                    }
                     "add-builtin-effect" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(cell) = map.get("name") {
@@ -4834,6 +4873,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "add-builtin-effect-to-track" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let effect_name = extract_string_from_payload(&payload, "name");
+                        if let (Some(track), Some(effect_name)) = (track, effect_name) {
+                            if track >= app.tracks.len() {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Track {} does not exist",
+                                    track + 1
+                                )));
+                                continue;
+                            }
+                            current_track.store(track, Ordering::Relaxed);
+                            app.ui.cursor_track = track;
+                            match app.add_builtin_effect_sync(track, &effect_name) {
+                                Ok(slot_idx) => {
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "current-track",
+                                        Value::Number(track as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "effects",
+                                        build_effects_value(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    sync_sidebar_browser(rt, &app, track);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    editor.reset_widget_scroll_for_buffer_named("*fx*");
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Added built-in effect '{}' to track {} slot {}",
+                                        effect_name,
+                                        track + 1,
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error adding built-in effect: {error}"
+                                ))),
+                            }
+                        }
+                    }
                     "add-midi-fx" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(cell) = map.get("name") {
@@ -4876,6 +4975,343 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )),
                                     }
                                 }
+                            }
+                        }
+                    }
+                    "add-midi-fx-to-track" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let fx_name = extract_string_from_payload(&payload, "name");
+                        if let (Some(track), Some(fx_name)) = (track, fx_name) {
+                            if track >= app.tracks.len() {
+                                editor.handle_host_event(HostEvent::Status(format!(
+                                    "Track {} does not exist",
+                                    track + 1
+                                )));
+                                continue;
+                            }
+                            current_track.store(track, Ordering::Relaxed);
+                            app.ui.cursor_track = track;
+                            match app.add_midi_fx_to_track_sync(track, &fx_name) {
+                                Ok(slot_idx) => {
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "current-track",
+                                        Value::Number(track as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "midi-effects",
+                                        build_midi_effects_value(&state, track, &selected_steps),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    sync_sidebar_browser(rt, &app, track);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    editor.reset_widget_scroll_for_buffer_named("*fx*");
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Added MIDI FX '{}' to track {} slot {}",
+                                        fx_name,
+                                        track + 1,
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error adding MIDI FX: {error}"
+                                ))),
+                            }
+                        }
+                    }
+                    "insert-builtin-effect-before-slot" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let effect_name = extract_string_from_payload(&payload, "name");
+                        if let (Some(track), Some(slot), Some(effect_name)) =
+                            (track, slot, effect_name)
+                        {
+                            current_track.store(track, Ordering::Relaxed);
+                            app.ui.cursor_track = track;
+                            match app.insert_builtin_effect_before_slot_sync(
+                                track,
+                                slot,
+                                &effect_name,
+                            ) {
+                                Ok(slot_idx) => {
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "current-track",
+                                        Value::Number(track as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "effects",
+                                        build_effects_value(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    sync_sidebar_browser(rt, &app, track);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Inserted built-in effect '{}' at slot {}",
+                                        effect_name,
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error inserting built-in effect: {error}"
+                                ))),
+                            }
+                        }
+                    }
+                    "insert-effect-before-slot" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let effect_name = extract_string_from_payload(&payload, "name");
+                        if let (Some(track), Some(slot), Some(effect_name)) =
+                            (track, slot, effect_name)
+                        {
+                            current_track.store(track, Ordering::Relaxed);
+                            app.ui.cursor_track = track;
+                            match app.insert_saved_effect_before_slot_sync(
+                                track,
+                                slot,
+                                &effect_name,
+                            ) {
+                                Ok(slot_idx) => {
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "current-track",
+                                        Value::Number(track as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "effects",
+                                        build_effects_value(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    sync_sidebar_browser(rt, &app, track);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Inserted effect '{}' at slot {}",
+                                        effect_name,
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error inserting effect: {error}"
+                                ))),
+                            }
+                        }
+                    }
+                    "insert-midi-fx-before-slot" => {
+                        let track = extract_usize_from_payload(&payload, "track");
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let fx_name = extract_string_from_payload(&payload, "name");
+                        if let (Some(track), Some(slot), Some(fx_name)) = (track, slot, fx_name) {
+                            current_track.store(track, Ordering::Relaxed);
+                            app.ui.cursor_track = track;
+                            match app.insert_midi_fx_before_slot_sync(track, slot, &fx_name) {
+                                Ok(slot_idx) => {
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "current-track",
+                                        Value::Number(track as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "midi-effects",
+                                        build_midi_effects_value(&state, track, &selected_steps),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            track,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    sync_sidebar_browser(rt, &app, track);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Inserted MIDI FX '{}' at slot {}",
+                                        fx_name,
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error inserting MIDI FX: {error}"
+                                ))),
+                            }
+                        }
+                    }
+                    "move-effect-slot" => {
+                        let source_track = extract_usize_from_payload(&payload, "source-track");
+                        let source_slot = extract_usize_from_payload(&payload, "source-slot");
+                        let target_track = extract_usize_from_payload(&payload, "target-track");
+                        let target_slot = extract_usize_from_payload(&payload, "target-slot");
+                        if let (Some(source_track), Some(source_slot), Some(target_track)) =
+                            (source_track, source_slot, target_track)
+                        {
+                            if source_track != target_track {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Move audio effects within the same track for now".to_string(),
+                                ));
+                                continue;
+                            }
+                            current_track.store(target_track, Ordering::Relaxed);
+                            app.ui.cursor_track = target_track;
+                            match app.move_effect_slot_sync(target_track, source_slot, target_slot)
+                            {
+                                Ok(slot_idx) => {
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "current-track",
+                                        Value::Number(target_track as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "effects",
+                                        build_effects_value(
+                                            &state,
+                                            target_track,
+                                            &app.graph.effect_descriptors,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            target_track,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Moved effect to slot {}",
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error moving effect: {error}"
+                                ))),
+                            }
+                        }
+                    }
+                    "move-midi-fx-slot" => {
+                        let source_track = extract_usize_from_payload(&payload, "source-track");
+                        let source_slot = extract_usize_from_payload(&payload, "source-slot");
+                        let target_track = extract_usize_from_payload(&payload, "target-track");
+                        let target_slot = extract_usize_from_payload(&payload, "target-slot");
+                        if let (Some(source_track), Some(source_slot), Some(target_track)) =
+                            (source_track, source_slot, target_track)
+                        {
+                            if source_track != target_track {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Move MIDI effects within the same track for now".to_string(),
+                                ));
+                                continue;
+                            }
+                            current_track.store(target_track, Ordering::Relaxed);
+                            app.ui.cursor_track = target_track;
+                            match app.move_midi_fx_slot_sync(target_track, source_slot, target_slot)
+                            {
+                                Ok(slot_idx) => {
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "current-track",
+                                        Value::Number(target_track as f64),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "midi-effects",
+                                        build_midi_effects_value(
+                                            &state,
+                                            target_track,
+                                            &selected_steps,
+                                        ),
+                                    );
+                                    rt.set_reactive(
+                                        "SEQ",
+                                        "step-has-plocks",
+                                        build_step_has_plocks(
+                                            &state,
+                                            target_track,
+                                            &app.graph.effect_descriptors,
+                                        ),
+                                    );
+                                    sync_track_mixer_state(rt, &app, &state);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Moved MIDI FX to slot {}",
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error moving MIDI FX: {error}"
+                                ))),
                             }
                         }
                     }

@@ -671,7 +671,7 @@ impl WidgetDefinition for TreeWidget {
         let row_relative = local_row - node.rect.row + scroll_offset;
         let row_idx = (row_relative / rh).floor() as usize;
         let row = rows.get(row_idx)?;
-        if row.has_children || get_item_field(&row.item_value, "path").is_none() {
+        if row.has_children {
             return None;
         }
         Some(make_drag_value(&drag_type, &row.item_value))

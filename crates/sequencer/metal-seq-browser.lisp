@@ -216,6 +216,12 @@
       :bg :transparent)))
 
 (def sbrowser-select-audio-effect (item)
+  (let ((kind (get item :kind)) (label (get item :label)))
+    (if (or (= kind "builtin-audio-effect") (= kind "custom-audio-effect") (= kind "new-audio-effect"))
+      (status (str label))
+      (status "Open a section or choose an effect"))))
+
+(def sbrowser-activate-audio-effect (item)
   (let ((kind (get item :kind)) (name (get item :name)))
     (if (= kind "builtin-audio-effect")
       (do
@@ -236,6 +242,12 @@
           (status "Open a section or choose an effect"))))))
 
 (def sbrowser-select-midi-effect (item)
+  (let ((kind (get item :kind)) (label (get item :label)))
+    (if (= kind "midi-effect")
+      (status (str label))
+      (status "Choose a MIDI effect"))))
+
+(def sbrowser-activate-midi-effect (item)
   (let ((kind (get item :kind)) (name (get item :name)))
     (if (= kind "midi-effect")
       (do
@@ -469,8 +481,11 @@
             :background-color :buffer-bg
             :items items
             :expand-all (not (= sbrowser-filter ""))
+            :focusable true
+            :drag-type "audio-effect"
             :on-select (lambda (item) (sbrowser-select-audio-effect item))
-            :on-activate (lambda (item) (sbrowser-select-audio-effect item))))))))
+            :on-cursor-change (lambda (item) (sbrowser-select-audio-effect item))
+            :on-activate (lambda (item) (sbrowser-activate-audio-effect item))))))))
 
 (def sbrowser-midi-fx-panel ()
   (let ((items (seq-midi-effect-tree sbrowser-filter)))
@@ -484,8 +499,11 @@
             :background-color :buffer-bg
             :items items
             :expand-all (not (= sbrowser-filter ""))
+            :focusable true
+            :drag-type "midi-effect"
             :on-select (lambda (item) (sbrowser-select-midi-effect item))
-            :on-activate (lambda (item) (sbrowser-select-midi-effect item))))))))
+            :on-cursor-change (lambda (item) (sbrowser-select-midi-effect item))
+            :on-activate (lambda (item) (sbrowser-activate-midi-effect item))))))))
 
 (def sbrowser-presets-tab-panel ()
   (v-stack :key "presets-tab-panel" :width :fill :gap 0.22 :padding 0.25 :flex 1

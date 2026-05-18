@@ -116,6 +116,33 @@ impl PatternSnapshot {
         }
     }
 
+    pub fn insert_empty_effect_slot(&mut self, track: usize, slot_idx: usize) {
+        let Some(slots) = self.effect_slots.get_mut(track) else {
+            return;
+        };
+        if slot_idx >= slots.len() {
+            return;
+        }
+        for idx in (slot_idx + 1..slots.len()).rev() {
+            slots[idx] = slots[idx - 1].clone();
+        }
+        slots[slot_idx].clear();
+    }
+
+    pub fn move_effect_slot_to(&mut self, track: usize, source_slot: usize, target_slot: usize) {
+        let Some(slots) = self.effect_slots.get_mut(track) else {
+            return;
+        };
+        if source_slot >= slots.len() || target_slot >= slots.len() || source_slot == target_slot {
+            return;
+        }
+        let entry = slots.remove(source_slot);
+        slots.insert(target_slot, entry);
+        while slots.len() <= target_slot.max(source_slot) {
+            slots.push(EffectSlotSnapshot::new_empty());
+        }
+    }
+
     pub fn remove_midi_fx_slot(&mut self, track: usize, slot_idx: usize) {
         let Some(params) = self.track_params.get_mut(track) else {
             return;
@@ -136,6 +163,58 @@ impl PatternSnapshot {
         }
         if let Some(last) = slots.last_mut() {
             last.clear();
+        }
+    }
+
+    pub fn insert_midi_fx_slot(
+        &mut self,
+        track: usize,
+        slot_idx: usize,
+        name: String,
+        desc: &EffectDescriptor,
+    ) {
+        let Some(params) = self.track_params.get_mut(track) else {
+            return;
+        };
+        let insert_idx = slot_idx.min(params.midi_fx_chain.len());
+        params.midi_fx_chain.insert(insert_idx, name);
+
+        let Some(slots) = self.midi_fx_slots.get_mut(track) else {
+            return;
+        };
+        if insert_idx >= slots.len() {
+            return;
+        }
+        for idx in (insert_idx + 1..slots.len()).rev() {
+            slots[idx] = slots[idx - 1].clone();
+        }
+        slots[insert_idx].sync_to_descriptor(desc, 0);
+    }
+
+    pub fn move_midi_fx_slot_to(&mut self, track: usize, source_slot: usize, target_slot: usize) {
+        let Some(params) = self.track_params.get_mut(track) else {
+            return;
+        };
+        if source_slot >= params.midi_fx_chain.len() {
+            return;
+        }
+        let target_slot = target_slot.min(params.midi_fx_chain.len().saturating_sub(1));
+        if source_slot == target_slot {
+            return;
+        }
+        let name = params.midi_fx_chain.remove(source_slot);
+        params.midi_fx_chain.insert(target_slot, name);
+
+        let Some(slots) = self.midi_fx_slots.get_mut(track) else {
+            return;
+        };
+        if source_slot >= slots.len() || target_slot >= slots.len() {
+            return;
+        }
+        let entry = slots.remove(source_slot);
+        slots.insert(target_slot, entry);
+        while slots.len() <= target_slot.max(source_slot) {
+            slots.push(EffectSlotSnapshot::new_empty());
         }
     }
 
@@ -2379,6 +2458,43 @@ mod tests {
         assert_eq!(snapshot.effect_slots[0][2].num_params, 0);
         assert!(snapshot.effect_slots[0][2].defaults.is_empty());
         assert!(snapshot.effect_slots[0][2].plocks[2].is_empty());
+    }
+
+    #[test]
+    fn pattern_snapshot_insert_empty_effect_slot_shifts_existing_slots() {
+        let mut snapshot = sample_pattern_snapshot(1);
+        snapshot.effect_slots[0] = vec![
+            sample_effect_slot_snapshot(0),
+            sample_effect_slot_snapshot(1),
+            sample_effect_slot_snapshot(2),
+            EffectSlotSnapshot::new_empty(),
+        ];
+
+        snapshot.insert_empty_effect_slot(0, 1);
+
+        assert_eq!(snapshot.effect_slots[0][0].node_id, 100);
+        assert_eq!(snapshot.effect_slots[0][1].node_id, 0);
+        assert_eq!(snapshot.effect_slots[0][2].node_id, 101);
+        assert_eq!(snapshot.effect_slots[0][3].node_id, 102);
+    }
+
+    #[test]
+    fn pattern_snapshot_move_effect_slot_reorders_without_losing_payload() {
+        let mut snapshot = sample_pattern_snapshot(1);
+        snapshot.effect_slots[0] = vec![
+            sample_effect_slot_snapshot(0),
+            sample_effect_slot_snapshot(1),
+            sample_effect_slot_snapshot(2),
+            EffectSlotSnapshot::new_empty(),
+        ];
+
+        snapshot.move_effect_slot_to(0, 2, 1);
+
+        assert_eq!(snapshot.effect_slots[0][0].node_id, 100);
+        assert_eq!(snapshot.effect_slots[0][1].node_id, 102);
+        assert_eq!(snapshot.effect_slots[0][1].defaults, vec![2.0, 2.5]);
+        assert_eq!(snapshot.effect_slots[0][2].node_id, 101);
+        assert_eq!(snapshot.effect_slots[0][3].node_id, 0);
     }
 
     #[test]

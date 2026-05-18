@@ -88,6 +88,28 @@
         (host-command "add-track-sample" (dict :path path))
         (status "Drop a sample file, not a folder")))))
 
+(def mixer-v2-drop-effect-on-track (event)
+  (let ((payload (get event :payload))
+      (target (get event :target)))
+    (let ((kind (get payload :kind))
+        (name (get payload :name))
+        (track (get target :track)))
+      (if (= kind "builtin-audio-effect")
+        (host-command "add-builtin-effect-to-track" (dict :track track :name name))
+        (if (= kind "custom-audio-effect")
+          (host-command "add-effect-to-track" (dict :track track :name name))
+          (if (= kind "midi-effect")
+            (host-command "add-midi-fx-to-track" (dict :track track :name name))
+            (status "Drop an audio or MIDI effect")))))))
+
+(def mixer-v2-drop-on-track (event)
+  (let ((drag-type (get event :drag-type)))
+    (if (= drag-type "sample")
+      (mixer-v2-drop-sample-on-track event)
+      (if (or (= drag-type "audio-effect") (= drag-type "midi-effect"))
+        (mixer-v2-drop-effect-on-track event)
+        (status "Unsupported drop")))))
+
 (defstate mixer-v2-pending-mod-source -1)
 (defstate mixer-v2-selected-mod-source -1)
 (defstate mixer-v2-selected-mod-dest -1)
@@ -381,9 +403,9 @@
       :border-color (mixer-v2-strip-border selected)
       :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
-      :drop-types (list "sample")
+      :drop-types (list "sample" "audio-effect" "midi-effect")
       :drop-meta (dict :kind "track" :track i)
-      :on-drop (lambda (event) (mixer-v2-drop-sample-on-track event))
+      :on-drop (lambda (event) (mixer-v2-drop-on-track event))
       :on-click |x y r| (mixer-v2-select-track i)
       (v-stack :gap 0.15
         (dropdown :value (nth SEQ.track-outputs i)

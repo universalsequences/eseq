@@ -154,6 +154,28 @@ pub(crate) fn box_drop_info(
     Value::Map(info)
 }
 
+fn box_drag_value(node: &LayoutNode, drag_type: &str) -> Value {
+    let mut map = std::collections::HashMap::new();
+    map.insert(
+        "kind".to_string(),
+        Rc::new(RefCell::new(Value::String("widget-drag".to_string()))),
+    );
+    map.insert(
+        "drag-type".to_string(),
+        Rc::new(RefCell::new(Value::String(drag_type.to_string()))),
+    );
+    map.insert(
+        "payload".to_string(),
+        Rc::new(RefCell::new(
+            node.props
+                .get("drag-payload")
+                .cloned()
+                .unwrap_or(Value::Nil),
+        )),
+    );
+    Value::Map(map)
+}
+
 #[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
@@ -362,7 +384,11 @@ impl WidgetDefinition for BoxWidget {
     }
 
     fn begin_gesture(&self, node: &LayoutNode, _local_col: f32, _local_row: f32) -> Option<Value> {
-        if node.props.contains_key("on-drag") || node.props.contains_key("on-mouse-up") {
+        if let Some(Value::String(drag_type) | Value::Keyword(drag_type)) =
+            node.props.get("drag-type")
+        {
+            Some(box_drag_value(node, drag_type))
+        } else if node.props.contains_key("on-drag") || node.props.contains_key("on-mouse-up") {
             Some(Value::String("box-pointer".to_string()))
         } else {
             None

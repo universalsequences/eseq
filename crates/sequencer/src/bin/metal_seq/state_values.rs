@@ -3735,8 +3735,12 @@ pub(crate) fn load_instrument_preset_into_track(
 
 /// Extract the :path string from a host-command payload dict.
 pub(crate) fn extract_path_from_payload(payload: &Value) -> Option<String> {
+    extract_string_from_payload(payload, "path")
+}
+
+pub(crate) fn extract_string_from_payload(payload: &Value, key: &str) -> Option<String> {
     if let Value::Map(map) = payload {
-        if let Some(cell) = map.get("path") {
+        if let Some(cell) = map.get(key) {
             if let Value::String(s) = &*cell.borrow() {
                 return Some(s.clone());
             }
@@ -5362,7 +5366,28 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_audio_effect_add_uses_selected_bus() {
+    fn metal_seq_browser_audio_effect_click_only_updates_browser_selection() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-audio-effect
+                    (dict :kind "builtin-audio-effect" :name "Filter" :label "Filter"))"#,
+            )
+            .expect("select built-in audio effect");
+
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "audio effect click should not add an effect"
+        );
+        assert_eq!(
+            editor.runtime_mut().take_status_message(),
+            Some("Filter".to_string())
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_audio_effect_activation_uses_selected_bus() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -5371,10 +5396,10 @@ mod tests {
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-audio-effect
+                r#"(sbrowser-activate-audio-effect
                     (dict :kind "builtin-audio-effect" :name "Filter" :label "Filter"))"#,
             )
-            .expect("select built-in audio effect for bus");
+            .expect("activate built-in audio effect for bus");
 
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -5398,7 +5423,7 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_audio_effect_add_uses_track_when_no_bus_selected() {
+    fn metal_seq_browser_audio_effect_activation_uses_track_when_no_bus_selected() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -5407,10 +5432,10 @@ mod tests {
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-audio-effect
+                r#"(sbrowser-activate-audio-effect
                     (dict :kind "custom-audio-effect" :name "my-effect" :label "my-effect"))"#,
             )
-            .expect("select custom audio effect for track");
+            .expect("activate custom audio effect for track");
 
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
@@ -5426,6 +5451,55 @@ mod tests {
                 );
             }
             other => panic!("expected add-effect host command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metal_seq_browser_midi_effect_click_only_updates_browser_selection() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-midi-effect
+                    (dict :kind "midi-effect" :name "Arp" :label "Arp"))"#,
+            )
+            .expect("select MIDI effect");
+
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "MIDI effect click should not add an effect"
+        );
+        assert_eq!(
+            editor.runtime_mut().take_status_message(),
+            Some("Arp".to_string())
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_midi_effect_activation_adds_midi_effect() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-activate-midi-effect
+                    (dict :kind "midi-effect" :name "Arp" :label "Arp"))"#,
+            )
+            .expect("activate MIDI effect");
+
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-midi-fx");
+                let Value::Map(payload) = payload else {
+                    panic!("MIDI effect payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Arp".to_string()))
+                );
+            }
+            other => panic!("expected add-midi-fx host command, got {other:?}"),
         }
     }
 
@@ -8103,6 +8177,103 @@ mod tests {
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor
             .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(0.0));
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-drop-on-effect
+                    (dict
+                      :payload (dict :kind "builtin-audio-effect" :name "Filter")
+                      :target (dict :chain "audio" :track 0 :slot 2)))"#,
+            )
+            .expect("drop builtin audio effect before slot");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "insert-builtin-effect-before-slot");
+                let Value::Map(payload) = payload else {
+                    panic!(
+                        "insert-builtin-effect-before-slot payload should be a dict: {payload:?}"
+                    );
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Filter".to_string()))
+                );
+            }
+            other => panic!("expected insert-builtin-effect-before-slot, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-drop-on-effect
+                    (dict
+                      :payload (dict :kind "audio-effect-instance" :chain "audio" :track 0 :slot 3 :name "Delay")
+                      :target (dict :chain "audio" :track 0 :slot 2)))"#,
+            )
+            .expect("drop audio effect instance before slot");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "move-effect-slot");
+                let Value::Map(payload) = payload else {
+                    panic!("move-effect-slot payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload
+                        .get("source-slot")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(3.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("target-slot")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0))
+                );
+            }
+            other => panic!("expected move-effect-slot, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-drop-on-effect
+                    (dict
+                      :payload (dict :kind "midi-effect" :name "Arp")
+                      :target (dict :chain "midi" :track 0 :slot 1)))"#,
+            )
+            .expect("drop MIDI effect before slot");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "insert-midi-fx-before-slot");
+                let Value::Map(payload) = payload else {
+                    panic!("insert-midi-fx-before-slot payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Arp".to_string()))
+                );
+            }
+            other => panic!("expected insert-midi-fx-before-slot, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
             .eval_str(
                 "(do (set! sampler-view-start 3.5)
                      (set! sampler-view-duration 1.25)
@@ -8195,6 +8366,16 @@ mod tests {
         editor.set_active_buffer(fx.id);
         editor.set_layout_viewport(92, 42);
         let layout = editor.widget_layout().expect("bus fx layout");
+        let append_row = find_layout_node_by_debug_name(&layout, "fx-chain-append-drop-row")
+            .expect("fx chain append drop row");
+        assert!(
+            append_row.rect.width >= 30.0
+                && append_row.rect.height > 0.0
+                && append_row.props.contains_key("on-drop"),
+            "fx chain append row should be a visible drop target, got rect={:?} props={:?}",
+            append_row.rect,
+            append_row.props.keys().collect::<Vec<_>>()
+        );
         let placeholder = find_layout_node_by_debug_name(&layout, "fx-drop-placeholder-panel")
             .expect("bus fx drop placeholder panel");
         assert!(
@@ -12485,6 +12666,96 @@ mod tests {
                 );
             }
             other => panic!("expected load-sample-into-track host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-on-track
+                    (dict
+                      :drag-type "audio-effect"
+                      :payload (dict :kind "builtin-audio-effect" :name "Filter")
+                      :target (dict :kind "track" :track 1)))"#,
+            )
+            .expect("drop built-in audio effect on track");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-builtin-effect-to-track");
+                let Value::Map(payload) = payload else {
+                    panic!("add-builtin-effect-to-track payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Filter".to_string()))
+                );
+            }
+            other => panic!("expected add-builtin-effect-to-track host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-on-track
+                    (dict
+                      :drag-type "audio-effect"
+                      :payload (dict :kind "custom-audio-effect" :name "delayz")
+                      :target (dict :kind "track" :track 1)))"#,
+            )
+            .expect("drop custom audio effect on track");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-effect-to-track");
+                let Value::Map(payload) = payload else {
+                    panic!("add-effect-to-track payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("delayz".to_string()))
+                );
+            }
+            other => panic!("expected add-effect-to-track host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-on-track
+                    (dict
+                      :drag-type "midi-effect"
+                      :payload (dict :kind "midi-effect" :name "Arp")
+                      :target (dict :kind "track" :track 1)))"#,
+            )
+            .expect("drop MIDI effect on track");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-midi-fx-to-track");
+                let Value::Map(payload) = payload else {
+                    panic!("add-midi-fx-to-track payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("Arp".to_string()))
+                );
+            }
+            other => panic!("expected add-midi-fx-to-track host command, got {other:?}"),
         }
 
         editor

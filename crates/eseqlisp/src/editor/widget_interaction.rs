@@ -127,6 +127,40 @@ fn deepest_double_click_node(node: &LayoutNode, row: f32, col: f32) -> Option<La
         })
 }
 
+fn path_to_widget_id(node: &LayoutNode, target_id: u64, path: &mut Vec<LayoutNode>) -> bool {
+    path.push(node.clone());
+    if node.widget_id == target_id {
+        return true;
+    }
+    for child in &node.children {
+        if path_to_widget_id(child, target_id, path) {
+            return true;
+        }
+    }
+    path.pop();
+    false
+}
+
+fn nearest_widget_gesture_node(
+    layout: &LayoutNode,
+    hit_node: &LayoutNode,
+    local_col: f32,
+    local_row: f32,
+) -> Option<(LayoutNode, Option<Value>)> {
+    let mut path = Vec::new();
+    if !path_to_widget_id(layout, hit_node.widget_id, &mut path) {
+        return None;
+    }
+    path.into_iter().rev().find_map(|node| {
+        let gesture_data = begin_widget_gesture_data(&node, local_col, local_row);
+        if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
+            Some((node, gesture_data))
+        } else {
+            None
+        }
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PatchPortDirection {
     In,
@@ -1058,7 +1092,7 @@ impl Editor {
         else {
             return;
         };
-        let Some(node) = self.widget_node_at_local(local_col, local_row) else {
+        let Some(hit_node) = self.widget_node_at_local(local_col, local_row) else {
             return;
         };
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
@@ -1067,7 +1101,7 @@ impl Editor {
             .runtime
             .current_layout
             .as_ref()
-            .and_then(|layout| find_scroll_ancestor(layout, node.widget_id))
+            .and_then(|layout| find_scroll_ancestor(layout, hit_node.widget_id))
             .map(|scroll_node| {
                 crate::widget_render::scroll::get_scroll_state(
                     crate::widget_render::scroll::scroll_state_key(&scroll_node),
@@ -1075,9 +1109,11 @@ impl Editor {
                 .offset_y
             });
         crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
-        let gesture_data = begin_widget_gesture_data(&node, scrolled_col, scrolled_row);
+        let gesture_node = self.runtime.current_layout.as_ref().and_then(|layout| {
+            nearest_widget_gesture_node(layout, &hit_node, scrolled_col, scrolled_row)
+        });
         crate::widget_render::scroll::set_current_event_scroll_offset(None);
-        if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
+        if let Some((node, gesture_data)) = gesture_node {
             self.active_leaf_mut().active_widget_gesture = Some(WidgetGesture {
                 widget_id: node.widget_id,
                 node,
