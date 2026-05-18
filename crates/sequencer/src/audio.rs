@@ -21,7 +21,8 @@ use crate::sampler::{
 };
 use crate::scheduled_event::{
     ScheduledEffectParam, ScheduledEvent, ScheduledEventKind, ScheduledEventQueue,
-    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, TimedEvent,
+    ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
+    TimedEvent,
 };
 use crate::sequencer::{
     sync_beats, BusId, InstrumentType, KeyboardTrigger, SequencerState, StepParam, SwingResolution,
@@ -1440,12 +1441,7 @@ unsafe fn dispatch_instrument_params_to_voice(
     modulator_id: u64,
     instrument_params: &[ScheduledInstrumentParam],
 ) {
-    let mut sorted_params = instrument_params.iter().collect::<Vec<_>>();
-    sorted_params.sort_by_key(|param| match param.target {
-        ScheduledInstrumentParamTarget::Synth => (0_u8, param.idx),
-        ScheduledInstrumentParamTarget::Modulator => (1_u8, param.idx),
-    });
-    for param in sorted_params {
+    for param in instrument_params {
         let (logical_id, idx) = match param.target {
             ScheduledInstrumentParamTarget::Synth => (synth_id, param.idx),
             ScheduledInstrumentParamTarget::Modulator => (modulator_id, param.idx),
@@ -1697,7 +1693,7 @@ fn dispatch_scheduled_step(
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
     instrument_fingerprint: u64,
 ) {
     unsafe {
@@ -1992,7 +1988,7 @@ fn fire_resolved(
     samples_per_step: f64,
     resolved: crate::accumulator::ResolvedStep,
     chord: crate::scheduled_event::ScheduledChordData,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
     instrument_fingerprint: u64,
 ) {
     let tp = &data.state.pattern.track_params[track_idx];
@@ -3411,7 +3407,7 @@ pub fn build_output_stream(
         bus_gate_play_start_sample: 0,
         dropped_scheduled_events: 0,
         late_scheduled_events: 0,
-        events_heap: BinaryHeap::new(),
+        events_heap: BinaryHeap::with_capacity(4096),
         event_seq: 0,
         trace_audio,
         trace_callback_counter: 0,

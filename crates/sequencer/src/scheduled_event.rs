@@ -1,5 +1,7 @@
 use crate::accumulator::ResolvedStep;
+use crate::effects::MAX_SLOT_PARAMS;
 use crate::voice::MAX_VOICES;
+use arrayvec::ArrayVec;
 use std::cell::UnsafeCell;
 use std::cmp::Ordering as CmpOrdering;
 use std::mem::MaybeUninit;
@@ -33,6 +35,8 @@ pub struct ScheduledInstrumentParam {
     pub value: f32,
 }
 
+pub type ScheduledInstrumentParams = ArrayVec<ScheduledInstrumentParam, MAX_SLOT_PARAMS>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScheduledEventKind {
     ResolvedTrigger {
@@ -42,13 +46,13 @@ pub enum ScheduledEventKind {
         resolved: ResolvedStep,
         chord: ScheduledChordData,
         effect_params: Vec<ScheduledEffectParam>,
-        instrument_params: Vec<ScheduledInstrumentParam>,
+        instrument_params: ScheduledInstrumentParams,
         instrument_fingerprint: u64,
     },
     InstrumentParams {
         track: usize,
         step: usize,
-        instrument_params: Vec<ScheduledInstrumentParam>,
+        instrument_params: ScheduledInstrumentParams,
     },
 }
 
@@ -147,6 +151,7 @@ mod tests {
     use super::{
         ScheduledChordData, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
         ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+        ScheduledInstrumentParams,
     };
     use crate::accumulator::ResolvedStep;
     use crate::voice::MAX_VOICES;
@@ -155,8 +160,8 @@ mod tests {
         Vec::new()
     }
 
-    fn empty_instrument_params() -> Vec<ScheduledInstrumentParam> {
-        Vec::new()
+    fn empty_instrument_params() -> ScheduledInstrumentParams {
+        ScheduledInstrumentParams::new()
     }
 
     #[test]
@@ -191,11 +196,13 @@ mod tests {
                         idx: 1,
                         value: 0.5,
                     }],
-                    instrument_params: vec![ScheduledInstrumentParam {
-                        target: ScheduledInstrumentParamTarget::Synth,
-                        idx: 2,
-                        value: 0.75,
-                    }],
+                    instrument_params: ScheduledInstrumentParams::from_iter([
+                        ScheduledInstrumentParam {
+                            target: ScheduledInstrumentParamTarget::Synth,
+                            idx: 2,
+                            value: 0.75,
+                        },
+                    ]),
                     instrument_fingerprint: 11,
                 },
             })
@@ -261,11 +268,13 @@ mod tests {
                         idx: 1,
                         value: 0.5,
                     }],
-                    instrument_params: vec![ScheduledInstrumentParam {
-                        target: ScheduledInstrumentParamTarget::Synth,
-                        idx: 2,
-                        value: 0.75,
-                    }],
+                    instrument_params: ScheduledInstrumentParams::from_iter([
+                        ScheduledInstrumentParam {
+                            target: ScheduledInstrumentParamTarget::Synth,
+                            idx: 2,
+                            value: 0.75,
+                        }
+                    ]),
                     instrument_fingerprint: 11,
                 },
             })

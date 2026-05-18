@@ -14,12 +14,19 @@ use crate::lisp_effect::{self, AccumulatorNoteSpan};
 use crate::scheduled_event::{
     ScheduledChordData, ScheduledEffectParam, ScheduledEvent, ScheduledEventKind,
     ScheduledEventQueue, ScheduledInstrumentParam, ScheduledInstrumentParamTarget,
+    ScheduledInstrumentParams,
 };
 use crate::sequencer::{
     sync_beats, KeyboardTrigger, MidiFxPosition, SequencerSnapshot, SequencerState, StepParam,
     SwingResolution, MAX_STEPS, MAX_TRACKS,
 };
 use crate::voice::MAX_VOICES;
+
+fn scheduled_instrument_params_from_vec(
+    params: Vec<ScheduledInstrumentParam>,
+) -> ScheduledInstrumentParams {
+    params.into_iter().collect::<ScheduledInstrumentParams>()
+}
 
 fn ceil_to_grid(value: f64, grid: f64) -> f64 {
     let rem = value % grid;
@@ -323,10 +330,10 @@ fn resolve_instrument_params(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
     step_idx: usize,
-) -> Vec<ScheduledInstrumentParam> {
+) -> ScheduledInstrumentParams {
     let slot = &snapshot.tracks[track_idx].instrument_slot;
     let num_params = slot.num_params as usize;
-    let mut params = Vec::with_capacity(num_params);
+    let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..num_params {
         let raw_idx = slot
             .param_node_indices
@@ -364,13 +371,13 @@ fn resolve_instrument_plocks(
     snapshot: &SequencerSnapshot,
     track_idx: usize,
     step_idx: usize,
-) -> Vec<ScheduledInstrumentParam> {
+) -> ScheduledInstrumentParams {
     let slot = &snapshot.tracks[track_idx].instrument_slot;
     let num_params = slot.num_params as usize;
     let Some(step_plocks) = slot.plocks.get(step_idx) else {
-        return Vec::new();
+        return ScheduledInstrumentParams::new();
     };
-    let mut params = Vec::new();
+    let mut params = ScheduledInstrumentParams::new();
     for param_idx in 0..num_params {
         let Some(value) = step_plocks.get(param_idx).copied().flatten() else {
             continue;
@@ -406,7 +413,7 @@ fn enqueue_instrument_param_change(
     sample_time: u64,
     track_idx: usize,
     step_idx: usize,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 ) -> bool {
     if instrument_params.is_empty() {
         return true;
@@ -719,7 +726,7 @@ fn enqueue_resolved_trigger(
     resolved: ResolvedStep,
     chord: ScheduledChordData,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 ) -> bool {
     let instrument_fingerprint =
         instrument_sound_fingerprint(snapshot, track_idx, &instrument_params);
@@ -755,7 +762,7 @@ struct MidiFxEvent {
     note_spans: Option<Vec<AccumulatorNoteSpan>>,
     arp_phase_beats: f32,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 }
 
 #[derive(Clone, Copy)]
@@ -780,7 +787,7 @@ fn midi_fx_event_from_step(
     arp_phase_beats: f32,
     resolved: ResolvedStep,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 ) -> MidiFxEvent {
     let step = &snapshot.tracks[track_idx].steps[step_idx];
     MidiFxEvent {
@@ -810,7 +817,7 @@ fn midi_fx_window_events_from_step(
     arp_phase_beats: f32,
     resolved: ResolvedStep,
     effect_params: Vec<ScheduledEffectParam>,
-    instrument_params: Vec<ScheduledInstrumentParam>,
+    instrument_params: ScheduledInstrumentParams,
 ) -> Vec<MidiFxEvent> {
     const EPS: f32 = 1e-5;
     const MAX_WINDOWS: usize = 1024;
@@ -975,14 +982,15 @@ fn run_midi_fx_chain_for_track(
                 snapshot.tracks[event.track].effect_slots.clone(),
                 snapshot.tracks[event.track].instrument_slot.clone(),
                 event.effect_params.clone(),
-                event.instrument_params.clone(),
+                event.instrument_params.to_vec(),
             ) {
                 Ok(output) => {
                     if !output.suppressed {
                         let mut passthrough = event.clone();
                         passthrough.resolved = output.resolved;
                         passthrough.effect_params = output.effect_params.clone();
-                        passthrough.instrument_params = output.instrument_params.clone();
+                        passthrough.instrument_params =
+                            scheduled_instrument_params_from_vec(output.instrument_params.clone());
                         next.push(passthrough);
                     }
                     for emitted in output.emitted {
@@ -1003,7 +1011,9 @@ fn run_midi_fx_chain_for_track(
                             note_spans: None,
                             arp_phase_beats: event.arp_phase_beats,
                             effect_params: emitted.effect_params,
-                            instrument_params: emitted.instrument_params,
+                            instrument_params: scheduled_instrument_params_from_vec(
+                                emitted.instrument_params,
+                            ),
                         };
                         if target_track == source_track {
                             next.push(routed);
@@ -1725,7 +1735,7 @@ pub fn spawn_scheduler_thread(
                                     track.effect_slots.clone(),
                                     track.instrument_slot.clone(),
                                     effect_params,
-                                    instrument_params,
+                                    instrument_params.to_vec(),
                                 ) {
                                     Ok(output) => {
                                         if debug_accum && debug_accum_invocations < 200 {
@@ -1773,7 +1783,10 @@ pub fn spawn_scheduler_thread(
                                                 note_spans: Some(note_spans.clone()),
                                                 arp_phase_beats: trigger.absolute_beats as f32,
                                                 effect_params: output.effect_params.clone(),
-                                                instrument_params: output.instrument_params.clone(),
+                                                instrument_params:
+                                                    scheduled_instrument_params_from_vec(
+                                                        output.instrument_params.clone(),
+                                                    ),
                                             });
                                         }
                                         for emitted in output.emitted {
@@ -1794,7 +1807,10 @@ pub fn spawn_scheduler_thread(
                                                 note_spans: None,
                                                 arp_phase_beats: trigger.absolute_beats as f32,
                                                 effect_params: emitted.effect_params,
-                                                instrument_params: emitted.instrument_params,
+                                                instrument_params:
+                                                    scheduled_instrument_params_from_vec(
+                                                        emitted.instrument_params,
+                                                    ),
                                             });
                                         }
                                         for event in accumulator_events {
@@ -1998,7 +2014,9 @@ mod tests {
     };
     use crate::accumulator::ResolvedStep;
     use crate::effects::EffectDescriptor;
-    use crate::scheduled_event::{ScheduledInstrumentParam, ScheduledInstrumentParamTarget};
+    use crate::scheduled_event::{
+        ScheduledInstrumentParam, ScheduledInstrumentParamTarget, ScheduledInstrumentParams,
+    };
     use crate::sequencer::{default_empty_effect_chain, SequencerState, StepParam};
 
     #[test]
@@ -2035,7 +2053,7 @@ mod tests {
         let params = resolve_instrument_plocks(&snapshot, track, step);
 
         assert_eq!(
-            params,
+            params.as_slice(),
             vec![
                 ScheduledInstrumentParam {
                     target: ScheduledInstrumentParamTarget::Synth,
@@ -2192,7 +2210,7 @@ mod tests {
                 chop: 1.0,
             },
             Vec::new(),
-            Vec::new(),
+            ScheduledInstrumentParams::new(),
         );
 
         assert_eq!(events.len(), 8);
