@@ -467,6 +467,62 @@ fn refresh_visible_track_topology_layouts(editor: &mut Editor) {
     }
 }
 
+fn load_sample_into_sampler_track(
+    app: &mut ui::App,
+    editor: &mut Editor,
+    state: &Arc<SequencerState>,
+    current_track: &Arc<AtomicUsize>,
+    track_names: &mut Vec<String>,
+    selected_steps: &Arc<Mutex<HashSet<usize>>>,
+    lg_raw: *mut sequencer::audiograph::LiveGraph,
+    track: usize,
+    path: &Path,
+) -> Result<String, String> {
+    if track >= app.tracks.len() {
+        return Err(format!("Track {} does not exist", track + 1));
+    }
+    if !app.is_sampler_track(track) {
+        return Err("Drop samples onto sampler tracks".to_string());
+    }
+
+    let loaded = sequencer::sampler::load_wav_buffer(lg_raw, path)?;
+    app.submit_sample_analysis(&loaded);
+    let new_buffer_id = loaded.buffer_id;
+    let sample_rate = loaded.sample_rate;
+    let new_name = loaded.name;
+    register_waveform_sample(path);
+    app.graph_controller()
+        .send_sample_to_all_voices(track, new_buffer_id, sample_rate);
+    app.graph.track_buffer_ids[track] = new_buffer_id;
+    app.graph.track_sample_rates[track] = sample_rate;
+    app.tracks[track] = new_name.clone();
+    app.register_loaded_sample_path(&new_name, new_buffer_id, path.to_path_buf());
+    if track < app.sampler_paths.len() {
+        app.sampler_paths[track] = Some(path.to_path_buf());
+    }
+    app.reset_sampler_bpm_for_analysis(track);
+    app.publish_sampler_analysis_runtime(track);
+    if let Some(track_name) = track_names.get_mut(track) {
+        *track_name = new_name.clone();
+    }
+    current_track.store(track, Ordering::Relaxed);
+    app.ui.cursor_track = track;
+
+    let rt = editor.runtime_mut();
+    rt.set_reactive("SEQ", "current-track", Value::Number(track as f64));
+    rt.set_reactive("SEQ", "track-names", build_track_names(track_names));
+    rt.set_reactive(
+        "SEQ",
+        "instrument-panel",
+        build_instrument_panel_value(app, track, selected_steps),
+    );
+    sync_track_mixer_state(rt, app, state);
+    sync_sidebar_browser(rt, app, track);
+    rt.run_reactive_cycle();
+    editor.refresh_runtime_side_effects();
+    Ok(new_name)
+}
+
 const AGENT_INSTRUMENT_STUB_DSP: &str = r#"; Provisional silent instrument used while Agent Mode is designing the real patch.
 (def gate (in 1 @name gate))
 (def pitch (in 2 @name pitch))
@@ -1653,47 +1709,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ));
                                 continue;
                             };
-                            match sequencer::sampler::load_wav_buffer(lg_raw, path) {
-                                Ok(loaded) => {
-                                    app.submit_sample_analysis(&loaded);
-                                    let new_buffer_id = loaded.buffer_id;
-                                    let sample_rate = loaded.sample_rate;
-                                    let new_name = loaded.name;
-                                    register_waveform_sample(path);
-                                    app.graph_controller().send_sample_to_all_voices(
-                                        track,
-                                        new_buffer_id,
-                                        sample_rate,
-                                    );
-                                    app.graph.track_buffer_ids[track] = new_buffer_id;
-                                    app.graph.track_sample_rates[track] = sample_rate;
-                                    app.tracks[track] = new_name.clone();
-                                    app.register_loaded_sample_path(
-                                        &new_name,
-                                        new_buffer_id,
-                                        path.to_path_buf(),
-                                    );
-                                    if track < app.sampler_paths.len() {
-                                        app.sampler_paths[track] = Some(path.to_path_buf());
-                                    }
-                                    app.reset_sampler_bpm_for_analysis(track);
-                                    app.publish_sampler_analysis_runtime(track);
-                                    track_names[track] = new_name.clone();
-                                    // Update reactive state
-                                    let rt = editor.runtime_mut();
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "track-names",
-                                        build_track_names(&track_names),
-                                    );
-                                    rt.set_reactive(
-                                        "SEQ",
-                                        "instrument-panel",
-                                        build_instrument_panel_value(&app, track, &selected_steps),
-                                    );
-                                    sync_sidebar_browser(rt, &app, track);
-                                    rt.run_reactive_cycle();
-                                    editor.refresh_runtime_side_effects();
+                            match load_sample_into_sampler_track(
+                                &mut app,
+                                &mut editor,
+                                &state,
+                                &current_track,
+                                &mut track_names,
+                                &selected_steps,
+                                lg_raw,
+                                track,
+                                path,
+                            ) {
+                                Ok(new_name) => {
                                     editor.handle_host_event(HostEvent::Status(format!(
                                         "Audition: {new_name}"
                                     )));
@@ -1858,6 +1885,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 editor.handle_host_event(HostEvent::Status(format!(
                                     "Error re-analyzing sample: {error}"
                                 )));
+                            }
+                        }
+                    }
+                    "load-sample-into-track" => {
+                        let path_str = extract_path_from_payload(&payload);
+                        let track = extract_usize_from_payload(&payload, "track");
+                        match (track, path_str) {
+                            (Some(track), Some(path_str)) => {
+                                let path = Path::new(&path_str);
+                                match load_sample_into_sampler_track(
+                                    &mut app,
+                                    &mut editor,
+                                    &state,
+                                    &current_track,
+                                    &mut track_names,
+                                    &selected_steps,
+                                    lg_raw,
+                                    track,
+                                    path,
+                                ) {
+                                    Ok(new_name) => {
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Loaded sample on track {}: {new_name}",
+                                            track + 1
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Error loading sample: {e}"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => {
+                                editor.handle_host_event(HostEvent::Status(
+                                    "Sample drop is missing a track or path".to_string(),
+                                ));
                             }
                         }
                     }

@@ -3741,6 +3741,17 @@ pub(crate) fn extract_path_from_payload(payload: &Value) -> Option<String> {
     None
 }
 
+pub(crate) fn extract_usize_from_payload(payload: &Value, key: &str) -> Option<usize> {
+    if let Value::Map(map) = payload {
+        if let Some(cell) = map.get(key) {
+            if let Value::Number(n) = &*cell.borrow() {
+                return (*n >= 0.0).then_some(*n as usize);
+            }
+        }
+    }
+    None
+}
+
 /// Push individual tp-* reactive fields for the current track.
 pub(crate) fn sync_track_params(
     rt: &mut Runtime,
@@ -5113,7 +5124,39 @@ mod tests {
     }
 
     #[test]
-    fn metal_seq_browser_sample_selection_adds_track_when_current_track_is_instrument() {
+    fn metal_seq_browser_sample_click_only_updates_browser_selection() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-kind",
+            Value::String("sampler".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-select-sample
+                    (dict :label "kick.wav" :path "samples/kick.wav"))"#,
+            )
+            .expect("select sample");
+
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "sample click should not audition or add a track"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("sbrowser-selected-sample")
+                .expect("read selected sample"),
+            Some(Value::String("samples/kick.wav".to_string()))
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_sample_activation_rejects_current_instrument_track() {
         let mut editor = browser_editor_on_instrument_tab();
         editor
             .runtime_mut()
@@ -5126,25 +5169,54 @@ mod tests {
         editor
             .runtime_mut()
             .eval_str(
-                r#"(sbrowser-select-item
+                r#"(sbrowser-activate-sample
                     (dict :label "kick.wav" :path "samples/kick.wav"))"#,
             )
-            .expect("select sample from instrument context");
+            .expect("activate sample from instrument context");
+
+        assert!(
+            editor.drain_host_commands().is_empty(),
+            "activating a sample on an instrument track should not create a track"
+        );
+        assert_eq!(
+            editor.runtime_mut().take_status_message(),
+            Some("Drop samples onto a sampler track or the new-track drop zone".to_string())
+        );
+    }
+
+    #[test]
+    fn metal_seq_browser_sample_activation_auditions_sampler_track() {
+        let mut editor = browser_editor_on_instrument_tab();
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "num-tracks", Value::Number(1.0));
+        editor.runtime_mut().set_reactive(
+            "SEQ",
+            "sidebar-kind",
+            Value::String("sampler".to_string()),
+        );
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(sbrowser-activate-sample
+                    (dict :label "kick.wav" :path "samples/kick.wav"))"#,
+            )
+            .expect("activate sample on sampler track");
 
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
         match &commands[0] {
             eseqlisp::host::HostCommand::Custom { name, payload } => {
-                assert_eq!(name, "add-track-sample");
+                assert_eq!(name, "audition-sample");
                 let Value::Map(payload) = payload else {
-                    panic!("sample add payload should be a dict: {payload:?}");
+                    panic!("sample audition payload should be a dict: {payload:?}");
                 };
                 assert_eq!(
                     payload.get("path").map(|value| value.borrow().clone()),
                     Some(Value::String("samples/kick.wav".to_string()))
                 );
             }
-            other => panic!("expected add-track-sample host command, got {other:?}"),
+            other => panic!("expected audition-sample host command, got {other:?}"),
         }
     }
 
@@ -12104,11 +12176,70 @@ mod tests {
             other => panic!("expected delete-track host command, got {other:?}"),
         }
 
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-sample-on-track
+                    (dict
+                      :payload (dict :path "samples/kick.wav")
+                      :target (dict :kind "track" :track 0)))"#,
+            )
+            .expect("drop sample on track");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "load-sample-into-track");
+                let Value::Map(payload) = payload else {
+                    panic!("load-sample-into-track payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("track").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected load-sample-into-track host command, got {other:?}"),
+        }
+
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(mixer-v2-drop-sample-new-track
+                    (dict :payload (dict :path "samples/kick.wav")))"#,
+            )
+            .expect("drop sample on new-track zone");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-track-sample");
+                let Value::Map(payload) = payload else {
+                    panic!("add-track-sample payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("path").map(|value| value.borrow().clone()),
+                    Some(Value::String("samples/kick.wav".to_string()))
+                );
+            }
+            other => panic!("expected add-track-sample host command, got {other:?}"),
+        }
+
         let layout = editor
             .runtime_mut()
             .current_layout
             .clone()
             .expect("mixer layout should be available");
+        let drop_zone = find_node_by_stable_key(&layout, "mixer-v2-sample-drop-zone")
+            .expect("sample drop zone");
+        assert!(
+            drop_zone.rect.width > 0.0 && drop_zone.rect.height > 0.0,
+            "sample drop zone should have a finite visible rect: {:?}",
+            drop_zone.rect
+        );
         let mod_out =
             find_node_by_stable_key(&layout, "mixer-v2-mod-out-0").expect("track mod out port");
         let mod_in =

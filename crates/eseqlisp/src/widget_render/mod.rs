@@ -149,6 +149,7 @@ struct OverlayInfo {
 thread_local! {
     static OVERLAY_INFO: RefCell<Option<OverlayInfo>> = RefCell::new(None);
     static HAPTIC_BUCKETS: RefCell<HashMap<u64, i64>> = RefCell::new(HashMap::new());
+    static DROP_HOVER_TARGET: RefCell<Option<u64>> = const { RefCell::new(None) };
     #[cfg(target_os = "macos")]
     static OVERLAY_PRIMITIVES: RefCell<Vec<MetalPrimitive>> = RefCell::new(Vec::new());
     #[cfg(target_os = "macos")]
@@ -185,6 +186,24 @@ pub fn overlay_contains(local_col: f32, local_row: f32) -> bool {
             false
         }
     })
+}
+
+pub fn set_drop_hover_target(widget_id: Option<u64>) {
+    DROP_HOVER_TARGET.with(|target| {
+        let mut target = target.borrow_mut();
+        if *target != widget_id {
+            *target = widget_id;
+            bump_widget_state_generation();
+        }
+    });
+}
+
+pub fn active_drop_hover_target() -> Option<u64> {
+    DROP_HOVER_TARGET.with(|target| *target.borrow())
+}
+
+pub fn drop_target_hovered(widget_id: u64) -> bool {
+    active_drop_hover_target() == Some(widget_id)
 }
 
 #[cfg(target_os = "macos")]
@@ -711,6 +730,7 @@ pub fn is_layout_widget_type(widget_type: &str) -> bool {
 pub fn node_handles_pointer_events(node: &LayoutNode) -> bool {
     let has_pointer_callback = node.props.contains_key("on-click")
         || node.props.contains_key("on-drag")
+        || node.props.contains_key("on-drop")
         || node.props.contains_key("on-change")
         || node.props.contains_key("on-mouse-down")
         || node.props.contains_key("on-mouse-up")

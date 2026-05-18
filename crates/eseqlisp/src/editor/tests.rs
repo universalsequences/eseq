@@ -2065,6 +2065,233 @@ fn tree_row_height_prop_controls_hit_testing() {
 }
 
 #[test]
+fn tree_click_cursor_and_activate_have_separate_callbacks() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def selected (state ""))
+                (def highlighted (state ""))
+                (def activated (state ""))
+                (effect
+                  (tree
+                    :focusable true
+                    :items '(
+                      (:label "one" :path "/one.wav")
+                      (:label "two" :path "/two.wav"))
+                    :on-select (lambda (item) (set! selected (get item :label)))
+                    :on-cursor-change (lambda (item) (set! highlighted (get item :label)))
+                    :on-activate (lambda (item) (set! activated (get item :label)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0),
+        0,
+        0,
+        40,
+        10,
+        1.0,
+        0.2,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String("one".to_string())
+    );
+    assert_eq!(
+        editor.runtime.eval_str("activated").unwrap().unwrap(),
+        Value::String(String::new())
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime.eval_str("highlighted").unwrap().unwrap(),
+        Value::String("two".to_string())
+    );
+    assert_eq!(
+        editor.runtime.eval_str("activated").unwrap().unwrap(),
+        Value::String(String::new())
+    );
+
+    editor.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(
+        editor.runtime.eval_str("activated").unwrap().unwrap(),
+        Value::String("two".to_string())
+    );
+}
+
+#[test]
+fn tree_double_click_activates_leaf() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(40, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def activated (state ""))
+                (effect
+                  (tree
+                    :items '((:label "one" :path "/one.wav"))
+                    :on-activate (lambda (item) (set! activated (get item :label)))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(40, 10);
+
+    let click = mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 0);
+    editor.handle_mouse_precise(click, 0, 0, 40, 10, 1.0, 0.2);
+    editor.handle_mouse_precise(click, 0, 0, 40, 10, 1.0, 0.2);
+
+    assert_eq!(
+        editor.runtime.eval_str("activated").unwrap().unwrap(),
+        Value::String("one".to_string())
+    );
+}
+
+#[test]
+fn tree_sample_drag_drops_on_compatible_box_target() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def dropped (state ""))
+                (effect
+                  (h-stack :width 40 :height 4
+                    (tree
+                      :width 18
+                      :height 2
+                      :drag-type "sample"
+                      :items '((:label "kick.wav" :path "/samples/kick.wav"))
+                      :on-select (lambda (item) nil))
+                    (box
+                      :key "drop-target"
+                      :width 18
+                      :height 2
+                      :drop-types (list "sample")
+                      :drop-meta (dict :kind "test")
+                      :on-drop (lambda (event)
+                        (set! dropped (get (get event :payload) :path)))))) 
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(80, 10);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        0,
+        0,
+        80,
+        10,
+        2.0,
+        0.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+    assert!(
+        crate::widget_render::active_drop_hover_target().is_some(),
+        "compatible drop target should become the active hover target during drag"
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::String("/samples/kick.wav".to_string())
+    );
+    assert_eq!(
+        crate::widget_render::active_drop_hover_target(),
+        None,
+        "drop hover target should clear after mouse up"
+    );
+}
+
+#[test]
+fn tree_sample_drag_ignores_incompatible_box_target() {
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def dropped (state ""))
+                (effect
+                  (h-stack :width 40 :height 4
+                    (tree
+                      :width 18
+                      :height 2
+                      :drag-type "sample"
+                      :items '((:label "kick.wav" :path "/samples/kick.wav"))
+                      :on-select (lambda (item) nil))
+                    (box
+                      :width 18
+                      :height 2
+                      :drop-types (list "instrument")
+                      :on-drop (lambda (event)
+                        (set! dropped "bad"))))) 
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(80, 10);
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        0,
+        0,
+        80,
+        10,
+        2.0,
+        0.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 0),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        0.4,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::String(String::new())
+    );
+}
+
+#[test]
 fn tiled_mouse_hit_testing_uses_fractional_tile_origin() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

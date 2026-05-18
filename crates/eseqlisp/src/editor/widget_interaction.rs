@@ -29,6 +29,74 @@ fn node_contains_point(node: &LayoutNode, row: f32, col: f32) -> bool {
         && col < node.rect.col + node.rect.width
 }
 
+fn list_contains_string(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(value) | Value::Keyword(value) => value == needle,
+        Value::List(items) => items.iter().any(|item| {
+            let item = item.borrow();
+            matches!(&*item, Value::String(value) | Value::Keyword(value) if value == needle)
+        }),
+        _ => false,
+    }
+}
+
+fn node_accepts_drag_type(node: &LayoutNode, drag_type: &str) -> bool {
+    if !node.props.contains_key("on-drop") {
+        return false;
+    }
+    node.props
+        .get("drop-types")
+        .is_some_and(|value| list_contains_string(value, drag_type))
+        || node
+            .props
+            .get("accepts-drag-type")
+            .is_some_and(|value| list_contains_string(value, drag_type))
+}
+
+fn deepest_drop_target(
+    node: &LayoutNode,
+    row: f32,
+    col: f32,
+    drag_type: &str,
+) -> Option<LayoutNode> {
+    if !node_contains_point(node, row, col) {
+        return None;
+    }
+    node.children
+        .iter()
+        .rev()
+        .find_map(|child| deepest_drop_target(child, row, col, drag_type))
+        .or_else(|| node_accepts_drag_type(node, drag_type).then(|| node.clone()))
+}
+
+fn widget_drag_data(value: &Value) -> Option<(String, Value)> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    let kind = map.get("kind").and_then(|value| match &*value.borrow() {
+        Value::String(value) => Some(value.clone()),
+        _ => None,
+    })?;
+    if kind != "widget-drag" {
+        return None;
+    }
+    let drag_type = map
+        .get("drag-type")
+        .and_then(|value| match &*value.borrow() {
+            Value::String(value) | Value::Keyword(value) => Some(value.clone()),
+            _ => None,
+        })?;
+    let payload = map
+        .get("payload")
+        .map(|value| value.borrow().clone())
+        .unwrap_or(Value::Nil);
+    Some((drag_type, payload))
+}
+
+fn active_widget_drag(gesture: &WidgetGesture) -> Option<(String, Value)> {
+    widget_drag_data(gesture.gesture_data.as_ref()?)
+}
+
 fn deepest_double_click_node(node: &LayoutNode, row: f32, col: f32) -> Option<LayoutNode> {
     if !node_contains_point(node, row, col) {
         return None;
@@ -1354,6 +1422,51 @@ impl Editor {
             gesture.gesture_data.as_ref(),
             modifiers,
         )
+    }
+
+    pub(super) fn dispatch_widget_drop_event(
+        &self,
+        gesture: &WidgetGesture,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) -> Option<crate::widget_render::EventOutput> {
+        let (drag_type, payload) = active_widget_drag(gesture)?;
+        let layout = self.runtime.current_layout.as_ref()?;
+        let local_col = precise_col - content_col as f32 + self.active_leaf().widget_scroll_left;
+        let local_row = precise_row - content_row as f32 + self.total_scroll_top();
+        let target = deepest_drop_target(layout, local_row, local_col, &drag_type)?;
+        let callback = target.props.get("on-drop")?.clone();
+        let event = crate::widget_render::box_widget::box_drop_info(
+            &target, &drag_type, payload, local_col, local_row,
+        );
+        Some(crate::widget_render::EventOutput {
+            callback,
+            args: vec![event],
+        })
+    }
+
+    pub(super) fn update_widget_drop_hover(
+        &mut self,
+        gesture: &WidgetGesture,
+        content_col: u16,
+        content_row: u16,
+        precise_col: f32,
+        precise_row: f32,
+    ) {
+        let Some((drag_type, _)) = active_widget_drag(gesture) else {
+            widget_render::set_drop_hover_target(None);
+            return;
+        };
+        let target = self.runtime.current_layout.as_ref().and_then(|layout| {
+            let local_col =
+                precise_col - content_col as f32 + self.active_leaf().widget_scroll_left;
+            let local_row = precise_row - content_row as f32 + self.total_scroll_top();
+            deepest_drop_target(layout, local_row, local_col, &drag_type)
+        });
+        widget_render::set_drop_hover_target(target.map(|node| node.widget_id));
+        self.mark_needs_redraw();
     }
 
     pub(super) fn handle_touchpad_magnify_impl(

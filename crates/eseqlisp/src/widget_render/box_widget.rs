@@ -129,6 +129,31 @@ fn box_mouse_info(
     Value::Map(info)
 }
 
+pub(crate) fn box_drop_info(
+    node: &LayoutNode,
+    drag_type: &str,
+    payload: Value,
+    local_col: f32,
+    local_row: f32,
+) -> Value {
+    let mut info = match box_mouse_info("drop", KeyModifiers::empty(), node, local_col, local_row) {
+        Value::Map(map) => map,
+        _ => std::collections::HashMap::new(),
+    };
+    info.insert(
+        "drag-type".to_string(),
+        Rc::new(RefCell::new(Value::String(drag_type.to_string()))),
+    );
+    info.insert("payload".to_string(), Rc::new(RefCell::new(payload)));
+    info.insert(
+        "target".to_string(),
+        Rc::new(RefCell::new(
+            node.props.get("drop-meta").cloned().unwrap_or(Value::Nil),
+        )),
+    );
+    Value::Map(info)
+}
+
 #[cfg(target_os = "macos")]
 fn normalized_corner_radius(rect: Rect, viewport: WidgetViewport, radius_px: f32) -> f32 {
     if radius_px <= 0.0 {
@@ -456,16 +481,30 @@ impl WidgetDefinition for BoxWidget {
             _ => 1.0,
         };
         let has_rounded_corners = corner_radius_px > 0.0;
-        let background_color = if node.props.contains_key("background-color") {
+        let hover_drop = super::drop_target_hovered(node.widget_id);
+        let background_color =
+            if hover_drop && node.props.contains_key("drop-hover-background-color") {
+                Some(resolve_named_color(
+                    &node.props,
+                    "drop-hover-background-color",
+                    Color::rgba(0.0, 0.0, 0.0, 0.0),
+                ))
+            } else if node.props.contains_key("background-color") {
+                Some(resolve_named_color(
+                    &node.props,
+                    "background-color",
+                    Color::rgba(0.0, 0.0, 0.0, 0.0),
+                ))
+            } else {
+                None
+            };
+        let border_color = if hover_drop && node.props.contains_key("drop-hover-border-color") {
             Some(resolve_named_color(
                 &node.props,
-                "background-color",
+                "drop-hover-border-color",
                 Color::rgba(0.0, 0.0, 0.0, 0.0),
             ))
-        } else {
-            None
-        };
-        let border_color = if node.props.contains_key("border-color") {
+        } else if node.props.contains_key("border-color") {
             Some(resolve_named_color(
                 &node.props,
                 "border-color",

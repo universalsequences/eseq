@@ -72,6 +72,22 @@
     (seq-clear-selection)
     (set! selected-bus i)))
 
+(def mixer-v2-drop-sample-on-track (event)
+  (let ((payload (get event :payload))
+      (target (get event :target)))
+    (let ((path (get payload :path))
+        (track (get target :track)))
+      (if path
+        (host-command "load-sample-into-track" (dict :track track :path path))
+        (status "Drop a sample file, not a folder")))))
+
+(def mixer-v2-drop-sample-new-track (event)
+  (let ((payload (get event :payload)))
+    (let ((path (get payload :path)))
+      (if path
+        (host-command "add-track-sample" (dict :path path))
+        (status "Drop a sample file, not a folder")))))
+
 (defstate mixer-v2-pending-mod-source -1)
 (defstate mixer-v2-selected-mod-source -1)
 (defstate mixer-v2-selected-mod-dest -1)
@@ -363,7 +379,11 @@
       :border-width 2
       :corner-radius 10
       :border-color (mixer-v2-strip-border selected)
+      :drop-hover-border-color :mixer-strip-selected-border
       :padding 0.45
+      :drop-types (list "sample")
+      :drop-meta (dict :kind "track" :track i)
+      :on-drop (lambda (event) (mixer-v2-drop-sample-on-track event))
       :on-click |x y r| (mixer-v2-select-track i)
       (v-stack :gap 0.15
         (dropdown :value (nth SEQ.track-outputs i)
@@ -514,12 +534,33 @@
           :color :white
           :on-click |x y r| (mixer-v2-select-bus i))))))
 
+(def mixer-v2-sample-drop-zone ()
+  (box :key "mixer-v2-sample-drop-zone"
+    :width 11.8 :height 12.0
+    :background-color :buffer-bg
+    :drop-hover-background-color :mixer-control-bg
+    :border-width 2
+    :border-color :mixer-strip-border
+    :drop-hover-border-color :mixer-strip-selected-border
+    :corner-radius 10
+    :padding 0.5
+    :align :center
+    :drop-types (list "sample")
+    :drop-meta (dict :kind "new-sample-track")
+    :on-drop (lambda (event) (mixer-v2-drop-sample-new-track event))
+    (label "Drop samples here"
+      :font-size 9.5
+      :color :gray
+      :bg :transparent)))
+
 (effect-buffer "*mixer*"
   (h-stack :padding 0.2 :gap 0.0
     (each (range 0 SEQ.num-tracks) |i|
       (subtree :key (str "mixer-v2-track-" i)
         (mixer-v2-track-strip i)))
-    (box :width 1.2 :height 11.0)
+    (box :width 1.0 :height 11.0)
+    (mixer-v2-sample-drop-zone)
+    (box :width 1.0 :height 11.0)
     (each (range 0 (len SEQ.bus-names)) |display-i|
       (let ((i (mixer-v2-display-bus-index display-i)))
         (subtree :key (str "mixer-v2-bus-" i)

@@ -9,6 +9,7 @@
 (defstate sbrowser-tab "samples")
 (defstate sbrowser-project-name "")
 (defstate sbrowser-last-track-index -1)
+(defstate sbrowser-selected-sample "")
 
 ;; Editor state for inline instrument/effect creation
 (def sbrowser-editor-name (state ""))
@@ -47,7 +48,9 @@
     (do
       (set! sbrowser-last-track-index SEQ.sidebar-track-index)
       (if (and (sbrowser-audition-mode?) (= SEQ.sidebar-kind "sampler"))
-        (set! sbrowser-filter "")))))
+        (do
+          (set! sbrowser-filter "")
+          (set! sbrowser-selected-sample SEQ.sidebar-selected-sample))))))
 
 (def sbrowser-reset-to-audition ()
   (set! sbrowser-mode "audition")
@@ -155,6 +158,27 @@
         (host-command "audition-sample" (dict :path path))
         (status (str "Audition: " (get item :label))))
       (status (str (get item :label))))))
+
+(def sbrowser-select-sample (item)
+  (let ((path (get item :path)))
+    (if path
+      (set! sbrowser-selected-sample path)
+      (status (str (get item :label))))))
+
+(def sbrowser-activate-sample (item)
+  (let ((path (get item :path)))
+    (if path
+      (if (or (sbrowser-create-sampler-mode?) (= SEQ.num-tracks 0))
+        (sbrowser-add-track item)
+        (if (= SEQ.sidebar-kind "sampler")
+          (sbrowser-audition item)
+          (status "Drop samples onto a sampler track or the new-track drop zone")))
+      (status "Choose a sample file, not a folder"))))
+
+(def sbrowser-sample-selected-path ()
+  (if (= sbrowser-selected-sample "")
+    SEQ.sidebar-selected-sample
+    sbrowser-selected-sample))
 
 (def sbrowser-add-track (item)
   (let ((path (get item :path)))
@@ -406,12 +430,15 @@
           (tree
             :key "samples-tab-tree"
             :width :fill
+            :focusable true
             :background-color :buffer-bg
             :items items
-            :selected-path SEQ.sidebar-selected-sample
+            :selected-path (sbrowser-sample-selected-path)
             :expand-all (not (= sbrowser-filter ""))
-            :on-select (lambda (item) (sbrowser-select-item item))
-            :on-activate (lambda (item) (sbrowser-select-item item))))))))
+            :drag-type "sample"
+            :on-select (lambda (item) (sbrowser-select-sample item))
+            :on-cursor-change (lambda (item) (sbrowser-select-sample item))
+            :on-activate (lambda (item) (sbrowser-activate-sample item))))))))
 
 (def sbrowser-instruments-panel ()
   (v-stack :key "instrument-tab-panel" :width :fill :gap 0.5 :flex 1
