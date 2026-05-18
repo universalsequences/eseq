@@ -2396,6 +2396,111 @@ fn typed_widget_drag_can_drop_on_another_tile() {
 }
 
 #[test]
+fn scrolled_tree_double_click_and_drag_use_visible_row() {
+    fn find_by_key<'a>(
+        node: &'a crate::layout::LayoutNode,
+        key: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.stable_key.as_deref() == Some(key) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find_by_key(child, key))
+    }
+
+    let items = (0..20)
+        .map(|idx| format!("(:label \"item-{idx}.wav\" :path \"/samples/item-{idx}.wav\")"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r#"
+            (def selected (state ""))
+            (def activated (state ""))
+            (def dropped (state ""))
+            (effect
+              (h-stack :width 48 :height 5
+                (scroll :key "sample-scroll" :width 20 :height 4
+                  (tree
+                    :key "sample-tree"
+                    :width 20
+                    :row-height 1.0
+                    :drag-type "sample"
+                    :items '({items})
+                    :on-select (lambda (item) (set! selected (get item :path)))
+                    :on-activate (lambda (item) (set! activated (get item :path)))))
+                (box
+                  :key "drop-target"
+                  :width 20
+                  :height 4
+                  :drop-types (list "sample")
+                  :on-drop (lambda (event)
+                    (set! dropped (get (get event :payload) :path))))))
+        "#
+    );
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 10);
+    editor.runtime.eval_str(&source).unwrap();
+    editor.set_layout_viewport(80, 10);
+
+    let layout = editor.widget_layout().expect("layout");
+    let scroll = find_by_key(&layout, "sample-scroll").expect("scroll node");
+    crate::widget_render::scroll::set_scroll_state(
+        crate::widget_render::scroll::scroll_state_key(scroll),
+        crate::widget_render::scroll::ScrollState {
+            offset_y: 10.0,
+            viewport_height: 4.0,
+            content_height: 20.0,
+            synced_selection: None,
+        },
+    );
+
+    let click = mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1);
+    editor.handle_mouse_precise(click, 0, 0, 80, 10, 2.0, 1.4);
+    assert_eq!(
+        editor.runtime.eval_str("selected").unwrap().unwrap(),
+        Value::String("/samples/item-11.wav".to_string())
+    );
+    editor.handle_mouse_precise(click, 0, 0, 80, 10, 2.0, 1.4);
+    assert_eq!(
+        editor.runtime.eval_str("activated").unwrap().unwrap(),
+        Value::String("/samples/item-11.wav".to_string())
+    );
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 3),
+        0,
+        0,
+        80,
+        10,
+        2.0,
+        3.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 26, 3),
+        0,
+        0,
+        80,
+        10,
+        26.0,
+        3.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 26, 3),
+        0,
+        0,
+        80,
+        10,
+        26.0,
+        3.4,
+    );
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::String("/samples/item-13.wav".to_string())
+    );
+}
+
+#[test]
 fn tiled_mouse_hit_testing_uses_fractional_tile_origin() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

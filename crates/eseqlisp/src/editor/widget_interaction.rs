@@ -951,7 +951,20 @@ impl Editor {
         }
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
+        let event_scroll_offset = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| find_scroll_ancestor(layout, node.widget_id))
+            .map(|scroll_node| {
+                crate::widget_render::scroll::get_scroll_state(
+                    crate::widget_render::scroll::scroll_state_key(&scroll_node),
+                )
+                .offset_y
+            });
+        crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
         if let Some(widget_event) = map_double_click_event(&node, scrolled_col, scrolled_row) {
+            crate::widget_render::scroll::set_current_event_scroll_offset(None);
             let output = handle_event(&node, widget_event);
             return self.apply_widget_output(output);
         }
@@ -961,13 +974,16 @@ impl Editor {
             .as_ref()
             .and_then(|layout| deepest_double_click_node(layout, scrolled_row, scrolled_col))
         else {
+            crate::widget_render::scroll::set_current_event_scroll_offset(None);
             return false;
         };
         let Some(widget_event) =
             map_double_click_event(&double_click_node, scrolled_col, scrolled_row)
         else {
+            crate::widget_render::scroll::set_current_event_scroll_offset(None);
             return false;
         };
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
         let output = handle_event(&double_click_node, widget_event);
         self.apply_widget_output(output)
     }
@@ -1032,7 +1048,20 @@ impl Editor {
         };
         let scrolled_col = local_col + self.active_leaf().widget_scroll_left;
         let scrolled_row = local_row + self.total_scroll_top();
+        let event_scroll_offset = self
+            .runtime
+            .current_layout
+            .as_ref()
+            .and_then(|layout| find_scroll_ancestor(layout, node.widget_id))
+            .map(|scroll_node| {
+                crate::widget_render::scroll::get_scroll_state(
+                    crate::widget_render::scroll::scroll_state_key(&scroll_node),
+                )
+                .offset_y
+            });
+        crate::widget_render::scroll::set_current_event_scroll_offset(event_scroll_offset);
         let gesture_data = begin_widget_gesture_data(&node, scrolled_col, scrolled_row);
+        crate::widget_render::scroll::set_current_event_scroll_offset(None);
         if widget_render::widget_captures_drag(&node.widget_type) || gesture_data.is_some() {
             self.active_leaf_mut().active_widget_gesture = Some(WidgetGesture {
                 widget_id: node.widget_id,
