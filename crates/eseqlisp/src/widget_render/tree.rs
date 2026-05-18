@@ -29,7 +29,9 @@ use crate::theme;
 #[derive(Clone, Debug, Default, PartialEq)]
 struct TreeState {
     expanded: HashSet<Vec<usize>>,
-    selected_row: usize,
+    cursor_row: usize,
+    cursor_view_active: bool,
+    external_selected_row: Option<usize>,
     synced_selection: Option<String>,
     synced_items_hash: Option<u64>,
 }
@@ -367,6 +369,10 @@ fn sync_state_with_external_selection(
     let original_state = state.clone();
     let items_hash = tree_items_hash(items);
     let Some((selection_key, field, needle)) = external_selection_key(props) else {
+        state.external_selected_row = None;
+        if state.synced_selection.is_some() {
+            state.cursor_view_active = false;
+        }
         state.synced_selection = None;
         state.synced_items_hash = Some(items_hash);
         if *state != original_state {
@@ -380,7 +386,8 @@ fn sync_state_with_external_selection(
         return;
     }
 
-    state.selected_row = 0;
+    state.external_selected_row = None;
+    state.cursor_view_active = false;
     if let Some(path) = find_item_path_by_field(items, field, &needle, &[]) {
         if !expand_all {
             state.expanded.extend(ancestor_paths(&path));
@@ -388,7 +395,8 @@ fn sync_state_with_external_selection(
         let mut rows = Vec::new();
         flatten_items(items, 0, &[], &state.expanded, expand_all, &mut rows);
         if let Some(row_idx) = rows.iter().position(|row| row.path == path) {
-            state.selected_row = row_idx;
+            state.external_selected_row = Some(row_idx);
+            state.cursor_row = row_idx;
         }
     }
     state.synced_selection = Some(selection_key);
@@ -409,16 +417,17 @@ pub(crate) fn selection_view_hint(node: &LayoutNode) -> Option<(String, usize, f
     let mut state = get_tree_state(widget_key);
     sync_state_with_external_selection(widget_key, &items, &node.props, expand_all, &mut state);
     let selection_key = state.synced_selection.clone()?;
+    let selected_row = if state.cursor_view_active {
+        state.cursor_row
+    } else {
+        state.external_selected_row?
+    };
     let view_key = format!(
         "{selection_key}:items:{}:row:{}",
         state.synced_items_hash.unwrap_or(0),
-        state.selected_row
+        selected_row
     );
-    Some((
-        view_key,
-        state.selected_row,
-        row_height_from_props(&node.props),
-    ))
+    Some((view_key, selected_row, row_height_from_props(&node.props)))
 }
 
 pub(crate) fn current_content_height(node: &LayoutNode) -> Option<f32> {
@@ -612,13 +621,16 @@ impl WidgetDefinition for TreeWidget {
 
         if row.has_children {
             toggle_expand(&mut state, &row.path);
+            state.cursor_row = row_idx;
+            state.cursor_view_active = true;
             set_tree_state(widget_key, state);
             MouseEventOutcome::Dispatch(WidgetEvent::Custom(make_action_value(
                 "toggle",
                 &row.item_value,
             )))
         } else {
-            state.selected_row = row_idx;
+            state.cursor_row = row_idx;
+            state.cursor_view_active = true;
             set_tree_state(widget_key, state);
             MouseEventOutcome::Dispatch(WidgetEvent::Custom(make_action_value(
                 "select",
@@ -641,24 +653,28 @@ impl WidgetDefinition for TreeWidget {
 
         match key.code {
             KeyCode::Up => {
-                state.selected_row = state.selected_row.saturating_sub(1);
+                state.cursor_row = state.cursor_row.saturating_sub(1);
+                state.cursor_view_active = true;
                 set_tree_state(widget_key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Down => {
-                state.selected_row = (state.selected_row + 1).min(rows.len() - 1);
+                state.cursor_row = (state.cursor_row + 1).min(rows.len() - 1);
+                state.cursor_view_active = true;
                 set_tree_state(widget_key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
             KeyCode::Right => {
-                let row = &rows[state.selected_row];
+                let row = &rows[state.cursor_row.min(rows.len() - 1)];
                 if row.has_children && !row.expanded {
                     toggle_expand(&mut state, &row.path);
+                    state.cursor_view_active = true;
                     set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else if row.has_children && row.expanded {
                     // Move to first child
-                    state.selected_row = (state.selected_row + 1).min(rows.len() - 1);
+                    state.cursor_row = (state.cursor_row + 1).min(rows.len() - 1);
+                    state.cursor_view_active = true;
                     set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else {
@@ -666,16 +682,18 @@ impl WidgetDefinition for TreeWidget {
                 }
             }
             KeyCode::Left => {
-                let row = &rows[state.selected_row];
+                let row = &rows[state.cursor_row.min(rows.len() - 1)];
                 if row.has_children && row.expanded {
                     toggle_expand(&mut state, &row.path);
+                    state.cursor_view_active = true;
                     set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else if row.depth > 0 {
                     // Move to parent
                     let parent_path: Vec<usize> = row.path[..row.path.len() - 1].to_vec();
                     if let Some(parent_idx) = rows.iter().position(|r| r.path == parent_path) {
-                        state.selected_row = parent_idx;
+                        state.cursor_row = parent_idx;
+                        state.cursor_view_active = true;
                         set_tree_state(widget_key, state);
                         Some(WidgetEvent::Custom(Value::Nil))
                     } else {
@@ -686,9 +704,10 @@ impl WidgetDefinition for TreeWidget {
                 }
             }
             KeyCode::Enter => {
-                let row = &rows[state.selected_row];
+                let row = &rows[state.cursor_row.min(rows.len() - 1)];
                 if row.has_children {
                     toggle_expand(&mut state, &row.path);
+                    state.cursor_view_active = true;
                     set_tree_state(widget_key, state);
                     Some(WidgetEvent::Custom(make_action_value(
                         "toggle",
@@ -809,7 +828,7 @@ impl WidgetDefinition for TreeWidget {
 
             // Row background — only draw the alternate stripe. The other rows
             // are left as the underlying panel background.
-            let is_selected = i == state.selected_row;
+            let is_selected = state.external_selected_row == Some(i);
             let show_bg = is_selected || i % 2 == 1;
             if show_bg {
                 let bg = if is_selected { selected_bg } else { bg_alt };

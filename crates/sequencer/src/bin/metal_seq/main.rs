@@ -1691,6 +1691,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         "instrument-panel",
                                         build_instrument_panel_value(&app, track, &selected_steps),
                                     );
+                                    sync_sidebar_browser(rt, &app, track);
                                     rt.run_reactive_cycle();
                                     editor.refresh_runtime_side_effects();
                                     editor.handle_host_event(HostEvent::Status(format!(

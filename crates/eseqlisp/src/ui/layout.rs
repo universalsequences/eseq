@@ -1457,6 +1457,44 @@ mod tests {
         )
     }
 
+    #[cfg(target_os = "macos")]
+    fn tree_row_selected_bg_count(layout: &LayoutNode) -> usize {
+        let viewport = crate::widget_render::WidgetViewport {
+            cell_w: 10.0,
+            cell_h: 10.0,
+            vp_w: 800.0,
+            vp_h: 240.0,
+            time_seconds: 0.0,
+            focused_widget_id: None,
+            focused_branch: false,
+            tile_content_rows: 24.0,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            inherited_hover: false,
+        };
+        let (primitives, _) =
+            crate::widget_render::collect_metal_primitives(layout, viewport, 0.0, 24);
+        let selected_bg = crate::theme::WIDGET_FOCUS_BG();
+        primitives
+            .iter()
+            .filter(|primitive| {
+                let crate::widget_render::MetalPrimitive::WidgetInstance {
+                    widget_type,
+                    instance,
+                    ..
+                } = primitive
+                else {
+                    return false;
+                };
+                widget_type == "tree-row"
+                    && (instance.color_a[0] - selected_bg.r).abs() < 0.001
+                    && (instance.color_a[1] - selected_bg.g).abs() < 0.001
+                    && (instance.color_a[2] - selected_bg.b).abs() < 0.001
+                    && (instance.color_a[3] - selected_bg.a).abs() < 0.001
+            })
+            .count()
+    }
+
     fn get_prop_num_from_layout(node: &LayoutNode, key: &str) -> Option<f64> {
         match node.props.get(key) {
             Some(Value::Number(value)) => Some(*value),
@@ -1729,6 +1767,34 @@ mod tests {
         let second_layout = engine.layout(&second).unwrap();
         let second_state = crate::widget_render::scroll::sync_node_state(&second_layout);
         assert_eq!(second_state.offset_y, 0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tree_without_external_selection_does_not_render_cursor_as_selected() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let tree = scroll_with_flat_selected_tree(410.0, &["a", "b", "c"], "");
+        let layout = engine.layout(&tree).unwrap();
+
+        assert_eq!(
+            tree_row_selected_bg_count(&layout),
+            0,
+            "empty selected-label should not render the internal cursor as selected"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tree_external_selection_still_renders_selected_row() {
+        let engine = LayoutEngine::new(80, 24, 1.0);
+        let tree = scroll_with_flat_selected_tree(420.0, &["a", "b", "c"], "b");
+        let layout = engine.layout(&tree).unwrap();
+
+        assert_eq!(
+            tree_row_selected_bg_count(&layout),
+            1,
+            "non-empty selected-label should render exactly one selected row"
+        );
     }
 
     #[test]
