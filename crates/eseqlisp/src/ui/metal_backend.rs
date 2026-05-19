@@ -24,8 +24,8 @@ mod inner {
         MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLLoadAction,
         MTLOrigin, MTLPixelFormat, MTLPrimitiveType, MTLRegion, MTLRenderCommandEncoder,
         MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-        MTLResourceOptions, MTLScissorRect, MTLSize, MTLStoreAction, MTLTexture,
-        MTLTextureDescriptor,
+        MTLResourceOptions, MTLScissorRect, MTLSize, MTLStorageMode, MTLStoreAction, MTLTexture,
+        MTLTextureDescriptor, MTLTextureUsage,
     };
     use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
     use winit::{
@@ -303,13 +303,6 @@ float2 patch_cable_bezier(float2 p0, float2 p1, float2 p2, float2 p3, float t) {
         + (tt * t) * p3;
 }
 
-float patch_cable_segment_distance(float2 p, float2 a, float2 b) {
-    float2 ab = b - a;
-    float denom = max(dot(ab, ab), 0.0001);
-    float h = clamp(dot(p - a, ab) / denom, 0.0, 1.0);
-    return length(p - (a + ab * h));
-}
-
 float patch_cable_curve_distance(
     float2 p,
     float2 p0,
@@ -318,12 +311,15 @@ float patch_cable_curve_distance(
     float2 p3)
 {
     float min_dist = 1.0e6;
-    float2 prev = p0;
-    for (int i = 1; i <= 32; i++) {
-        float t = float(i) / 32.0;
-        float2 next = patch_cable_bezier(p0, p1, p2, p3, t);
-        min_dist = min(min_dist, patch_cable_segment_distance(p, prev, next));
-        prev = next;
+    for (int i = 0; i < 8; i++) {
+        float t1 = float(i) * 0.125;
+        float t2 = float(i + 1) * 0.125;
+        float2 seg_start = patch_cable_bezier(p0, p1, p2, p3, t1);
+        float2 seg_end = patch_cable_bezier(p0, p1, p2, p3, t2);
+        float2 seg_vec = seg_end - seg_start;
+        float seg_len_sq = max(dot(seg_vec, seg_vec), 0.0001);
+        float t = clamp(dot(p - seg_start, seg_vec) / seg_len_sq, 0.0, 1.0);
+        min_dist = min(min_dist, length(p - (seg_start + t * seg_vec)));
     }
     return min_dist;
 }
@@ -336,8 +332,9 @@ fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
         in.control1,
         in.control2,
         in.end);
-    float aa = max(fwidth(dist), 0.75);
-    float alpha = smoothstep(in.radius_px + aa, in.radius_px - aa, dist);
+    float sdf = dist - in.radius_px;
+    float derivative = max(fwidth(sdf), 0.75);
+    float alpha = smoothstep(derivative * 0.5, -derivative * 0.5, sdf);
     if (alpha <= 0.001) {
         discard_fragment();
     }
@@ -1006,6 +1003,7 @@ fragment float4 waveform_frag(
         last_window_bg: Option<Color>,
         start_time: Instant,
         initial_window_size: LogicalSize<f64>,
+        initial_window_visible: bool,
         monospace_font_size_pt: f64,
     }
 
@@ -1022,6 +1020,29 @@ fragment float4 waveform_frag(
             width: u32,
             height: u32,
             monospace_font_size_pt: f64,
+        ) -> Result<Self, BackendError> {
+            Self::new_with_size_font_size_and_visibility(
+                width,
+                height,
+                monospace_font_size_pt,
+                true,
+            )
+        }
+
+        pub fn new_capture(width: u32, height: u32) -> Result<Self, BackendError> {
+            Self::new_with_size_font_size_and_visibility(
+                width,
+                height,
+                DEFAULT_MONOSPACE_FONT_SIZE_PT,
+                false,
+            )
+        }
+
+        fn new_with_size_font_size_and_visibility(
+            width: u32,
+            height: u32,
+            monospace_font_size_pt: f64,
+            visible: bool,
         ) -> Result<Self, BackendError> {
             if !monospace_font_size_pt.is_finite() || monospace_font_size_pt <= 0.0 {
                 return Err(BackendError::MetalError);
@@ -1093,6 +1114,7 @@ fragment float4 waveform_frag(
                 last_window_bg: None,
                 start_time: Instant::now(),
                 initial_window_size: LogicalSize::new(width as f64, height as f64),
+                initial_window_visible: visible,
                 monospace_font_size_pt,
             })
         }
@@ -1312,6 +1334,265 @@ fragment float4 waveform_frag(
                 .as_ref()
                 .map(|a| (a.cell_w.max(1) as f32, a.cell_h.max(1) as f32))
                 .unwrap_or((8.0, 16.0))
+        }
+
+        pub fn render_frame_to_png<P: AsRef<std::path::Path>>(
+            &mut self,
+            frame: &RenderFrame,
+            width_px: u32,
+            height_px: u32,
+            path: P,
+        ) -> Result<(), BackendError> {
+            if width_px == 0 || height_px == 0 {
+                return Err(BackendError::MetalError);
+            }
+            crate::widget_render::sdf_widget::set_sdf_time_seconds(self.elapsed_time_seconds());
+            self.compile_pending_sdf_pipelines();
+            self.drain_decoded_images(usize::MAX);
+
+            let desc = MTLTextureDescriptor::new();
+            desc.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+            unsafe {
+                desc.setWidth(width_px as usize);
+                desc.setHeight(height_px as usize);
+            }
+            desc.setStorageMode(MTLStorageMode::Shared);
+            desc.setUsage(MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead);
+            let Some(texture) = self.device.newTextureWithDescriptor(&desc) else {
+                return Err(BackendError::MetalError);
+            };
+
+            self.render_frame_into_texture(frame, &texture)?;
+
+            let bytes_per_pixel = 4usize;
+            let bytes_per_row = width_px as usize * bytes_per_pixel;
+            let mut bgra = vec![0u8; bytes_per_row * height_px as usize];
+            unsafe {
+                texture.getBytes_bytesPerRow_fromRegion_mipmapLevel(
+                    NonNull::new(bgra.as_mut_ptr().cast()).ok_or(BackendError::MetalError)?,
+                    bytes_per_row,
+                    MTLRegion {
+                        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                        size: MTLSize {
+                            width: width_px as usize,
+                            height: height_px as usize,
+                            depth: 1,
+                        },
+                    },
+                    0,
+                );
+            }
+            let mut rgba = Vec::with_capacity(bgra.len());
+            for px in bgra.chunks_exact(4) {
+                rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+            }
+            image::save_buffer_with_format(
+                path,
+                &rgba,
+                width_px,
+                height_px,
+                image::ColorType::Rgba8,
+                image::ImageFormat::Png,
+            )
+            .map_err(|_| BackendError::MetalError)
+        }
+
+        fn render_frame_into_texture(
+            &mut self,
+            frame: &RenderFrame,
+            texture: &ProtocolObject<dyn MTLTexture>,
+        ) -> Result<(), BackendError> {
+            let time_seconds = self.elapsed_time_seconds();
+            let Some(pipeline) = self.pipeline.clone() else {
+                return Ok(());
+            };
+            let Some((cell_w, cell_h, atlas_texture)) = self.atlas.as_ref().map(|atlas| {
+                (
+                    atlas.cell_w as f32,
+                    atlas.cell_h as f32,
+                    atlas.texture.clone(),
+                )
+            }) else {
+                return Ok(());
+            };
+            let vp_w = texture.width() as f32;
+            let vp_h = texture.height() as f32;
+            let max_rows_exact = (vp_h / cell_h - 1.0).max(0.0);
+            let max_rows = max_rows_exact.floor() as u16;
+
+            let primitive_scene = frame
+                .widget_layout
+                .as_ref()
+                .map(|layout| {
+                    self.widget_scene_for_layout(
+                        frame.widget_content_cache_key,
+                        frame.widget_layout_cache_key,
+                        layout,
+                        &frame.dirty_widget_ids,
+                        WidgetViewport {
+                            cell_w,
+                            cell_h,
+                            vp_w,
+                            vp_h,
+                            time_seconds,
+                            focused_widget_id: frame.focused_widget_id,
+                            focused_branch: false,
+                            tile_content_rows: max_rows_exact,
+                            scroll_top: frame.widget_scroll_top,
+                            scroll_left: frame.widget_scroll_left,
+                            inherited_hover: false,
+                        },
+                        frame.widget_scroll_top,
+                        max_rows,
+                    )
+                })
+                .unwrap_or_default();
+
+            let Some(atlas) = &mut self.atlas else {
+                return Ok(());
+            };
+            let text_quads = build_text_quads(frame, atlas, vp_w, vp_h);
+            let primitive_quads = build_widget_primitive_quads(&primitive_scene, atlas, vp_w, vp_h);
+            let (primitive_bg_runs, primitive_fg_runs) =
+                partition_widget_instance_runs(&primitive_scene);
+
+            let render_desc = MTLRenderPassDescriptor::new();
+            let attach = unsafe { render_desc.colorAttachments().objectAtIndexedSubscript(0) };
+            attach.setTexture(Some(texture));
+            attach.setLoadAction(MTLLoadAction::Clear);
+            attach.setClearColor(MTLClearColor {
+                red: theme::BG().r as f64,
+                green: theme::BG().g as f64,
+                blue: theme::BG().b as f64,
+                alpha: 1.0,
+            });
+            attach.setStoreAction(MTLStoreAction::Store);
+
+            let cmdbuf = self
+                .command_queue
+                .commandBuffer()
+                .ok_or(BackendError::MetalError)?;
+            let enc = cmdbuf
+                .renderCommandEncoderWithDescriptor(&render_desc)
+                .ok_or(BackendError::MetalError)?;
+            enc.setScissorRect(MTLScissorRect {
+                x: 0,
+                y: 0,
+                width: texture.width(),
+                height: texture.height(),
+            });
+
+            for (widget_type, instances) in &primitive_bg_runs {
+                let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                    continue;
+                };
+                draw_widget_instances(&enc, &self.device, wpipe, instances.as_slice());
+            }
+
+            if let Some(image_pipeline) = self.image_pipeline.clone() {
+                let mut image_load_budget = usize::MAX;
+                let images = collect_image_primitives(&primitive_scene);
+                self.draw_image_primitives(
+                    &enc,
+                    &image_pipeline,
+                    &images,
+                    None,
+                    &mut image_load_budget,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                    time_seconds,
+                );
+            }
+
+            draw_vertices(
+                &enc,
+                &self.device,
+                &pipeline,
+                &atlas_texture,
+                text_quads.as_slice(),
+            );
+            draw_vertices(
+                &enc,
+                &self.device,
+                &pipeline,
+                &atlas_texture,
+                primitive_quads.as_slice(),
+            );
+
+            if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
+                let clip = MTLScissorRect {
+                    x: 0,
+                    y: 0,
+                    width: texture.width(),
+                    height: texture.height(),
+                };
+                let cables = collect_patch_cable_primitives(
+                    &primitive_scene,
+                    clip,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+                draw_patch_cable_instances(&enc, &self.device, &cable_pipeline, &cables);
+            }
+
+            if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
+                let waveform_primitives = collect_waveform_primitives(&primitive_scene);
+                self.draw_waveform_primitives(
+                    &enc,
+                    &waveform_pipeline,
+                    &waveform_primitives,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+            }
+
+            for (widget_type, instances) in &primitive_fg_runs {
+                let Some(wpipe) = self.widget_pipelines.get(widget_type) else {
+                    continue;
+                };
+                draw_widget_instances(&enc, &self.device, wpipe, instances.as_slice());
+            }
+
+            let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
+            draw_vertices(
+                &enc,
+                &self.device,
+                &pipeline,
+                &atlas_texture,
+                circle_quads.as_slice(),
+            );
+
+            if let (Some(prop_atlas), Some(prop_pipe)) =
+                (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+            {
+                let prop_verts = build_proportional_text_quads(
+                    &primitive_scene,
+                    prop_atlas,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+                let prop_tex = prop_atlas.texture.clone();
+                draw_vertices(
+                    &enc,
+                    &self.device,
+                    prop_pipe,
+                    &prop_tex,
+                    prop_verts.as_slice(),
+                );
+            }
+
+            enc.endEncoding();
+            cmdbuf.commit();
+            cmdbuf.waitUntilCompleted();
+            Ok(())
         }
 
         pub fn take_pending_image_loads(&mut self) -> bool {
@@ -2078,16 +2359,22 @@ fragment float4 waveform_frag(
                         metal_prep_time += prep_started.elapsed();
                         draw_text_verts(&enc, &self.device, &pipeline, &atlas_texture, &prim_quads);
 
-                        if let (Some(prop_atlas), Some(prop_pipe)) =
-                            (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
-                        {
-                            let prop_started = Instant::now();
-                            let prop_verts = build_proportional_text_quads(
-                                seg_prims, prop_atlas, cell_w, cell_h, vp_w, vp_h,
+                        if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
+                            let cables = collect_patch_cable_primitives(
+                                seg_prims,
+                                *seg_scissor,
+                                cell_w,
+                                cell_h,
+                                vp_w,
+                                vp_h,
                             );
-                            metal_prep_time += prop_started.elapsed();
-                            let prop_tex = prop_atlas.texture.clone();
-                            draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
+                            draw_patch_cable_instances(
+                                &enc,
+                                &self.device,
+                                &cable_pipeline,
+                                &cables,
+                            );
+                            enc.setScissorRect(*seg_scissor);
                         }
 
                         if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
@@ -2130,6 +2417,28 @@ fragment float4 waveform_frag(
                                     instances.len() as _,
                                 );
                             }
+                        }
+
+                        let circle_quads =
+                            build_circle_quads(seg_prims, cell_w, cell_h, vp_w, vp_h);
+                        draw_text_verts(
+                            &enc,
+                            &self.device,
+                            &pipeline,
+                            &atlas_texture,
+                            &circle_quads,
+                        );
+
+                        if let (Some(prop_atlas), Some(prop_pipe)) =
+                            (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+                        {
+                            let prop_started = Instant::now();
+                            let prop_verts = build_proportional_text_quads(
+                                seg_prims, prop_atlas, cell_w, cell_h, vp_w, vp_h,
+                            );
+                            metal_prep_time += prop_started.elapsed();
+                            let prop_tex = prop_atlas.texture.clone();
+                            draw_text_verts(&enc, &self.device, prop_pipe, &prop_tex, &prop_verts);
                         }
                     }
                     // Restore tile scissor after segments
@@ -2690,6 +2999,7 @@ fragment float4 waveform_frag(
             let window = winit::window::WindowBuilder::new()
                 .with_title("eseqlisp")
                 .with_inner_size(self.initial_window_size)
+                .with_visible(self.initial_window_visible)
                 .build(&event_loop)
                 .map_err(|_| BackendError::MetalError)?;
 
@@ -3375,41 +3685,22 @@ fragment float4 waveform_frag(
                 }
             }
 
-            // Proportional text: separate atlas + linear-filtering pipeline.
-            if let (Some(prop_atlas), Some(prop_pipe)) =
-                (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
-            {
-                let prop_started = Instant::now();
-                let prop_verts = build_proportional_text_quads(
+            if let Some(cable_pipeline) = self.patch_cable_pipeline.clone() {
+                let clip = MTLScissorRect {
+                    x: 0,
+                    y: 0,
+                    width: texture.width(),
+                    height: texture.height(),
+                };
+                let cables = collect_patch_cable_primitives(
                     &primitive_scene,
-                    prop_atlas,
+                    clip,
                     cell_w,
                     cell_h,
                     vp_w,
                     vp_h,
                 );
-                metal_prep_time += prop_started.elapsed();
-                if !prop_verts.is_empty() {
-                    let byte_len = std::mem::size_of_val(prop_verts.as_slice());
-                    if let Some(pvbuf) = unsafe {
-                        self.device.newBufferWithBytes_length_options(
-                            NonNull::new(prop_verts.as_ptr() as *mut _).unwrap(),
-                            byte_len,
-                            MTLResourceOptions(0),
-                        )
-                    } {
-                        enc.setRenderPipelineState(prop_pipe);
-                        unsafe {
-                            enc.setVertexBuffer_offset_atIndex(Some(&pvbuf), 0, 0);
-                            enc.setFragmentTexture_atIndex(Some(&prop_atlas.texture), 0);
-                            enc.drawPrimitives_vertexStart_vertexCount(
-                                MTLPrimitiveType::Triangle,
-                                0,
-                                prop_verts.len() as _,
-                            );
-                        }
-                    }
-                }
+                draw_patch_cable_instances(&enc, &self.device, &cable_pipeline, &cables);
             }
 
             if let Some(waveform_pipeline) = self.waveform_pipeline.clone() {
@@ -3453,6 +3744,52 @@ fragment float4 waveform_frag(
                         6,
                         instances.len() as _,
                     );
+                }
+            }
+
+            let circle_quads = build_circle_quads(&primitive_scene, cell_w, cell_h, vp_w, vp_h);
+            draw_vertices(
+                &enc,
+                &self.device,
+                &pipeline,
+                &atlas_texture,
+                circle_quads.as_slice(),
+            );
+
+            // Proportional text: separate atlas + linear-filtering pipeline.
+            if let (Some(prop_atlas), Some(prop_pipe)) =
+                (self.prop_atlas.as_mut(), self.prop_pipeline.as_ref())
+            {
+                let prop_started = Instant::now();
+                let prop_verts = build_proportional_text_quads(
+                    &primitive_scene,
+                    prop_atlas,
+                    cell_w,
+                    cell_h,
+                    vp_w,
+                    vp_h,
+                );
+                metal_prep_time += prop_started.elapsed();
+                if !prop_verts.is_empty() {
+                    let byte_len = std::mem::size_of_val(prop_verts.as_slice());
+                    if let Some(pvbuf) = unsafe {
+                        self.device.newBufferWithBytes_length_options(
+                            NonNull::new(prop_verts.as_ptr() as *mut _).unwrap(),
+                            byte_len,
+                            MTLResourceOptions(0),
+                        )
+                    } {
+                        enc.setRenderPipelineState(prop_pipe);
+                        unsafe {
+                            enc.setVertexBuffer_offset_atIndex(Some(&pvbuf), 0, 0);
+                            enc.setFragmentTexture_atIndex(Some(&prop_atlas.texture), 0);
+                            enc.drawPrimitives_vertexStart_vertexCount(
+                                MTLPrimitiveType::Triangle,
+                                0,
+                                prop_verts.len() as _,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -4155,12 +4492,39 @@ fragment float4 waveform_frag(
                 }
                 // Proportional text is rendered in a separate pass with its own atlas.
                 widget_render::MetalPrimitive::ProportionalText(_) => {}
+                widget_render::MetalPrimitive::PatchCable(_) => {}
+                widget_render::MetalPrimitive::Circle(_) => {}
                 widget_render::MetalPrimitive::Waveform(_) => {}
                 widget_render::MetalPrimitive::Image(_) => {}
                 widget_render::MetalPrimitive::WidgetInstance { .. } => {}
                 widget_render::MetalPrimitive::PushClipRect(_)
                 | widget_render::MetalPrimitive::PopClipRect => {}
             }
+        }
+        verts
+    }
+
+    fn build_circle_quads(
+        primitives: &[widget_render::MetalPrimitive],
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<Vertex> {
+        let mut verts = Vec::new();
+        for primitive in primitives {
+            let widget_render::MetalPrimitive::Circle(circle) = primitive else {
+                continue;
+            };
+            push_circle_fill_px(
+                &mut verts,
+                circle.center[0] * cell_w,
+                circle.center[1] * cell_h,
+                circle.radius_px,
+                circle.color,
+                vp_w,
+                vp_h,
+            );
         }
         verts
     }
@@ -4187,6 +4551,67 @@ fragment float4 waveform_frag(
                 _ => None,
             })
             .collect()
+    }
+
+    fn collect_patch_cable_primitives(
+        primitives: &[widget_render::MetalPrimitive],
+        clip: MTLScissorRect,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Vec<PatchCableDrawInstance> {
+        primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                widget_render::MetalPrimitive::PatchCable(cable) => {
+                    patch_cable_draw_instance_from_primitive(
+                        cable, clip, cell_w, cell_h, vp_w, vp_h,
+                    )
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn patch_cable_draw_instance_from_primitive(
+        cable: &widget_render::MetalPatchCablePrimitive,
+        clip: MTLScissorRect,
+        cell_w: f32,
+        cell_h: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Option<PatchCableDrawInstance> {
+        let start = (cable.start[0] * cell_w, cable.start[1] * cell_h);
+        let c1 = (cable.control1[0] * cell_w, cable.control1[1] * cell_h);
+        let c2 = (cable.control2[0] * cell_w, cable.control2[1] * cell_h);
+        let end = (cable.end[0] * cell_w, cable.end[1] * cell_h);
+        let padding = cable.radius_px + 12.0;
+        let min_x = start.0.min(end.0).min(c1.0).min(c2.0) - padding;
+        let max_x = start.0.max(end.0).max(c1.0).max(c2.0) + padding;
+        let min_y = start.1.min(end.1).min(c1.1).min(c2.1) - padding;
+        let max_y = start.1.max(end.1).max(c1.1).max(c2.1) + padding;
+        if min_x >= vp_w || max_x <= 0.0 || min_y >= vp_h || max_y <= 0.0 {
+            return None;
+        }
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        Some(PatchCableDrawInstance {
+            instance: PatchCableInstance {
+                ndc_min: [ndc_x(min_x), ndc_y(min_y)],
+                ndc_max: [ndc_x(max_x), ndc_y(max_y)],
+                bounds_min: [min_x, min_y],
+                bounds_max: [max_x, max_y],
+                start: [start.0, start.1],
+                control1: [c1.0, c1.1],
+                control2: [c2.0, c2.1],
+                end: [end.0, end.1],
+                color: cable.color.to_rgba(),
+                radius_px: cable.radius_px,
+                _pad: [0.0; 3],
+            },
+            clip,
+        })
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4899,6 +5324,39 @@ fragment float4 waveform_frag(
         }
     }
 
+    fn push_circle_fill_px(
+        verts: &mut Vec<Vertex>,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        color: Color,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        if radius <= 0.0 {
+            return;
+        }
+        let segments = 32usize;
+        let ndc_x = |px: f32| px / vp_w * 2.0 - 1.0;
+        let ndc_y = |px: f32| 1.0 - px / vp_h * 2.0;
+        let rgba = color.to_rgba();
+        let v = |px: f32, py: f32| Vertex {
+            position: [ndc_x(px), ndc_y(py)],
+            uv: [0.0, 0.0],
+            fg: rgba,
+            bg: rgba,
+        };
+        for i in 0..segments {
+            let a0 = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let a1 = ((i + 1) as f32 / segments as f32) * std::f32::consts::TAU;
+            verts.extend_from_slice(&[
+                v(cx, cy),
+                v(cx + a0.cos() * radius, cy + a0.sin() * radius),
+                v(cx + a1.cos() * radius, cy + a1.sin() * radius),
+            ]);
+        }
+    }
+
     fn push_rounded_rect_border_px(
         verts: &mut Vec<Vertex>,
         x: f32,
@@ -5128,6 +5586,38 @@ fragment float4 waveform_frag(
                 0,
                 6,
                 instances.len() as _,
+            );
+        }
+    }
+
+    fn draw_vertices(
+        enc: &ProtocolObject<dyn MTLRenderCommandEncoder>,
+        device: &ProtocolObject<dyn MTLDevice>,
+        pipeline: &ProtocolObject<dyn MTLRenderPipelineState>,
+        texture: &ProtocolObject<dyn MTLTexture>,
+        verts: &[Vertex],
+    ) {
+        if verts.is_empty() {
+            return;
+        }
+        let byte_len = std::mem::size_of_val(verts);
+        let Some(buffer) = (unsafe {
+            device.newBufferWithBytes_length_options(
+                NonNull::new(verts.as_ptr() as *mut _).unwrap(),
+                byte_len,
+                MTLResourceOptions(0),
+            )
+        }) else {
+            return;
+        };
+        enc.setRenderPipelineState(pipeline);
+        unsafe {
+            enc.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
+            enc.setFragmentTexture_atIndex(Some(texture), 0);
+            enc.drawPrimitives_vertexStart_vertexCount(
+                MTLPrimitiveType::Triangle,
+                0,
+                verts.len() as _,
             );
         }
     }
@@ -5386,6 +5876,19 @@ fragment float4 waveform_frag(
                 }
                 widget_render::MetalPrimitive::ProportionalText(p)
             }
+            widget_render::MetalPrimitive::PatchCable(mut c) => {
+                if reaches_right(c.end[0]) {
+                    c.end[0] += extra_cols;
+                    c.control2[0] += extra_cols;
+                }
+                widget_render::MetalPrimitive::PatchCable(c)
+            }
+            widget_render::MetalPrimitive::Circle(mut c) => {
+                if reaches_right(c.center[0]) {
+                    c.center[0] += extra_cols;
+                }
+                widget_render::MetalPrimitive::Circle(c)
+            }
             widget_render::MetalPrimitive::Waveform(mut w) => {
                 if reaches_right(w.rect.col + w.rect.width) {
                     w.rect.width += extra_cols;
@@ -5461,6 +5964,22 @@ fragment float4 waveform_frag(
                 p.col += col_off;
                 p.row += row_off;
                 widget_render::MetalPrimitive::ProportionalText(p)
+            }
+            widget_render::MetalPrimitive::PatchCable(mut c) => {
+                c.start[0] += col_off;
+                c.start[1] += row_off;
+                c.control1[0] += col_off;
+                c.control1[1] += row_off;
+                c.control2[0] += col_off;
+                c.control2[1] += row_off;
+                c.end[0] += col_off;
+                c.end[1] += row_off;
+                widget_render::MetalPrimitive::PatchCable(c)
+            }
+            widget_render::MetalPrimitive::Circle(mut c) => {
+                c.center[0] += col_off;
+                c.center[1] += row_off;
+                widget_render::MetalPrimitive::Circle(c)
             }
             widget_render::MetalPrimitive::Waveform(mut w) => {
                 w.rect.col += col_off;

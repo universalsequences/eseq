@@ -742,6 +742,7 @@ dependencies = [
  "objc2-metal",
  "objc2-quartz-core",
  "ratatui",
+ "serde_json",
  "winit",
 ]
 

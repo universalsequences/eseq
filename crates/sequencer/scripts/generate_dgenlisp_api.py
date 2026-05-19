@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 DEFAULT_DGENLISP_ROOT = Path("/Users/alecresende/code/swift/dgen/Sources/DGenLisp")
+DEFAULT_OPERATOR_MANIFEST = Path("tools/dgenlisp-operators.json")
 
 
 CURATED_OPERATORS = {
@@ -141,6 +142,158 @@ CURATED_OPERATORS = {
     "clip": {"category": "utility", "summary": "Clamp into a range.", "signatures": ["(clip sig min max)"], "arity": {"minimum": 3, "maximum": 3}},
     "gswitch": {"category": "conditional", "summary": "Conditional branch.", "signatures": ["(gswitch condition true_value false_value)"], "arity": {"minimum": 3, "maximum": 3}},
     "selector": {"category": "conditional", "summary": "1-based selector over options; mode <= 0 yields 0.", "signatures": ["(selector mode option1 option2 ...)"], "arity": {"minimum": 2, "maximum": None}},
+    "atan": {"category": "math", "summary": "Arctangent.", "signatures": ["(atan x)"], "arity": {"minimum": 1, "maximum": 1}},
+    "wavetable": {"category": "tensor_creation", "summary": "Load a static wavetable tensor from JSON data, or create zero-filled wavetable data from a shape.", "signatures": ["(wavetable @shape [512 32] @file \"waves/factory.json\")", "(wavetable [512 32])"], "arity": {"minimum": 0, "maximum": None}},
+    "wavetable-param": {"category": "tensor_creation", "summary": "Host-editable wavetable tensor initialized from JSON data or zeros.", "signatures": ["(wavetable-param @shape [512 32] @default-file \"waves/init.json\")", "(wavetable-param [512 32])"], "arity": {"minimum": 0, "maximum": None}},
+    "__modulated-param": {"category": "internal", "summary": "Internal lowered modulation combiner. User code should use `(mod paramName)` instead.", "signatures": ["(__modulated-param base active modulator depth ... @mode additive @min 0 @max 1)"], "arity": {"minimum": 2, "maximum": None}},
+}
+
+
+CURATED_OPERATOR_UPDATES = {
+    "stateful-phasor": {
+        "summary": "Forced stateful phasor variant with optional reset.",
+        "signatures": ["(stateful-phasor freq)", "(stateful-phasor freq reset)"],
+        "arity": {"minimum": 1, "maximum": 2},
+    },
+    "triangle": {
+        "summary": "Convert a 0..1 phase to a triangle wave with optional duty.",
+        "signatures": ["(triangle phase)", "(triangle phase duty)"],
+        "arity": {"minimum": 1, "maximum": 2},
+    },
+    "wrap": {
+        "summary": "Wrap into a range. Defaults to 0..1 when bounds are omitted.",
+        "signatures": ["(wrap sig)", "(wrap sig min max)"],
+        "arity": {"minimum": 1, "maximum": 3},
+    },
+}
+
+for _name, _updates in CURATED_OPERATOR_UPDATES.items():
+    CURATED_OPERATORS.setdefault(_name, {}).update(_updates)
+
+
+ATTRIBUTE_SPECS = {
+    "@N": {"type": "int", "summary": "FFT/window size for spectral operators.", "aliases": ["@n"]},
+    "@n": {"type": "int", "summary": "Lowercase alias for @N.", "aliases": ["@N"]},
+    "@attack": {"type": "signal|float", "summary": "Compressor attack time."},
+    "@axes": {"type": "int[]", "summary": "Axis order for transpose."},
+    "@axis": {"type": "int", "summary": "Axis argument for reductions and softmax."},
+    "@backend": {"type": "enum", "values": ["tensor", "accelerated"], "summary": "FFT backend."},
+    "@channel": {"type": "int", "summary": "Audio file channel to load. Channel numbering is zero-based."},
+    "@cutoff": {"type": "signal|float", "summary": "Biquad cutoff in Hz."},
+    "@data": {"type": "float[]", "summary": "Inline tensor or tensor-history data."},
+    "@default": {"type": "float", "summary": "Default value for scalar params."},
+    "@default-file": {"type": "path", "summary": "JSON file used to initialize a mutable tensor or wavetable parameter."},
+    "@end": {"type": "float", "summary": "Audio load end time in seconds."},
+    "@file": {"type": "path", "summary": "Audio, tensor, or wavetable asset path."},
+    "@gain": {"type": "signal|float", "summary": "Biquad gain or partitioned convolution output gain, depending on operator."},
+    "@generated": {"type": "string", "summary": "Tags generated helper parameters."},
+    "@generated-for": {"type": "symbol", "summary": "Associates a generated helper parameter with a user parameter."},
+    "@hidden": {"type": "bool", "summary": "Hide a generated or internal parameter from normal host presentation."},
+    "@hop": {"type": "int", "summary": "Hop size for STFT and hop-rate operators.", "aliases": ["@hopSize"]},
+    "@hopSize": {"type": "int", "summary": "Camel-case alias for @hop.", "aliases": ["@hop"]},
+    "@hops": {"type": "int", "summary": "Fixed delay in hops for spectrum-delay."},
+    "@knee": {"type": "signal|float", "summary": "Compressor knee in dB."},
+    "@max": {"type": "float", "summary": "Maximum parameter value."},
+    "@max-frames": {"type": "int", "summary": "Playback frame budget for to-signal."},
+    "@max-hops": {"type": "int", "summary": "Maximum modulated delay in hops for spectrum-delay-mod.", "aliases": ["@maxHops"]},
+    "@maxHops": {"type": "int", "summary": "Camel-case alias for @max-hops.", "aliases": ["@max-hops"]},
+    "@min": {"type": "float", "summary": "Minimum parameter value."},
+    "@mode": {"type": "enum|signal|float", "summary": "Operator mode selector. Meaning is operator-specific."},
+    "@mod": {"type": "bool", "summary": "Marks a parameter as modulatable."},
+    "@mod-active-param": {"type": "symbol", "summary": "Generated modulation active parameter name."},
+    "@mod-depth-max": {"type": "float", "summary": "Upper bound for generated modulation depth control."},
+    "@mod-depth-min": {"type": "float", "summary": "Lower bound for generated modulation depth control."},
+    "@mod-mode": {"type": "enum", "values": ["additive", "multiplicative", "semitone"], "summary": "Modulation mode for a modulatable param."},
+    "@mod-resolved-symbol": {"type": "symbol", "summary": "Generated resolved modulation symbol name."},
+    "@modulator": {"type": "int", "summary": "Marks an input as a modulation source slot."},
+    "@modulator-slot": {"type": "int", "summary": "Generated modulation depth parameter slot."},
+    "@mono": {"type": "bool", "summary": "Load audio as mono when no explicit channel is selected."},
+    "@name": {"type": "string", "summary": "Host-visible parameter, input, output, or tensor name."},
+    "@normalize": {"type": "enum", "values": ["peak"], "summary": "Audio load normalization mode."},
+    "@padding": {"type": "range[]", "summary": "Per-axis padding for pad, e.g. [1:1,0:0]."},
+    "@q": {"type": "signal|float", "summary": "Biquad resonance / Q."},
+    "@ranges": {"type": "range[]", "summary": "Slice ranges for shrink, e.g. [0:2,1:3]."},
+    "@ratio": {"type": "signal|float", "summary": "Compressor ratio."},
+    "@release": {"type": "signal|float", "summary": "Compressor release time."},
+    "@repeats": {"type": "int[]", "summary": "Per-axis repeat counts."},
+    "@shape": {"type": "int[]", "summary": "Tensor shape."},
+    "@sidechain": {"type": "symbol|expr", "summary": "Compressor sidechain signal."},
+    "@size": {"type": "int", "summary": "Tensor size for tensor noise."},
+    "@start": {"type": "float", "summary": "Audio load start time in seconds."},
+    "@threshold": {"type": "signal|float", "summary": "Compressor threshold in dB."},
+    "@type": {"type": "enum", "values": ["hann"], "summary": "Window type."},
+    "@unit": {"type": "string", "summary": "Host-visible unit label."},
+}
+
+
+CURATED_OPERATOR_ATTRIBUTES = {
+    "__modulated-param": ["@mode", "@min", "@max"],
+    "audio-tensor": ["@file", "@channel", "@mono", "@start", "@end", "@normalize", "@name"],
+    "biquad": ["@cutoff", "@q", "@gain", "@mode"],
+    "compressor": ["@ratio", "@threshold", "@knee", "@attack", "@release", "@sidechain"],
+    "fft": ["@N", "@n", "@backend"],
+    "hann": ["@N", "@n"],
+    "ifft": ["@N", "@n", "@backend"],
+    "in": ["@name", "@modulator"],
+    "ir": ["@file", "@channel", "@mono", "@start", "@end", "@normalize", "@name"],
+    "make-tensor-history": ["@shape", "@data"],
+    "noise": ["@size", "@hop", "@hopSize"],
+    "out": ["@name"],
+    "param": [
+        "@default",
+        "@min",
+        "@max",
+        "@unit",
+        "@hidden",
+        "@mod",
+        "@mod-mode",
+        "@mod-depth-min",
+        "@mod-depth-max",
+        "@mod-active-param",
+        "@mod-resolved-symbol",
+        "@generated",
+        "@generated-for",
+        "@modulator-slot",
+    ],
+    "partition-ir": ["@N", "@n", "@hop", "@hopSize"],
+    "partitioned-convolve": ["@N", "@n", "@hop", "@hopSize", "@gain"],
+    "partitioned-spectral-mac": ["@N", "@n"],
+    "phase-vocoder": ["@N", "@n", "@hop", "@hopSize"],
+    "reshape": ["@shape"],
+    "shrink": ["@ranges"],
+    "pad": ["@padding"],
+    "expand": ["@shape"],
+    "repeat": ["@repeats"],
+    "sum": ["@axis"],
+    "mean": ["@axis"],
+    "max-axis": ["@axis"],
+    "sum-axis": ["@axis"],
+    "mean-axis": ["@axis"],
+    "softmax": ["@axis"],
+    "spectrum-delay": ["@N", "@n", "@hops", "@hop", "@hopSize"],
+    "spectrum-delay-mod": ["@N", "@n", "@max-hops", "@maxHops", "@hop", "@hopSize"],
+    "tensor": ["@shape", "@data", "@file", "@name"],
+    "tensor-param": ["@shape", "@file", "@default-file", "@name"],
+    "to-signal": ["@max-frames"],
+    "transpose": ["@axes"],
+    "wavetable": ["@shape", "@file", "@name"],
+    "wavetable-param": ["@shape", "@file", "@default-file", "@name"],
+    "window": ["@type", "@N", "@n"],
+    "windows": ["@shape"],
+}
+
+
+CURATED_OPERATOR_INPUTS = {
+    "zeros": [{"name": "shape", "kind": "int[]", "summary": "Tensor shape, either as a bracket list or individual dimension arguments.", "required": True, "variadic": True}],
+    "ones": [{"name": "shape", "kind": "int[]", "summary": "Tensor shape, either as a bracket list or individual dimension arguments.", "required": True, "variadic": True}],
+    "randn": [{"name": "shape", "kind": "int[]", "summary": "Tensor shape, either as a bracket list or individual dimension arguments.", "required": True, "variadic": True}],
+    "full": [
+        {"name": "shape", "kind": "int[]", "summary": "Tensor shape, either as a bracket list or individual dimension arguments.", "required": True, "variadic": True},
+        {"name": "value", "kind": "float", "summary": "Fill value.", "required": True},
+    ],
+    "tensor-param": [{"name": "shape", "kind": "int[]", "summary": "Tensor parameter shape, either as a bracket list, individual dimension arguments, or @shape.", "required": False, "variadic": True}],
+    "wavetable": [{"name": "shape", "kind": "int[]", "summary": "Wavetable shape when not supplied with @shape.", "required": False, "variadic": True}],
+    "wavetable-param": [{"name": "shape", "kind": "int[]", "summary": "Wavetable parameter shape when not supplied with @shape.", "required": False, "variadic": True}],
 }
 
 PREAMBLE_OPERATORS = [
@@ -253,56 +406,7 @@ CLI_OPTIONS = [
 ]
 
 
-GLOBAL_ATTRIBUTES = {
-    "@default": "Default value for params and generated modulation helpers.",
-    "@min": "Minimum parameter value.",
-    "@max": "Maximum parameter value.",
-    "@unit": "Host-visible unit label.",
-    "@name": "Host-visible input/output or modulator name.",
-    "@modulator": "Marks an input as a modulation source slot.",
-    "@mod": "Marks a parameter as modulatable.",
-    "@mod-mode": "Modulation mode: additive, multiplicative, or semitone.",
-    "@mod-depth-min": "Lower bound for generated modulation depth control.",
-    "@mod-depth-max": "Upper bound for generated modulation depth control.",
-    "@hidden": "Hide a generated or internal parameter from normal host presentation.",
-    "@generated": "Tags generated helper parameters.",
-    "@generated-for": "Associates a generated helper parameter with a user parameter.",
-    "@mod-source-param": "Generated modulation source parameter name.",
-    "@mod-depth-param": "Generated modulation depth parameter name.",
-    "@mod-resolved-symbol": "Generated resolved modulation symbol name.",
-    "@cutoff": "Biquad cutoff attribute form.",
-    "@q": "Biquad resonance / Q attribute form.",
-    "@gain": "Biquad gain attribute form.",
-    "@mode": "Biquad filter mode attribute form.",
-    "@ratio": "Compressor ratio.",
-    "@threshold": "Compressor threshold.",
-    "@knee": "Compressor knee.",
-    "@attack": "Compressor attack.",
-    "@release": "Compressor release.",
-    "@sidechain": "Compressor sidechain signal binding.",
-    "@max-frames": "Playback frame budget for `to-signal`.",
-    "@shape": "Target shape for reshape / expand.",
-    "@axes": "Axis order for transpose.",
-    "@ranges": "Slice ranges for shrink.",
-    "@padding": "Per-axis padding for pad.",
-    "@repeats": "Per-axis repeat counts.",
-    "@axis": "Axis argument for reductions and softmax.",
-    "@N": "FFT/window size for spectral operators.",
-    "@backend": "FFT backend: tensor or accelerated.",
-    "@size": "Tensor size for tensor noise.",
-    "@hop": "Hop size for STFT and hop-rate operators.",
-    "@hops": "Fixed delay in hops for spectrum-delay.",
-    "@max-hops": "Maximum modulated delay in hops for spectrum-delay-mod.",
-    "@type": "Window type for window operator.",
-    "@file": "Audio or tensor asset path.",
-    "@mono": "Load audio as mono.",
-    "@channel": "Load one channel from an audio asset.",
-    "@start": "Audio load start time in seconds.",
-    "@end": "Audio load end time in seconds.",
-    "@normalize": "Audio load normalization mode, e.g. peak.",
-    "@data": "Inline tensor or tensor-history data.",
-    "@gain": "Gain for high-level spectral convolution.",
-}
+GLOBAL_ATTRIBUTES = {name: spec["summary"] for name, spec in ATTRIBUTE_SPECS.items()}
 
 
 MANIFEST_SCHEMA = {
@@ -375,10 +479,7 @@ def read(path: Path) -> str:
 
 
 def extract_function_attribute_usage(evaluator_source: str):
-    fn_pattern = re.compile(
-        r'private func ([A-Za-z0-9_]+)\([^)]*attributes: \[\(name: String, value: String\)\][^)]*\) throws -> EvalResult \{',
-        re.MULTILINE,
-    )
+    fn_pattern = re.compile(r"\n\s*private func ([A-Za-z0-9_]+)\(")
     matches = list(fn_pattern.finditer(evaluator_source))
     attrs_by_fn = {}
     for idx, match in enumerate(matches):
@@ -387,8 +488,13 @@ def extract_function_attribute_usage(evaluator_source: str):
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(evaluator_source)
         body = evaluator_source[start:end]
         attrs = sorted(set(re.findall(r'attrValue\(attributes,\s*"(@[^"]+)"\)', body)))
-        attrs_by_fn[fn_name] = attrs
+        if attrs:
+            attrs_by_fn[fn_name] = attrs
     return attrs_by_fn
+
+
+def parse_case_names(case_text: str):
+    return [name for name in re.findall(r'"([^"]+)"', case_text)]
 
 
 def extract_operator_cases(evaluator_source: str):
@@ -409,10 +515,19 @@ def extract_operator_cases(evaluator_source: str):
         if not stripped.startswith("case "):
             idx += 1
             continue
-        case_part, _, _ = stripped.partition(":")
-        raw_names = case_part[len("case "):]
-        names = [part.strip().strip('"') for part in raw_names.split(",")]
-        body_lines = []
+        case_lines = [stripped]
+        while ":" not in case_lines[-1]:
+            idx += 1
+            if idx >= len(lines):
+                raise ValueError("unterminated case in operator switch")
+            case_lines.append(lines[idx].strip())
+        case_text = " ".join(case_lines)
+        case_head, _, inline_body = case_text.partition(":")
+        names = parse_case_names(case_head)
+        if not names:
+            idx += 1
+            continue
+        body_lines = [inline_body.strip()] if inline_body.strip() else []
         idx += 1
         while idx < len(lines):
             next_line = lines[idx].strip()
@@ -431,59 +546,197 @@ def extract_operator_cases(evaluator_source: str):
                 impl = m.group(1)
         if impl is None:
             continue
-        operator_map[names[0]] = {"aliases": names[1:], "implementation": impl}
+        if re.search(r"\b(fn|op):\s*op\b", body):
+            for name in names:
+                operator_map[name] = {"aliases": [], "implementation": impl}
+        else:
+            operator_map[names[0]] = {"aliases": names[1:], "implementation": impl}
     return operator_map
 
 
-def collect_examples(repo_root: Path):
-    examples = []
-    for kind in ("instruments", "effects"):
-        base = repo_root / kind
-        if not base.exists():
+def token_kind(name: str) -> str:
+    lowered = name.lower()
+    if lowered in {"channel", "slot", "n", "size", "hop", "hops", "max-hops", "maxhops", "rowindex"}:
+        return "int"
+    if lowered in {"shape", "axes", "ranges", "padding", "repeats"}:
+        return "metadata"
+    if "tensor" in lowered or lowered in {"a", "b", "input", "kernel", "prediction", "target"}:
+        return "value"
+    if lowered in {"signal", "sig", "input", "phase", "freq", "reset", "trigger", "ratio", "cutoff", "q", "gain", "mode", "condition", "delay", "time_in_samples"}:
+        return "signal|float"
+    if lowered in {"name", "type"}:
+        return "symbol|string"
+    return "value"
+
+
+def describe_token(name: str) -> str:
+    descriptions = {
+        "a": "Left operand.",
+        "b": "Right operand.",
+        "x": "Input value.",
+        "sig": "Input signal.",
+        "signal": "Input signal.",
+        "input": "Input value.",
+        "freq": "Frequency in Hz.",
+        "reset": "Optional reset trigger.",
+        "trigger": "Trigger signal.",
+        "phase": "Phase signal, usually 0..1.",
+        "duty": "Optional duty cycle.",
+        "cutoff": "Cutoff frequency in Hz.",
+        "q": "Filter resonance / Q.",
+        "gain": "Gain value.",
+        "mode": "Mode selector.",
+        "ratio": "Ratio value.",
+        "threshold": "Threshold value.",
+        "knee": "Knee value.",
+        "attack": "Attack time.",
+        "release": "Release time.",
+        "sidechain": "Sidechain signal.",
+        "time_in_samples": "Delay time in samples.",
+        "channel": "One-based channel number in Lisp source.",
+        "tensor": "Tensor input.",
+        "kernel": "Convolution kernel tensor.",
+        "index": "Lookup index.",
+        "rowIndex": "Row lookup index.",
+        "shape": "Tensor shape.",
+        "value": "Value.",
+        "hop": "Hop size in frames.",
+        "condition": "Branch condition; nonzero means true.",
+        "true_value": "Value returned when condition is true.",
+        "false_value": "Value returned when condition is false.",
+    }
+    return descriptions.get(name, f"{name.replace('_', ' ')} input.")
+
+
+def signature_tokens(signature: str):
+    inner = signature.strip()
+    if inner.startswith("(") and inner.endswith(")"):
+        inner = inner[1:-1]
+    return re.findall(r'"[^"]*"|\[[^\]]*\]|\S+', inner)
+
+
+def attributes_from_signatures(signatures):
+    attrs = []
+    for signature in signatures:
+        attrs.extend(token for token in signature_tokens(signature) if token.startswith("@"))
+    return attrs
+
+
+def infer_inputs_from_signatures(name: str, signatures):
+    if name in CURATED_OPERATOR_INPUTS:
+        return [dict(port) for port in CURATED_OPERATOR_INPUTS[name]]
+    if not signatures:
+        return []
+    tokens = signature_tokens(signatures[0])
+    if not tokens:
+        return []
+    inputs = []
+    attr_mode = False
+    for token in tokens[1:]:
+        if token == "...":
+            if inputs:
+                inputs[-1]["variadic"] = True
             continue
-        for path in sorted(base.rglob("*.lisp")):
-            if path.name == "ui.lisp" or "/ui/" in path.as_posix():
-                continue
-            text = read(path)
-            if "(out " not in text:
-                continue
-            params = re.findall(r"\(param\s+([^\s\)]+)", text)
-            outputs = len(re.findall(r"\(out\s", text))
-            modulators = len(re.findall(r"@modulator\s+\d+", text))
-            preview_lines = []
-            for line in text.splitlines():
-                stripped = line.strip()
-                if not stripped or stripped.startswith(";") or stripped.startswith("#"):
-                    continue
-                preview_lines.append(line.rstrip())
-                if len(preview_lines) == 6:
-                    break
-            examples.append(
-                {
-                    "name": path.stem,
-                    "kind": kind[:-1],
-                    "path": str(path.relative_to(repo_root)),
-                    "params": sorted(set(params)),
-                    "output_count": outputs,
-                    "modulator_count": modulators,
-                    "preview": "\n".join(preview_lines),
-                }
-            )
-    return examples
+        if token.startswith("@"):
+            attr_mode = True
+            continue
+        if attr_mode:
+            continue
+        if token.startswith("[") or token.startswith('"'):
+            continue
+        inputs.append(
+            {
+                "name": token,
+                "kind": token_kind(token),
+                "required": True,
+                "summary": describe_token(token),
+            }
+        )
+    if name in {"noise", "window", "audio-tensor", "ir", "wavetable", "wavetable-param"}:
+        return []
+    return inputs
+
+
+def apply_required_flags(inputs, arity):
+    minimum = arity.get("minimum")
+    if minimum is None:
+        return inputs
+    for idx, port in enumerate(inputs):
+        if "required" not in port:
+            port["required"] = idx < minimum
+        else:
+            port["required"] = bool(port["required"] and idx < minimum)
+    return inputs
+
+
+def result_kind_for_operator(name: str, category: str) -> str:
+    if name in {"param", "in", "phasor", "stateful-phasor", "click", "ramp2trig", "accum", "latch", "mix", "biquad", "compressor", "delay", "peek", "to-signal", "overlap-add", "scale", "triangle", "wrap", "clip", "selector", "partitioned-convolve", "__modulated-param"}:
+        return "signal"
+    if name in {"tensor", "wavetable", "wavetable-param", "zeros", "ones", "full", "randn", "tensor-param", "audio-tensor", "ir", "matmul", "conv1d", "conv2d", "reshape", "transpose", "shrink", "pad", "expand", "repeat", "windows", "hann", "window", "softmax"}:
+        return "tensor"
+    if name in {"peek-row", "sample", "buffer", "spectrum-delay", "spectrum-delay-mod"}:
+        return "signalTensor"
+    if category in {"arithmetic", "math", "comparison", "conditional", "reduction"}:
+        return "same-as-inputs"
+    return "value"
+
+
+def infer_outputs(name: str, category: str):
+    tuple_outputs = {
+        "fft": [("real", "tensor|signalTensor", "Real FFT bins."), ("imag", "tensor|signalTensor", "Imaginary FFT bins.")],
+        "polar-fft": [("magnitude", "tensor|signalTensor", "Magnitude spectrum."), ("phase", "tensor|signalTensor", "Phase spectrum.")],
+        "rect-fft": [("real", "tensor|signalTensor", "Real FFT bins."), ("imag", "tensor|signalTensor", "Imaginary FFT bins.")],
+        "complex-mul": [("real", "tensor|signalTensor", "Real product bins."), ("imag", "tensor|signalTensor", "Imaginary product bins.")],
+        "complex-conj": [("real", "tensor|signalTensor", "Real bins."), ("imag", "tensor|signalTensor", "Negated imaginary bins.")],
+        "phase-vocoder": [("real", "signalTensor", "Real transformed bins."), ("imag", "signalTensor", "Imaginary transformed bins.")],
+        "partition-ir": [("real", "tensor", "Partitioned IR real spectra."), ("imag", "tensor", "Partitioned IR imaginary spectra.")],
+        "partitioned-spectral-mac": [("real", "signalTensor", "Real convolved spectrum."), ("imag", "signalTensor", "Imaginary convolved spectrum.")],
+    }
+    if name in tuple_outputs:
+        return [
+            {"name": port_name, "kind": kind, "summary": summary, "index": idx}
+            for idx, (port_name, kind, summary) in enumerate(tuple_outputs[name])
+        ]
+    if name == "out":
+        return []
+    if name in {"def", "defmacro", "make-history", "make-tensor-history"}:
+        return []
+    return [{"name": "out", "kind": result_kind_for_operator(name, category), "summary": "Operator result.", "index": 0}]
+
+
+def attribute_docs(names):
+    docs = []
+    for name in sorted(set(names)):
+        spec = ATTRIBUTE_SPECS.get(name, {"type": "unknown", "summary": "Attribute observed in evaluator source."})
+        doc = {"name": name, "type": spec.get("type", "unknown"), "summary": spec["summary"]}
+        if "values" in spec:
+            doc["values"] = spec["values"]
+        if "aliases" in spec:
+            doc["aliases"] = spec["aliases"]
+        docs.append(doc)
+    return docs
 
 
 def build_attributes_index(operator_map, attrs_by_fn):
     usage = defaultdict(set)
     for name, meta in operator_map.items():
         fn_name = meta["implementation"]
-        for attr in attrs_by_fn.get(fn_name, []):
+        curated = CURATED_OPERATORS.get(name, {})
+        discovered_attrs = (
+            attrs_by_fn.get(fn_name, [])
+            + attributes_from_signatures(curated.get("signatures", []))
+            + CURATED_OPERATOR_ATTRIBUTES.get(name, [])
+        )
+        for attr in set(discovered_attrs):
             usage[attr].add(name)
     all_attrs = []
     for attr in sorted(set(GLOBAL_ATTRIBUTES) | set(usage)):
+        spec = ATTRIBUTE_SPECS.get(attr, {"type": "unknown", "summary": GLOBAL_ATTRIBUTES.get(attr, "Attribute observed in evaluator source.")})
         all_attrs.append(
             {
                 "name": attr,
-                "summary": GLOBAL_ATTRIBUTES.get(attr, "Attribute observed in evaluator source."),
+                "type": spec.get("type", "unknown"),
+                "summary": spec["summary"],
                 "used_by": sorted(usage.get(attr, [])),
             }
         )
@@ -495,27 +748,79 @@ def build_operators(operator_map, attrs_by_fn):
     for name in sorted(operator_map):
         base = operator_map[name]
         curated = CURATED_OPERATORS.get(name, {})
+        category = curated.get("category", "uncategorized")
+        signatures = curated.get("signatures", [])
+        arity = curated.get("arity", {"minimum": None, "maximum": None})
+        attrs = attrs_by_fn.get(base["implementation"], [])
+        attrs = sorted(
+            set(attrs)
+            | set(attributes_from_signatures(signatures))
+            | set(CURATED_OPERATOR_ATTRIBUTES.get(name, []))
+        )
+        inputs = apply_required_flags(infer_inputs_from_signatures(name, signatures), arity)
+        outputs = infer_outputs(name, category)
         operators.append(
             {
                 "name": name,
                 "aliases": base["aliases"],
-                "category": curated.get("category", "uncategorized"),
+                "category": category,
                 "summary": curated.get("summary", "Operator implemented in DGenLisp evaluator."),
-                "signatures": curated.get("signatures", []),
-                "arity": curated.get("arity", {"minimum": None, "maximum": None}),
-                "attributes": attrs_by_fn.get(base["implementation"], []),
+                "signatures": signatures,
+                "arity": arity,
+                "input_count": arity,
+                "output_count": {"minimum": len(outputs), "maximum": len(outputs)},
+                "inputs": inputs,
+                "outputs": outputs,
+                "attributes": attrs,
+                "attribute_docs": attribute_docs(attrs),
                 "implementation": {
                     "function": base["implementation"],
                     "source_file": "LispEvaluator.swift",
                 },
+                "documentation": {
+                    "source": "curated" if name in CURATED_OPERATORS else "source-discovered",
+                    "port_docs": "curated-from-signature" if signatures else "not-yet-curated",
+                },
             }
         )
     existing_names = {operator["name"] for operator in operators}
-    operators.extend(
-        operator for operator in PREAMBLE_OPERATORS if operator["name"] not in existing_names
-    )
+    for operator in PREAMBLE_OPERATORS:
+        if operator["name"] in existing_names:
+            continue
+        signatures = operator.get("signatures", [])
+        attrs = operator.get("attributes", [])
+        outputs = infer_outputs(operator["name"], operator["category"])
+        operators.append(
+            {
+                **operator,
+                "input_count": operator["arity"],
+                "output_count": {"minimum": len(outputs), "maximum": len(outputs)},
+                "inputs": apply_required_flags(infer_inputs_from_signatures(operator["name"], signatures), operator["arity"]),
+                "outputs": outputs,
+                "attribute_docs": attribute_docs(attrs),
+                "implementation": {"function": None, "source_file": "generated preamble"},
+                "documentation": {"source": "curated-preamble", "port_docs": "curated-from-signature"},
+            }
+        )
     operators.sort(key=lambda operator: operator["name"])
     return operators
+
+
+def build_operator_manifest(data):
+    return {
+        "schema_version": 1,
+        "generated_from": data["generated_from"],
+        "value_types": data["language"]["types"],
+        "port_schema": {
+            "inputs": "Regular Lisp arguments, excluding @attributes.",
+            "outputs": "Result values available to patch-editor cables. Tuple-returning operators expose one output per tuple element.",
+            "count": "minimum/maximum are regular argument or output counts. null maximum means variadic/unbounded.",
+        },
+        "operators": data["language"]["operators"],
+        "attributes": data["language"]["attributes"],
+        "special_forms": data["language"]["special_forms"],
+        "constants": data["language"]["constants"],
+    }
 
 
 def main():
@@ -523,17 +828,25 @@ def main():
     parser.add_argument("--dgenlisp-root", default=str(DEFAULT_DGENLISP_ROOT))
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--output", default=None)
+    parser.add_argument(
+        "--operator-output",
+        default=None,
+        help="Patch-editor focused operator manifest output. Defaults to tools/dgenlisp-operators.json.",
+    )
     args = parser.parse_args()
 
     dgen_root = Path(os.path.expanduser(args.dgenlisp_root)).resolve()
     repo_root = Path(args.repo_root).resolve()
     output = Path(args.output).resolve() if args.output else repo_root / "docs" / "dgenlisp-api.json"
+    operator_output = (
+        Path(args.operator_output).resolve()
+        if args.operator_output
+        else repo_root / DEFAULT_OPERATOR_MANIFEST
+    )
 
     evaluator_source = read(dgen_root / "LispEvaluator.swift")
     operator_map = extract_operator_cases(evaluator_source)
     attrs_by_fn = extract_function_attribute_usage(evaluator_source)
-    examples = collect_examples(repo_root)
-
     data = {
         "schema_version": 1,
         "generated_from": {
@@ -584,13 +897,19 @@ def main():
                 "schema": MANIFEST_SCHEMA,
                 "types": MANIFEST_TYPES,
             },
-            "examples": examples,
         },
     }
 
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    operator_manifest = build_operator_manifest(data)
+    operator_output.parent.mkdir(parents=True, exist_ok=True)
+    operator_output.write_text(
+        json.dumps(operator_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     print(output)
+    print(operator_output)
 
 
 if __name__ == "__main__":

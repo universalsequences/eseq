@@ -1,6 +1,7 @@
 pub mod adsr_editor;
 pub mod box_widget;
 pub mod button;
+pub mod cable;
 pub mod dropdown;
 pub mod grid;
 pub mod hslider;
@@ -13,6 +14,7 @@ pub mod mixer_meter;
 pub mod modulator_curve;
 pub mod number_label;
 pub mod number_picker;
+pub mod patcher;
 pub mod response_curve_editor;
 pub mod scroll;
 pub mod sdf_widget;
@@ -491,11 +493,32 @@ pub enum ImageFit {
 
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
+pub struct MetalPatchCablePrimitive {
+    pub start: [f32; 2],
+    pub control1: [f32; 2],
+    pub control2: [f32; 2],
+    pub end: [f32; 2],
+    pub radius_px: f32,
+    pub color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct MetalCirclePrimitive {
+    pub center: [f32; 2],
+    pub radius_px: f32,
+    pub color: Color,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
 pub enum MetalPrimitive {
     Rect(MetalRectPrimitive),
     Quad(MetalQuadPrimitive),
     GlyphRun(MetalGlyphRunPrimitive),
     ProportionalText(MetalProportionalTextPrimitive),
+    PatchCable(MetalPatchCablePrimitive),
+    Circle(MetalCirclePrimitive),
     Waveform(MetalWaveformPrimitive),
     Image(MetalImagePrimitive),
     WidgetInstance {
@@ -694,6 +717,7 @@ static WIDGET_DEFINITIONS: &[&dyn WidgetDefinition] = &[
     &mixer_meter::MIXER_METER_WIDGET,
     &modulator_curve::MODULATOR_CURVE_WIDGET,
     &number_label::NUMBER_LABEL_WIDGET,
+    &patcher::PATCHER_WIDGET,
     &adsr_editor::ADSR_EDITOR_WIDGET,
     &tabs::TABS_WIDGET,
     &timeline::TIMELINE_WIDGET,
@@ -1050,6 +1074,13 @@ fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetVi
         MetalPrimitive::Quad(q) => q.y += dy,
         MetalPrimitive::GlyphRun(g) => g.row += dy,
         MetalPrimitive::ProportionalText(t) => t.row += dy,
+        MetalPrimitive::PatchCable(c) => {
+            c.start[1] += dy;
+            c.control1[1] += dy;
+            c.control2[1] += dy;
+            c.end[1] += dy;
+        }
+        MetalPrimitive::Circle(c) => c.center[1] += dy,
         MetalPrimitive::Waveform(w) => w.rect.row += dy,
         MetalPrimitive::Image(i) => i.rect.row += dy,
         MetalPrimitive::WidgetInstance { instance, .. } => {

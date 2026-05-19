@@ -23,6 +23,7 @@ pub fn register_widget_natives(vm: &mut VM) {
         "textbox",
         "number-picker",
         "number-label",
+        "patcher",
         "response-curve-editor",
         "dropdown",
         "select",

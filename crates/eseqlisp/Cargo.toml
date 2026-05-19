@@ -7,6 +7,7 @@ autoexamples = false
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
+serde_json = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

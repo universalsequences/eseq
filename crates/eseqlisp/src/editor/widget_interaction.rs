@@ -809,6 +809,21 @@ impl Editor {
         };
         if self.apply_widget_output(output) {
             true
+        } else if widget_render::widget_state_generation() != gen_before {
+            self.runtime.invalidate_layout_deferred();
+            self.mark_needs_redraw();
+            true
+        } else if matches!(
+            mouse.kind,
+            MouseEventKind::ScrollUp
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+        ) && self
+            .widget_node_at_local(local_col, local_row)
+            .is_some_and(|node| captures_scroll_gesture(&node))
+        {
+            true
         } else if matches!(mouse.kind, MouseEventKind::Down(_) | MouseEventKind::Moved) {
             let has_widget = self.widget_node_at_local(local_col, local_row).is_some();
             // Only invalidate layout if widget state actually changed

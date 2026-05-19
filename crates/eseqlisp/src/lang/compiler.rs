@@ -125,6 +125,7 @@ fn is_widget_name(name: &str) -> bool {
             | "box"
             | "grid"
             | "tabs"
+            | "patcher"
             | "response-curve-editor"
             | "scroll"
             | "tree"
