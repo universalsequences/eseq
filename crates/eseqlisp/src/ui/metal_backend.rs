@@ -948,6 +948,7 @@ fragment float4 waveform_frag(
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SUFFIX: &str = "__agent-instrument-stub-bg";
     const AGENT_INSTRUMENT_STUB_ANIMATION_WIDGET_SAFE_SUFFIX: &str = "__agent_instrument_stub_bg";
     const AGENT_INSTRUMENT_STUB_SKELETON_DEBUG_NAME: &str = "agent-instrument-stub-skeleton";
+    const DEFAULT_MONOSPACE_FONT_SIZE_PT: f64 = 14.0;
 
     // ── Backend ───────────────────────────────────────────────────────────────
 
@@ -1005,6 +1006,7 @@ fragment float4 waveform_frag(
         last_window_bg: Option<Color>,
         start_time: Instant,
         initial_window_size: LogicalSize<f64>,
+        monospace_font_size_pt: f64,
     }
 
     impl MetalBackend {
@@ -1013,6 +1015,17 @@ fragment float4 waveform_frag(
         }
 
         pub fn new_with_size(width: u32, height: u32) -> Result<Self, BackendError> {
+            Self::new_with_size_and_font_size(width, height, DEFAULT_MONOSPACE_FONT_SIZE_PT)
+        }
+
+        pub fn new_with_size_and_font_size(
+            width: u32,
+            height: u32,
+            monospace_font_size_pt: f64,
+        ) -> Result<Self, BackendError> {
+            if !monospace_font_size_pt.is_finite() || monospace_font_size_pt <= 0.0 {
+                return Err(BackendError::MetalError);
+            }
             let device = MTLCreateSystemDefaultDevice().ok_or(BackendError::MetalError)?;
             let command_queue = device.newCommandQueue().ok_or(BackendError::MetalError)?;
             let layer = CAMetalLayer::new();
@@ -1080,6 +1093,7 @@ fragment float4 waveform_frag(
                 last_window_bg: None,
                 start_time: Instant::now(),
                 initial_window_size: LogicalSize::new(width as f64, height as f64),
+                monospace_font_size_pt,
             })
         }
 
@@ -2706,8 +2720,16 @@ fragment float4 waveform_frag(
                 .as_ref()
                 .map(|w| w.scale_factor())
                 .unwrap_or(1.0);
-            self.atlas = GlyphAtlas::new(&self.device, "JetBrainsMono-Regular", 14.0 * scale);
-            self.prop_atlas = ProportionalGlyphAtlas::new(&self.device, 14.0 * scale, scale);
+            self.atlas = GlyphAtlas::new(
+                &self.device,
+                "JetBrainsMono-Regular",
+                self.monospace_font_size_pt * scale,
+            );
+            self.prop_atlas = ProportionalGlyphAtlas::new(
+                &self.device,
+                DEFAULT_MONOSPACE_FONT_SIZE_PT * scale,
+                scale,
+            );
 
             // ── Render pipeline ──────────────────────────────────────────────
             let src = NSString::from_str(SHADER_SRC);

@@ -115,8 +115,8 @@
   (let ((border (if (= selected 1)
           (rgba 1.0 0.86 0.22 1.0)
           (if (= plocked 1)
-            (rgba 0.45 0.42 0.62 1.0)
-            (rgba 0.31 0.32 0.40 1.0)))))
+            (rgba 0.25 0.22 0.22 1.0)
+            (rgba 0.18 0.18 0.18 1.0)))))
     (sdf/layer
       (sdf/fill
         (sdf/translate 0 0.0 (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0)
@@ -146,7 +146,7 @@
             (rgba 0 0 0 0)))))))
 
 (defwidget seqv-step-dot
-  :width 1.0 :height 0.5
+  :width 1.5 :height 0.72
   :state (active plocked selected track-r track-g track-b)
   :bindable (active plocked selected track-r track-g track-b)
   :shader

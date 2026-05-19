@@ -6,6 +6,8 @@ use sequencer::ui;
 use super::custom_ui::reload_custom_instrument_ui;
 use super::state_values::push_project_scratch_to_named_buffer;
 
+const METAL_SEQ_TEXT_FONT_SIZE_PT: f64 = 13.0;
+
 pub(crate) fn create_editor_and_backend(
     runtime: Runtime,
     app: &ui::App,
@@ -32,7 +34,8 @@ pub(crate) fn create_editor_and_backend(
     push_project_scratch_to_named_buffer(&mut editor, &app);
 
     let mut backend =
-        MetalBackend::new_with_size(1250, 850).map_err(|_| "Metal backend creation failed")?;
+        MetalBackend::new_with_size_and_font_size(1250, 850, METAL_SEQ_TEXT_FONT_SIZE_PT)
+            .map_err(|_| "Metal backend creation failed")?;
     backend
         .initialize()
         .map_err(|_| "Metal backend init failed")?;
