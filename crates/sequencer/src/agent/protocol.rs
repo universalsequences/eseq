@@ -195,6 +195,22 @@ impl AgentToolRuntime {
                 }),
             },
             ToolSpec {
+                name: "update_instrument_artifact".to_string(),
+                description:
+                    "Replace the current draft/applied instrument artifact's complete source and validate it. Does not apply it to a track."
+                        .to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "artifact_id": { "type": "string", "description": "Current instrument artifact id, if known." },
+                        "name": { "type": "string", "description": "Optional replacement instrument name." },
+                        "dsp_source": { "type": "string", "description": "Complete replacement DGenLisp instrument dsp.lisp source." },
+                        "ui_source": { "type": "string", "description": "Complete replacement eseqlisp ui.lisp source containing exactly one defsynth-ui form." }
+                    },
+                    "required": ["dsp_source", "ui_source"]
+                }),
+            },
+            ToolSpec {
                 name: "create_effect_artifact".to_string(),
                 description:
                     "Create and validate a draft audio effect artifact from complete dsp.lisp and ui.lisp source. Does not apply it to a track. Effect dsp_source must be raw top-level DGenLisp forms; never wrap it in `(defeffect ...)`."
@@ -365,6 +381,7 @@ impl AgentToolRuntime {
                 "list_instruments",
                 "read_instrument_source",
                 "create_instrument_artifact",
+                "update_instrument_artifact",
                 "create_instrument_track",
                 "read_current_instrument_source",
                 "inspect_current_instrument_preset_schema",
@@ -405,6 +422,9 @@ impl AgentToolRuntime {
             "read_effect_source" => self.execute_read_effect_source(&call.arguments),
             "create_instrument_artifact" => {
                 self.execute_create_instrument_artifact(&call.arguments)
+            }
+            "update_instrument_artifact" => {
+                self.execute_update_instrument_artifact(&call.arguments)
             }
             "create_effect_artifact" => self.execute_create_effect_artifact(&call.arguments),
             "update_effect_artifact" => self.execute_update_effect_artifact(&call.arguments),
@@ -560,6 +580,22 @@ impl AgentToolRuntime {
             summary: format!("Queued draft instrument artifact '{}'.", name),
             content: format!("Create draft instrument artifact '{}'.", name),
             pending_actions: vec![AgentAppAction::CreateInstrumentArtifact {
+                name,
+                dsp_source: dsp_source.to_string(),
+                ui_source: ui_source.to_string(),
+            }],
+        })
+    }
+
+    fn execute_update_instrument_artifact(&self, arguments: &Value) -> Result<ToolResult, String> {
+        let name = optional_string(arguments, "name")
+            .map(|name| normalize_patch_name(name, "generated-instrument"));
+        let dsp_source = required_string(arguments, "dsp_source")?;
+        let ui_source = required_string(arguments, "ui_source")?;
+        Ok(ToolResult {
+            summary: "Queued instrument artifact update.".to_string(),
+            content: "Update the current draft instrument artifact.".to_string(),
+            pending_actions: vec![AgentAppAction::UpdateInstrumentArtifact {
                 name,
                 dsp_source: dsp_source.to_string(),
                 ui_source: ui_source.to_string(),
@@ -1102,6 +1138,7 @@ mod tests {
         assert!(names.contains(&"list_instruments".to_string()));
         assert!(names.contains(&"read_instrument_source".to_string()));
         assert!(names.contains(&"create_instrument_artifact".to_string()));
+        assert!(names.contains(&"update_instrument_artifact".to_string()));
         assert!(names.contains(&"create_effect_artifact".to_string()));
         assert!(names.contains(&"update_effect_artifact".to_string()));
         assert!(names.contains(&"finalize_effect_artifact".to_string()));
@@ -1135,6 +1172,7 @@ mod tests {
             .collect();
 
         assert!(instrument_names.contains(&"create_instrument_artifact".to_string()));
+        assert!(instrument_names.contains(&"update_instrument_artifact".to_string()));
         assert!(instrument_names.contains(&"read_instrument_source".to_string()));
         assert!(!instrument_names.contains(&"create_effect_artifact".to_string()));
         assert!(!instrument_names.contains(&"read_effect_source".to_string()));
@@ -1142,6 +1180,7 @@ mod tests {
         assert!(effect_names.contains(&"create_effect_artifact".to_string()));
         assert!(effect_names.contains(&"read_effect_source".to_string()));
         assert!(!effect_names.contains(&"create_instrument_artifact".to_string()));
+        assert!(!effect_names.contains(&"update_instrument_artifact".to_string()));
         assert!(!effect_names.contains(&"read_instrument_source".to_string()));
     }
 
@@ -1255,6 +1294,24 @@ mod tests {
         assert!(outcome.ok);
         assert_eq!(outcome.pending_actions.len(), 1);
         assert!(outcome.summary.contains("glass-draft"));
+    }
+
+    #[test]
+    fn update_instrument_artifact_queues_update_action() {
+        let runtime = AgentToolRuntime::load_default().expect("load runtime");
+        let outcome = runtime.execute(
+            ToolCall {
+                name: "update_instrument_artifact".to_string(),
+                arguments: json!({
+                    "dsp_source": "(out 0 1 @name audio)",
+                    "ui_source": "(defsynth-ui (label \"updated\"))"
+                }),
+            },
+            &empty_session(),
+        );
+        assert!(outcome.ok);
+        assert_eq!(outcome.pending_actions.len(), 1);
+        assert!(outcome.summary.contains("update"));
     }
 
     #[test]

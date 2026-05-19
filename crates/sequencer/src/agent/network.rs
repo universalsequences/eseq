@@ -928,6 +928,7 @@ fn has_artifact_action_tools(tools: &[ToolSpec]) -> bool {
         matches!(
             tool.name.as_str(),
             "create_instrument_artifact"
+                | "update_instrument_artifact"
                 | "create_effect_artifact"
                 | "update_effect_artifact"
                 | "finalize_effect_artifact"

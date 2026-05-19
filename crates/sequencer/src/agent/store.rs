@@ -315,6 +315,7 @@ impl ConversationStore {
         let state = inner
             .get_mut(&id)
             .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+        state.draft = None;
         state.finalized_instrument_name = Some(instrument_name.into());
         bump(state);
         Ok(())
@@ -436,5 +437,31 @@ mod tests {
         );
         assert!(snapshot.state.effect_draft.is_none());
         assert!(!snapshot.state.effect_draft_applied);
+    }
+
+    #[test]
+    fn finalized_instrument_consumes_draft_state() {
+        let store = ConversationStore::new(44_100);
+        let id = store.new_conversation(AgentKind::Instrument);
+        {
+            let inner = store.inner();
+            let mut inner = inner.lock().unwrap();
+            let state = inner.get_mut(&id).unwrap();
+            state.draft = Some(super::InstrumentDraft {
+                dsp_source: "(out 0 1 @name audio)".to_string(),
+                ui_source: "(defsynth-ui (label \"draft\"))".to_string(),
+            });
+        }
+
+        store
+            .set_finalized_instrument_name(id, "saved-instrument/")
+            .expect("finalize instrument");
+
+        let snapshot = store.snapshot(id).unwrap();
+        assert_eq!(
+            snapshot.state.finalized_instrument_name.as_deref(),
+            Some("saved-instrument/")
+        );
+        assert!(snapshot.state.draft.is_none());
     }
 }

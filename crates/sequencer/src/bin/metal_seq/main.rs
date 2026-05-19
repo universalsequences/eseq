@@ -1079,10 +1079,16 @@ fn finalize_agent_instrument(
         );
     }
 
-    let dsp_source = sequencer::lisp_effect::load_instrument_source(&target.instrument_name)
-        .map_err(|error| format!("Failed to read draft dsp.lisp: {error}"))?;
-    let ui_source = sequencer::lisp_effect::load_instrument_ui_source(&target.instrument_name)
-        .map_err(|error| format!("Failed to read draft ui.lisp: {error}"))?;
+    let (dsp_source, ui_source) = if let Some(draft) = snapshot.state.draft {
+        (draft.dsp_source, draft.ui_source)
+    } else {
+        (
+            sequencer::lisp_effect::load_instrument_source(&target.instrument_name)
+                .map_err(|error| format!("Failed to read draft dsp.lisp: {error}"))?,
+            sequencer::lisp_effect::load_instrument_ui_source(&target.instrument_name)
+                .map_err(|error| format!("Failed to read draft ui.lisp: {error}"))?,
+        )
+    };
 
     sequencer::lisp_effect::save_instrument(&final_name, &dsp_source)
         .map_err(|error| format!("Failed to save finalized dsp.lisp: {error}"))?;

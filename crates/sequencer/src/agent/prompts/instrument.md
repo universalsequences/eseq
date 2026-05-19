@@ -13,11 +13,17 @@ Prefer tools over pasted code:
   complete revision. Pass complete `dsp_source` and complete `ui_source`; the
   host will compile, validate, and audition it. If that tool fails, revise the
   full artifact and call it again.
+- Use `update_instrument_artifact` when the user asks to change, refine, or
+  iterate on the current draft/applied instrument. Pass complete replacement
+  `dsp_source` and complete replacement `ui_source`; the host will compile,
+  validate, and audition it. The user can then update the applied track with the
+  artifact button.
 
 Retry behavior after a failed artifact:
-- If `create_instrument_artifact` fails validation, compile, UI validation, or
-  audition, repair the exact full `dsp_source` and `ui_source` you just wrote
-  and call `create_instrument_artifact` again.
+- If `create_instrument_artifact` or `update_instrument_artifact` fails
+  validation, compile, UI validation, or audition, repair the exact full
+  `dsp_source` and `ui_source` you just wrote and call the same artifact tool
+  again.
 - Do not reread the same example or list examples again after a direct validator
   error. The validator error is the primary source of truth; apply its specific
   fix to the artifact.
@@ -42,9 +48,9 @@ INCLUDES `@mod true`; OTHERWISE READ THE PARAMETER DIRECTLY AS `param_name`.
    host route external sources such as track LFOs, envelopes, random, drift, or
    performance lanes into instrument parameters. A host-modulated destination
    param must be declared with `@mod true @mod-mode additive`, and DSP must read
-   its host-modulated value with `(mod param_name)`. The `mod1`..`mod6` inputs
-   are only host plumbing for that matrix; do not use them as audio/control
-   signals in the synth algorithm.
+   its host-modulated value with `(mod param_name)`. The `mod1`..`mod6` and
+   `ext1`..`ext4` inputs are only host plumbing for that matrix; do not use them
+   as audio/control signals in the synth algorithm.
 
 2. Bespoke modulators are signals generated inside the instrument DSP itself:
    local LFOs, local ADSR envelopes, oscillator cross-modulation, FM operators,
@@ -100,6 +106,13 @@ Critical syntax rules:
   `(definstrument ...)`, `(defsynth ...)`, `(process ...)`, or `(main ...)`.
 - A complete instrument is just top-level `(def ...)`, `(defmacro ...)`,
   `(param ...)`, `(in ...)`, and `(out ...)` forms.
+- DGenLisp is order-dependent. Never reference a symbol before the top-level
+  form that defines it. Every `(def name ...)` must appear before any later
+  `(def ...)` or `(out ...)` that reads `name`. Before calling an artifact tool,
+  scan the DSP from top to bottom and reorder helper definitions so dependencies
+  come first. Do not write feedback-style groups such as `(def string1_out
+  (svf string1 ...))` before `(def string1 ...)`; that is a forward reference
+  and will be rejected.
 - Every parameter declaration must start exactly with `(param name ...)`.
   Parameter names are simple symbols such as `mod_sustain`, `filter_env_amt`,
   or `lfo1_to_pitch`. Never emit dotted/generated path forms such as
@@ -118,6 +131,10 @@ Critical syntax rules:
   `(def mod4 (in 8 @name mod4 @modulator 4))`
   `(def mod5 (in 9 @name mod5 @modulator 5))`
   `(def mod6 (in 10 @name mod6 @modulator 6))`
+  `(def ext1 (in 11 @name ext1 @modulator 7))`
+  `(def ext2 (in 12 @name ext2 @modulator 8))`
+  `(def ext3 (in 13 @name ext3 @modulator 9))`
+  `(def ext4 (in 14 @name ext4 @modulator 10))`
 - Do not mark a parameter `@mod true` just because it appears in the UI or is
   related to modulation. Host-modulatable params are destination controls for
   the host modulation matrix. Local modulation amount knobs are usually plain
@@ -127,10 +144,11 @@ Critical syntax rules:
 - When a validation error says a plain param was used as `(mod some_param)`, fix
   the DSP expression by replacing `(mod some_param)` with `some_param`. Do not
   add `@mod true` just to silence that error.
-- Never read `mod1`, `mod2`, `mod3`, `mod4`, `mod5`, or `mod6` directly in DSP
-  expressions. These inputs are host modulation lanes, not patch signals. They
-  exist so the host mod matrix can route LFO/envelope/random/drift sources into
-  params declared with `@mod true`.
+- Never read `mod1`, `mod2`, `mod3`, `mod4`, `mod5`, `mod6`, `ext1`, `ext2`,
+  `ext3`, or `ext4` directly in DSP expressions. These inputs are host
+  modulation lanes, not patch signals. They exist so the host mod matrix can
+  route LFO/envelope/random/drift/external sources into params declared with
+  `@mod true`.
 - Forbidden examples:
   `(* mod1 2500)`, `(+ (mod cutoff) (* mod3 cutoff))`,
   `(+ (mod pulse_width) (* mod2 0.1))`.
@@ -200,6 +218,10 @@ Minimal valid instrument shape:
 (def mod4 (in 8 @name mod4 @modulator 4))
 (def mod5 (in 9 @name mod5 @modulator 5))
 (def mod6 (in 10 @name mod6 @modulator 6))
+(def ext1 (in 11 @name ext1 @modulator 7))
+(def ext2 (in 12 @name ext2 @modulator 8))
+(def ext3 (in 13 @name ext3 @modulator 9))
+(def ext4 (in 14 @name ext4 @modulator 10))
 
 (param amp_attack @default 3 @min 1 @max 1000 @unit ms)
 (param amp_decay @default 180 @min 1 @max 2000 @unit ms)

@@ -330,6 +330,9 @@ fn tool_progress_message(call: &ToolCall) -> String {
             Some(name) => format!("Creating draft instrument artifact `{name}`."),
             None => "Creating a draft instrument artifact.".to_string(),
         },
+        "update_instrument_artifact" => {
+            "Updating the current draft instrument artifact.".to_string()
+        }
         "create_effect_artifact" => match string_arg(&call.arguments, "name") {
             Some(name) => format!("Creating draft effect artifact `{name}`."),
             None => "Creating a draft effect artifact.".to_string(),
@@ -526,6 +529,11 @@ fn apply_agent_action(
             dsp_source,
             ui_source,
         } => create_instrument_artifact(store, id, name, dsp_source, ui_source),
+        AgentAppAction::UpdateInstrumentArtifact {
+            name,
+            dsp_source,
+            ui_source,
+        } => update_instrument_artifact(store, id, name, dsp_source, ui_source),
         AgentAppAction::CreateEffectArtifact {
             name,
             dsp_source,
@@ -734,6 +742,76 @@ fn create_instrument_artifact(
     dsp_source: String,
     ui_source: String,
 ) -> Result<String, String> {
+    validate_instrument_artifact_sources(store, id, &name, &dsp_source, &ui_source)?;
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    let state = inner
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+    state.draft = Some(InstrumentDraft {
+        dsp_source,
+        ui_source,
+    });
+    state.last_compile_error = None;
+    state.finalized_instrument_name = None;
+    state.status = AgentStatus::Idle;
+    bump(state);
+    Ok(format!(
+        "Created validated draft instrument artifact '{}'.",
+        name
+    ))
+}
+
+fn update_instrument_artifact(
+    store: &ConversationStore,
+    id: ConvId,
+    name: Option<String>,
+    dsp_source: String,
+    ui_source: String,
+) -> Result<String, String> {
+    let existing_name = store
+        .snapshot(id)
+        .and_then(|snapshot| {
+            snapshot
+                .state
+                .accepted_instrument_target
+                .map(|target| target.instrument_name)
+                .or_else(|| {
+                    snapshot
+                        .state
+                        .stub_instrument_target
+                        .map(|target| target.instrument_name)
+                })
+        })
+        .unwrap_or_else(|| format!("agent-draft-{id}/"));
+    let name = name.unwrap_or_else(|| existing_name.trim_end_matches('/').to_string());
+    validate_instrument_artifact_sources(store, id, &name, &dsp_source, &ui_source)?;
+    let inner = store.inner();
+    let mut inner = inner.lock().unwrap();
+    let state = inner
+        .get_mut(&id)
+        .ok_or_else(|| format!("unknown agent conversation {id}"))?;
+    state.draft = Some(InstrumentDraft {
+        dsp_source,
+        ui_source,
+    });
+    state.last_compile_error = None;
+    state.finalized_instrument_name = None;
+    state.status = AgentStatus::Idle;
+    bump(state);
+    Ok(format!(
+        "Updated validated draft instrument artifact '{}'.",
+        name
+    ))
+}
+
+fn validate_instrument_artifact_sources(
+    store: &ConversationStore,
+    id: ConvId,
+    name: &str,
+    dsp_source: &str,
+    ui_source: &str,
+) -> Result<(), String> {
     if let Err(error) = validate_instrument_dsp_source(&dsp_source) {
         log_failed_instrument_sources(id, "dsp validation", &error, &dsp_source, &ui_source);
         return Err(format!("dsp.lisp validation error:\n{error}"));
@@ -764,25 +842,18 @@ fn create_instrument_artifact(
     if audition.silent || audition.clipped {
         return Err(feedback);
     }
-
     let inner = store.inner();
     let mut inner = inner.lock().unwrap();
     let state = inner
         .get_mut(&id)
         .ok_or_else(|| format!("unknown agent conversation {id}"))?;
-    state.draft = Some(InstrumentDraft {
-        dsp_source,
-        ui_source,
-    });
     state.last_audition = Some(audition);
-    state.last_compile_error = None;
-    state.finalized_instrument_name = None;
-    state.status = AgentStatus::Idle;
-    bump(state);
-    Ok(format!(
-        "Created validated draft instrument artifact '{}'. {feedback}",
-        name
-    ))
+    push_message(
+        state,
+        Role::System,
+        format!("Validated instrument artifact '{name}'. {feedback}"),
+    );
+    Ok(())
 }
 
 fn log_failed_instrument_sources(

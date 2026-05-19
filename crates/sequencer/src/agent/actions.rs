@@ -59,6 +59,11 @@ pub enum AgentAppAction {
         dsp_source: String,
         ui_source: String,
     },
+    UpdateInstrumentArtifact {
+        name: Option<String>,
+        dsp_source: String,
+        ui_source: String,
+    },
     CreateEffectArtifact {
         name: String,
         dsp_source: String,

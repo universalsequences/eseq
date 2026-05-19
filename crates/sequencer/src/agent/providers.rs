@@ -126,8 +126,8 @@ pub fn default_model_presets() -> Vec<AgentModelPreset> {
             capability: ModelCapability::Cheap,
         },
         AgentModelPreset {
-            id: "gemini-flash-latest".to_string(),
-            display_name: "Gemini Flash Latest".to_string(),
+            id: "gemini-3.5-flash".to_string(),
+            display_name: "Gemini 3.5 Flash".to_string(),
             provider: AgentProviderKind::Gemini,
             capability: ModelCapability::Cheap,
         },
@@ -388,6 +388,20 @@ mod tests {
             .expect("deepseek flash preset");
         assert_eq!(preset.provider, AgentProviderKind::DeepSeek);
         assert_eq!(preset.capability, ModelCapability::Fast);
+    }
+
+    #[test]
+    fn gemini_3_5_flash_replaces_latest_flash_alias() {
+        let presets = default_model_presets();
+        let preset = presets
+            .iter()
+            .find(|preset| preset.id == "gemini-3.5-flash")
+            .expect("gemini 3.5 flash preset");
+        assert_eq!(preset.provider, AgentProviderKind::Gemini);
+        assert_eq!(preset.capability, ModelCapability::Cheap);
+        assert!(!presets
+            .iter()
+            .any(|preset| preset.id == "gemini-flash-latest"));
     }
 
     #[test]

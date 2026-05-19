@@ -1757,6 +1757,10 @@ impl App {
                 "create_instrument_artifact is only supported by the conversation agent panel."
                     .to_string(),
             ),
+            AgentAppAction::UpdateInstrumentArtifact { .. } => Err(
+                "update_instrument_artifact is only supported by the conversation agent panel."
+                    .to_string(),
+            ),
             AgentAppAction::CreateEffectArtifact {
                 name,
                 dsp_source,

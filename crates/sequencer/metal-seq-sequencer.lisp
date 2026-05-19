@@ -109,14 +109,14 @@
 
 (defwidget seqv-step-shell
   :width 1.5 :height 1.5
-  :state (active plocked selected duration track-r track-g track-b)
+  :state (active odd plocked selected duration track-r track-g track-b)
   :bindable (active plocked selected duration track-r track-g track-b)
   :shader
   (let ((border (if (= selected 1)
           (rgba 1.0 0.86 0.22 1.0)
           (if (= plocked 1)
             (rgba 0.25 0.22 0.22 1.0)
-            (rgba 0.18 0.18 0.18 1.0)))))
+            (if (= odd 1) (rgba 0.28 0.28 0.28 1.0) (rgba 0.18 0.18 0.18 1.0))))))
     (sdf/layer
       (sdf/fill
         (sdf/translate 0 0.0
@@ -136,7 +136,9 @@
           :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
       (sdf/fill (sdf/circle 0.53)
         (material
-          :color (if (= active 1) (rgba 0.05 0.055 0.075 1.0) (rgba 0.015 0.016 0.025 1.0))))
+          :color (if (= odd 1) 
+            (rgba 0.15 0.155 0.155 1.0) 
+            (rgba 0.015 0.016 0.025 1.0))))
       (sdf/fill
         (sdf/translate 0 0.70
           (sdf/circle 0.16))
@@ -256,9 +258,13 @@
 
 ;; Single tight step button (no slider, no number).
 (def seqv-step-cell (track step visible)
-  (let ((track-r (seqv-track-color-r track (seqv-muted? track)))
-        (track-g (seqv-track-color-g track (seqv-muted? track)))
-        (track-b (seqv-track-color-b track (seqv-muted? track))))
+  (let (
+      (odd1 (mod (floor (/ step 4)) 2))
+      (odd2 (mod (floor (/ step 32)) 2))
+      (odd (if (= odd2 1) (if (= odd1 1) 0 1) odd1))
+      (track-r (seqv-track-color-r track (seqv-muted? track)))
+      (track-g (seqv-track-color-g track (seqv-muted? track)))
+      (track-b (seqv-track-color-b track (seqv-muted? track))))
     (box
       :width 3.05 :height 1.45
       :key (str "seqv-step-cell-" track "-" step)
@@ -274,6 +280,7 @@
         (if visible
           (seqv-step-pointer-up track step evt)
           nil))
+      :odd odd
       :active (bind-seq (str "seq-track-step-active-" track "-" step))
       :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
       :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
