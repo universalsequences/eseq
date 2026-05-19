@@ -856,11 +856,13 @@ impl CommittedBufferUiSnapshot {
             }
         }
 
-        let mut merged_tree = self.tree.deep_clone();
+        let replacement_lookup = replacements
+            .iter()
+            .map(|(subtree_root_id, replacement_tree, _)| (*subtree_root_id, replacement_tree))
+            .collect::<HashMap<_, _>>();
+        let merged_tree = replace_subtrees_in_value(&self.tree, &replacement_lookup)?;
         let mut dependency_lookup = self.subtree_root_dependencies;
-        for (subtree_root_id, replacement_tree, reactive_dependencies) in replacements {
-            merged_tree =
-                replace_subtree_in_value(&merged_tree, *subtree_root_id, replacement_tree)?;
+        for (_, replacement_tree, reactive_dependencies) in replacements {
             for root_id in collect_subtree_root_ids(replacement_tree) {
                 dependency_lookup.insert(root_id, reactive_dependencies.clone());
             }
@@ -1064,6 +1066,62 @@ fn replace_subtree_in_value(
             std::rc::Rc::new(std::cell::RefCell::new(child_value))
         })
         .collect();
+    drop(children_borrow);
+
+    let mut rebuilt = HashMap::with_capacity(map.len());
+    for (key, value) in map {
+        let next_value = if key == "children" {
+            Value::List(next_children.clone())
+        } else {
+            value.borrow().clone()
+        };
+        rebuilt.insert(
+            key.clone(),
+            std::rc::Rc::new(std::cell::RefCell::new(next_value)),
+        );
+    }
+    Some(Value::Map(rebuilt))
+}
+
+fn replace_subtrees_in_value(
+    value: &Value,
+    replacement_lookup: &HashMap<u64, &Value>,
+) -> Option<Value> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    if let Some(replacement_tree) = prop_u64_from_map(map, "__subtree-root-id")
+        .and_then(|root_id| replacement_lookup.get(&root_id))
+    {
+        return Some((*replacement_tree).deep_clone());
+    }
+
+    let children_value = map.get("children")?;
+    let children_borrow = children_value.borrow();
+    let Value::List(children) = &*children_borrow else {
+        return None;
+    };
+
+    let mut replaced_any = false;
+    let next_children = children
+        .iter()
+        .map(|child| {
+            let child_borrow = child.borrow();
+            let child_value = if let Some(replacement) =
+                replace_subtrees_in_value(&child_borrow, replacement_lookup)
+            {
+                replaced_any = true;
+                replacement
+            } else {
+                child_borrow.clone()
+            };
+            std::rc::Rc::new(std::cell::RefCell::new(child_value))
+        })
+        .collect::<Vec<_>>();
+
+    if !replaced_any {
+        return None;
+    }
     drop(children_borrow);
 
     let mut rebuilt = HashMap::with_capacity(map.len());
@@ -1462,6 +1520,80 @@ mod tests {
                 field: "selected-step".to_string(),
             }),
             vec![2]
+        );
+        assert_eq!(
+            merged.subtree_roots_for_field(&ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "steps".to_string(),
+            }),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn committed_snapshot_replacing_subtrees_updates_multiple_siblings() {
+        let tree = widget(
+            "root",
+            1,
+            1,
+            vec![
+                widget("left", 2, 2, vec![]),
+                widget("middle", 3, 3, vec![]),
+                widget("right", 4, 4, vec![]),
+            ],
+        );
+        let snapshot = CommittedBufferUiSnapshot::from_tree(
+            tree,
+            Some(7),
+            vec![ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "steps".to_string(),
+            }],
+        );
+        let merged = snapshot
+            .replacing_subtrees(&[
+                (
+                    2,
+                    widget("left-updated", 22, 2, vec![]),
+                    vec![ReactiveFieldKey {
+                        namespace: "SEQ".to_string(),
+                        field: "left".to_string(),
+                    }],
+                ),
+                (
+                    4,
+                    widget("right-updated", 44, 4, vec![]),
+                    vec![ReactiveFieldKey {
+                        namespace: "SEQ".to_string(),
+                        field: "right".to_string(),
+                    }],
+                ),
+            ])
+            .expect("replace subtrees");
+
+        let root_children = super::value_children(&merged.tree);
+        let child_types = root_children
+            .iter()
+            .map(|child| {
+                super::value_map(child)
+                    .and_then(|map| super::prop_widget_type(&map))
+                    .expect("child widget type")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(child_types, vec!["left-updated", "middle", "right-updated"]);
+        assert_eq!(
+            merged.subtree_roots_for_field(&ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "left".to_string(),
+            }),
+            vec![2]
+        );
+        assert_eq!(
+            merged.subtree_roots_for_field(&ReactiveFieldKey {
+                namespace: "SEQ".to_string(),
+                field: "right".to_string(),
+            }),
+            vec![4]
         );
         assert_eq!(
             merged.subtree_roots_for_field(&ReactiveFieldKey {

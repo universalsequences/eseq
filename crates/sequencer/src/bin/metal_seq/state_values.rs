@@ -5119,6 +5119,17 @@ mod tests {
             .find_map(|child| find_layout_node_by_stable_key(child, key))
     }
 
+    fn layout_prop_bool(node: &eseqlisp::layout::LayoutNode, prop: &str) -> Option<bool> {
+        match node.props.get(prop)? {
+            Value::Bool(value) => Some(*value),
+            Value::Number(value) => Some(*value != 0.0),
+            Value::ReactiveRef { slot, .. } => {
+                Some(eseqlisp::reactive::read_float_slot(slot) != 0.0)
+            }
+            _ => None,
+        }
+    }
+
     fn render_layout_cells(layout: &eseqlisp::layout::LayoutNode, cols: u16, rows: u16) -> String {
         let mut cell_buf = eseqlisp::widget_render::CellBuffer::new(cols, rows);
         eseqlisp::widget_render::render_widget_tree(layout, &mut cell_buf);
@@ -7188,6 +7199,65 @@ mod tests {
         )
     }
 
+    fn test_owned_string_list(values: &[String]) -> Value {
+        test_list(values.iter().cloned().map(Value::String).collect())
+    }
+
+    fn test_repeated_number_list(value: f64, len: usize) -> Value {
+        test_list((0..len).map(|_| Value::Number(value)).collect())
+    }
+
+    fn test_repeated_bool_list(value: bool, len: usize) -> Value {
+        test_list((0..len).map(|_| Value::Bool(value)).collect())
+    }
+
+    fn test_multi_track_colors(track_count: usize) -> Value {
+        let palette = [
+            [0.96, 0.28, 0.52],
+            [0.98, 0.55, 0.25],
+            [0.95, 0.78, 0.28],
+            [0.32, 0.78, 0.48],
+            [0.24, 0.72, 0.78],
+            [0.48, 0.54, 0.94],
+            [0.82, 0.42, 0.92],
+            [0.72, 0.74, 0.78],
+            [0.92, 0.38, 0.34],
+            [0.38, 0.86, 0.68],
+        ];
+        test_list(
+            (0..track_count)
+                .map(|track| {
+                    let color = palette[track % palette.len()];
+                    test_number_list(&color)
+                })
+                .collect(),
+        )
+    }
+
+    fn sequencer_perf_steps(track: usize, generation: usize, step_count: usize) -> Value {
+        test_list(
+            (0..step_count)
+                .map(|step| Value::Bool((step + track + generation) % 3 == 0))
+                .collect(),
+        )
+    }
+
+    fn sequencer_perf_plocks(track: usize, generation: usize, step_count: usize) -> Value {
+        test_list(
+            (0..step_count)
+                .map(|step| Value::Bool((step * 5 + track + generation) % 11 == 0))
+                .collect(),
+        )
+    }
+
+    fn sequencer_perf_duration_spans(track: usize, generation: usize, step_count: usize) -> Value {
+        test_list(
+            (0..step_count)
+                .map(|step| Value::Bool((step + track * 2 + generation) % 7 == 0))
+                .collect(),
+        )
+    }
+
     fn register_full_grid_test_natives(editor: &mut eseqlisp::Editor) {
         editor
             .runtime_mut()
@@ -7233,6 +7303,7 @@ mod tests {
         }
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.runtime_mut().set_capture_rendered_layouts(false);
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         register_agent_test_natives(editor.runtime_mut());
         register_full_grid_test_natives(&mut editor);
@@ -7442,8 +7513,226 @@ mod tests {
         editor.runtime_mut().eval_str(&src).expect("load grid lisp");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
-            panic!("full grid lisp status after refresh: {status}");
+            if status.to_ascii_lowercase().contains("error") {
+                panic!("full grid lisp status after refresh: {status}");
+            }
         }
+        editor
+    }
+
+    fn apply_sequencer_perf_pattern(
+        editor: &mut eseqlisp::Editor,
+        track_count: usize,
+        step_count: usize,
+        generation: usize,
+    ) {
+        let names = (0..track_count)
+            .map(|track| format!("perf-track-{track:02}"))
+            .collect::<Vec<_>>();
+        let ids = (0..track_count)
+            .map(|track| Value::Number((1000 + track) as f64))
+            .collect::<Vec<_>>();
+        let track_steps = (0..track_count)
+            .map(|track| sequencer_perf_steps(track, generation, step_count))
+            .collect::<Vec<_>>();
+        let track_duration_spans = (0..track_count)
+            .map(|track| sequencer_perf_duration_spans(track, generation, step_count))
+            .collect::<Vec<_>>();
+        let track_step_has_plocks = (0..track_count)
+            .map(|track| sequencer_perf_plocks(track, generation, step_count))
+            .collect::<Vec<_>>();
+
+        let rt = editor.runtime_mut();
+        rt.set_reactive("SEQ", "num-tracks", Value::Number(track_count as f64));
+        rt.set_reactive("SEQ", "track-ids", test_list(ids));
+        rt.set_reactive("SEQ", "track-names", test_owned_string_list(&names));
+        rt.set_reactive("SEQ", "track-colors", test_multi_track_colors(track_count));
+        rt.set_reactive("SEQ", "current-track", Value::Number(0.0));
+        rt.set_reactive(
+            "SEQ",
+            "record-armed",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-mutes",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-solos",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-muted-by-solo",
+            test_repeated_bool_list(false, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-volumes",
+            test_repeated_number_list(1.0, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-pans",
+            test_repeated_number_list(0.0, track_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-outputs",
+            test_list(
+                (0..track_count)
+                    .map(|_| Value::String("main".to_string()))
+                    .collect(),
+            ),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-num-steps",
+            test_repeated_number_list(step_count as f64, track_count),
+        );
+        rt.set_reactive("SEQ", "track-steps", test_list(track_steps));
+        rt.set_reactive(
+            "SEQ",
+            "track-duration-spans",
+            test_list(track_duration_spans),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "track-step-has-plocks",
+            test_list(track_step_has_plocks),
+        );
+        rt.set_reactive("SEQ", "tp-num-steps", Value::Number(step_count as f64));
+        rt.set_reactive(
+            "SEQ",
+            "steps",
+            sequencer_perf_steps(0, generation, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "step-has-plocks",
+            sequencer_perf_plocks(0, generation, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "selected-steps",
+            test_repeated_bool_list(false, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "durations",
+            test_repeated_number_list(1.0, step_count),
+        );
+        rt.set_reactive(
+            "SEQ",
+            "velocities",
+            test_repeated_number_list(1.0, step_count),
+        );
+        rt.set_reactive("SEQ", "auxas", test_repeated_number_list(0.0, step_count));
+        rt.set_reactive(
+            "SEQ",
+            "transposes",
+            test_repeated_number_list(0.0, step_count),
+        );
+        rt.set_reactive("SEQ", "pans", test_repeated_number_list(0.0, step_count));
+        rt.set_reactive("SEQ", "syncs", test_repeated_number_list(0.0, step_count));
+
+        let max_rows = (step_count + PAGE_SIZE - 1) / PAGE_SIZE;
+        for track in 0..track_count {
+            for step in 0..step_count {
+                let active = (step + track + generation) % 3 == 0;
+                let duration = (step + track * 2 + generation) % 7 == 0;
+                let plocked = (step * 5 + track + generation) % 11 == 0;
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_active_field(track, step),
+                    Value::Bool(active),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_duration_field(track, step),
+                    Value::Bool(duration),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_plocked_field(track, step),
+                    Value::Bool(plocked),
+                );
+                rt.set_reactive(
+                    "SEQ",
+                    &track_step_selected_field(track, step),
+                    Value::Bool(false),
+                );
+            }
+            for row in 0..max_rows {
+                rt.set_reactive(
+                    "SEQ",
+                    &track_playhead_row_field(track, row),
+                    Value::Number(if row == 0 {
+                        generation as f64 % PAGE_SIZE as f64
+                    } else {
+                        -1.0
+                    }),
+                );
+            }
+        }
+    }
+
+    fn sequencer_perf_editor(track_count: usize, step_count: usize) -> eseqlisp::Editor {
+        struct TestTextMeasurer;
+        impl eseqlisp::layout::TextMeasurer for TestTextMeasurer {
+            fn measure_text_px(&self, text: &str, _font_size: f32) -> f32 {
+                text.chars().count() as f32 * 8.0
+            }
+
+            fn line_height_px(&self, _font_size: f32) -> f32 {
+                16.0
+            }
+        }
+
+        let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
+        editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
+        editor.runtime_mut().register_reactive("SEQ", vec![], true);
+        editor
+            .runtime_mut()
+            .eval_str("(defstate selected-bus -1)")
+            .expect("install sequencer selection state");
+        apply_sequencer_perf_pattern(&mut editor, track_count, step_count, 0);
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                  (load "metal-seq-themes.lisp")
+                  (seq-theme-mac-osx-dark)
+                  (load "metal-seq-materials.lisp")
+                  (load "metal-seq-sequencer.lisp")
+                "#,
+            )
+            .expect("load sequencer lisp");
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            if status.to_ascii_lowercase().contains("error") {
+                panic!("sequencer perf fixture setup status: {status}");
+            }
+        }
+
+        let sequencer_id = editor
+            .buffers
+            .iter()
+            .find(|buffer| buffer.name == "*sequencer*")
+            .expect("sequencer buffer should exist")
+            .id;
+        editor.set_active_buffer(sequencer_id);
+        editor.set_layout_viewport(150, 44);
+        let layout = editor
+            .widget_layout()
+            .expect("sequencer perf fixture layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&layout, "seqv-step-cell-"),
+            track_count * step_count,
+            "sequencer perf fixture should render every track step"
+        );
         editor
     }
 
@@ -8145,6 +8434,172 @@ mod tests {
             count_stable_key_prefix(&layout, "seqv-step-cell-"),
             16,
             "sequencer buffer should render one cell per visible step"
+        );
+    }
+
+    #[test]
+    fn metal_seq_sequencer_pattern_switch_updates_existing_step_bindings() {
+        let track_count = 10;
+        let mut editor = sequencer_perf_editor(track_count, 32);
+
+        let initial_layout = editor
+            .widget_layout()
+            .expect("initial sequencer layout should build");
+        let initial_step = find_layout_node_by_stable_key(&initial_layout, "seqv-step-cell-0-0")
+            .expect("initial step cell should render");
+        assert_eq!(
+            layout_prop_bool(initial_step, "active"),
+            Some(true),
+            "fixture generation 0 should render track 0 step 0 active"
+        );
+
+        apply_sequencer_perf_pattern(&mut editor, track_count, 48, 1);
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        if let Some(status) = editor.runtime_mut().take_status_message() {
+            panic!("sequencer pattern switch binding status: {status}");
+        }
+
+        let switched_layout = editor
+            .widget_layout()
+            .expect("switched sequencer layout should build");
+        assert_eq!(
+            count_stable_key_prefix(&switched_layout, "seqv-step-cell-"),
+            track_count * 48,
+            "pattern switch should render the new pattern length"
+        );
+        let switched_step = find_layout_node_by_stable_key(&switched_layout, "seqv-step-cell-0-0")
+            .expect("existing keyed step cell should still render after switch");
+        assert_eq!(
+            layout_prop_bool(switched_step, "active"),
+            Some(false),
+            "track 0 step 0 active binding should reflect the switched pattern"
+        );
+    }
+
+    #[test]
+    #[ignore = "performance benchmark; run with --ignored --nocapture"]
+    fn metal_seq_sequencer_pattern_switch_perf_10_tracks_variable_lengths() {
+        #[derive(Clone, Copy)]
+        struct Sample {
+            update_ms: f64,
+            reactive_ms: f64,
+            side_effects_ms: f64,
+            frame_ms: f64,
+            total_ms: f64,
+        }
+
+        fn percentile(sorted: &[f64], pct: f64) -> f64 {
+            let index = ((sorted.len().saturating_sub(1) as f64) * pct).round() as usize;
+            sorted[index.min(sorted.len().saturating_sub(1))]
+        }
+
+        fn summarize(label: &str, values: &[f64]) {
+            let mut sorted = values.to_vec();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let min = sorted.first().copied().unwrap_or(0.0);
+            let median = percentile(&sorted, 0.50);
+            let p95 = percentile(&sorted, 0.95);
+            let max = sorted.last().copied().unwrap_or(0.0);
+            println!(
+                "{label:>12}: min={min:7.3}ms median={median:7.3}ms p95={p95:7.3}ms max={max:7.3}ms"
+            );
+        }
+
+        let track_count = 10;
+        let short_pattern_steps = 32;
+        let long_pattern_steps = 48;
+        let warmup_iterations = 3;
+        let measured_iterations = 10;
+        let mut editor = sequencer_perf_editor(track_count, short_pattern_steps);
+
+        let mut samples = Vec::with_capacity(measured_iterations);
+        for generation in 1..=(warmup_iterations + measured_iterations) {
+            let step_count = if generation % 2 == 0 {
+                short_pattern_steps
+            } else {
+                long_pattern_steps
+            };
+            let total_start = std::time::Instant::now();
+
+            let update_start = std::time::Instant::now();
+            apply_sequencer_perf_pattern(&mut editor, track_count, step_count, generation);
+            let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+
+            let reactive_start = std::time::Instant::now();
+            editor.runtime_mut().run_reactive_cycle();
+            let reactive_ms = reactive_start.elapsed().as_secs_f64() * 1000.0;
+
+            let side_effects_start = std::time::Instant::now();
+            editor.refresh_runtime_side_effects();
+            let side_effects_ms = side_effects_start.elapsed().as_secs_f64() * 1000.0;
+            if let Some(status) = editor.runtime_mut().take_status_message() {
+                panic!("sequencer pattern switch perf status: {status}");
+            }
+
+            let frame_start = std::time::Instant::now();
+            let frame = eseqlisp::frame::build_render_frame(&mut editor, 150, 44);
+            let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+            let layout = frame
+                .widget_layout
+                .as_ref()
+                .expect("sequencer pattern switch layout should build");
+            assert_eq!(
+                count_stable_key_prefix(layout, "seqv-step-cell-"),
+                track_count * step_count,
+                "pattern switch should keep every sequencer cell rendered"
+            );
+
+            let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
+            if generation > warmup_iterations {
+                samples.push(Sample {
+                    update_ms,
+                    reactive_ms,
+                    side_effects_ms,
+                    frame_ms,
+                    total_ms,
+                });
+            }
+        }
+
+        println!(
+            "sequencer pattern switch perf: {track_count} tracks, alternating {short_pattern_steps}/{long_pattern_steps} steps, {} measured iterations after {} warmups",
+            measured_iterations, warmup_iterations
+        );
+        summarize(
+            "update",
+            &samples
+                .iter()
+                .map(|sample| sample.update_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "reactive",
+            &samples
+                .iter()
+                .map(|sample| sample.reactive_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "side-effects",
+            &samples
+                .iter()
+                .map(|sample| sample.side_effects_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "frame",
+            &samples
+                .iter()
+                .map(|sample| sample.frame_ms)
+                .collect::<Vec<_>>(),
+        );
+        summarize(
+            "total",
+            &samples
+                .iter()
+                .map(|sample| sample.total_ms)
+                .collect::<Vec<_>>(),
         );
     }
 

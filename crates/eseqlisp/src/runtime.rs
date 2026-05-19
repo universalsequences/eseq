@@ -919,6 +919,8 @@ pub struct Runtime {
     pub reactive_registry: ReactiveRegistry,
     #[cfg(test)]
     rendered_layouts: Vec<Vec<String>>,
+    #[cfg(test)]
+    capture_rendered_layouts: bool,
     pub current_layout: Option<Arc<LayoutNode>>,
     layout_revision: u64,
     dirty_widget_ids: Vec<u64>,
@@ -961,6 +963,8 @@ impl Runtime {
             reactive_registry: ReactiveRegistry::new(),
             #[cfg(test)]
             rendered_layouts: Vec::new(),
+            #[cfg(test)]
+            capture_rendered_layouts: true,
             current_layout: None,
             layout_revision: 0,
             dirty_widget_ids: Vec::new(),
@@ -1973,6 +1977,20 @@ impl Runtime {
         std::mem::take(&mut self.rendered_layouts)
     }
 
+    pub fn set_capture_rendered_layouts(&mut self, capture: bool) {
+        #[cfg(test)]
+        {
+            self.capture_rendered_layouts = capture;
+            if !capture {
+                self.rendered_layouts.clear();
+            }
+        }
+        #[cfg(not(test))]
+        {
+            let _ = capture;
+        }
+    }
+
     pub fn current_widget_tree(&self) -> Option<Value> {
         self.current_widget_tree.clone()
     }
@@ -2451,8 +2469,10 @@ impl Runtime {
             && let Some(updated) = reuse_layout_node(existing.as_ref(), tree, &mut dirty_widget_ids)
         {
             #[cfg(test)]
-            self.rendered_layouts
-                .push(crate::layout::format_layout_tree_lines(&updated, 0));
+            if self.capture_rendered_layouts {
+                self.rendered_layouts
+                    .push(crate::layout::format_layout_tree_lines(&updated, 0));
+            }
             self.current_layout = Some(Arc::new(updated));
             self.reactive_registry
                 .replace_widget_bindings_from_layout(self.current_layout.as_deref());
@@ -2484,8 +2504,10 @@ impl Runtime {
                 .as_ref()
                 .is_none_or(|existing| !same_layout_geometry(existing.as_ref(), &layout));
             #[cfg(test)]
-            self.rendered_layouts
-                .push(crate::layout::format_layout_tree_lines(&layout, 0));
+            if self.capture_rendered_layouts {
+                self.rendered_layouts
+                    .push(crate::layout::format_layout_tree_lines(&layout, 0));
+            }
             self.current_layout = Some(Arc::new(layout));
             self.reactive_registry
                 .replace_widget_bindings_from_layout(self.current_layout.as_deref());

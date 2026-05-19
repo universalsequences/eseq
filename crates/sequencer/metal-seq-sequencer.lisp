@@ -129,12 +129,12 @@
               (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5)
               (rgba track-r track-g track-b 1))
             (rgba 0 0 0 0))))
-      (sdf/fill (sdf/rounded-rect (* 0.65 width) (* 0.65 height) 0.65)
+      (sdf/fill (sdf/circle 0.65)
         (material
           :lighting (lighting :edge-min -0.3 :edge-max 1.0
             :light (vec3 0.3 -1.0 1.5) :shininess 92.0)
           :color (aqua-color border (rgba 0.9 0.1 0.5 1.0))))
-      (sdf/fill (sdf/rounded-rect (* 0.53 width) (* 0.53 height) 0.52)
+      (sdf/fill (sdf/circle 0.53)
         (material
           :color (if (= active 1) (rgba 0.05 0.055 0.075 1.0) (rgba 0.015 0.016 0.025 1.0))))
       (sdf/fill
@@ -143,24 +143,16 @@
         (material
           :color (if (= plocked 1)
             (rgba 0.82 0.84 0.88 0.95)
-            (rgba 0 0 0 0)))))))
-
-(defwidget seqv-step-dot
-  :width 1.5 :height 0.72
-  :state (active plocked selected track-r track-g track-b)
-  :bindable (active plocked selected track-r track-g track-b)
-  :shader
-  (if (= active 1)
-    (sdf/layer
-      (sdf/fill (sdf/rounded-rect width height 0.88)
+            (rgba 0 0 0 0))))
+      (sdf/fill (sdf/circle 0.36)
         (material
           :lighting (lighting :edge-min -0.35 :edge-max 0.5
             :light (vec3 0.0 -1.0 2.5) :shininess 32.0)
-          :color
-          (aqua-color
-            (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
-            (rgba track-r track-g track-b 1.0)))))
-    (rgba 0 0 0 0)))
+          :color (if (= active 1)
+            (aqua-color
+              (rgba (* track-r 0.72) (* track-g 0.72) (* track-b 0.82) 1.0)
+              (rgba track-r track-g track-b 1.0))
+            (rgba 0 0 0 0)))))))
 
 (def seqv-mute-bg (active)
   (if active
@@ -267,7 +259,8 @@
   (let ((track-r (seqv-track-color-r track (seqv-muted? track)))
         (track-g (seqv-track-color-g track (seqv-muted? track)))
         (track-b (seqv-track-color-b track (seqv-muted? track))))
-  (box :width 3.05 :height 1.45 :align :center :padding 0.03
+  (box
+    :width 3.05 :height 1.45
     :key (str "seqv-step-cell-" track "-" step)
     :on-mouse-down (lambda (evt)
       (if visible
@@ -281,20 +274,12 @@
       (if visible
         (seqv-step-pointer-up track step evt)
         nil))
-    (box
-      :active (bind-seq (str "seq-track-step-active-" track "-" step))
-      :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
-      :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
-      :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
-      :track-r track-r :track-g track-g :track-b track-b
-      :background "seqv-step-shell"
-      :align :center :width 3.08 :height 1.41
-      (box :width 1.62 :height 1.38 :align :center
-        (seqv-step-dot
-          :active (bind-seq (str "seq-track-step-active-" track "-" step))
-          :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
-          :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
-          :track-r track-r :track-g track-g :track-b track-b))))))
+    :active (bind-seq (str "seq-track-step-active-" track "-" step))
+    :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
+    :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
+    :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
+    :track-r track-r :track-g track-g :track-b track-b
+    :background "seqv-step-shell")))
 
 (def seqv-playhead-row (track track-id row)
   (box
