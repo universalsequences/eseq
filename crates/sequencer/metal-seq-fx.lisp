@@ -2509,30 +2509,13 @@
       :color :dim
       :bg :transparent)))
 
-(def fx-chain-append-drop-row (children)
-  (box :debug-name "fx-chain-append-drop-row"
-       :width :fill
-       :height fx-fixed-panel-height
-       :padding 0
-       :h-align :start
-       :v-align :start
-       :drop-types (list "audio-effect" "midi-effect" "effect-instance")
-       :drop-meta (dict :kind "fx-append" :chain "append" :track SEQ.current-track :slot -1)
-       :drop-hover-border-color :mixer-strip-selected-border
-       :drop-hover-background-color :mixer-control-bg
-       :border-color :mixer-strip-border
-       :border-width 2
-       :on-drop (lambda (event) (fx-drop-on-effect event))
-    children))
-
 (def fx-bus-selection-panel ()
   (v-stack :padding 0.5 :gap 1
-    (fx-chain-append-drop-row
-      (h-stack :gap 1
-        (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
-          (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
-            (fx-panel (get fx :name) (get fx :params) fx)))
-        (fx-drop-placeholder-panel)))))
+    (h-stack :gap 1
+      (each (filter |fx| (> (len (get fx :params)) 0) (selected-bus-effects)) |fx slot-idx|
+        (subtree :key (str "bus-fx-panel-" (get fx :bus-idx) "-" (get fx :slot-idx) "-" (get fx :name))
+          (fx-panel (get fx :name) (get fx :params) fx)))
+      (fx-drop-placeholder-panel))))
 
 (effect-buffer "*track*"
   (if (= SEQ.num-tracks 0)
@@ -2549,16 +2532,15 @@
     (if (= SEQ.num-tracks 0)
     (fx-empty-track-fallback)
     (v-stack :padding 0.05 :gap 1 
-      (fx-chain-append-drop-row
-        (h-stack :gap 1
-          (each SEQ.instrument-panel |inst inst-idx|
-            (instrument-panel inst))
-          (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
-            (midi-fx-panel (get fx :name) (get fx :params) fx))
-          (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
-            (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
-              (fx-panel (get fx :name) (get fx :params) fx)))
-          (fx-drop-placeholder-panel)))))))
+      (h-stack :gap 1
+        (each SEQ.instrument-panel |inst inst-idx|
+          (instrument-panel inst))
+        (each (filter |fx| (> (len (get fx :params)) 0) SEQ.midi-effects) |fx slot-idx|
+          (midi-fx-panel (get fx :name) (get fx :params) fx))
+        (each (filter |fx| (> (len (get fx :params)) 0) SEQ.effects) |fx slot-idx|
+          (subtree :key (str "audio-fx-panel-" (get fx :slot-idx) "-" (get fx :name))
+            (fx-panel (get fx :name) (get fx :params) fx)))
+        (fx-drop-placeholder-panel))))))
 
 (define-mode "seq-fx-mode" :read-only true)
 (mode-bind-key "seq-fx-mode" "BS" "fx-delete-selected-effect")

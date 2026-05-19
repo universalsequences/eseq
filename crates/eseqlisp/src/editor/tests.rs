@@ -2360,6 +2360,97 @@ fn box_drag_payload_drops_on_compatible_box_target() {
 }
 
 #[test]
+fn box_drag_drops_on_target_inside_scrolled_container() {
+    fn find_by_key<'a>(
+        node: &'a crate::layout::LayoutNode,
+        key: &str,
+    ) -> Option<&'a crate::layout::LayoutNode> {
+        if node.stable_key.as_deref() == Some(key) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find_by_key(child, key))
+    }
+
+    let runtime = Runtime::new();
+    let mut editor = Editor::new(runtime, EditorConfig::default());
+    editor.set_layout_viewport(80, 10);
+    editor
+        .runtime
+        .eval_str(
+            r#"
+                (def dropped (state ""))
+                (effect
+                  (h-stack :width 48 :height 4
+                    (box
+                      :key "drag-source"
+                      :width 18
+                      :height 2
+                      :drag-type "audio-effect"
+                      :drag-payload (dict :kind "builtin-audio-effect" :name "Filter")
+                      (label "Filter"))
+                    (scroll :key "drop-scroll" :width 22 :height 4
+                      (v-stack :gap 0
+                        (box :width 20 :height 8)
+                        (box
+                          :key "drop-target"
+                          :width 20
+                          :height 2
+                          :drop-types (list "audio-effect")
+                          :on-drop (lambda (event)
+                            (set! dropped (get (get event :payload) :name))))))))
+                "#,
+        )
+        .unwrap();
+    editor.set_layout_viewport(80, 10);
+
+    let layout = editor.widget_layout().expect("layout");
+    let scroll = find_by_key(&layout, "drop-scroll").expect("drop scroll node");
+    crate::widget_render::scroll::set_scroll_state(
+        crate::widget_render::scroll::scroll_state_key(scroll),
+        crate::widget_render::scroll::ScrollState {
+            offset_y: 7.0,
+            viewport_height: 4.0,
+            content_height: 10.0,
+            synced_selection: None,
+        },
+    );
+
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0),
+        0,
+        0,
+        80,
+        10,
+        2.0,
+        0.4,
+    );
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Drag(MouseButton::Left), 24, 1),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        1.4,
+    );
+    assert_eq!(editor.widget_cursor(), crate::widget_render::WidgetCursor::DragCopy);
+    editor.handle_mouse_precise(
+        mouse_event(MouseEventKind::Up(MouseButton::Left), 24, 1),
+        0,
+        0,
+        80,
+        10,
+        24.0,
+        1.4,
+    );
+
+    assert_eq!(
+        editor.runtime.eval_str("dropped").unwrap().unwrap(),
+        Value::String("Filter".to_string())
+    );
+}
+
+#[test]
 fn tree_sample_drag_cursor_starts_after_pointer_moves_past_threshold() {
     let runtime = Runtime::new();
     let mut editor = Editor::new(runtime, EditorConfig::default());

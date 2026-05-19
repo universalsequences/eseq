@@ -59,7 +59,21 @@ fn deepest_drop_target(
     row: f32,
     col: f32,
     drag_type: &str,
-) -> Option<LayoutNode> {
+) -> Option<(LayoutNode, f32, f32)> {
+    if node.widget_type == "scroll" {
+        if !node_contains_point(node, row, col) {
+            return None;
+        }
+        let state =
+            widget_render::scroll::get_scroll_state(widget_render::scroll::scroll_state_key(node));
+        let adjusted_row = row + state.offset_y;
+        return node
+            .children
+            .iter()
+            .rev()
+            .find_map(|child| deepest_drop_target(child, adjusted_row, col, drag_type))
+            .or_else(|| node_accepts_drag_type(node, drag_type).then(|| (node.clone(), row, col)));
+    }
     if !node_contains_point(node, row, col) {
         return None;
     }
@@ -67,7 +81,7 @@ fn deepest_drop_target(
         .iter()
         .rev()
         .find_map(|child| deepest_drop_target(child, row, col, drag_type))
-        .or_else(|| node_accepts_drag_type(node, drag_type).then(|| node.clone()))
+        .or_else(|| node_accepts_drag_type(node, drag_type).then(|| (node.clone(), row, col)))
 }
 
 fn widget_drag_data(value: &Value) -> Option<(String, Value)> {
@@ -1517,10 +1531,11 @@ impl Editor {
         let layout = self.runtime.current_layout.as_ref()?;
         let local_col = precise_col - content_col as f32 + self.active_leaf().widget_scroll_left;
         let local_row = precise_row - content_row as f32 + self.total_scroll_top();
-        let target = deepest_drop_target(layout, local_row, local_col, &drag_type)?;
+        let (target, hit_row, hit_col) =
+            deepest_drop_target(layout, local_row, local_col, &drag_type)?;
         let callback = target.props.get("on-drop")?.clone();
         let event = crate::widget_render::box_widget::box_drop_info(
-            &target, &drag_type, payload, local_col, local_row,
+            &target, &drag_type, payload, hit_col, hit_row,
         );
         Some(crate::widget_render::EventOutput {
             callback,
@@ -1577,6 +1592,7 @@ impl Editor {
                 precise_col - content_col as f32 + self.active_leaf().widget_scroll_left;
             let local_row = precise_row - content_row as f32 + self.total_scroll_top();
             deepest_drop_target(layout, local_row, local_col, &drag_type)
+                .map(|(target, _, _)| target)
         });
         let allowed = target.is_some();
         widget_render::set_drop_hover_target(target.map(|node| node.widget_id));

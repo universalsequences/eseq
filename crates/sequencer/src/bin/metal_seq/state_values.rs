@@ -8366,22 +8366,15 @@ mod tests {
         editor.set_active_buffer(fx.id);
         editor.set_layout_viewport(92, 42);
         let layout = editor.widget_layout().expect("bus fx layout");
-        let append_row = find_layout_node_by_debug_name(&layout, "fx-chain-append-drop-row")
-            .expect("fx chain append drop row");
-        assert!(
-            append_row.rect.width >= 30.0
-                && append_row.rect.height > 0.0
-                && append_row.props.contains_key("on-drop"),
-            "fx chain append row should be a visible drop target, got rect={:?} props={:?}",
-            append_row.rect,
-            append_row.props.keys().collect::<Vec<_>>()
-        );
         let placeholder = find_layout_node_by_debug_name(&layout, "fx-drop-placeholder-panel")
             .expect("bus fx drop placeholder panel");
         assert!(
-            placeholder.rect.width >= 30.0,
-            "bus fx drop placeholder should be wide enough for its label, got {:?}",
-            placeholder.rect
+            placeholder.rect.width >= 30.0
+                && placeholder.rect.height > 0.0
+                && placeholder.props.contains_key("on-drop"),
+            "bus fx drop placeholder should be the visible append drop target, got rect={:?} props={:?}",
+            placeholder.rect,
+            placeholder.props.keys().collect::<Vec<_>>()
         );
     }
 
