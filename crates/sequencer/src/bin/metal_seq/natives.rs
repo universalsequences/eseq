@@ -6,6 +6,169 @@ pub(crate) struct RuntimeInit {
     pub(crate) midi_fx_names: Arc<Mutex<Vec<String>>>,
 }
 
+fn value_number_field(value: &Value, field: &str) -> Option<usize> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    map.get(field).and_then(|cell| match &*cell.borrow() {
+        Value::Number(n) if *n >= 0.0 => Some(*n as usize),
+        _ => None,
+    })
+}
+
+fn value_string_field(value: &Value, field: &str) -> Option<String> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    map.get(field).and_then(|cell| match &*cell.borrow() {
+        Value::String(s) => Some(s.clone()),
+        Value::Keyword(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+fn delete_kind_name(value: &Value) -> Option<&str> {
+    match value {
+        Value::Keyword(kind) | Value::String(kind) => Some(kind.as_str()),
+        _ => None,
+    }
+}
+
+fn parse_fx_delete_chain(value: &Value) -> Option<FxDeleteChain> {
+    match value_string_field(value, "chain")?.as_str() {
+        "audio" | "fx" => Some(FxDeleteChain::Audio),
+        "midi" | "midi-fx" => Some(FxDeleteChain::Midi),
+        "bus" | "bus-fx" => Some(FxDeleteChain::Bus),
+        _ => None,
+    }
+}
+
+fn parse_delete_target(kind: &Value, payload: &Value) -> Result<ActiveDeleteTarget, String> {
+    match delete_kind_name(kind) {
+        Some("mixer-track") | Some("track") => {
+            let track = value_number_field(payload, "track")
+                .ok_or_else(|| "mixer-track delete target expects :track".to_string())?;
+            Ok(ActiveDeleteTarget::MixerTrack { track })
+        }
+        Some("mod-route") | Some("route") | Some("cable") => {
+            let source = value_number_field(payload, "source")
+                .ok_or_else(|| "mod-route delete target expects :source".to_string())?;
+            let dest = value_number_field(payload, "dest")
+                .ok_or_else(|| "mod-route delete target expects :dest".to_string())?;
+            let input = value_number_field(payload, "input")
+                .ok_or_else(|| "mod-route delete target expects :input".to_string())?;
+            Ok(ActiveDeleteTarget::ModRoute {
+                source,
+                dest,
+                input,
+            })
+        }
+        Some("fx-effect") | Some("effect") => {
+            let chain = parse_fx_delete_chain(payload)
+                .ok_or_else(|| "fx-effect delete target expects :chain".to_string())?;
+            let slot = value_number_field(payload, "slot")
+                .ok_or_else(|| "fx-effect delete target expects :slot".to_string())?;
+            let bus = value_number_field(payload, "bus");
+            if chain == FxDeleteChain::Bus && bus.is_none() {
+                return Err("bus fx-effect delete target expects :bus".to_string());
+            }
+            Ok(ActiveDeleteTarget::FxEffect { chain, bus, slot })
+        }
+        Some(other) => Err(format!("unknown delete target kind :{other}")),
+        None => Err("delete target kind must be a keyword or string".to_string()),
+    }
+}
+
+fn active_delete_target_kind(target: Option<&ActiveDeleteTarget>) -> Value {
+    match target {
+        Some(ActiveDeleteTarget::MixerTrack { .. }) => Value::String("mixer-track".to_string()),
+        Some(ActiveDeleteTarget::ModRoute { .. }) => Value::String("mod-route".to_string()),
+        Some(ActiveDeleteTarget::FxEffect { .. }) => Value::String("fx-effect".to_string()),
+        None => Value::Bool(false),
+    }
+}
+
+fn bump_delete_target_version(
+    active_delete_target_version: &Arc<AtomicUsize>,
+    ui_epoch: &Arc<AtomicUsize>,
+) {
+    active_delete_target_version.fetch_add(1, Ordering::Relaxed);
+    ui_epoch.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod delete_target_tests {
+    use super::*;
+
+    fn map_value(entries: impl IntoIterator<Item = (&'static str, Value)>) -> Value {
+        Value::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value))))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn delete_target_parser_distinguishes_mixer_track_mod_route_and_fx_effects() {
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("mixer-track".to_string()),
+                &map_value([("track", Value::Number(2.0))]),
+            )
+            .expect("mixer target"),
+            ActiveDeleteTarget::MixerTrack { track: 2 }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("mod-route".to_string()),
+                &map_value([
+                    ("source", Value::Number(0.0)),
+                    ("dest", Value::Number(3.0)),
+                    ("input", Value::Number(1.0)),
+                ]),
+            )
+            .expect("mod route target"),
+            ActiveDeleteTarget::ModRoute {
+                source: 0,
+                dest: 3,
+                input: 1,
+            }
+        );
+
+        assert_eq!(
+            parse_delete_target(
+                &Value::Keyword("fx-effect".to_string()),
+                &map_value([
+                    ("chain", Value::String("bus".to_string())),
+                    ("bus", Value::Number(1.0)),
+                    ("slot", Value::Number(4.0)),
+                ]),
+            )
+            .expect("bus fx target"),
+            ActiveDeleteTarget::FxEffect {
+                chain: FxDeleteChain::Bus,
+                bus: Some(1),
+                slot: 4,
+            }
+        );
+    }
+
+    #[test]
+    fn delete_target_parser_rejects_incomplete_bus_fx_target() {
+        let err = parse_delete_target(
+            &Value::Keyword("fx-effect".to_string()),
+            &map_value([
+                ("chain", Value::String("bus".to_string())),
+                ("slot", Value::Number(0.0)),
+            ]),
+        )
+        .expect_err("bus fx target without bus should fail");
+        assert!(err.contains(":bus"), "unexpected error: {err}");
+    }
+}
+
 pub(crate) fn init_runtime(
     app: &ui::App,
     state: Arc<SequencerState>,
@@ -21,6 +184,8 @@ pub(crate) fn init_runtime(
     record_armed: Arc<Mutex<Vec<bool>>>,
     ui_epoch: Arc<AtomicUsize>,
     fx_epoch: Arc<AtomicUsize>,
+    active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>>,
+    active_delete_target_version: Arc<AtomicUsize>,
     auto_follow_override_until: Arc<Mutex<Option<Instant>>>,
     lg_raw: *mut sequencer::audiograph::LiveGraph,
 ) -> RuntimeInit {
@@ -42,6 +207,7 @@ pub(crate) fn init_runtime(
                 ("num-steps", Value::Number(PAGE_SIZE as f64)),
                 ("num-tracks", Value::Number(track_count as f64)),
                 ("current-track", Value::Number(0.0)),
+                ("delete-target-version", Value::Number(0.0)),
                 (
                     "current-pattern",
                     Value::Number(state.pattern.current_pattern.load(Ordering::Relaxed) as f64),
@@ -461,6 +627,211 @@ pub(crate) fn init_runtime(
     }
 
     // ── Native functions ──
+
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-set-delete-target", move |args, _ctx| {
+        let (Some(kind), Some(payload)) = (args.first(), args.get(1)) else {
+            return Err("seq-set-delete-target: expected (kind payload)".into());
+        };
+        let target = parse_delete_target(kind, payload)?;
+        let mut guard = delete_target.lock().unwrap();
+        if guard.as_ref() != Some(&target) {
+            *guard = Some(target);
+            bump_delete_target_version(&delete_target_version, &ui_ep);
+        }
+        Ok(Value::Bool(true))
+    });
+
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-clear-delete-target", move |_args, _ctx| {
+        let mut guard = delete_target.lock().unwrap();
+        if guard.take().is_some() {
+            bump_delete_target_version(&delete_target_version, &ui_ep);
+        }
+        Ok(Value::Bool(true))
+    });
+
+    let delete_target = active_delete_target.clone();
+    runtime.register_native("seq-delete-target?", move |args, _ctx| {
+        let (Some(kind), Some(payload)) = (args.first(), args.get(1)) else {
+            return Err("seq-delete-target?: expected (kind payload)".into());
+        };
+        let target = parse_delete_target(kind, payload)?;
+        Ok(Value::Bool(
+            delete_target.lock().unwrap().as_ref() == Some(&target),
+        ))
+    });
+
+    let delete_target = active_delete_target.clone();
+    runtime.register_native("seq-active-delete-target-kind", move |_args, _ctx| {
+        let guard = delete_target.lock().unwrap();
+        Ok(active_delete_target_kind(guard.as_ref()))
+    });
+
+    let st = state.clone();
+    let ct = current_track.clone();
+    let delete_target = active_delete_target.clone();
+    let delete_target_version = active_delete_target_version.clone();
+    let ui_ep = ui_epoch.clone();
+    runtime.register_native("seq-delete-active-target", move |_args, ctx| {
+        let target = delete_target.lock().unwrap().clone();
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
+        };
+
+        let current_buffer = ctx.current_buffer_name();
+        match target {
+            ActiveDeleteTarget::MixerTrack { track } => {
+                if current_buffer != "*mixer*" {
+                    return Ok(Value::Bool(false));
+                }
+                let track_count = st.active_track_count();
+                if track_count <= 1 {
+                    ctx.set_status("Cannot delete the last remaining track");
+                    return Ok(Value::Bool(false));
+                }
+                if track >= track_count {
+                    ctx.set_status(format!("Cannot delete missing track {}", track + 1));
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "track".to_string(),
+                    Rc::new(RefCell::new(Value::Number(track as f64))),
+                );
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-track".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
+            ActiveDeleteTarget::ModRoute {
+                source,
+                dest,
+                input,
+            } => {
+                if current_buffer != "*mixer*" {
+                    return Ok(Value::Bool(false));
+                }
+                let current_pattern = st.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+                let route_exists = st
+                    .pattern
+                    .pattern_bank
+                    .lock()
+                    .unwrap()
+                    .get(current_pattern)
+                    .is_some_and(|pattern| {
+                        pattern.mod_connections.iter().any(|route| {
+                            route.source_track == source
+                                && route.dest_track == dest
+                                && route.dest_input == input
+                        })
+                    });
+                if !route_exists {
+                    let mut guard = delete_target.lock().unwrap();
+                    if guard.take().is_some() {
+                        bump_delete_target_version(&delete_target_version, &ui_ep);
+                    }
+                    return Ok(Value::Bool(false));
+                }
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "source".to_string(),
+                    Rc::new(RefCell::new(Value::Number(source as f64))),
+                );
+                map.insert(
+                    "dest".to_string(),
+                    Rc::new(RefCell::new(Value::Number(dest as f64))),
+                );
+                map.insert(
+                    "input".to_string(),
+                    Rc::new(RefCell::new(Value::Number(input as f64))),
+                );
+                ctx.enqueue_command(HostCommand::Custom {
+                    name: "delete-mod-route".to_string(),
+                    payload: Value::Map(map),
+                });
+            }
+            ActiveDeleteTarget::FxEffect { chain, bus, slot } => {
+                if current_buffer != "*fx*" {
+                    return Ok(Value::Bool(false));
+                }
+                let (name, payload) = match chain {
+                    FxDeleteChain::Audio => {
+                        let track = ct.load(Ordering::Relaxed);
+                        let valid = track < st.active_track_count()
+                            && slot < st.pattern.effect_chains[track].len();
+                        if !valid {
+                            ctx.set_status("Cannot delete missing audio effect");
+                            let mut guard = delete_target.lock().unwrap();
+                            if guard.take().is_some() {
+                                bump_delete_target_version(&delete_target_version, &ui_ep);
+                            }
+                            return Ok(Value::Bool(false));
+                        }
+                        let mut map = std::collections::HashMap::new();
+                        map.insert(
+                            "slot".to_string(),
+                            Rc::new(RefCell::new(Value::Number(slot as f64))),
+                        );
+                        ("delete-effect".to_string(), Value::Map(map))
+                    }
+                    FxDeleteChain::Midi => {
+                        let track = ct.load(Ordering::Relaxed);
+                        let valid = track < st.active_track_count()
+                            && st
+                                .pattern
+                                .track_params
+                                .get(track)
+                                .is_some_and(|params| slot < params.midi_fx_chain().len());
+                        if !valid {
+                            ctx.set_status("Cannot delete missing MIDI effect");
+                            let mut guard = delete_target.lock().unwrap();
+                            if guard.take().is_some() {
+                                bump_delete_target_version(&delete_target_version, &ui_ep);
+                            }
+                            return Ok(Value::Bool(false));
+                        }
+                        let mut map = std::collections::HashMap::new();
+                        map.insert(
+                            "slot".to_string(),
+                            Rc::new(RefCell::new(Value::Number(slot as f64))),
+                        );
+                        ("delete-midi-fx".to_string(), Value::Map(map))
+                    }
+                    FxDeleteChain::Bus => {
+                        let Some(bus) = bus else {
+                            return Err("bus fx delete target is missing bus index".into());
+                        };
+                        let mut map = std::collections::HashMap::new();
+                        map.insert(
+                            "bus".to_string(),
+                            Rc::new(RefCell::new(Value::Number(bus as f64))),
+                        );
+                        map.insert(
+                            "slot".to_string(),
+                            Rc::new(RefCell::new(Value::Number(slot as f64))),
+                        );
+                        ("delete-bus-effect".to_string(), Value::Map(map))
+                    }
+                };
+                ctx.enqueue_command(HostCommand::Custom { name, payload });
+            }
+        }
+
+        let mut guard = delete_target.lock().unwrap();
+        if guard.take().is_some() {
+            bump_delete_target_version(&delete_target_version, &ui_ep);
+        }
+        Ok(Value::Bool(true))
+    });
 
     // seq-toggle-step — toggle step on current track
     let st = state.clone();
@@ -2787,6 +3158,31 @@ fn document_metal_seq_natives(runtime: &mut Runtime) {
             "seq-set-track",
             "(seq-set-track track)",
             "Select the current track by 0-based index.",
+        ),
+        (
+            "seq-set-delete-target",
+            "(seq-set-delete-target kind payload)",
+            "Set the active destructive keyboard target, such as :mixer-track, :mod-route, or :fx-effect.",
+        ),
+        (
+            "seq-clear-delete-target",
+            "(seq-clear-delete-target)",
+            "Clear the active destructive keyboard target.",
+        ),
+        (
+            "seq-delete-target?",
+            "(seq-delete-target? kind payload)",
+            "Return true when the active destructive keyboard target matches kind and payload.",
+        ),
+        (
+            "seq-active-delete-target-kind",
+            "(seq-active-delete-target-kind)",
+            "Return the active destructive keyboard target kind, or false when none is active.",
+        ),
+        (
+            "seq-delete-active-target",
+            "(seq-delete-active-target)",
+            "Delete the active destructive keyboard target when valid for the current buffer.",
         ),
         (
             "seq-set-track-volume",

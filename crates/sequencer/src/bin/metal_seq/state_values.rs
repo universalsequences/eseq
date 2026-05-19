@@ -4487,6 +4487,12 @@ mod tests {
     fn metal_seq_core_lisp_files_parse() {
         for path in [
             "mac-osx-dark.lisp",
+            "mac-osx-graphite.lisp",
+            "mac-osx-haze.lisp",
+            "mac-osx-midnight.lisp",
+            "mac-osx-ember.lisp",
+            "mac-osx-violet.lisp",
+            "metal-seq-themes.lisp",
             "metal-seq-materials.lisp",
             "metal-seq-browser.lisp",
             "metal-seq-builtin-fx-ui.lisp",
@@ -4507,6 +4513,193 @@ mod tests {
                 .parse()
                 .unwrap_or_else(|e| panic!("parse {path}: {e:?}"));
         }
+    }
+
+    fn load_step_gesture_source(runtime: &mut Runtime) {
+        let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read metal-seq-grid.lisp");
+        let start = src
+            .find("(def selection-click?")
+            .expect("step gesture source should define selection-click?");
+        let end = src
+            .find("(def seq-set-step-param-from-step")
+            .expect("step gesture source should precede step param helpers");
+        runtime
+            .eval_str(&src[start..end])
+            .expect("load step gesture source");
+    }
+
+    fn register_step_gesture_test_natives(
+        runtime: &mut Runtime,
+        steps: Arc<Mutex<Vec<bool>>>,
+        selected: Arc<Mutex<Vec<bool>>>,
+        toggles: Arc<Mutex<Vec<usize>>>,
+        moves: Arc<Mutex<Vec<(usize, usize)>>>,
+    ) {
+        runtime.register_native("cool-off-follow", |_args, _ctx| Ok(Value::Nil));
+
+        let selected_for_has_selection = selected.clone();
+        runtime.register_native("seq-has-selection?", move |_args, _ctx| {
+            Ok(Value::Bool(
+                selected_for_has_selection
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|selected| *selected),
+            ))
+        });
+
+        let steps_for_active = steps.clone();
+        runtime.register_native("seq-track-step-active?", move |args, _ctx| {
+            let Some(Value::Number(step)) = args.get(1) else {
+                return Err("seq-track-step-active?: expected track and step".into());
+            };
+            Ok(Value::Bool(
+                steps_for_active.lock().unwrap()[*step as usize],
+            ))
+        });
+
+        let steps_for_toggle = steps.clone();
+        let toggles_for_toggle = toggles.clone();
+        runtime.register_native("seq-toggle-step", move |args, _ctx| {
+            let Some(Value::Number(step)) = args.first() else {
+                return Err("seq-toggle-step: expected step".into());
+            };
+            let step = *step as usize;
+            let mut steps = steps_for_toggle.lock().unwrap();
+            steps[step] = !steps[step];
+            toggles_for_toggle.lock().unwrap().push(step);
+            Ok(Value::Bool(steps[step]))
+        });
+
+        let moves_for_drag = moves.clone();
+        runtime.register_native("seq-move-step-drag", move |args, _ctx| {
+            let (Some(Value::Number(start)), Some(Value::Number(target))) =
+                (args.first(), args.get(1))
+            else {
+                return Err("seq-move-step-drag: expected start and target".into());
+            };
+            moves_for_drag
+                .lock()
+                .unwrap()
+                .push((*start as usize, *target as usize));
+            Ok(Value::Bool(true))
+        });
+
+        runtime.register_native("seq-select-step-range", |_args, _ctx| Ok(Value::Nil));
+    }
+
+    fn step_gesture_runtime(
+        initial_steps: &[bool],
+        selected_steps: &[bool],
+    ) -> (
+        Runtime,
+        Arc<Mutex<Vec<bool>>>,
+        Arc<Mutex<Vec<usize>>>,
+        Arc<Mutex<Vec<(usize, usize)>>>,
+    ) {
+        let steps = Arc::new(Mutex::new(initial_steps.to_vec()));
+        let selected = Arc::new(Mutex::new(selected_steps.to_vec()));
+        let toggles = Arc::new(Mutex::new(Vec::new()));
+        let moves = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = Runtime::new();
+        runtime
+            .eval_str("(defstate cursor-step 0)")
+            .expect("define cursor step");
+        runtime
+            .eval_str(&format!(
+                "(def SEQ (dict :current-track 0 :selected-steps '{}))",
+                bool_list_source(selected_steps)
+            ))
+            .expect("define SEQ test map");
+        register_step_gesture_test_natives(
+            &mut runtime,
+            steps.clone(),
+            selected,
+            toggles.clone(),
+            moves.clone(),
+        );
+        load_step_gesture_source(&mut runtime);
+        (runtime, steps, toggles, moves)
+    }
+
+    fn bool_list_source(values: &[bool]) -> String {
+        let items = values
+            .iter()
+            .map(|value| if *value { "true" } else { "false" })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("({items})")
+    }
+
+    #[test]
+    fn empty_step_drag_paints_steps_on_without_starting_move_drag() {
+        let (mut runtime, steps, toggles, moves) =
+            step_gesture_runtime(&[false, false, false, false, false], &[false; 5]);
+
+        runtime
+            .eval_str("(step-pointer-down 1 (dict))")
+            .expect("pointer down");
+        runtime
+            .eval_str("(step-select-drag-over 2 (dict))")
+            .expect("drag over step 2");
+        runtime
+            .eval_str("(step-select-drag-over 3 (dict))")
+            .expect("drag over step 3");
+        runtime
+            .eval_str("(step-pointer-up 3 (dict))")
+            .expect("pointer up");
+
+        assert_eq!(*steps.lock().unwrap(), vec![false, true, true, true, false]);
+        assert_eq!(*toggles.lock().unwrap(), vec![1, 2, 3]);
+        assert!(moves.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn active_step_drag_moves_without_toggling_clicked_step_off() {
+        let (mut runtime, steps, toggles, moves) =
+            step_gesture_runtime(&[false, false, true, false, false], &[false; 5]);
+
+        runtime
+            .eval_str("(step-pointer-down 2 (dict))")
+            .expect("pointer down");
+        runtime
+            .eval_str("(step-select-drag-over 3 (dict))")
+            .expect("drag over step 3");
+        runtime
+            .eval_str("(step-pointer-up 3 (dict))")
+            .expect("pointer up");
+
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec![false, false, true, false, false]
+        );
+        assert!(toggles.lock().unwrap().is_empty());
+        assert_eq!(*moves.lock().unwrap(), vec![(2, 3)]);
+    }
+
+    #[test]
+    fn selected_empty_step_drag_uses_move_drag_instead_of_painting() {
+        let (mut runtime, steps, toggles, moves) = step_gesture_runtime(
+            &[false, false, false, false, false],
+            &[false, false, true, false, false],
+        );
+
+        runtime
+            .eval_str("(step-pointer-down 2 (dict))")
+            .expect("pointer down");
+        runtime
+            .eval_str("(step-select-drag-over 4 (dict))")
+            .expect("drag over step 4");
+        runtime
+            .eval_str("(step-pointer-up 4 (dict))")
+            .expect("pointer up");
+
+        assert_eq!(
+            *steps.lock().unwrap(),
+            vec![false, false, false, false, false]
+        );
+        assert!(toggles.lock().unwrap().is_empty());
+        assert_eq!(*moves.lock().unwrap(), vec![(2, 4)]);
     }
 
     #[test]
@@ -5728,6 +5921,190 @@ mod tests {
         )
     }
 
+    fn test_delete_target_number(payload: &Value, field: &str) -> Option<usize> {
+        let Value::Map(map) = payload else {
+            return None;
+        };
+        map.get(field).and_then(|value| match &*value.borrow() {
+            Value::Number(value) if *value >= 0.0 => Some(*value as usize),
+            _ => None,
+        })
+    }
+
+    fn test_delete_target_string(payload: &Value, field: &str) -> Option<String> {
+        let Value::Map(map) = payload else {
+            return None;
+        };
+        map.get(field).and_then(|value| match &*value.borrow() {
+            Value::String(value) => Some(value.clone()),
+            Value::Keyword(value) => Some(value.clone()),
+            _ => None,
+        })
+    }
+
+    fn test_delete_target_key(kind: &str, payload: &Value) -> Option<String> {
+        match kind {
+            "mixer-track" => Some(format!(
+                "mixer-track:{}",
+                test_delete_target_number(payload, "track")?
+            )),
+            "mod-route" => Some(format!(
+                "mod-route:{}:{}:{}",
+                test_delete_target_number(payload, "source")?,
+                test_delete_target_number(payload, "dest")?,
+                test_delete_target_number(payload, "input")?
+            )),
+            "fx-effect" => {
+                let chain = test_delete_target_string(payload, "chain")?;
+                let slot = test_delete_target_number(payload, "slot")?;
+                if chain == "bus" {
+                    Some(format!(
+                        "fx-effect:bus:{}:{}",
+                        test_delete_target_number(payload, "bus")?,
+                        slot
+                    ))
+                } else {
+                    Some(format!("fx-effect:{chain}:{slot}"))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn register_test_delete_target_natives(editor: &mut eseqlisp::Editor, track_count: usize) {
+        let active = Arc::new(Mutex::new(None::<(String, Value)>));
+        let version = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        {
+            let active = Arc::clone(&active);
+            let version = Arc::clone(&version);
+            editor
+                .runtime_mut()
+                .register_native("seq-set-delete-target", move |args, _ctx| {
+                    let Some(kind) = args.first() else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let Some(payload) = args.get(1) else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let kind = match kind {
+                        Value::Keyword(kind) | Value::String(kind) => kind.clone(),
+                        _ => return Ok(Value::Bool(false)),
+                    };
+                    let Some(key) = test_delete_target_key(&kind, payload) else {
+                        return Ok(Value::Bool(false));
+                    };
+                    *active.lock().unwrap() = Some((key, payload.clone()));
+                    version.fetch_add(1, Ordering::Relaxed);
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        {
+            let active = Arc::clone(&active);
+            let version = Arc::clone(&version);
+            editor
+                .runtime_mut()
+                .register_native("seq-clear-delete-target", move |_args, _ctx| {
+                    if active.lock().unwrap().take().is_some() {
+                        version.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(Value::Bool(true))
+                });
+        }
+
+        {
+            let active = Arc::clone(&active);
+            editor
+                .runtime_mut()
+                .register_native("seq-delete-target?", move |args, _ctx| {
+                    let Some(kind) = args.first() else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let Some(payload) = args.get(1) else {
+                        return Ok(Value::Bool(false));
+                    };
+                    let kind = match kind {
+                        Value::Keyword(kind) | Value::String(kind) => kind,
+                        _ => return Ok(Value::Bool(false)),
+                    };
+                    let Some(key) = test_delete_target_key(kind, payload) else {
+                        return Ok(Value::Bool(false));
+                    };
+                    Ok(Value::Bool(
+                        active
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .is_some_and(|(active_key, _)| active_key == &key),
+                    ))
+                });
+        }
+
+        {
+            let active = Arc::clone(&active);
+            editor.runtime_mut().register_native(
+                "seq-active-delete-target-kind",
+                move |_args, _ctx| {
+                    let kind = active
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|(key, _)| key.split(':').next().unwrap_or_default().to_string());
+                    Ok(kind.map(Value::String).unwrap_or(Value::Bool(false)))
+                },
+            );
+        }
+
+        editor
+            .runtime_mut()
+            .register_native("seq-delete-active-target", move |_args, ctx| {
+                let Some((key, payload)) = active.lock().unwrap().take() else {
+                    return Ok(Value::Bool(false));
+                };
+                let kind = key.split(':').next().unwrap_or_default();
+                let name = match (ctx.current_buffer_name().as_str(), kind) {
+                    ("*mixer*", "mixer-track") => {
+                        let Value::Map(map) = &payload else {
+                            return Ok(Value::Bool(false));
+                        };
+                        let track = map.get("track").and_then(|value| match &*value.borrow() {
+                            Value::Number(track) => Some(*track as usize),
+                            _ => None,
+                        });
+                        if track_count <= 1 || track.is_none_or(|track| track >= track_count) {
+                            return Ok(Value::Bool(false));
+                        }
+                        "delete-track"
+                    }
+                    ("*mixer*", "mod-route") => "delete-mod-route",
+                    ("*fx*", "fx-effect") => {
+                        let chain = match &payload {
+                            Value::Map(map) => {
+                                map.get("chain").and_then(|value| match &*value.borrow() {
+                                    Value::String(chain) => Some(chain.clone()),
+                                    _ => None,
+                                })
+                            }
+                            _ => None,
+                        };
+                        match chain.as_deref() {
+                            Some("audio") => "delete-effect",
+                            Some("midi") => "delete-midi-fx",
+                            Some("bus") => "delete-bus-effect",
+                            _ => return Ok(Value::Bool(false)),
+                        }
+                    }
+                    _ => return Ok(Value::Bool(false)),
+                };
+                ctx.enqueue_command(eseqlisp::host::HostCommand::Custom {
+                    name: name.to_string(),
+                    payload,
+                });
+                Ok(Value::Bool(true))
+            });
+    }
+
     fn value_contains_string(value: &Value, needle: &str) -> bool {
         match value {
             Value::String(text) => text.contains(needle),
@@ -6908,6 +7285,7 @@ mod tests {
                 ("track-names", test_string_list(&["bd02"])),
                 ("track-colors", test_track_colors()),
                 ("current-track", Value::Number(0.0)),
+                ("delete-target-version", Value::Number(0.0)),
                 ("record-armed", test_bool_list(&[false])),
                 ("track-mutes", test_bool_list(&[false])),
                 ("track-solos", test_bool_list(&[false])),
@@ -7058,6 +7436,7 @@ mod tests {
             ],
             true,
         );
+        register_test_delete_target_natives(&mut editor, 1);
 
         let src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
         editor.runtime_mut().eval_str(&src).expect("load grid lisp");
@@ -7878,7 +8257,11 @@ mod tests {
                 ("track-colors", test_track_colors()),
                 ("num-tracks", Value::Number(1.0)),
                 ("current-track", Value::Number(0.0)),
-                ("record-armed", test_list(vec![Value::Bool(false)])),
+                ("delete-target-version", Value::Number(0.0)),
+                (
+                    "record-armed",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
                 ("track-mutes", test_list(vec![Value::Bool(false)])),
                 ("track-solos", test_list(vec![Value::Bool(false)])),
                 ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
@@ -7896,7 +8279,7 @@ mod tests {
                         );
                         map.insert(
                             "dest".to_string(),
-                            Rc::new(RefCell::new(Value::Number(0.0))),
+                            Rc::new(RefCell::new(Value::Number(1.0))),
                         );
                         map.insert(
                             "input".to_string(),
@@ -7994,6 +8377,7 @@ mod tests {
             .runtime_mut()
             .eval_str("(defstate selected-bus -1)")
             .expect("install shared mixer selection state");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&src)
@@ -8101,6 +8485,7 @@ mod tests {
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
+                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("limiter".to_string())]),
@@ -8174,6 +8559,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor
             .runtime_mut()
@@ -8271,6 +8657,98 @@ mod tests {
                 );
             }
             other => panic!("expected insert-midi-fx-before-slot, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-drop-on-effect
+                    (dict
+                      :payload (dict :kind "builtin-audio-effect" :name "Filter")
+                      :target (dict :chain "bus" :bus 1 :slot 0)))"#,
+            )
+            .expect("drop builtin audio effect before bus slot");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "insert-builtin-bus-effect-before-slot");
+                let Value::Map(payload) = payload else {
+                    panic!("insert-builtin-bus-effect-before-slot payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("bus").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("slot").map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+            }
+            other => panic!("expected insert-builtin-bus-effect-before-slot, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-drop-on-effect
+                    (dict
+                      :payload (dict :kind "bus-effect-instance" :chain "bus" :bus 1 :slot 2 :name "Delay")
+                      :target (dict :chain "bus" :bus 1 :slot 0)))"#,
+            )
+            .expect("drop bus effect instance before bus slot");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "move-bus-effect-slot");
+                let Value::Map(payload) = payload else {
+                    panic!("move-bus-effect-slot payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("bus").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("source-slot")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(2.0))
+                );
+                assert_eq!(
+                    payload
+                        .get("target-slot")
+                        .map(|value| value.borrow().clone()),
+                    Some(Value::Number(0.0))
+                );
+            }
+            other => panic!("expected move-bus-effect-slot, got {other:?}"),
+        }
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"(fx-drop-on-effect
+                    (dict
+                      :payload (dict :kind "custom-audio-effect" :name "verb")
+                      :target (dict :chain "append" :bus 1 :track 0 :slot -1)))"#,
+            )
+            .expect("drop custom audio effect onto bus append target");
+        let commands = editor.drain_host_commands();
+        assert_eq!(commands.len(), 1);
+        match &commands[0] {
+            eseqlisp::host::HostCommand::Custom { name, payload } => {
+                assert_eq!(name, "add-bus-effect");
+                let Value::Map(payload) = payload else {
+                    panic!("add-bus-effect payload should be a dict: {payload:?}");
+                };
+                assert_eq!(
+                    payload.get("bus").map(|value| value.borrow().clone()),
+                    Some(Value::Number(1.0))
+                );
+                assert_eq!(
+                    payload.get("name").map(|value| value.borrow().clone()),
+                    Some(Value::String("verb".to_string()))
+                );
+            }
+            other => panic!("expected add-bus-effect, got {other:?}"),
         }
         editor
             .runtime_mut()
@@ -8429,6 +8907,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let filter_ui_probe = editor
             .runtime_mut()
@@ -8503,6 +8982,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -8624,6 +9104,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let delay_ui_probe = editor
             .runtime_mut()
@@ -8747,6 +9228,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         let reverb_ui_probe = editor
             .runtime_mut()
@@ -8804,6 +9286,7 @@ mod tests {
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
+                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("MODUM_DELAY".to_string())]),
@@ -8845,6 +9328,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -8902,6 +9386,7 @@ mod tests {
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
+                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![Value::String("dimension-d-chorus".to_string())]),
@@ -8943,6 +9428,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -9024,6 +9510,7 @@ mod tests {
             vec![
                 ("num-tracks", Value::Number(1.0)),
                 ("compiling", Value::Bool(false)),
+                ("delete-target-version", Value::Number(0.0)),
                 (
                     "available-effects",
                     test_list(vec![
@@ -9071,6 +9558,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_audio_ui_source)
@@ -9211,6 +9699,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -9368,6 +9857,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -9527,6 +10017,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_instrument_ui_source)
@@ -9654,6 +10145,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -9788,6 +10280,16 @@ mod tests {
         }
 
         let src = std::fs::read_to_string("metal-seq-fx.lisp").expect("read fx lisp");
+        fn lisp_def_slice<'a>(src: &'a str, start_pattern: &str, end_pattern: &str) -> &'a str {
+            let start = src
+                .find(start_pattern)
+                .unwrap_or_else(|| panic!("source should contain {start_pattern}"));
+            let end = src[start..]
+                .find(end_pattern)
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| panic!("{start_pattern} should be followed by {end_pattern}"));
+            &src[start..end]
+        }
         fn test_mod_target(
             source_idx: f64,
             depth_idx: f64,
@@ -10001,6 +10503,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -10039,9 +10542,52 @@ mod tests {
 
         editor
             .runtime_mut()
-            .eval_str("(do (set! instrument-mods-open true) (set! instrument-selected-mod-slot 1))")
-            .expect("open inline mods");
-        editor.refresh_runtime_side_effects();
+            .eval_str("(defstate lower-panel-buffer \"*fx*\")")
+            .expect("install lower panel state for mods toggle action");
+        let grid_src = std::fs::read_to_string("metal-seq-grid.lisp").expect("read grid lisp");
+        let toggle_action_src = lisp_def_slice(
+            &src,
+            "(def instrument-toggle-mods-view",
+            "(def instrument-mods-toggle-button",
+        );
+        let grid_action_src = lisp_def_slice(
+            &grid_src,
+            "(def seq-show-fx-lower-panel",
+            "(bind-key \"Tab\"",
+        );
+        editor
+            .runtime_mut()
+            .eval_str(toggle_action_src)
+            .expect("load real instrument mods toggle action");
+        editor
+            .runtime_mut()
+            .eval_str(grid_action_src)
+            .expect("load real mods toggle action");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard = Arc::new(Mutex::new(None));
+        assert!(
+            handle_metal_command_shortcut(
+                &mut editor,
+                &crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Char('m'),
+                    crossterm::event::KeyModifiers::SUPER,
+                ),
+                &state,
+                &current_track,
+                &selected_steps,
+                &step_clipboard,
+            ),
+            "Cmd+M should invoke the mods toggle action and refresh the visible FX layout"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-mods-open")
+                .unwrap(),
+            Some(Value::Bool(true))
+        );
         if let Some(status) = editor.runtime_mut().take_status_message() {
             panic!("inline mods fx lisp status after refresh: {status}");
         }
@@ -10452,6 +10998,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor
             .runtime_mut()
@@ -10624,6 +11171,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -10733,6 +11281,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&initial_custom_ui_source)
@@ -10874,6 +11423,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -10980,6 +11530,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor.runtime_mut().eval_str(&src).expect("load fx lisp");
         editor.refresh_runtime_side_effects();
         if let Some(status) = editor.runtime_mut().take_status_message() {
@@ -11113,6 +11664,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -11286,6 +11838,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -11503,6 +12056,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -11757,6 +12311,7 @@ mod tests {
                     "#,
                 )
                 .expect("install fx test helpers");
+            register_test_delete_target_natives(&mut editor, 1);
             editor
                 .runtime_mut()
                 .eval_str(&custom_ui_source)
@@ -11900,6 +12455,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&initial_custom_ui_source)
@@ -12022,6 +12578,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -12142,6 +12699,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -12288,6 +12846,7 @@ mod tests {
                 "#,
             )
             .expect("install fx test helpers");
+        register_test_delete_target_natives(&mut editor, 1);
         editor
             .runtime_mut()
             .eval_str(&custom_ui_source)
@@ -12323,18 +12882,8 @@ mod tests {
 
     #[test]
     fn metal_seq_mixer_clicks_dispatch_to_matching_track_and_bus_controls() {
-        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
         use eseqlisp::layout::LayoutNode;
         use std::sync::{Arc, Mutex};
-
-        fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
-            MouseEvent {
-                kind,
-                column,
-                row,
-                modifiers: KeyModifiers::NONE,
-            }
-        }
 
         fn node_text(node: &LayoutNode) -> Option<String> {
             match node.props.get("text") {
@@ -12373,22 +12922,6 @@ mod tests {
                 .find_map(|child| find_descendant_button_by_text(child, text))
         }
 
-        fn click_node(editor: &mut eseqlisp::Editor, node: &LayoutNode) {
-            let precise_col = 1.0 + node.rect.col + node.rect.width * 0.5;
-            let precise_row = 1.0 + node.rect.row + node.rect.height * 0.5;
-            let col = precise_col.floor() as u16;
-            let row = precise_row.floor() as u16;
-            editor.handle_mouse_precise(
-                mouse_event(MouseEventKind::Down(MouseButton::Left), col, row),
-                1,
-                1,
-                120,
-                30,
-                precise_col,
-                precise_row,
-            );
-        }
-
         let src = std::fs::read_to_string("metal-seq-mixer-v2.lisp").expect("read mixer lisp");
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
@@ -12398,18 +12931,37 @@ mod tests {
             vec![
                 (
                     "track-names",
-                    test_list(vec![Value::String("kick".to_string())]),
+                    test_list(vec![
+                        Value::String("kick".to_string()),
+                        Value::String("snare".to_string()),
+                    ]),
                 ),
                 ("track-colors", test_track_colors()),
-                ("num-tracks", Value::Number(1.0)),
+                ("num-tracks", Value::Number(2.0)),
                 ("current-track", Value::Number(0.0)),
-                ("record-armed", test_list(vec![Value::Bool(false)])),
-                ("track-mutes", test_list(vec![Value::Bool(false)])),
-                ("track-solos", test_list(vec![Value::Bool(false)])),
-                ("track-muted-by-solo", test_list(vec![Value::Bool(false)])),
+                ("delete-target-version", Value::Number(0.0)),
+                (
+                    "record-armed",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
+                (
+                    "track-mutes",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
+                (
+                    "track-solos",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
+                (
+                    "track-muted-by-solo",
+                    test_list(vec![Value::Bool(false), Value::Bool(false)]),
+                ),
                 (
                     "track-instrument-types",
-                    test_list(vec![Value::String("instrument".to_string())]),
+                    test_list(vec![
+                        Value::String("modulator".to_string()),
+                        Value::String("instrument".to_string()),
+                    ]),
                 ),
                 (
                     "mod-routes",
@@ -12421,7 +12973,7 @@ mod tests {
                         );
                         map.insert(
                             "dest".to_string(),
-                            Rc::new(RefCell::new(Value::Number(0.0))),
+                            Rc::new(RefCell::new(Value::Number(1.0))),
                         );
                         map.insert(
                             "input".to_string(),
@@ -12430,11 +12982,20 @@ mod tests {
                         map
                     })]),
                 ),
-                ("track-volumes", test_list(vec![Value::Number(1.0)])),
-                ("track-pans", test_list(vec![Value::Number(0.0)])),
+                (
+                    "track-volumes",
+                    test_list(vec![Value::Number(1.0), Value::Number(1.0)]),
+                ),
+                (
+                    "track-pans",
+                    test_list(vec![Value::Number(0.0), Value::Number(0.0)]),
+                ),
                 (
                     "track-outputs",
-                    test_list(vec![Value::String("main".to_string())]),
+                    test_list(vec![
+                        Value::String("main".to_string()),
+                        Value::String("main".to_string()),
+                    ]),
                 ),
                 (
                     "track-output-options",
@@ -12447,42 +13008,79 @@ mod tests {
                 ),
                 (
                     "track-bus-sends",
-                    test_list(vec![test_list(vec![
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "bus-idx".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map.insert(
-                                "name".to_string(),
-                                Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
-                            );
-                            map.insert(
-                                "amount".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map
-                        }),
-                        Value::Map({
-                            let mut map = std::collections::HashMap::new();
-                            map.insert(
-                                "bus-idx".to_string(),
-                                Rc::new(RefCell::new(Value::Number(1.0))),
-                            );
-                            map.insert(
-                                "name".to_string(),
-                                Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
-                            );
-                            map.insert(
-                                "amount".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
-                            map
-                        }),
-                    ])]),
+                    test_list(vec![
+                        test_list(vec![
+                            Value::Map({
+                                let mut map = std::collections::HashMap::new();
+                                map.insert(
+                                    "bus-idx".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(0.0))),
+                                );
+                                map.insert(
+                                    "name".to_string(),
+                                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
+                                );
+                                map.insert(
+                                    "amount".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(0.0))),
+                                );
+                                map
+                            }),
+                            Value::Map({
+                                let mut map = std::collections::HashMap::new();
+                                map.insert(
+                                    "bus-idx".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(1.0))),
+                                );
+                                map.insert(
+                                    "name".to_string(),
+                                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
+                                );
+                                map.insert(
+                                    "amount".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(0.0))),
+                                );
+                                map
+                            }),
+                        ]),
+                        test_list(vec![
+                            Value::Map({
+                                let mut map = std::collections::HashMap::new();
+                                map.insert(
+                                    "bus-idx".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(0.0))),
+                                );
+                                map.insert(
+                                    "name".to_string(),
+                                    Rc::new(RefCell::new(Value::String("Bus A".to_string()))),
+                                );
+                                map.insert(
+                                    "amount".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(0.0))),
+                                );
+                                map
+                            }),
+                            Value::Map({
+                                let mut map = std::collections::HashMap::new();
+                                map.insert(
+                                    "bus-idx".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(1.0))),
+                                );
+                                map.insert(
+                                    "name".to_string(),
+                                    Rc::new(RefCell::new(Value::String("Bus B".to_string()))),
+                                );
+                                map.insert(
+                                    "amount".to_string(),
+                                    Rc::new(RefCell::new(Value::Number(0.0))),
+                                );
+                                map
+                            }),
+                        ]),
+                    ]),
                 ),
                 ("track-peak-0", Value::Number(0.0)),
+                ("track-peak-1", Value::Number(0.0)),
                 ("master-peak-l", Value::Number(0.0)),
                 ("master-peak-r", Value::Number(0.0)),
                 ("bus-peak-0", Value::Number(0.0)),
@@ -12533,6 +13131,7 @@ mod tests {
             .runtime_mut()
             .eval_str("(defstate selected-bus -1)")
             .expect("install shared mixer selection state");
+        register_test_delete_target_natives(&mut editor, 2);
 
         for name in [
             "seq-toggle-record-arm",
@@ -12574,6 +13173,26 @@ mod tests {
         editor
             .runtime_mut()
             .eval_str("(mixer-v2-select-next-channel)")
+            .expect("right arrow should select next track channel");
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-set-track:[1]"),
+            "next channel from track 1 should select track 2"
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("selected-bus")
+                .expect("read selected bus"),
+            Some(Value::Number(-1.0)),
+            "next track selection should keep selected-bus cleared"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "current-track", Value::Number(1.0));
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-select-next-channel)")
             .expect("right arrow should select next mixer channel");
         assert_eq!(
             editor
@@ -12581,7 +13200,7 @@ mod tests {
                 .eval_str("selected-bus")
                 .expect("read selected bus"),
             Some(Value::Number(1.0)),
-            "next channel from the only track should select Bus A in display order"
+            "next channel from the last track should select Bus A in display order"
         );
         assert!(
             editor.drain_host_commands().is_empty(),
@@ -12601,8 +13220,8 @@ mod tests {
             .expect("left arrow should select previous mixer channel");
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
-            Some("seq-set-track:[0]"),
-            "previous channel from Bus A should return to track 1"
+            Some("seq-set-track:[1]"),
+            "previous channel from Bus A should return to track 2"
         );
         assert_eq!(
             editor
@@ -12614,8 +13233,19 @@ mod tests {
         );
         editor
             .runtime_mut()
+            .eval_str("(mixer-v2-select-track 0)")
+            .expect("explicit mixer track selection should claim delete target");
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("read delete target kind"),
+            Some(Value::String("mixer-track".to_string()))
+        );
+        editor
+            .runtime_mut()
             .eval_str("(mixer-v2-delete-selected-track)")
-            .expect("delete on track selection should queue host command");
+            .expect("delete on mixer delete target should queue host command");
         let commands = editor.drain_host_commands();
         assert_eq!(commands.len(), 1);
         match &commands[0] {
@@ -12789,9 +13419,9 @@ mod tests {
         let mod_out =
             find_node_by_stable_key(&layout, "mixer-v2-mod-out-0").expect("track mod out port");
         let mod_in =
-            find_node_by_stable_key(&layout, "mixer-v2-mod-in-0-0").expect("track mod in port");
+            find_node_by_stable_key(&layout, "mixer-v2-mod-in-1-0").expect("track mod in port");
         for input in 1..4 {
-            let key = format!("mixer-v2-mod-in-0-{input}");
+            let key = format!("mixer-v2-mod-in-1-{input}");
             let node = find_node_by_stable_key(&layout, &key)
                 .unwrap_or_else(|| panic!("track mod in port {input}"));
             assert!(
@@ -12802,7 +13432,7 @@ mod tests {
             );
         }
         let ext3_in =
-            find_node_by_stable_key(&layout, "mixer-v2-mod-in-0-2").expect("Ext3 mod in port");
+            find_node_by_stable_key(&layout, "mixer-v2-mod-in-1-2").expect("Ext3 mod in port");
         let Value::List(sources) = ext3_in
             .props
             .get("connected-sources")
@@ -12824,20 +13454,94 @@ mod tests {
             mod_out.rect,
             mod_in.rect
         );
-        let track_strip =
-            find_node_by_stable_key(&layout, "mixer-v2-track-0").expect("track mixer strip");
+        editor
+            .runtime_mut()
+            .eval_str("(mixer-v2-select-track 0)")
+            .expect("select track before clicking track control");
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(mixer-v2-delete-target-track? 0)")
+                .expect("query mixer delete target"),
+            Some(Value::Bool(true)),
+            "mixer delete target predicate should match selected track"
+        );
+        editor.runtime_mut().run_reactive_cycle();
+        editor.refresh_runtime_side_effects();
+        let layout_for_control_click = editor
+            .runtime_mut()
+            .current_layout
+            .clone()
+            .expect("mixer layout should be available before control click");
+        let track_strip = find_node_by_stable_key(&layout_for_control_click, "mixer-v2-track-0")
+            .expect("track mixer strip");
         let track_select =
-            find_descendant_button_by_text(track_strip, "1").expect("track selector button");
-        click_node(&mut editor, track_select);
+            find_descendant_button_by_text(track_strip, "1").expect("track mute button");
+        calls.lock().unwrap().clear();
+        let track_select_callback = track_select
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("track mute button on-click");
+        editor
+            .runtime_mut()
+            .invoke(track_select_callback, vec![Value::Bool(true)])
+            .expect("invoke track mute click");
+        assert_eq!(
+            calls.lock().unwrap().last().map(String::as_str),
+            Some("seq-toggle-track-mute:[0]")
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("read delete target after control click"),
+            Some(Value::Bool(false)),
+            "track controls should clear active delete target instead of claiming track deletion"
+        );
+        let track_label = find_button_by_text(&layout, "kick").expect("track label button");
+        let track_label_callback = track_label
+            .props
+            .get("on-click")
+            .cloned()
+            .expect("track label on-click");
+        editor
+            .runtime_mut()
+            .invoke(track_label_callback, vec![Value::Bool(true)])
+            .expect("invoke track label click");
         assert_eq!(
             calls.lock().unwrap().last().map(String::as_str),
             Some("seq-set-track:[0]")
         );
-        let track_label = find_button_by_text(&layout, "kick").expect("track label button");
-        click_node(&mut editor, track_label);
         assert_eq!(
-            calls.lock().unwrap().last().map(String::as_str),
-            Some("seq-set-track:[0]")
+            editor
+                .runtime_mut()
+                .eval_str("(seq-active-delete-target-kind)")
+                .expect("read delete target after track label click"),
+            Some(Value::String("mixer-track".to_string())),
+            "track-name badge should claim mixer track deletion"
+        );
+        editor
+            .runtime_mut()
+            .set_reactive("SEQ", "delete-target-version", Value::Number(2.0));
+        editor.refresh_runtime_side_effects();
+        let selected_layout = editor
+            .widget_layout()
+            .expect("selected mixer layout should be available");
+        let selected_track_label =
+            find_button_by_text(&selected_layout, "kick").expect("selected track label button");
+        assert!(
+            selected_track_label.rect.width > 0.0 && selected_track_label.rect.height > 0.0,
+            "active mixer delete-target badge should have a finite visible rect: {:?}",
+            selected_track_label.rect
+        );
+        assert_eq!(
+            selected_track_label.props.get("background-color"),
+            Some(&Value::Keyword("fx-panel-header-selected-bg".to_string())),
+            "active mixer delete-target badge should use the selected FX header color path"
         );
 
         let bus_a_strip =

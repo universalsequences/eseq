@@ -5,9 +5,6 @@
 (defstate instrument-source-tab 0)
 (defstate instrument-mods-open false)
 (defstate instrument-selected-mod-slot 1)
-(defstate selected-fx-slot -1)
-(defstate selected-midi-fx-slot -1)
-(defstate selected-bus-fx-slot -1)
 ;; These are temporary render-context globals used by generated custom synth UI.
 ;; They must NOT be defstate: custom UI functions set them while rendering, and
 ;; writing reactive state during measurement/layout can perturb the layout.
@@ -67,7 +64,7 @@
   (if (get fx :midi-fx)
     (list "midi-effect" "effect-instance")
     (if (get fx :bus-fx)
-      (list "audio-effect")
+      (list "audio-effect" "effect-instance")
       (list "audio-effect" "effect-instance"))))
 
 (def fx-panel-header (title params fx)
@@ -79,7 +76,7 @@
       (if (get fx :midi-fx)
         (fx-select-midi-effect (get fx :slot-idx))
         (if (get fx :bus-fx)
-          (fx-select-bus-effect (get fx :slot-idx))
+          (fx-select-bus-effect (get fx :bus-idx) (get fx :slot-idx))
           (fx-select-effect (get fx :slot-idx)))))
     (h-stack :gap 0.5 :align :center
       (fx-panel-header-leading-spacer)
@@ -103,32 +100,40 @@
         (box)))))
 
 (def fx-clear-selected-effect ()
-  (do
-    (set! selected-fx-slot -1)
-    (set! selected-midi-fx-slot -1)
-    (set! selected-bus-fx-slot -1)))
+  (seq-clear-delete-target))
 
 (def fx-drop-library-effect (payload target)
   (let ((kind (get payload :kind))
         (name (get payload :name))
         (chain (get target :chain))
         (track (get target :track))
+        (bus (get target :bus))
         (slot (get target :slot)))
     (if (= chain "append")
-      (if (= kind "builtin-audio-effect")
-        (host-command "add-builtin-effect-to-track" (dict :track track :name name))
-        (if (= kind "custom-audio-effect")
-          (host-command "add-effect-to-track" (dict :track track :name name))
-          (if (= kind "midi-effect")
-            (host-command "add-midi-fx-to-track" (dict :track track :name name))
-            (status "Drop an audio or MIDI effect"))))
+      (if (and (not (= bus nil)) (>= bus 0))
+        (if (= kind "builtin-audio-effect")
+          (host-command "add-builtin-bus-effect" (dict :bus bus :name name))
+          (if (= kind "custom-audio-effect")
+            (host-command "add-bus-effect" (dict :bus bus :name name))
+            (status "Drop an audio effect on a bus")))
+        (if (= kind "builtin-audio-effect")
+          (host-command "add-builtin-effect-to-track" (dict :track track :name name))
+          (if (= kind "custom-audio-effect")
+            (host-command "add-effect-to-track" (dict :track track :name name))
+            (if (= kind "midi-effect")
+              (host-command "add-midi-fx-to-track" (dict :track track :name name))
+              (status "Drop an audio or MIDI effect")))))
       (if (and (= chain "audio") (= kind "builtin-audio-effect"))
         (host-command "insert-builtin-effect-before-slot" (dict :track track :slot slot :name name))
         (if (and (= chain "audio") (= kind "custom-audio-effect"))
           (host-command "insert-effect-before-slot" (dict :track track :slot slot :name name))
           (if (and (= chain "midi") (= kind "midi-effect"))
             (host-command "insert-midi-fx-before-slot" (dict :track track :slot slot :name name))
-            (status "That effect type does not belong in this chain")))))))
+            (if (and (= chain "bus") (= kind "builtin-audio-effect"))
+              (host-command "insert-builtin-bus-effect-before-slot" (dict :bus bus :slot slot :name name))
+              (if (and (= chain "bus") (= kind "custom-audio-effect"))
+                (host-command "insert-bus-effect-before-slot" (dict :bus bus :slot slot :name name))
+                (status "That effect type does not belong in this chain")))))))))
 
 (def fx-drop-existing-effect (payload target)
   (let ((kind (get payload :kind))
@@ -137,6 +142,8 @@
         (source-slot (get payload :slot))
         (target-chain (get target :chain))
         (target-track (get target :track))
+        (source-bus (get payload :bus))
+        (target-bus (get target :bus))
         (target-slot (get target :slot)))
     (if (and (= kind "audio-effect-instance") (= source-chain "audio")
              (or (= target-chain "audio") (= target-chain "append")))
@@ -150,7 +157,13 @@
           (dict :source-track source-track :source-slot source-slot
                 :target-track target-track :target-slot target-slot
                 :position target-chain))
-        (status "Move effects within the same audio or MIDI chain")))))
+        (if (and (= kind "bus-effect-instance") (= source-chain "bus")
+                 (or (= target-chain "bus") (= target-chain "append"))
+                 (= source-bus target-bus))
+          (host-command "move-bus-effect-slot"
+            (dict :bus target-bus :source-slot source-slot
+                  :target-slot target-slot :position target-chain))
+          (status "Move effects within the same audio, MIDI, or bus chain"))))))
 
 (def fx-drop-on-effect (event)
   (let ((payload (get event :payload))
@@ -336,22 +349,13 @@
               :on-change (lambda (v) (do (cool-off-follow) (seq-set-track-param :swing v))))))))))
 
 (def fx-select-effect (slot)
-  (do
-    (set! selected-fx-slot slot)
-    (set! selected-midi-fx-slot -1)
-    (set! selected-bus-fx-slot -1)))
+  (seq-set-delete-target :fx-effect (dict :chain "audio" :slot slot)))
 
 (def fx-select-midi-effect (slot)
-  (do
-    (set! selected-midi-fx-slot slot)
-    (set! selected-fx-slot -1)
-    (set! selected-bus-fx-slot -1)))
+  (seq-set-delete-target :fx-effect (dict :chain "midi" :slot slot)))
 
-(def fx-select-bus-effect (slot)
-  (do
-    (set! selected-bus-fx-slot slot)
-    (set! selected-fx-slot -1)
-    (set! selected-midi-fx-slot -1)))
+(def fx-select-bus-effect (bus slot)
+  (seq-set-delete-target :fx-effect (dict :chain "bus" :bus bus :slot slot)))
 
 (def fx-has-selected-bus? ()
   (and (>= selected-bus 0)
@@ -359,20 +363,7 @@
        (< selected-bus (len SEQ.bus-effects))))
 
 (def fx-delete-selected-effect ()
-  (if (and (fx-has-selected-bus?) (>= selected-bus-fx-slot 0))
-    (do
-      (host-command "delete-bus-effect"
-        (dict :bus selected-bus :slot selected-bus-fx-slot))
-      (fx-clear-selected-effect))
-  (if (>= selected-midi-fx-slot 0)
-    (do
-      (host-command "delete-midi-fx" (dict :slot selected-midi-fx-slot))
-      (fx-clear-selected-effect))
-    (if (>= selected-fx-slot 0)
-    (do
-      (host-command "delete-effect" (dict :slot selected-fx-slot))
-      (fx-clear-selected-effect))
-    (fx-clear-selected-effect)))))
+  (seq-delete-active-target))
 
 (defwidget fx-panel-bg
   :width 1 :height 1
@@ -1131,7 +1122,7 @@
     :padding 0)))
 
 (def midi-fx-panel (title params fx)
-  (let ((selected (= selected-midi-fx-slot (get fx :slot-idx))))
+  (let ((selected (fx-panel-selected? fx)))
   (box
     (v-stack :gap 0
       (fx-panel-header title params fx)
@@ -1171,9 +1162,14 @@
   (instrument-header-button "synth" (and (= instrument-panel-tab 0) (not instrument-mods-open)) 4.5
     (lambda (info) (do (set! instrument-panel-tab 0) (set! instrument-mods-open false)))))
 
+(def instrument-toggle-mods-view ()
+  (do
+    (set! instrument-panel-tab 0)
+    (set! instrument-mods-open (not instrument-mods-open))))
+
 (def instrument-mods-toggle-button ()
   (instrument-header-button "mods" (and (= instrument-panel-tab 0) instrument-mods-open) 4.0
-    (lambda (info) (do (set! instrument-panel-tab 0) (set! instrument-mods-open (not instrument-mods-open))))))
+    (lambda (info) (instrument-toggle-mods-view))))
 
 (def inst-param (inst name)
   (nth (filter |p| (= (get p :name) name) (get inst :synth)) 0))
@@ -2133,11 +2129,14 @@
             (fx-param-grid params fx)))))))
 
 (def fx-panel-selected? (fx)
-  (if (get fx :midi-fx)
-    (= selected-midi-fx-slot (get fx :slot-idx))
-    (if (get fx :bus-fx)
-      (= selected-bus-fx-slot (get fx :slot-idx))
-      (= selected-fx-slot (get fx :slot-idx)))))
+  (do
+    SEQ.delete-target-version
+    (if (get fx :midi-fx)
+      (seq-delete-target? :fx-effect (dict :chain "midi" :slot (get fx :slot-idx)))
+      (if (get fx :bus-fx)
+        (seq-delete-target? :fx-effect
+          (dict :chain "bus" :bus (get fx :bus-idx) :slot (get fx :slot-idx)))
+        (seq-delete-target? :fx-effect (dict :chain "audio" :slot (get fx :slot-idx)))))))
 
 (def fx-panel-header-bg (selected)
   (if selected :fx-panel-header-selected-bg :fx-panel-header-bg))
@@ -2340,7 +2339,7 @@
                       (box :height 0.1)
                       (if (get inst :buffer)
                         (subtree :key (str "sampler-waveform-" (get inst :buffer))
-                          (box :width 73 :height 4.85
+                          (box :width 78 :height 4.85
                             (waveform
                               :height 4.85
                               :header-height 0.3
@@ -2492,8 +2491,14 @@
        :corner-radius 10
        :border-color :mixer-strip-border
        :border-width 2
-       :drop-types (list "audio-effect" "midi-effect" "effect-instance")
-       :drop-meta (dict :kind "fx-append" :chain "append" :track SEQ.current-track :slot -1)
+       :drop-types (if (fx-has-selected-bus?)
+         (list "audio-effect" "effect-instance")
+         (list "audio-effect" "midi-effect" "effect-instance"))
+       :drop-meta (dict :kind "fx-append"
+                    :chain "append"
+                    :track SEQ.current-track
+                    :bus (if (fx-has-selected-bus?) selected-bus -1)
+                    :slot -1)
        :drop-hover-border-color :mixer-strip-selected-border
        :drop-hover-background-color :mixer-control-bg
        :on-drop (lambda (event) (fx-drop-on-effect event))

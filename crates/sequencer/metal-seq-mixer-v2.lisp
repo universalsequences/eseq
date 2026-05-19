@@ -65,11 +65,13 @@
 (def mixer-v2-select-track (i)
   (do
     (set! selected-bus -1)
-    (seq-set-track i)))
+    (seq-set-track i)
+    (seq-set-delete-target :mixer-track (dict :track i))))
 
 (def mixer-v2-select-bus (i)
   (do
     (seq-clear-selection)
+    (seq-clear-delete-target)
     (set! selected-bus i)))
 
 (def mixer-v2-drop-sample-on-track (event)
@@ -77,16 +79,20 @@
       (target (get event :target)))
     (let ((path (get payload :path))
         (track (get target :track)))
-      (if path
-        (host-command "load-sample-into-track" (dict :track track :path path))
-        (status "Drop a sample file, not a folder")))))
+      (do
+        (mixer-v2-clear-delete-target)
+        (if path
+          (host-command "load-sample-into-track" (dict :track track :path path))
+          (status "Drop a sample file, not a folder"))))))
 
 (def mixer-v2-drop-sample-new-track (event)
   (let ((payload (get event :payload)))
     (let ((path (get payload :path)))
-      (if path
-        (host-command "add-track-sample" (dict :path path))
-        (status "Drop a sample file, not a folder")))))
+      (do
+        (mixer-v2-clear-delete-target)
+        (if path
+          (host-command "add-track-sample" (dict :path path))
+          (status "Drop a sample file, not a folder"))))))
 
 (def mixer-v2-drop-effect-on-track (event)
   (let ((payload (get event :payload))
@@ -94,13 +100,15 @@
     (let ((kind (get payload :kind))
         (name (get payload :name))
         (track (get target :track)))
-      (if (= kind "builtin-audio-effect")
-        (host-command "add-builtin-effect-to-track" (dict :track track :name name))
-        (if (= kind "custom-audio-effect")
-          (host-command "add-effect-to-track" (dict :track track :name name))
-          (if (= kind "midi-effect")
-            (host-command "add-midi-fx-to-track" (dict :track track :name name))
-            (status "Drop an audio or MIDI effect")))))))
+      (do
+        (mixer-v2-clear-delete-target)
+        (if (= kind "builtin-audio-effect")
+          (host-command "add-builtin-effect-to-track" (dict :track track :name name))
+          (if (= kind "custom-audio-effect")
+            (host-command "add-effect-to-track" (dict :track track :name name))
+            (if (= kind "midi-effect")
+              (host-command "add-midi-fx-to-track" (dict :track track :name name))
+              (status "Drop an audio or MIDI effect"))))))))
 
 (def mixer-v2-drop-on-track (event)
   (let ((drag-type (get event :drag-type)))
@@ -111,13 +119,22 @@
         (status "Unsupported drop")))))
 
 (defstate mixer-v2-pending-mod-source -1)
-(defstate mixer-v2-selected-mod-source -1)
-(defstate mixer-v2-selected-mod-dest -1)
-(defstate mixer-v2-selected-mod-input -1)
-
 (def mixer-v2-track-modulator? (i)
   (and (< i (len SEQ.track-instrument-types))
     (= (nth SEQ.track-instrument-types i) "modulator")))
+
+(def mixer-v2-clear-delete-target ()
+  (seq-clear-delete-target))
+
+(def mixer-v2-delete-target-track? (track)
+  (do
+    SEQ.delete-target-version
+    (seq-delete-target? :mixer-track (dict :track track))))
+
+(def mixer-v2-delete-target-mod-route? (source dest input)
+  (do
+    SEQ.delete-target-version
+    (seq-delete-target? :mod-route (dict :source source :dest dest :input input))))
 
 (def mixer-v2-mod-route-exists-at (source dest input idx)
   (if (>= idx (len SEQ.mod-routes))
@@ -145,22 +162,15 @@
   (mixer-v2-mod-route-sources-at dest input 0 (list)))
 
 (def mixer-v2-clear-selected-mod-route ()
-  (do
-    (set! mixer-v2-selected-mod-source -1)
-    (set! mixer-v2-selected-mod-dest -1)
-    (set! mixer-v2-selected-mod-input -1)))
+  (mixer-v2-clear-delete-target))
 
 (def mixer-v2-select-mod-route (source dest input)
   (do
-    (set! mixer-v2-selected-mod-source source)
-    (set! mixer-v2-selected-mod-dest dest)
-    (set! mixer-v2-selected-mod-input input)
+    (seq-set-delete-target :mod-route (dict :source source :dest dest :input input))
     (status (str "Selected mod route: track " (+ source 1) " out -> track " (+ dest 1) " Ext" (+ input 1)))))
 
 (def mixer-v2-selected-mod-route? (source dest input)
-  (and (= mixer-v2-selected-mod-source source)
-    (= mixer-v2-selected-mod-dest dest)
-    (= mixer-v2-selected-mod-input input)))
+  (mixer-v2-delete-target-mod-route? source dest input))
 
 (def mixer-v2-selected-mod-sources-at (dest input idx acc)
   (if (>= idx (len SEQ.mod-routes))
@@ -174,30 +184,15 @@
 (def mixer-v2-selected-mod-sources (dest input)
   (mixer-v2-selected-mod-sources-at dest input 0 (list)))
 
-(def mixer-v2-delete-selected-mod-route ()
-  (if (mixer-v2-mod-route-exists?
-      mixer-v2-selected-mod-source
-      mixer-v2-selected-mod-dest
-      mixer-v2-selected-mod-input)
-    (do
-      (host-command "delete-mod-route"
-        (dict
-          :source mixer-v2-selected-mod-source
-          :dest mixer-v2-selected-mod-dest
-          :input mixer-v2-selected-mod-input))
-      (mixer-v2-clear-selected-mod-route)
-      true)
-    (do
-      (mixer-v2-clear-selected-mod-route)
-      false)))
-
 (def mixer-v2-mod-out-click (track)
   (if (mixer-v2-track-modulator? track)
     (do
       (set! mixer-v2-pending-mod-source track)
-      (mixer-v2-clear-selected-mod-route)
+      (mixer-v2-clear-delete-target)
       (status (str "Mod out: track " (+ track 1))))
-    (status "Only modulator tracks expose mod out in v1")))
+    (do
+      (mixer-v2-clear-delete-target)
+      (status "Only modulator tracks expose mod out in v1"))))
 
 (def mixer-v2-cancel-mod-draw ()
   (do
@@ -205,12 +200,14 @@
     true))
 
 (def mixer-v2-connect-mod-route (source track input)
-  (if (= source track)
-    (status "Mod self-routes are not allowed")
-    (if (mixer-v2-mod-route-exists? source track input)
-      (status "Mod route already connected")
-      (host-command "set-mod-route"
-        (dict :source source :dest track :input input)))))
+  (do
+    (mixer-v2-clear-delete-target)
+    (if (= source track)
+      (status "Mod self-routes are not allowed")
+      (if (mixer-v2-mod-route-exists? source track input)
+        (status "Mod route already connected")
+        (host-command "set-mod-route"
+          (dict :source source :dest track :input input))))))
 
 (def mixer-v2-mod-in-click (track input)
   (if (< mixer-v2-pending-mod-source 0)
@@ -337,16 +334,24 @@
 (def mixer-v2-track-meter-control (i)
   (box :width 3.65 :height 4.24
     :on-click (lambda (event)
-      (seq-set-track-volume i (mixer-v2-event-volume event)))
+      (do
+        (mixer-v2-clear-delete-target)
+        (seq-set-track-volume i (mixer-v2-event-volume event))))
     :on-drag (lambda (event)
-      (seq-set-track-volume i (mixer-v2-event-volume event)))
+      (do
+        (mixer-v2-clear-delete-target)
+        (seq-set-track-volume i (mixer-v2-event-volume event))))
     (h-stack :gap 0.06 :align :center
       (mixer-v2-volume-triangle
         :value (bind-seq-nth "track-volumes" i)
         :on-click (lambda (sx sy region)
-          (seq-set-track-volume i (mixer-v2-pointer-volume sy)))
+          (do
+            (mixer-v2-clear-delete-target)
+            (seq-set-track-volume i (mixer-v2-pointer-volume sy))))
         :on-drag (lambda (sx sy region)
-          (seq-set-track-volume i (mixer-v2-pointer-volume sy))))
+          (do
+            (mixer-v2-clear-delete-target)
+            (seq-set-track-volume i (mixer-v2-pointer-volume sy)))))
       (mixer-v2-track-meter i))))
 
 (def mixer-v2-bus-meter-control (i)
@@ -389,8 +394,10 @@
     :text-color :dim :label-color :dim
     :width 4.7 :height 1.5 :knob-size 1.34
     :on-change (lambda (v)
-      (host-command "set-track-bus-send"
-        (dict :track track :bus (get send :bus-idx) :amount v)))))
+      (do
+        (mixer-v2-clear-delete-target)
+        (host-command "set-track-bus-send"
+          (dict :track track :bus (get send :bus-idx) :amount v))))))
 
 (def mixer-v2-track-strip (i)
   (let ((selected (and (< selected-bus 0) (= SEQ.current-track i)))
@@ -406,13 +413,15 @@
       :drop-types (list "sample" "audio-effect" "midi-effect")
       :drop-meta (dict :kind "track" :track i)
       :on-drop (lambda (event) (mixer-v2-drop-on-track event))
-      :on-click |x y r| (mixer-v2-select-track i)
+      :on-click (lambda (event) (mixer-v2-select-track i))
       (v-stack :gap 0.15
         (dropdown :value (nth SEQ.track-outputs i)
           :key (str "mixer-v2-track-output-" i)
           :options SEQ.track-output-options
           :on-change (lambda (v)
-            (host-command "set-track-output" (dict :track i :label v)))
+            (do
+              (mixer-v2-clear-delete-target)
+              (host-command "set-track-output" (dict :track i :label v))))
           :width 9.8 :height 1.2 :font-size 10)
         (mixer-v2-mod-port-row i)
         (h-stack :gap 0.05
@@ -427,33 +436,37 @@
             :text-color :dim :label-color :dim
             :width 3.9 :height 2.35 :knob-size 1.48
             :on-change (lambda (v)
-              (seq-set-track-pan i v)))
+              (do
+                (mixer-v2-clear-delete-target)
+                (seq-set-track-pan i v))))
           (mixer-v2-track-meter-control i))
         (h-stack :gap 0.35
           (button (str (+ i 1))
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if muted :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
             :color (if muted :dim :black)
-            :on-click |x y r| (seq-toggle-track-mute i))
+            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-track-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.track-solos i))
             :color (if (nth SEQ.track-solos i) :black :dim)
-            :on-click |x y r| (seq-toggle-track-solo i))
+            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-track-solo i))))
           (button "R"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-arm-bg (nth SEQ.record-armed i))
             :color (if (nth SEQ.record-armed i) :black :dim)
-            :on-click |x y r| (seq-toggle-record-arm i)))
+            :on-click (lambda (event) (do (mixer-v2-clear-delete-target) (seq-toggle-record-arm i)))))
         (button (substring (nth SEQ.track-names i) 0 10)
           :width 9.8 :height 1.0 :padding 0 :font-size 10
-          :background-color (rgba
-            (mixer-v2-track-color-r i muted)
-            (mixer-v2-track-color-g i muted)
-            (mixer-v2-track-color-b i muted)
-            1.0)
-          :color (if muted :dim :black)
-          :on-click |x y r| (mixer-v2-select-track i))))))
+          :background-color (if (mixer-v2-delete-target-track? i)
+            :fx-panel-header-selected-bg
+            (rgba
+              (mixer-v2-track-color-r i muted)
+              (mixer-v2-track-color-g i muted)
+              (mixer-v2-track-color-b i muted)
+              1.0))
+          :color (if (mixer-v2-delete-target-track? i) :white (if muted :dim :black))
+          :on-click (lambda (event) (mixer-v2-select-track i)))))))
 
 (def mixer-v2-bus-label (i)
   (if (= i 0) "Main" (nth SEQ.bus-names i)))
@@ -491,8 +504,10 @@
     (if (< clamped SEQ.num-tracks)
       (do
         (set! selected-bus -1)
+        (mixer-v2-clear-delete-target)
         (seq-set-track clamped))
       (do
+        (mixer-v2-clear-delete-target)
         (seq-clear-selection)
         (set! selected-bus (mixer-v2-display-bus-index (- clamped SEQ.num-tracks)))))))
 
@@ -507,11 +522,7 @@
     true))
 
 (def mixer-v2-delete-selected-track ()
-  (if (and (< selected-bus 0) (> SEQ.num-tracks 0) (< SEQ.current-track SEQ.num-tracks))
-    (do
-      (host-command "delete-track" (dict :track SEQ.current-track))
-      true)
-    false))
+  (seq-delete-active-target))
 
 (def mixer-v2-handle-key (key text)
   (if (= key "LEFT")
@@ -519,9 +530,9 @@
     (if (= key "RIGHT")
       (mixer-v2-select-next-channel)
       (if (= key "BS")
-        (mixer-v2-delete-selected-mod-route)
+        (seq-delete-active-target)
         (if (= key "Delete")
-          (mixer-v2-delete-selected-mod-route)
+          (seq-delete-active-target)
           false)))))
 
 (def mixer-v2-bus-strip (i)
@@ -532,7 +543,7 @@
       :corner-radius 10
       :border-color (mixer-v2-strip-border selected)
       :padding 0.45
-      :on-click |x y r| (mixer-v2-select-bus i)
+      :on-click (lambda (event) (mixer-v2-select-bus i))
       (v-stack :gap 0.25
         (box :height 4.8)
         (h-stack :gap 0.45 :align :center
@@ -543,18 +554,18 @@
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (if (nth SEQ.bus-mutes i) :mixer-control-bg (rgba 0.95 0.48 0.18 1.0))
             :color (if (nth SEQ.bus-mutes i) :dim :black)
-            :on-click |x y r| (do (mixer-v2-select-bus i) (seq-toggle-bus-mute i)))
+            :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-mute i))))
           (button "S"
             :width 2.1 :height 1.0 :padding 0 :font-size 10
             :background-color (mixer-v2-button-bg (nth SEQ.bus-solos i))
             :color (if (nth SEQ.bus-solos i) :black :dim)
-            :on-click |x y r| (do (mixer-v2-select-bus i) (seq-toggle-bus-solo i)))
+            :on-click (lambda (event) (do (mixer-v2-select-bus i) (seq-toggle-bus-solo i))))
           (box :width 2.1 :height 1.0))
         (button (mixer-v2-bus-label i)
           :width 8.2 :height 1.0 :padding 0 :font-size 10
           :background-color :mixer-label-bg
           :color :white
-          :on-click |x y r| (mixer-v2-select-bus i))))))
+          :on-click (lambda (event) (mixer-v2-select-bus i)))))))
 
 (def mixer-v2-sample-drop-zone ()
   (box :key "mixer-v2-sample-drop-zone"

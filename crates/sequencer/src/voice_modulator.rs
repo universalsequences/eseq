@@ -6,9 +6,6 @@ use crate::effects::{ParamDescriptor, ParamKind, ParamScaling, SyncDivision};
 pub const NUM_OUTPUTS: usize = 6;
 pub const MOD_PARAM_BASE: u32 = 1_000_000;
 
-pub const PARAM_BPM: usize = 11;
-pub const PARAM_RESET_COUNTER: usize = 12;
-
 const IDX_LFO1_PHASE: usize = 0;
 const IDX_LFO2_PHASE: usize = 1;
 const IDX_LFO3_PHASE: usize = 2;
@@ -22,6 +19,9 @@ const IDX_RAND_SMOOTH: usize = 9;
 const IDX_LAST_RESET_COUNTER: usize = 10;
 const IDX_ENV_STAGE: usize = 11;
 const IDX_SAMPLE_RATE: usize = 48;
+
+pub const PARAM_BPM: usize = 49;
+pub const PARAM_RESET_COUNTER: usize = 50;
 
 pub const PARAM_LFO1_RATE_HZ: usize = 13;
 pub const PARAM_LFO1_SYNC: usize = 14;
@@ -60,7 +60,7 @@ pub const PARAM_MOD5_DEPTH: usize = 46;
 pub const PARAM_MOD6_DEPTH: usize = 47;
 
 pub const PARAM_COUNT: usize = 37;
-pub const STATE_SIZE: usize = 49;
+pub const STATE_SIZE: usize = 51;
 
 const SHAPE_TRIANGLE: usize = 0;
 const SHAPE_SINE: usize = 1;
@@ -1096,5 +1096,29 @@ mod tests {
             .expect("LFO 1 retrigger descriptor");
 
         assert_eq!(retrigger.default, 0.0);
+    }
+
+    #[test]
+    fn transport_params_do_not_overlap_runtime_state() {
+        let runtime_indices = [
+            IDX_LFO1_PHASE,
+            IDX_LFO2_PHASE,
+            IDX_LFO3_PHASE,
+            IDX_ENV2,
+            IDX_RAND_PHASE,
+            IDX_DRIFT,
+            IDX_PREV_GATE,
+            IDX_RNG,
+            IDX_RAND_HOLD,
+            IDX_RAND_SMOOTH,
+            IDX_LAST_RESET_COUNTER,
+            IDX_ENV_STAGE,
+            IDX_SAMPLE_RATE,
+        ];
+
+        assert!(!runtime_indices.contains(&PARAM_BPM));
+        assert!(!runtime_indices.contains(&PARAM_RESET_COUNTER));
+        assert!(PARAM_BPM < STATE_SIZE);
+        assert!(PARAM_RESET_COUNTER < STATE_SIZE);
     }
 }

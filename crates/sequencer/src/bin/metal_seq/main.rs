@@ -62,6 +62,48 @@ use sequencer::sequencer::{
 use sequencer::ui;
 use std::sync::atomic::AtomicBool;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FxDeleteChain {
+    Audio,
+    Midi,
+    Bus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActiveDeleteTarget {
+    MixerTrack {
+        track: usize,
+    },
+    ModRoute {
+        source: usize,
+        dest: usize,
+        input: usize,
+    },
+    FxEffect {
+        chain: FxDeleteChain,
+        bus: Option<usize>,
+        slot: usize,
+    },
+}
+
+impl ActiveDeleteTarget {
+    fn buffer_name(&self) -> &'static str {
+        match self {
+            ActiveDeleteTarget::MixerTrack { .. } | ActiveDeleteTarget::ModRoute { .. } => {
+                "*mixer*"
+            }
+            ActiveDeleteTarget::FxEffect { .. } => "*fx*",
+        }
+    }
+}
+
+fn should_clear_active_delete_target_for_buffer(
+    target: Option<&ActiveDeleteTarget>,
+    active_buffer_name: &str,
+) -> bool {
+    target.is_some_and(|target| target.buffer_name() != active_buffer_name)
+}
+
 fn pull_shared_bus_state(
     app: &mut ui::App,
     bus_state: &Arc<Mutex<Vec<ui::BusChannelState>>>,
@@ -159,17 +201,10 @@ fn param_scaling(param: &sequencer::effects::ParamDescriptor) -> String {
     }
 }
 
-fn runtime_usize_state(editor: &Editor, name: &str) -> Option<usize> {
-    match editor.runtime().global_value(name) {
-        Some(Value::Number(value)) if value >= 0.0 => Some(value as usize),
-        _ => None,
-    }
-}
-
 fn metal_agent_session_context(
     app: &ui::App,
-    editor: &Editor,
     current_track: &Arc<AtomicUsize>,
+    active_delete_target: &Arc<Mutex<Option<ActiveDeleteTarget>>>,
 ) -> AgentSessionContext {
     let track = current_track_for_snapshot(app, current_track);
     let current_track_name = track.and_then(|track| app.tracks.get(track).cloned());
@@ -187,8 +222,18 @@ fn metal_agent_session_context(
     let current_instrument_preset_schema =
         metal_agent_instrument_preset_schema(app, track, current_instrument_name.as_deref());
 
-    let current_effect_slot = runtime_usize_state(editor, "selected-fx-slot")
-        .filter(|slot| *slot >= sequencer::effects::BUILTIN_SLOT_COUNT);
+    let current_effect_slot = active_delete_target
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|target| match target {
+            ActiveDeleteTarget::FxEffect {
+                chain: FxDeleteChain::Audio,
+                slot,
+                ..
+            } if *slot >= sequencer::effects::BUILTIN_SLOT_COUNT => Some(*slot),
+            _ => None,
+        });
     let current_effect_name = track.and_then(|track| {
         current_effect_slot.and_then(|slot| {
             app.graph
@@ -1223,10 +1268,38 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_custom_instrument_ui_source_with_overlay, reconciled_track_index, Runtime, Value,
-        AGENT_INSTRUMENT_STUB_UI,
+        build_custom_instrument_ui_source_with_overlay, reconciled_track_index,
+        should_clear_active_delete_target_for_buffer, ActiveDeleteTarget, FxDeleteChain, Runtime,
+        Value, AGENT_INSTRUMENT_STUB_UI,
     };
     use eseqlisp::parser::{ASTParser, Parser};
+
+    #[test]
+    fn active_delete_target_buffer_switch_preserves_target_claimed_in_new_buffer() {
+        let mixer_target = ActiveDeleteTarget::MixerTrack { track: 0 };
+        assert!(
+            !should_clear_active_delete_target_for_buffer(Some(&mixer_target), "*mixer*"),
+            "clicking a mixer delete target in an inactive mixer tile should survive the tile activation"
+        );
+        assert!(
+            should_clear_active_delete_target_for_buffer(Some(&mixer_target), "*fx*"),
+            "leaving mixer for another buffer should clear a mixer delete target"
+        );
+
+        let fx_target = ActiveDeleteTarget::FxEffect {
+            chain: FxDeleteChain::Audio,
+            bus: None,
+            slot: 2,
+        };
+        assert!(
+            !should_clear_active_delete_target_for_buffer(Some(&fx_target), "*fx*"),
+            "clicking an FX delete target in an inactive FX tile should survive the tile activation"
+        );
+        assert!(
+            should_clear_active_delete_target_for_buffer(Some(&fx_target), "*mixer*"),
+            "leaving FX for mixer should clear an FX delete target"
+        );
+    }
 
     #[test]
     fn reconciles_stale_current_track_against_track_count() {
@@ -1344,6 +1417,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // FX/instrument panel refresh counter for changes that affect *fx* but
     // should not force *fx* to rerun on unrelated step-grid edits.
     let fx_epoch = Arc::new(AtomicUsize::new(0));
+    let active_delete_target: Arc<Mutex<Option<ActiveDeleteTarget>>> = Arc::new(Mutex::new(None));
+    let active_delete_target_version = Arc::new(AtomicUsize::new(0));
     // When set, pagination stays on the user-selected page until the cooldown expires.
     let auto_follow_override_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
@@ -1376,6 +1451,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         record_armed.clone(),
         ui_epoch.clone(),
         fx_epoch.clone(),
+        active_delete_target.clone(),
+        active_delete_target_version.clone(),
         auto_follow_override_until.clone(),
         lg_raw,
     );
@@ -1419,6 +1496,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut prev_current_track_playhead_visible = false;
     let mut prev_ui_epoch: usize = 0;
     let mut prev_fx_epoch: usize = 0;
+    let mut prev_active_buffer_name = editor.active_buffer().name.clone();
     let mut prev_agent_generation_watermark = agent_generation_watermark(&app);
     let mut prev_sampler_analysis_key: Option<(usize, i32, u32, u32, usize)> = None;
     let mut prev_auto_follow = true;
@@ -1443,6 +1521,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pull_shared_bus_state(&mut app, &bus_state);
         pull_named_scratch_buffer_into_project(&editor, &mut app);
         editor.update_timers();
+        let active_buffer_name = editor.active_buffer().name.clone();
+        if active_buffer_name != prev_active_buffer_name {
+            prev_active_buffer_name = active_buffer_name;
+            let mut guard = active_delete_target.lock().unwrap();
+            let should_clear = should_clear_active_delete_target_for_buffer(
+                guard.as_ref(),
+                &prev_active_buffer_name,
+            );
+            if should_clear {
+                guard.take();
+                drop(guard);
+                active_delete_target_version.fetch_add(1, Ordering::Relaxed);
+                ui_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         let agent_generation = agent_generation_watermark(&app);
         if agent_generation != prev_agent_generation_watermark {
             eprintln!(
@@ -3216,6 +3309,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "set-bus-step-active" => {
+                        if let Value::Map(ref map) = payload {
+                            let bus_idx = map_number(map, "bus").map(|value| value as usize);
+                            let step = map_number(map, "step").map(|value| value as usize);
+                            let active = map_bool(map, "active");
+                            if let (Some(bus_idx), Some(step)) = (bus_idx, step) {
+                                if let Some(bus) = app.buses.get_mut(bus_idx) {
+                                    if let Some(slot) = bus.gate_sequence.steps.get_mut(step) {
+                                        if *slot != active {
+                                            *slot = active;
+                                            app.publish_bus_gate_runtime();
+                                            let rt = editor.runtime_mut();
+                                            sync_bus_mixer_state(rt, &app);
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "set-bus-step-param" => {
                         if let Value::Map(ref map) = payload {
                             let bus_idx = map_number(map, "bus").map(|value| value as usize);
@@ -4764,6 +4879,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
+                    "insert-builtin-bus-effect-before-slot" => {
+                        let bus_idx = extract_usize_from_payload(&payload, "bus");
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let effect_name = extract_string_from_payload(&payload, "name");
+                        if let (Some(bus_idx), Some(slot), Some(effect_name)) =
+                            (bus_idx, slot, effect_name)
+                        {
+                            match app.insert_builtin_bus_effect_before_slot_sync(
+                                bus_idx,
+                                slot,
+                                &effect_name,
+                            ) {
+                                Ok(slot_idx) => {
+                                    app.publish_bus_gate_runtime();
+                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Inserted built-in bus effect '{}' at slot {}",
+                                        effect_name,
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error inserting built-in bus effect: {error}"
+                                ))),
+                            }
+                        }
+                    }
+                    "insert-bus-effect-before-slot" => {
+                        let bus_idx = extract_usize_from_payload(&payload, "bus");
+                        let slot = extract_usize_from_payload(&payload, "slot");
+                        let effect_name = extract_string_from_payload(&payload, "name");
+                        if let (Some(bus_idx), Some(slot), Some(effect_name)) =
+                            (bus_idx, slot, effect_name)
+                        {
+                            match app.insert_bus_effect_before_slot_sync(
+                                bus_idx,
+                                slot,
+                                &effect_name,
+                            ) {
+                                Ok(slot_idx) => {
+                                    app.publish_bus_gate_runtime();
+                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Inserted bus effect '{}' at slot {}",
+                                        effect_name,
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error inserting bus effect: {error}"
+                                ))),
+                            }
+                        }
+                    }
                     "add-effect" => {
                         if let Value::Map(ref map) = payload {
                             if let Some(cell) = map.get("name") {
@@ -5311,6 +5492,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 Err(error) => editor.handle_host_event(HostEvent::Status(format!(
                                     "Error moving MIDI FX: {error}"
+                                ))),
+                            }
+                        }
+                    }
+                    "move-bus-effect-slot" => {
+                        let bus_idx = extract_usize_from_payload(&payload, "bus");
+                        let source_slot = extract_usize_from_payload(&payload, "source-slot");
+                        let target_slot = extract_usize_from_payload(&payload, "target-slot");
+                        if let (Some(bus_idx), Some(source_slot)) = (bus_idx, source_slot) {
+                            match app.move_bus_effect_slot_sync(bus_idx, source_slot, target_slot) {
+                                Ok(slot_idx) => {
+                                    app.publish_bus_gate_runtime();
+                                    *bus_state.lock().unwrap() = app.buses.clone();
+                                    let rt = editor.runtime_mut();
+                                    sync_bus_mixer_state(rt, &app);
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                    fx_epoch.fetch_add(1, Ordering::Relaxed);
+                                    ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                    editor.handle_host_event(HostEvent::Status(format!(
+                                        "Moved bus effect to slot {}",
+                                        slot_idx + 1
+                                    )));
+                                }
+                                Err(error) => editor.handle_host_event(HostEvent::Status(format!(
+                                    "Error moving bus effect: {error}"
                                 ))),
                             }
                         }
@@ -5941,8 +6148,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        let session_context =
-                            metal_agent_session_context(&app, &editor, &current_track);
+                        let session_context = metal_agent_session_context(
+                            &app,
+                            &current_track,
+                            &active_delete_target,
+                        );
                         if let Err(error) =
                             app.agent_store
                                 .send_with_context(conv_id, prompt, session_context)
@@ -7478,6 +7688,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Sync recording state
                 let rec_on = recording.load(Ordering::Relaxed);
                 rt.set_reactive("SEQ", "recording", Value::Bool(rec_on));
+                rt.set_reactive(
+                    "SEQ",
+                    "delete-target-version",
+                    Value::Number(active_delete_target_version.load(Ordering::Relaxed) as f64),
+                );
                 let armed = record_armed.lock().unwrap();
                 let record_armed_changed = armed.len() != app.graph.record_armed.len()
                     || armed

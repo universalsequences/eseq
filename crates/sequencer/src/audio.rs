@@ -47,6 +47,20 @@ unsafe fn push_param_span(lg: *mut LiveGraph, logical_id: u64, idx: u64, span: u
     }
 }
 
+unsafe fn dispatch_voice_modulator_transport(lg: *mut LiveGraph, modulator_id: u64, bpm: f32) {
+    if modulator_id == 0 {
+        return;
+    }
+    params_push_wrapper(
+        lg,
+        ParamMsg {
+            idx: crate::voice_modulator::PARAM_BPM as u64,
+            logical_id: modulator_id,
+            fvalue: bpm.clamp(20.0, 400.0),
+        },
+    );
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct OutputDeviceConfig {
     sample_rate: u32,
@@ -2789,7 +2803,7 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
         data.last_pattern = pattern;
     }
 
-    // Push BPM to custom-engine modulators only when it changes. Track Filter/Delay
+    // Push BPM to per-voice modulators when it changes. Track Filter/Delay
     // inserts are descriptor-managed on the control side.
     let bpm = data.state.transport.bpm.load(Ordering::Relaxed);
     if bpm != data.last_bpm {
@@ -2800,20 +2814,22 @@ fn audio_callback(data: &mut AudioCallbackData, output: &mut [f32]) {
                 let logical_id = node.load(Ordering::Relaxed);
                 if logical_id != 0 {
                     unsafe {
-                        params_push_wrapper(
-                            data.lg.0,
-                            ParamMsg {
-                                idx: crate::voice_modulator::PARAM_BPM as u64,
-                                logical_id: logical_id as u64,
-                                fvalue: bpm_f,
-                            },
-                        );
+                        dispatch_voice_modulator_transport(data.lg.0, logical_id as u64, bpm_f);
                     }
                 }
             }
         }
         for pool in &data.voice_pools {
             for voice in pool.voices.iter().take(pool.num_voices) {
+                if voice.modulator_id > 0 {
+                    unsafe {
+                        dispatch_voice_modulator_transport(
+                            data.lg.0,
+                            voice.modulator_id as u64,
+                            bpm_f,
+                        );
+                    }
+                }
                 if voice.logical_id != 0 {
                     unsafe {
                         params_push_wrapper(

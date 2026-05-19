@@ -74,14 +74,21 @@ fn deepest_drop_target(
             .find_map(|child| deepest_drop_target(child, adjusted_row, col, drag_type))
             .or_else(|| node_accepts_drag_type(node, drag_type).then(|| (node.clone(), row, col)));
     }
-    if !node_contains_point(node, row, col) {
-        return None;
-    }
-    node.children
+
+    let child_target = node
+        .children
         .iter()
         .rev()
-        .find_map(|child| deepest_drop_target(child, row, col, drag_type))
-        .or_else(|| node_accepts_drag_type(node, drag_type).then(|| (node.clone(), row, col)))
+        .find_map(|child| deepest_drop_target(child, row, col, drag_type));
+    if child_target.is_some() {
+        return child_target;
+    }
+
+    if node_contains_point(node, row, col) && node_accepts_drag_type(node, drag_type) {
+        Some((node.clone(), row, col))
+    } else {
+        None
+    }
 }
 
 fn widget_drag_data(value: &Value) -> Option<(String, Value)> {

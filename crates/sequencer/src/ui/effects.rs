@@ -31,6 +31,13 @@ struct CustomEffectEntry {
     snapshot: EffectSlotSnapshot,
 }
 
+#[derive(Clone)]
+struct BusEffectEntry {
+    desc: EffectDescriptor,
+    snapshot: EffectSlotSnapshot,
+    custom_name: Option<String>,
+}
+
 #[derive(Clone, Copy)]
 struct CustomEffectEdge {
     source_id: i32,
@@ -591,6 +598,52 @@ impl App {
             if pattern_idx != current_pattern {
                 snapshot.move_midi_fx_slot_to(track, source_slot, target_slot);
             }
+        }
+    }
+
+    fn sync_other_bus_pattern_effect_insert(&mut self, bus_idx: usize, slot_idx: usize) {
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        self.ensure_bus_pattern_bank_len(current_pattern + 1);
+        for (pattern_idx, buses) in self.bus_pattern_bank.iter_mut().enumerate() {
+            if pattern_idx == current_pattern {
+                continue;
+            }
+            let Some(bus) = buses.get_mut(bus_idx) else {
+                continue;
+            };
+            if slot_idx > bus.effect_plocks.len() {
+                continue;
+            }
+            bus.effect_plocks.insert(slot_idx, Vec::new());
+            bus.effect_plocks.truncate(MAX_CUSTOM_FX);
+        }
+    }
+
+    fn sync_other_bus_pattern_effect_move(
+        &mut self,
+        bus_idx: usize,
+        source_slot: usize,
+        target_slot: usize,
+    ) {
+        let current_pattern = self.state.pattern.current_pattern.load(Ordering::Relaxed) as usize;
+        self.ensure_bus_pattern_bank_len(current_pattern + 1);
+        for (pattern_idx, buses) in self.bus_pattern_bank.iter_mut().enumerate() {
+            if pattern_idx == current_pattern {
+                continue;
+            }
+            let Some(bus) = buses.get_mut(bus_idx) else {
+                continue;
+            };
+            if source_slot >= bus.effect_plocks.len() {
+                continue;
+            }
+            let plocks = bus.effect_plocks.remove(source_slot);
+            let mut target = target_slot.min(bus.effect_plocks.len());
+            if source_slot < target {
+                target = target.saturating_sub(1);
+            }
+            bus.effect_plocks.insert(target, plocks);
+            bus.effect_plocks.truncate(MAX_CUSTOM_FX);
         }
     }
 
@@ -1700,6 +1753,253 @@ impl App {
             .ok_or_else(|| "No free bus effect slots available".to_string())?;
         self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, name)?;
         Ok(slot_idx)
+    }
+
+    fn bus_effect_entries(&self, bus_idx: usize) -> Result<Vec<BusEffectEntry>, String> {
+        let bus = self
+            .buses
+            .get(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        Ok((0..MAX_CUSTOM_FX)
+            .filter_map(|slot_idx| {
+                let slot = bus.effect_slots.get(slot_idx)?;
+                if slot.node_id == 0 {
+                    return None;
+                }
+                Some(BusEffectEntry {
+                    desc: bus.effect_descriptors[slot_idx].clone(),
+                    snapshot: slot.clone(),
+                    custom_name: bus.custom_effect_names.get(slot_idx).cloned().flatten(),
+                })
+            })
+            .collect())
+    }
+
+    fn write_bus_effect_entries(
+        &mut self,
+        bus_idx: usize,
+        entries: &[BusEffectEntry],
+    ) -> Result<(), String> {
+        let bus = self
+            .buses
+            .get_mut(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        for slot_idx in 0..MAX_CUSTOM_FX {
+            if slot_idx >= bus.effect_descriptors.len() || slot_idx >= bus.effect_slots.len() {
+                break;
+            }
+            if let Some(entry) = entries.get(slot_idx) {
+                bus.effect_descriptors[slot_idx] = entry.desc.clone();
+                bus.effect_slots[slot_idx] = entry.snapshot.clone();
+                if slot_idx < bus.custom_effect_names.len() {
+                    bus.custom_effect_names[slot_idx] = entry.custom_name.clone();
+                }
+            } else {
+                bus.effect_descriptors[slot_idx] = EffectDescriptor::empty_custom_slot();
+                bus.effect_slots[slot_idx] = EffectSlotSnapshot::new_empty();
+                if slot_idx < bus.custom_effect_names.len() {
+                    bus.custom_effect_names[slot_idx] = None;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn bus_effect_edges(&self, bus_idx: usize) -> Result<Vec<CustomEffectEdge>, String> {
+        let bus_nodes = self
+            .graph
+            .bus_node_ids
+            .get(bus_idx)
+            .ok_or_else(|| format!("Bus {} graph nodes not found", bus_idx + 1))?;
+        let bus = self
+            .buses
+            .get(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        let mut edges = Vec::new();
+        let mut prev_id = bus_nodes.gate_id;
+        let mut prev_channels = 2usize;
+        for slot_idx in 0..MAX_CUSTOM_FX {
+            let Some(slot) = bus.effect_slots.get(slot_idx) else {
+                continue;
+            };
+            if slot.node_id == 0 {
+                continue;
+            }
+            let desc = &bus.effect_descriptors[slot_idx];
+            edges.push(CustomEffectEdge {
+                source_id: prev_id,
+                source_channels: prev_channels,
+                dest_id: slot.node_id as i32,
+                dest_channels: desc.input_channels.max(1),
+            });
+            prev_id = slot.node_id as i32;
+            prev_channels = desc.output_channels.max(1);
+        }
+        edges.push(CustomEffectEdge {
+            source_id: prev_id,
+            source_channels: prev_channels,
+            dest_id: bus_nodes.volume_id,
+            dest_channels: 2,
+        });
+        Ok(edges)
+    }
+
+    fn reconnect_bus_effect_chain(
+        &self,
+        old_edges: Vec<CustomEffectEdge>,
+        bus_idx: usize,
+    ) -> Result<(), String> {
+        unsafe {
+            for edge in old_edges {
+                self.disconnect_custom_effect_edge(edge);
+            }
+            for edge in self.bus_effect_edges(bus_idx)? {
+                self.disconnect_custom_effect_edge(edge);
+                self.connect_custom_effect_edge(edge);
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_bus_effect_insert_slot(
+        &mut self,
+        bus_idx: usize,
+        target_slot: usize,
+    ) -> Result<usize, String> {
+        let mut entries = self.bus_effect_entries(bus_idx)?;
+        if entries.len() >= MAX_CUSTOM_FX {
+            return Err("No free bus effect slots available".to_string());
+        }
+        let bus = self
+            .buses
+            .get(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        let insert_offset = bus
+            .effect_slots
+            .iter()
+            .enumerate()
+            .take(target_slot.min(MAX_CUSTOM_FX))
+            .filter(|(_, slot)| slot.node_id != 0)
+            .count()
+            .min(entries.len());
+        entries.insert(
+            insert_offset,
+            BusEffectEntry {
+                desc: EffectDescriptor::empty_custom_slot(),
+                snapshot: EffectSlotSnapshot::new_empty(),
+                custom_name: None,
+            },
+        );
+        let old_edges = self.bus_effect_edges(bus_idx)?;
+        self.write_bus_effect_entries(bus_idx, &entries)?;
+        self.reconnect_bus_effect_chain(old_edges, bus_idx)?;
+        self.sync_other_bus_pattern_effect_insert(bus_idx, insert_offset);
+        Ok(insert_offset)
+    }
+
+    pub fn insert_builtin_bus_effect_before_slot_sync(
+        &mut self,
+        bus_idx: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        EffectDescriptor::builtin_insert(name)
+            .ok_or_else(|| format!("Unknown built-in effect '{name}'"))?;
+        let slot_idx = self.prepare_bus_effect_insert_slot(bus_idx, target_slot)?;
+        self.load_builtin_bus_effect_to_slot_sync(bus_idx, slot_idx, name)?;
+        Ok(slot_idx)
+    }
+
+    pub fn insert_bus_effect_before_slot_sync(
+        &mut self,
+        bus_idx: usize,
+        target_slot: usize,
+        name: &str,
+    ) -> Result<usize, String> {
+        let source = lisp_effect::load_effect_source(name).map_err(|e| e.to_string())?;
+        let result = lisp_effect::compile_and_load(&source, self.graph.sample_rate)?;
+        let slot_idx = self.prepare_bus_effect_insert_slot(bus_idx, target_slot)?;
+        let (slot_id, pred, pred_outputs, succ, succ_inputs, existing) =
+            self.resolve_bus_effect_slot_wiring(bus_idx, slot_idx)?;
+        let node_id = unsafe {
+            lisp_effect::add_effect_to_chain_at(
+                self.graph.lg.0,
+                slot_id,
+                &result.manifest,
+                &result.lib,
+                pred,
+                pred_outputs,
+                succ,
+                succ_inputs,
+                existing,
+            )
+        }?;
+        let desc = self.build_bus_effect_descriptor(name, &result.manifest);
+        let bus = self
+            .buses
+            .get_mut(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?;
+        bus.effect_descriptors[slot_idx] = desc;
+        bus.effect_slots[slot_idx] =
+            EffectSlotSnapshot::new_default(&bus.effect_descriptors[slot_idx], node_id as u32);
+        if slot_idx < bus.custom_effect_names.len() {
+            bus.custom_effect_names[slot_idx] = Some(name.to_string());
+        }
+        self.push_bus_effect_slot_defaults(bus_idx, slot_idx);
+        self.push_all_delay_bpm();
+        self.editor.lisp_libs.push(result.lib);
+        Ok(slot_idx)
+    }
+
+    pub fn move_bus_effect_slot_sync(
+        &mut self,
+        bus_idx: usize,
+        source_slot: usize,
+        target_slot: Option<usize>,
+    ) -> Result<usize, String> {
+        let mut entries = self.bus_effect_entries(bus_idx)?;
+        let source_offset = self
+            .buses
+            .get(bus_idx)
+            .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?
+            .effect_slots
+            .iter()
+            .enumerate()
+            .take(source_slot.min(MAX_CUSTOM_FX))
+            .filter(|(_, slot)| slot.node_id != 0)
+            .count();
+        if source_offset >= entries.len() {
+            return Err("Invalid source bus effect slot".to_string());
+        }
+        let entry = entries.remove(source_offset);
+        let mut target_offset = match target_slot {
+            Some(slot) => self
+                .buses
+                .get(bus_idx)
+                .ok_or_else(|| format!("Bus {} not found", bus_idx + 1))?
+                .effect_slots
+                .iter()
+                .enumerate()
+                .take(slot.min(MAX_CUSTOM_FX))
+                .filter(|(_, slot)| slot.node_id != 0)
+                .count(),
+            None => entries.len(),
+        };
+        if source_offset < target_offset {
+            target_offset = target_offset.saturating_sub(1);
+        }
+        target_offset = target_offset.min(entries.len());
+        if target_offset == source_offset {
+            entries.insert(source_offset, entry);
+            return Ok(source_slot);
+        }
+        let old_edges = self.bus_effect_edges(bus_idx)?;
+        entries.insert(target_offset, entry);
+        self.write_bus_effect_entries(bus_idx, &entries)?;
+        self.reconnect_bus_effect_chain(old_edges, bus_idx)?;
+        self.sync_other_bus_pattern_effect_move(bus_idx, source_offset, target_offset);
+        self.push_all_delay_bpm();
+        Ok(target_offset)
     }
 
     pub fn load_builtin_bus_effect_to_slot_sync(

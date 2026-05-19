@@ -86,6 +86,21 @@ fn active_buffer_accepts_global_ui_shortcuts(editor: &Editor) -> bool {
     matches!(editor.active_buffer().view_mode, ViewMode::UiOnly)
 }
 
+fn is_toggle_mods_view_shortcut(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Char('m') | KeyCode::Char('M') => key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::SUPER),
+        _ => false,
+    }
+}
+
 pub(crate) fn held_note_for_key(
     held_notes: &Arc<Mutex<Vec<HeldKeyboardNote>>>,
     key: &crossterm::event::KeyEvent,
@@ -405,6 +420,19 @@ pub(crate) fn handle_metal_command_shortcut(
 
     if !matches!(key.kind, KeyEventKind::Press) {
         return false;
+    }
+
+    if editor.minibuffer_prompt().is_none()
+        && editor.prompt_text().is_none()
+        && !focused_widget_captures_text_input(editor)
+        && is_toggle_mods_view_shortcut(key)
+    {
+        let _ = editor
+            .runtime_mut()
+            .eval_str("(seq-toggle-current-track-mods-view)");
+        editor.refresh_runtime_side_effects();
+        editor.mark_needs_redraw();
+        return true;
     }
 
     if editor.minibuffer_prompt().is_none()
@@ -888,6 +916,123 @@ mod live_keyboard_tests {
         assert_eq!(
             editor.runtime_mut().eval_str("tab-target").unwrap(),
             Some(eseqlisp::vm::Value::String("placement".to_string()))
+        );
+    }
+
+    #[test]
+    fn command_or_control_m_toggles_current_track_mods_view() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().view_mode = ViewMode::UiOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate instrument-panel-tab 2)
+                (defstate instrument-mods-open false)
+                (defstate selected-bus 1)
+                (def instrument-toggle-mods-view ()
+                  (do
+                    (set! instrument-panel-tab 0)
+                    (set! instrument-mods-open (not instrument-mods-open))))
+                (def seq-toggle-current-track-mods-view ()
+                  (do
+                    (set! selected-bus -1)
+                    (instrument-toggle-mods-view)))
+                "#,
+            )
+            .expect("install mods view handler");
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-mods-open")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Bool(true))
+        );
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-panel-tab")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Number(0.0))
+        );
+        assert_eq!(
+            editor.runtime_mut().eval_str("selected-bus").unwrap(),
+            Some(eseqlisp::vm::Value::Number(-1.0))
+        );
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-mods-open")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn command_m_toggles_mods_view_outside_ui_buffers() {
+        let mut editor = Editor::new(Runtime::new(), EditorConfig::default());
+        editor.active_buffer_mut().read_only = true;
+        editor.active_buffer_mut().view_mode = ViewMode::TextOnly;
+        editor
+            .runtime_mut()
+            .eval_str(
+                r#"
+                (defstate instrument-mods-open false)
+                (def instrument-toggle-mods-view ()
+                  (set! instrument-mods-open (not instrument-mods-open)))
+                (def seq-toggle-current-track-mods-view ()
+                  (instrument-toggle-mods-view))
+                "#,
+            )
+            .expect("install mods view handler");
+        editor.clear_needs_redraw();
+        let state = Arc::new(SequencerState::new(1, vec![]));
+        let current_track = Arc::new(AtomicUsize::new(0));
+        let selected_steps = Arc::new(Mutex::new(HashSet::new()));
+        let step_clipboard: Arc<Mutex<Option<(usize, Vec<(usize, StepSnapshot)>)>>> =
+            Arc::new(Mutex::new(None));
+
+        assert!(handle_metal_command_shortcut(
+            &mut editor,
+            &KeyEvent::new(KeyCode::Char('m'), KeyModifiers::SUPER),
+            &state,
+            &current_track,
+            &selected_steps,
+            &step_clipboard,
+        ));
+        assert_eq!(
+            editor
+                .runtime_mut()
+                .eval_str("instrument-mods-open")
+                .unwrap(),
+            Some(eseqlisp::vm::Value::Bool(true))
+        );
+        assert!(
+            editor.needs_redraw(),
+            "mods shortcut should schedule a frame after mutating Lisp UI state"
         );
     }
 

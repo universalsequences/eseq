@@ -1802,6 +1802,16 @@ impl GraphController<'_> {
                     "build_sampler_voices: failed to add modulator node for voice {v}"
                 ));
             }
+            unsafe {
+                crate::audiograph::params_push_wrapper(
+                    self.app.graph.lg.0,
+                    crate::audiograph::ParamMsg {
+                        idx: crate::voice_modulator::PARAM_BPM as u64,
+                        logical_id: mod_id as u64,
+                        fvalue: self.app.state.transport.bpm.load(Ordering::Relaxed) as f32,
+                    },
+                );
+            }
             let node_name = format!("{}_{}", track_name, v);
             let st = crate::sampler::create_sampler_node(
                 self.app.graph.lg.0,
@@ -2858,124 +2868,7 @@ impl GraphController<'_> {
         manifest: &DGenManifest,
         preserve_runtime_values: bool,
     ) {
-        let mut inst_desc = EffectDescriptor::from_lisp_manifest(
-            name,
-            &manifest.params,
-            manifest.n_inputs,
-            manifest.n_outputs,
-        );
-        inst_desc
-            .params
-            .extend(crate::voice_modulator::ui_param_descriptors());
-        let sorted_modulators = {
-            let mut ms = manifest.modulators.clone();
-            ms.sort_by_key(|m| m.slot);
-            ms
-        };
-        inst_desc.instrument_modulators = sorted_modulators
-            .iter()
-            .map(|m| crate::effects::InstrumentModulatorDescriptor {
-                slot: m.slot,
-                label: crate::voice_modulator::modulator_slot_label(m.slot, &m.name),
-            })
-            .collect();
-        let param_by_cell: std::collections::HashMap<usize, &crate::lisp_effect::DGenParam> =
-            manifest.params.iter().map(|p| (p.cell_id, p)).collect();
-        for dest in &manifest.mod_destinations {
-            let base_param_idx = inst_desc.params.iter().position(|p| {
-                p.node_param_idx == (lisp_effect::HEADER_SLOTS + dest.param_cell_id) as u32
-            });
-            let active_param_idx = inst_desc.params.len();
-            let active_default = param_by_cell
-                .get(&dest.active_cell_id)
-                .map(|p| p.default)
-                .unwrap_or(0.0);
-            let active_span = param_by_cell
-                .get(&dest.active_cell_id)
-                .map(|p| p.cell_span as u32)
-                .unwrap_or(1)
-                .max(1);
-            inst_desc.params.push(crate::effects::ParamDescriptor {
-                name: format!("__dgen_mod_active__{}", dest.name),
-                min: 0.0,
-                max: 1.0,
-                default: active_default,
-                kind: crate::effects::ParamKind::Boolean,
-                scaling: crate::effects::ParamScaling::Linear,
-                node_param_idx: (lisp_effect::HEADER_SLOTS + dest.active_cell_id) as u32,
-                node_param_span: active_span,
-                host_control: None,
-            });
-            for lane in &dest.depth_lanes {
-                let depth_default = param_by_cell
-                    .get(&lane.depth_cell_id)
-                    .map(|p| p.default)
-                    .unwrap_or(0.0);
-                let depth_min = dest.depth_min.unwrap_or_else(|| {
-                    param_by_cell
-                        .get(&lane.depth_cell_id)
-                        .map(|p| p.min)
-                        .unwrap_or(-1.0)
-                });
-                let depth_max = dest.depth_max.unwrap_or_else(|| {
-                    param_by_cell
-                        .get(&lane.depth_cell_id)
-                        .map(|p| p.max)
-                        .unwrap_or(1.0)
-                });
-                let depth_span = param_by_cell
-                    .get(&lane.depth_cell_id)
-                    .map(|p| p.cell_span as u32)
-                    .unwrap_or(1)
-                    .max(1);
-                let depth_param_idx = inst_desc.params.len();
-                inst_desc.params.push(crate::effects::ParamDescriptor {
-                    name: format!("mod {} slot {} amt", dest.name, lane.slot),
-                    min: depth_min,
-                    max: depth_max,
-                    default: depth_default,
-                    kind: crate::effects::ParamKind::Continuous {
-                        unit: dest.unit.clone(),
-                    },
-                    scaling: crate::effects::ParamScaling::Linear,
-                    node_param_idx: (lisp_effect::HEADER_SLOTS + lane.depth_cell_id) as u32,
-                    node_param_span: depth_span,
-                    host_control: None,
-                });
-                if let Some(base_param_idx) = base_param_idx {
-                    inst_desc.instrument_modulation_targets.push(
-                        crate::effects::InstrumentModulationTarget {
-                            base_param_idx,
-                            source_param_idx: None,
-                            modulator_slot: lane.slot,
-                            depth_param_idx,
-                            active_param_idx: Some(active_param_idx),
-                            depth_min,
-                            depth_max,
-                            depth_unit: dest.unit.clone(),
-                        },
-                    );
-                }
-            }
-        }
-        for target in &inst_desc.instrument_modulation_targets {
-            if let Some(active_param_idx) = target.active_param_idx {
-                let active = inst_desc
-                    .instrument_modulation_targets
-                    .iter()
-                    .filter(|candidate| candidate.active_param_idx == Some(active_param_idx))
-                    .any(|candidate| {
-                        inst_desc
-                            .params
-                            .get(candidate.depth_param_idx)
-                            .map(|param| param.default.abs() > f32::EPSILON)
-                            .unwrap_or(false)
-                    });
-                if let Some(param) = inst_desc.params.get_mut(active_param_idx) {
-                    param.default = if active { 1.0 } else { 0.0 };
-                }
-            }
-        }
+        let inst_desc = lisp_effect::instrument_descriptor_from_manifest(name, manifest);
         let inst_slot = &self.app.state.pattern.instrument_slots[track];
         if preserve_runtime_values {
             let node_id = inst_slot.node_id.load(Ordering::Relaxed);

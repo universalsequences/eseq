@@ -1,8 +1,8 @@
 ; Minimal Metal Sequencer - Step Grid UI
 ; C-p to toggle play/stop, Esc to clear step selection
 
-(load "mac-osx-dark.lisp")
-(mac-osx-theme)
+(load "metal-seq-themes.lisp")
+(seq-theme-mac-osx-dark)
 (load "metal-seq-materials.lisp")
 
 (defstate selected-bus -1)
@@ -179,6 +179,21 @@
     (seq-close-piano-roll)
     (seq-open-piano-roll-preferred)))
 
+(def seq-show-fx-lower-panel ()
+  (if (= lower-panel-buffer "*piano-roll*")
+    (do
+      (if (= (current-buffer-name) "*piano-roll*")
+        (set-window-buffer "*fx*")
+        (set-window-buffer-for "*piano-roll*" "*fx*"))
+      (seq-apply-fx-layout))
+    nil))
+
+(def seq-toggle-current-track-mods-view ()
+  (do
+    (set! selected-bus -1)
+    (instrument-toggle-mods-view)
+    (seq-show-fx-lower-panel)))
+
 (bind-key "Tab" "seq-toggle-main-or-piano-roll")
 
 ; 0=vel 1=dur 2=aux_a 3=transpose 4=pan 5=sync
@@ -283,6 +298,9 @@
 (defstate step-move-last nil)
 (defstate step-toggle-drag-value nil)
 
+(def step-selected? (step)
+  (and (seq-has-selection?) (nth SEQ.selected-steps step)))
+
 (def step-select-drag-start (step evt)
   (do
     (cool-off-follow)
@@ -301,15 +319,24 @@
       (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
       (set! cursor-step step)
       (seq-select-step-range step-drag-anchor step))
-    (if (= step-toggle-drag-value nil)
-      nil
+    (if (not (= step-toggle-drag-value nil))
       (do
         (set! step-click-pending nil)
         (cool-off-follow)
         (set! cursor-step step)
         (if (= (seq-track-step-active? SEQ.current-track step) step-toggle-drag-value)
           nil
-          (seq-toggle-step step))))))
+          (seq-toggle-step step)))
+      (if (= step-move-last nil)
+        nil
+        (if (= step step-move-last)
+          nil
+          (do
+            (set! step-click-pending nil)
+            (cool-off-follow)
+            (seq-move-step-drag step-move-last step)
+            (set! step-move-last step)
+            (set! cursor-step step)))))))
 
 (def step-pointer-down (step evt)
   (if (selection-click? evt)
@@ -318,10 +345,16 @@
       (cool-off-follow)
       (set! cursor-step step)
       (set! step-drag-anchor nil)
-      (set! step-move-last nil)
-      (set! step-click-pending nil)
-      (set! step-toggle-drag-value (not (seq-track-step-active? SEQ.current-track step)))
-      (step-select-drag-over step evt))))
+      (if (or (seq-track-step-active? SEQ.current-track step) (step-selected? step))
+        (do
+          (set! step-move-last step)
+          (set! step-click-pending step)
+          (set! step-toggle-drag-value nil))
+        (do
+          (set! step-move-last nil)
+          (set! step-click-pending nil)
+          (set! step-toggle-drag-value true)
+          (step-select-drag-over step evt))))))
 
 (def step-pointer-up (step evt)
   (do
@@ -332,9 +365,6 @@
     (set! step-drag-anchor nil)
     (set! step-move-last nil)
     (set! step-toggle-drag-value nil)))
-
-(def step-selected? (step)
-  (and (seq-has-selection?) (nth SEQ.selected-steps step)))
 
 (def seq-set-step-param-from-step (step param value)
   (if (step-selected? step)
@@ -621,6 +651,16 @@
     (set! cursor-step step)
     (host-command "toggle-bus-step" (dict :bus selected-bus :step step))))
 
+(def bus-set-step-active (step active)
+  (do
+    (cool-off-follow)
+    (set! cursor-step step)
+    (host-command "set-bus-step-active"
+      (dict :bus selected-bus :step step :active active))))
+
+(def bus-step-active? (step)
+  (nth (bus-seq-list SEQ.bus-steps) step))
+
 (def bus-select-step-range (start end)
   (host-command "select-bus-step-range"
     (dict :bus selected-bus :start start :end end)))
@@ -656,16 +696,24 @@
       (if (= step-drag-anchor nil) (set! step-drag-anchor step) nil)
       (set! cursor-step step)
       (bus-select-step-range step-drag-anchor step))
-    (if (= step-move-last nil)
-      nil
-      (if (= step step-move-last)
+    (if (not (= step-toggle-drag-value nil))
+      (do
+        (set! step-click-pending nil)
+        (cool-off-follow)
+        (set! cursor-step step)
+        (if (= (bus-step-active? step) step-toggle-drag-value)
+          nil
+          (bus-set-step-active step step-toggle-drag-value)))
+      (if (= step-move-last nil)
         nil
-        (do
-          (set! step-click-pending nil)
-          (cool-off-follow)
-          (bus-move-step-drag step-move-last step)
-          (set! step-move-last step)
-          (set! cursor-step step))))))
+        (if (= step step-move-last)
+          nil
+          (do
+            (set! step-click-pending nil)
+            (cool-off-follow)
+            (bus-move-step-drag step-move-last step)
+            (set! step-move-last step)
+            (set! cursor-step step)))))))
 
 (def bus-step-pointer-down (step evt)
   (if (selection-click? evt)
@@ -674,8 +722,16 @@
       (cool-off-follow)
       (set! cursor-step step)
       (set! step-drag-anchor nil)
-      (set! step-move-last step)
-      (set! step-click-pending step))))
+      (if (or (bus-step-active? step) (step-selected? step))
+        (do
+          (set! step-move-last step)
+          (set! step-click-pending step)
+          (set! step-toggle-drag-value nil))
+        (do
+          (set! step-move-last nil)
+          (set! step-click-pending nil)
+          (set! step-toggle-drag-value true)
+          (bus-step-select-drag-over step evt))))))
 
 (def bus-step-pointer-up (step evt)
   (do
@@ -684,7 +740,8 @@
       nil)
     (set! step-click-pending nil)
     (set! step-drag-anchor nil)
-    (set! step-move-last nil)))
+    (set! step-move-last nil)
+    (set! step-toggle-drag-value nil)))
 
 (def bus-set-sequencer-param (param value)
   (host-command "set-bus-sequencer-param"
