@@ -7303,7 +7303,6 @@ mod tests {
         }
 
         let mut editor = eseqlisp::Editor::new(Runtime::new(), eseqlisp::EditorConfig::default());
-        editor.runtime_mut().set_capture_rendered_layouts(false);
         editor.set_text_measurer(Box::new(TestTextMeasurer), 8.0, 16.0);
         register_agent_test_natives(editor.runtime_mut());
         register_full_grid_test_natives(&mut editor);

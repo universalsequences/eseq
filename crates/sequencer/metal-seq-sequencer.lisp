@@ -119,13 +119,13 @@
             (rgba 0.18 0.18 0.18 1.0)))))
     (sdf/layer
       (sdf/fill
-        (sdf/translate 0 0.0 (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0)
-          )
+        (sdf/translate 0 0.0
+          (sdf/rounded-rect (* 2.0 width) (* 1.00 height) 0.0))
         (material
           :lighting (lighting :edge-min -0.5 :edge-max 0.3
             :light (vec3 0.1 -1.8 2.5) :shininess 92.0)
           :color (if (= duration 1)
-            (aqua-color  
+            (aqua-color
               (rgba (* track-r 0.55) (* track-g 0.55) (* track-b 0.55) 0.5)
               (rgba track-r track-g track-b 1))
             (rgba 0 0 0 0))))
@@ -259,27 +259,27 @@
   (let ((track-r (seqv-track-color-r track (seqv-muted? track)))
         (track-g (seqv-track-color-g track (seqv-muted? track)))
         (track-b (seqv-track-color-b track (seqv-muted? track))))
-  (box
-    :width 3.05 :height 1.45
-    :key (str "seqv-step-cell-" track "-" step)
-    :on-mouse-down (lambda (evt)
-      (if visible
-        (seqv-step-pointer-down track step evt)
-        nil))
-    :on-drag (lambda (evt)
-      (if visible
-        (seqv-step-select-drag-over track step evt)
-        nil))
-    :on-mouse-up (lambda (evt)
-      (if visible
-        (seqv-step-pointer-up track step evt)
-        nil))
-    :active (bind-seq (str "seq-track-step-active-" track "-" step))
-    :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
-    :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
-    :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
-    :track-r track-r :track-g track-g :track-b track-b
-    :background "seqv-step-shell")))
+    (box
+      :width 3.05 :height 1.45
+      :key (str "seqv-step-cell-" track "-" step)
+      :on-mouse-down (lambda (evt)
+        (if visible
+          (seqv-step-pointer-down track step evt)
+          nil))
+      :on-drag (lambda (evt)
+        (if visible
+          (seqv-step-select-drag-over track step evt)
+          nil))
+      :on-mouse-up (lambda (evt)
+        (if visible
+          (seqv-step-pointer-up track step evt)
+          nil))
+      :active (bind-seq (str "seq-track-step-active-" track "-" step))
+      :plocked (bind-seq (str "seq-track-step-plocked-" track "-" step))
+      :selected (bind-seq (str "seq-track-step-selected-" track "-" step))
+      :duration (bind-seq (str "seq-track-step-duration-" track "-" step))
+      :track-r track-r :track-g track-g :track-b track-b
+      :background "seqv-step-shell")))
 
 (def seqv-playhead-row (track track-id row)
   (box
