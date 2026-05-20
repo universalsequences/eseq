@@ -558,6 +558,78 @@ fn debug_emit_wraps_macro_subpatches_as_defmacro() {
 }
 
 #[test]
+fn debug_emit_uses_macro_parameter_names_for_edited_connections() {
+    let patch = parse(
+        r#"
+            (defmacro ap (sig g)
+              (def node (+ sig (* h g)))
+              node)
+            "#,
+    );
+    let mut macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap()
+        .patch
+        .clone();
+    let sig_node_id = macro_patch
+        .nodes
+        .iter()
+        .find(|node| {
+            matches!(
+                node.source.as_ref().map(|source| &source.owner),
+                Some(SourceOwner::MacroParameter { binding, .. }) if binding.name == "sig"
+            )
+        })
+        .unwrap()
+        .id
+        .clone();
+    let plus_node_id = macro_patch
+        .nodes
+        .iter()
+        .find(|node| node.op == "+")
+        .unwrap()
+        .id
+        .clone();
+    macro_patch.connections.retain(|connection| {
+        !(connection.from_node == sig_node_id && connection.to_node == plus_node_id)
+    });
+    macro_patch.nodes.push(PatchNode {
+        id: "created-mul".to_string(),
+        op: "*".to_string(),
+        kind: NodeKind::Builtin,
+        label: "* 1".to_string(),
+        args: vec![ArgValue::ConnectedExpr, ArgValue::Literal("1".to_string())],
+        outputs: vec!["out".to_string()],
+        position: (0.0, 0.0),
+        diagnostic: None,
+        source: None,
+    });
+    macro_patch.connections.push(PatchConnection {
+        from_node: sig_node_id,
+        from_output: 0,
+        to_node: "created-mul".to_string(),
+        to_input: 0,
+        kind: ConnectionKind::Forward,
+        source: None,
+    });
+    macro_patch.connections.push(PatchConnection {
+        from_node: "created-mul".to_string(),
+        from_output: 0,
+        to_node: plus_node_id,
+        to_input: 0,
+        kind: ConnectionKind::Forward,
+        source: None,
+    });
+
+    assert_eq!(
+        emit_patch_debug_lisp_for_view("macro:ap", &macro_patch),
+        "(defmacro ap (sig g)\n  (def node (+ (* sig 1) (* h g)))\n  node)"
+    );
+}
+
+#[test]
 fn literal_args_are_inlined_and_do_not_create_visible_ports() {
     let patch = parse(
         r#"

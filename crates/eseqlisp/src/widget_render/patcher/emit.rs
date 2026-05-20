@@ -49,19 +49,18 @@ fn emit_patch_debug_lisp_body(patch: &Patch, context: EmitContext) -> String {
     let mut top_level = patch.nodes.iter().collect::<Vec<_>>();
     top_level.sort_by_key(|node| source_order(node).unwrap_or((usize::MAX, usize::MAX)));
     for node in top_level {
-        if !should_emit_top_level(node, context) {
+        if !should_emit_top_level(node) {
             continue;
         }
         if emitted_node_ids.contains(node.id.as_str()) {
             continue;
         }
         emitted_node_ids.insert(node.id.as_str());
-        emitted.push(emit_top_level_node(
-            node,
-            &nodes,
-            &inbound,
-            &mut HashSet::new(),
-        ));
+        if let Some(form) =
+            emit_top_level_node(node, &nodes, &inbound, &mut HashSet::new(), context)
+        {
+            emitted.push(form);
+        }
     }
     if emitted.is_empty() {
         return ";; patcher debug emit: no source-backed top-level forms".to_string();
@@ -167,10 +166,7 @@ fn source_order(node: &PatchNode) -> Option<(usize, usize)> {
     Some((form_id.index, path_len))
 }
 
-fn should_emit_top_level(node: &PatchNode, context: EmitContext) -> bool {
-    if context == EmitContext::Macro && node.kind == NodeKind::Out {
-        return false;
-    }
+fn should_emit_top_level(node: &PatchNode) -> bool {
     let Some(source) = node.source.as_ref() else {
         return matches!(node.kind, NodeKind::Out);
     };
@@ -188,11 +184,15 @@ fn emit_top_level_node(
     nodes: &HashMap<&str, &PatchNode>,
     inbound: &HashMap<(String, usize), &PatchConnection>,
     stack: &mut HashSet<String>,
-) -> String {
+    context: EmitContext,
+) -> Option<String> {
+    if context == EmitContext::Macro && node.kind == NodeKind::Out {
+        return emit_macro_return_node(node, nodes, inbound, stack);
+    }
     let Some(source) = node.source.as_ref() else {
-        return emit_node_expr(node, nodes, inbound, stack);
+        return Some(emit_node_expr(node, nodes, inbound, stack));
     };
-    match &source.owner {
+    Some(match &source.owner {
         SourceOwner::BindingValue { binding, .. } => match binding {
             BindingTarget::Symbol(name) => {
                 format!(
@@ -213,7 +213,39 @@ fn emit_top_level_node(
             format!("(make-history {})", node.id)
         }
         _ => emit_node_expr(node, nodes, inbound, stack),
+    })
+}
+
+fn emit_macro_return_node(
+    node: &PatchNode,
+    nodes: &HashMap<&str, &PatchNode>,
+    inbound: &HashMap<(String, usize), &PatchConnection>,
+    stack: &mut HashSet<String>,
+) -> Option<String> {
+    let connection = inbound.get(&(node.id.clone(), 0))?;
+    let source_node = nodes.get(connection.from_node.as_str())?;
+    if same_top_level_form(node, source_node) {
+        return None;
     }
+    Some(emit_connected_source_node(
+        source_node,
+        connection,
+        nodes,
+        inbound,
+        stack,
+    ))
+}
+
+fn same_top_level_form(out_node: &PatchNode, source_node: &PatchNode) -> bool {
+    let Some(SourceOwner::TopLevelForm { form_id: out_form }) =
+        out_node.source.as_ref().map(|source| &source.owner)
+    else {
+        return false;
+    };
+    matches!(
+        source_node.source.as_ref().map(|source| &source.owner),
+        Some(SourceOwner::TopLevelForm { form_id }) if form_id == out_form
+    )
 }
 
 fn emit_node_expr(
@@ -248,15 +280,13 @@ fn emit_call_expr(
             && connection.kind == ConnectionKind::Forward
             && let Some(source_node) = nodes.get(connection.from_node.as_str())
         {
-            if let Some(symbol) = connection.source.as_ref().and_then(symbol_reference_arg) {
-                parts.push(symbol.to_string());
-                continue;
-            }
-            if let Some(symbol) = node_reference_name(source_node) {
-                parts.push(symbol);
-                continue;
-            }
-            parts.push(emit_node_expr(source_node, nodes, inbound, stack));
+            parts.push(emit_connected_source_node(
+                source_node,
+                connection,
+                nodes,
+                inbound,
+                stack,
+            ));
             continue;
         }
         parts.push(match arg {
@@ -266,6 +296,22 @@ fn emit_call_expr(
         });
     }
     format!("({})", parts.join(" "))
+}
+
+fn emit_connected_source_node(
+    source_node: &PatchNode,
+    connection: &PatchConnection,
+    nodes: &HashMap<&str, &PatchNode>,
+    inbound: &HashMap<(String, usize), &PatchConnection>,
+    stack: &mut HashSet<String>,
+) -> String {
+    if let Some(symbol) = connection.source.as_ref().and_then(symbol_reference_arg) {
+        return symbol.to_string();
+    }
+    if let Some(symbol) = node_reference_name(source_node) {
+        return symbol;
+    }
+    emit_node_expr(source_node, nodes, inbound, stack)
 }
 
 fn emit_label_as_call(label: &str) -> String {
@@ -281,6 +327,9 @@ fn node_reference_name(node: &PatchNode) -> Option<String> {
         } => Some(name.clone()),
         SourceOwner::TopLevelForm { .. } if node.kind == NodeKind::Param => {
             node.label.split_whitespace().nth(1).map(str::to_string)
+        }
+        SourceOwner::MacroParameter { binding, .. } if node.kind == NodeKind::In => {
+            Some(binding.name.clone())
         }
         SourceOwner::Compound { .. } if node.kind == NodeKind::History => Some(node.id.clone()),
         _ => None,
