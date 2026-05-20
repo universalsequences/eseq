@@ -17,9 +17,9 @@ pub(super) fn node_display_label(node: &PatchNode) -> String {
     let base = match node.kind {
         NodeKind::Builtin
         | NodeKind::MacroInstance
-        | NodeKind::In
         | NodeKind::Out
         | NodeKind::Constant => node.op.as_str(),
+        NodeKind::In => return node.label.clone(),
         _ => node.label.as_str(),
     };
     let mut label = base.to_string();

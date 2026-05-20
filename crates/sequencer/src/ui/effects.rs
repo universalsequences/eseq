@@ -235,6 +235,92 @@ impl App {
         Ok(())
     }
 
+    pub fn replace_custom_instrument_engine_sync(
+        &mut self,
+        engine_id: usize,
+        name: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        let track = self
+            .graph
+            .track_engine_ids
+            .iter()
+            .position(|track_engine_id| *track_engine_id == Some(engine_id))
+            .ok_or_else(|| format!("No live track is using instrument engine id {engine_id}."))?;
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
+            return Err(
+                "The target engine is not attached to a custom instrument track.".to_string(),
+            );
+        }
+
+        let asset_base = lisp_effect::instrument_source_path(name)
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+        let result = lisp_effect::compile_and_load_instrument_with_asset_base(
+            source,
+            self.graph.sample_rate,
+            asset_base.as_deref(),
+        )?;
+        self.apply_compiled_instrument_engine(engine_id, name, source, result)
+    }
+
+    pub fn apply_compiled_instrument_engine(
+        &mut self,
+        engine_id: usize,
+        name: &str,
+        source: &str,
+        result: lisp_effect::CompileResult,
+    ) -> Result<(), String> {
+        let track = self
+            .graph
+            .track_engine_ids
+            .iter()
+            .position(|track_engine_id| *track_engine_id == Some(engine_id))
+            .ok_or_else(|| format!("No live track is using instrument engine id {engine_id}."))?;
+        if self.graph.track_instrument_types.get(track) != Some(&InstrumentType::Custom) {
+            return Err(
+                "The target engine is not attached to a custom instrument track.".to_string(),
+            );
+        }
+
+        let manifest = result.manifest.clone();
+        let lib_index = self.push_instrument_lib(result.lib);
+        let lib_ptr: *const lisp_effect::LoadedDGenLib = &self.editor.instrument_libs[lib_index];
+        unsafe {
+            self.graph_controller()
+                .hot_reload_instrument(track, &manifest, &*lib_ptr)
+        }
+        .map_err(|e| e.to_string())?;
+
+        for bound_track in 0..self.graph.track_engine_ids.len() {
+            if self.graph.track_engine_ids[bound_track] == Some(engine_id) {
+                self.push_instrument_defaults_for_track(bound_track);
+                self.tracks[bound_track] = instrument_display_name(name);
+                if let Some(sound) = self
+                    .state
+                    .pattern
+                    .track_sound_state
+                    .lock()
+                    .unwrap()
+                    .get_mut(bound_track)
+                {
+                    sound.engine_id = Some(engine_id);
+                }
+            }
+        }
+
+        self.editor.engine_registry.replace_at(
+            engine_id,
+            super::EngineDescriptor {
+                name: name.to_string(),
+                source: source.to_string(),
+                manifest,
+                lib_index,
+            },
+        );
+        Ok(())
+    }
+
     fn cached_instrument_engine_idx(&self, name: &str, source: &str) -> Option<usize> {
         self.editor
             .engine_registry

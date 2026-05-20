@@ -1,6 +1,6 @@
+use super::super::text_input::{cache_char_widths, TextInputState};
 use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
-use super::super::text_input::{TextInputState, cache_char_widths};
 use super::display::*;
 use super::emit::{emit_patch_debug_lisp, emit_patch_debug_lisp_for_view};
 use super::geometry::*;
@@ -17,6 +17,8 @@ use crate::theme;
 use crate::vm::Value;
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
+use std::fs;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn parse(source: &str) -> Patch {
     parse_patch_source(source, PatcherIntent::Instrument).unwrap()
@@ -58,6 +60,117 @@ fn node_expr(node: &PatchNode) -> SourceExprId {
         .as_ref()
         .and_then(|source| source.expr.clone())
         .expect("node source expr")
+}
+
+fn temp_patcher_source_path(name: &str) -> std::path::PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!("{name}-{nonce}.lisp"))
+}
+
+fn patcher_test_node(path: &std::path::Path) -> LayoutNode {
+    LayoutNode {
+        widget_id: 1,
+        stable_widget_id: None,
+        subtree_root_id: None,
+        parent_subtree_root_id: None,
+        stable_key: None,
+        widget_type: "patcher".to_string(),
+        rect: Rect {
+            row: 0.0,
+            col: 0.0,
+            width: 100.0,
+            height: 100.0,
+        },
+        props: HashMap::from([
+            (
+                "path".to_string(),
+                Value::String(path.display().to_string()),
+            ),
+            (
+                "intent".to_string(),
+                Value::Keyword("instrument".to_string()),
+            ),
+            (
+                "on-change".to_string(),
+                Value::Symbol("callback".to_string()),
+            ),
+        ]),
+        children: Vec::new(),
+        focusable: true,
+    }
+}
+
+#[test]
+fn patcher_change_payload_emits_valid_writeback_source() {
+    let path = temp_patcher_source_path("patcher-change-valid");
+    fs::write(&path, "(def sig (phasor 440))\n(out sig 1 @name audio)\n").unwrap();
+    let node = patcher_test_node(&path);
+
+    let payload = patcher_writeback_payload(&node);
+    let Value::Map(map) = payload else {
+        panic!("expected payload map");
+    };
+
+    assert_eq!(
+        map.get("status").map(|value| value.borrow().clone()),
+        Some(Value::Keyword("valid".to_string()))
+    );
+    assert!(
+        matches!(map.get("source").map(|value| value.borrow().clone()), Some(Value::String(source)) if source.contains("out sig"))
+    );
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn dgenlisp_mod_special_form_projects_as_valid_expression_operator() {
+    assert!(dgenlisp_operator_names().contains("mod"));
+
+    let patch = parse("(def level (mod gain))");
+    let node = patch.nodes.iter().find(|node| node.op == "mod").unwrap();
+
+    assert_eq!(node.args.len(), 1);
+    assert_eq!(node.diagnostic, None);
+}
+
+#[test]
+fn instrument_preamble_helpers_project_as_documented_operators() {
+    let patch = parse(
+        r#"
+        (def env (adsr gate trigger 1 2 0.5 4))
+        (def lfo (mod_unipolar osc))
+        (def pitch (apply_pitch_mod_semi base mod1 12))
+        (def cutoff (apply_cutoff_mod_safe base mod1 2000))
+        (def width (apply_pw_mod_safe base mod1 0.2))
+        (def blep (polyblep phase freq))
+        (def typo (polypleb phase freq))
+        (def wave (wavetable-read-512 table slot phase))
+        (def morph (wavetable-morph-512 table a b phase mix))
+        (def filtered (svf sig cutoff q 0))
+        "#,
+    );
+
+    for op in [
+        "adsr",
+        "mod_unipolar",
+        "apply_pitch_mod_semi",
+        "apply_cutoff_mod_safe",
+        "apply_pw_mod_safe",
+        "polyblep",
+        "polypleb",
+        "wavetable-read-512",
+        "wavetable-morph-512",
+        "svf",
+    ] {
+        let node = patch
+            .nodes
+            .iter()
+            .find(|node| node.op == op)
+            .unwrap_or_else(|| panic!("missing projected node for {op}"));
+        assert_eq!(node.diagnostic, None, "{op}");
+    }
 }
 
 #[test]
@@ -663,7 +776,7 @@ fn writeback_emits_unchanged_root_patch_as_complete_normalized_lisp() {
             &PatcherInteractionState::default()
         )
         .unwrap(),
-        "(param freq)\n(def result (phasor freq))\n(out result 1.0)"
+        "(param freq)\n(def result (phasor freq))\n(out result 1)"
     );
 }
 
@@ -875,7 +988,7 @@ fn writeback_macro_parameter_rename_updates_header_and_resolved_references() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1.0))\n(defmacro ap (input g) (def node (+ input g)) (phasor node))"
+        "(def sig (in 1))\n(defmacro ap (input g) (def node (+ input g)) (phasor node))"
     );
 }
 
@@ -1075,7 +1188,7 @@ fn writeback_existing_feedforward_history_round_trips() {
             &PatcherInteractionState::default()
         )
         .unwrap(),
-        "(make-history h)\n(def sig (in 1.0))\n(def delta (- sig (read-history h)))\n(write-history h sig)"
+        "(make-history h)\n(def sig (in 1))\n(def delta (- sig (read-history h)))\n(write-history h sig)"
     );
 }
 
@@ -1157,7 +1270,7 @@ fn writeback_created_history_uses_generated_name_for_make_read_and_write() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(make-history history1)\n(def sig (in 1.0))\n(out (read-history history1) 1.0)\n(write-history history1 sig)"
+        "(make-history history1)\n(def sig (in 1))\n(out (read-history history1) 1)\n(write-history history1 sig)"
     );
 }
 
@@ -1314,7 +1427,173 @@ fn writeback_generated_binding_uses_existing_high_water_suffix() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1.0))\n(def phasor2 (phasor sig))\n(def phasor1 (phasor sig))\n(out phasor2 1.0)"
+        "(def sig (in 1))\n(def phasor2 (phasor sig))\n(def phasor1 (phasor sig))\n(out phasor2 1)"
+    );
+}
+
+#[test]
+fn writeback_generated_binding_can_wrap_nested_output_expression() {
+    let source = r#"
+        (def sig (in 1))
+        (out (phasor sig) 1)
+    "#;
+    let patch = parse(source);
+    let phasor = patch.nodes.iter().find(|node| node.op == "phasor").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let phasor_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == phasor.id && connection.to_node == out.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let created = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &created))
+        .unwrap()
+        .text = "* 1".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(phasor_to_out),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: phasor.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: created.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: created,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1))\n(def mul1 (* (phasor sig) 1.0))\n(out mul1 1)"
+    );
+}
+
+#[test]
+fn writeback_generated_binding_can_depend_on_created_phasor_and_literal() {
+    let source = r#"
+        (def sig (phasor 440))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let out = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .unwrap();
+    let sig_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == sig.id && connection.to_node == out.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    let multiply = allocate_created_node(&mut state, "root", (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &multiply))
+        .unwrap()
+        .text = "*".to_string();
+    let phasor = allocate_created_node(&mut state, "root", (2.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &phasor))
+        .unwrap()
+        .text = "phasor".to_string();
+    let five = allocate_created_node(&mut state, "root", (2.0, 0.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &five))
+        .unwrap()
+        .text = "5".to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(sig_to_out),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: sig.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: multiply.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: five,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: phasor.clone(),
+            input_index: 0,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: phasor,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: multiply.clone(),
+            input_index: 1,
+        },
+    );
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: multiply,
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: out.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def phasor1 (phasor 5.0))\n(def sig (phasor 440.0))\n(def mul1 (* sig phasor1))\n(out mul1 1)"
     );
 }
 
@@ -1381,7 +1660,7 @@ fn writeback_generated_binding_avoids_scope_name_collisions() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(param phasor1)\n(make-history phasor2)\n(defmacro phasor3 (sig) sig)\n(def sig (in 1.0))\n(def phasor4 (phasor sig))\n(out phasor4 1.0)"
+        "(param phasor1)\n(make-history phasor2)\n(defmacro phasor3 (sig) sig)\n(def sig (in 1))\n(def phasor4 (phasor sig))\n(out phasor4 1)"
     );
 }
 
@@ -1547,7 +1826,7 @@ fn writeback_shared_created_node_emits_one_generated_def_and_multiple_refs() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1.0))\n(def phasor1 (phasor sig))\n(out phasor1 1.0)\n(def clipped (clip phasor1 0.0 1.0))"
+        "(def sig (in 1))\n(def phasor1 (phasor sig))\n(out phasor1 1)\n(def clipped (clip phasor1 0.0 1.0))"
     );
 }
 
@@ -1577,7 +1856,7 @@ fn writeback_cable_create_updates_destination_semantic_arg() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def a (in 1.0))\n(def b (in 2.0))\n(def result (+ a b))"
+        "(def a (in 1))\n(def b (in 2))\n(def result (+ a b))"
     );
 }
 
@@ -1607,7 +1886,7 @@ fn writeback_cable_create_uses_semantic_arg_index_with_attributes() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def a (in 1.0))\n(def b (in 2.0))\n(def result (foo a @mode fast b))"
+        "(def a (in 1))\n(def b (in 2))\n(def result (foo a @mode fast b))"
     );
 }
 
@@ -1650,7 +1929,7 @@ fn writeback_source_cable_rewire_replaces_destination_arg_once() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def a (in 1.0))\n(def b (in 2.0))\n(def result (+ b 1.0))"
+        "(def a (in 1))\n(def b (in 2))\n(def result (+ b 1.0))"
     );
 }
 
@@ -1673,7 +1952,7 @@ fn writeback_cable_delete_in_root_emits_missing_input_sentinel() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1.0))\n(out __patcher_missing_input__ 1.0)"
+        "(def sig (in 1))\n(out __patcher_missing_input__ 1)"
     );
 }
 
@@ -1698,7 +1977,7 @@ fn writeback_cable_delete_in_macro_emits_missing_input_sentinel() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(defmacro ap (sig) (out __patcher_missing_input__ 1.0))"
+        "(defmacro ap (sig) (out __patcher_missing_input__ 1))"
     );
 }
 
@@ -1719,7 +1998,7 @@ fn writeback_deleting_source_backed_top_level_node_removes_form() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1.0))\n(out result 1.0)"
+        "(def sig (in 1))\n(out result 1)"
     );
 }
 
@@ -1746,7 +2025,7 @@ fn writeback_deleting_multiple_top_level_nodes_removes_expected_forms() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def carrier (phasor sig))\n(out shaped 1.0)"
+        "(def carrier (phasor sig))\n(out shaped 1)"
     );
 }
 
@@ -1779,7 +2058,7 @@ fn writeback_deleted_top_level_node_ignores_incident_deleted_connections() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1.0))\n(out result 1.0)"
+        "(def sig (in 1))\n(out result 1)"
     );
 }
 
@@ -1799,7 +2078,7 @@ fn writeback_deleting_nested_source_node_replaces_it_with_missing_input() {
 
     assert_eq!(
         emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
-        "(def sig (in 1.0))\n(def result (phasor __patcher_missing_input__))"
+        "(def sig (in 1))\n(def result (phasor __patcher_missing_input__))"
     );
 }
 
@@ -2026,9 +2305,81 @@ fn display_labels_omit_def_names_and_show_in_out_channels() {
         .find(|node| node.kind == NodeKind::Out)
         .unwrap();
 
-    assert_eq!(node_display_label(input), "in 1");
+    assert_eq!(node_display_label(input), "in 1 @name pitch");
     assert_eq!(node_display_label(multiply), "* 3");
     assert_eq!(node_display_label(output), "out 1");
+}
+
+#[test]
+fn instrument_signature_modulator_inputs_are_hidden_boilerplate() {
+    let patch = parse(
+        r#"
+            (def gate (in 1 @name gate))
+            (def pitch (in 2 @name pitch))
+            (def velocity (in 3 @name velocity))
+            (def trigger (in 4 @name trigger))
+            (def mod1 (in 5 @name mod1 @modulator 1))
+            (def mod2 (in 6 @name mod2 @modulator 2))
+            (def mod3 (in 7 @name mod3 @modulator 3))
+            (def mod4 (in 8 @name mod4 @modulator 4))
+            (def mod5 (in 9 @name mod5 @modulator 5))
+            (def mod6 (in 10 @name mod6 @modulator 6))
+            (def ext1 (in 11 @name ext1 @modulator 7))
+            (def ext2 (in 12 @name ext2 @modulator 8))
+            (def ext3 (in 13 @name ext3 @modulator 9))
+            (def ext4 (in 14 @name ext4 @modulator 10))
+            (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+            (out (* gate (mod gain)) 1 @name audio)
+            "#,
+    );
+
+    for name in ["gate", "pitch", "velocity", "trigger"] {
+        assert!(
+            patch.nodes.iter().any(|node| node.id == name),
+            "missing visible instrument input {name}"
+        );
+    }
+    for name in [
+        "mod1", "mod2", "mod3", "mod4", "mod5", "mod6", "ext1", "ext2", "ext3", "ext4",
+    ] {
+        assert!(
+            !patch.nodes.iter().any(|node| node.id == name),
+            "boilerplate modulator input {name} should be hidden"
+        );
+    }
+    assert!(patch.nodes.iter().any(|node| node.op == "mod"));
+}
+
+#[test]
+fn writeback_preserves_integer_modulator_attribute_tokens() {
+    let source = r#"
+        (def gate (in 1 @name gate))
+        (def mod1 (in 5 @name mod1 @modulator 1))
+        (param gain @default 0.5 @min 0 @max 1 @mod true @mod-mode additive)
+        (out (* gate (mod gain)) 1 @name audio)
+    "#;
+
+    let emitted =
+        emit_patch_writeback(source, PatcherIntent::Instrument, &PatcherInteractionState::default())
+            .unwrap();
+
+    assert!(emitted.contains("@modulator 1)"), "{emitted}");
+    assert!(!emitted.contains("@modulator 1.0"), "{emitted}");
+    assert!(emitted.contains("(def gate (in 1 @name gate))"), "{emitted}");
+    assert!(emitted.contains("(out (* gate (mod gain)) 1 @name audio)"), "{emitted}");
+    assert!(!emitted.contains("(in 1.0"), "{emitted}");
+    assert!(!emitted.contains(" 1.0 @name audio"), "{emitted}");
+}
+
+#[test]
+fn effect_patcher_does_not_hide_matching_modulator_input_forms() {
+    let root_patch = parse_patch_source(
+        "(def mod1 (in 5 @name mod1 @modulator 1))\n(out mod1 1)",
+        PatcherIntent::Effect,
+    )
+    .unwrap();
+
+    assert!(root_patch.nodes.iter().any(|node| node.id == "mod1"));
 }
 
 #[test]
@@ -3265,6 +3616,22 @@ fn double_clicking_background_creates_editable_draft_node() {
                 },
             )
             .is_some()
+    );
+    assert!(PATCHER_WIDGET
+        .key_event(
+            &node,
+            WidgetKeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::empty(),
+            },
+        )
+        .is_some());
+    assert_eq!(
+        get_patcher_interaction_state(key)
+            .text_edit
+            .as_ref()
+            .map(|edit| edit.text.as_str()),
+        Some("ph ")
     );
     assert!(
         PATCHER_WIDGET

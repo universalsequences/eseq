@@ -63,15 +63,15 @@ pub(crate) fn focused_widget_matches(
 }
 
 pub(crate) fn focused_widget_captures_space(editor: &Editor) -> bool {
-    focused_widget_matches(editor, |widget_type| {
-        matches!(widget_type, "text-input" | "textbox")
-    })
+    focused_widget_matches(editor, widget_type_captures_text_input)
 }
 
 pub(crate) fn focused_widget_captures_text_input(editor: &Editor) -> bool {
-    focused_widget_matches(editor, |widget_type| {
-        matches!(widget_type, "text-input" | "textbox")
-    })
+    focused_widget_matches(editor, widget_type_captures_text_input)
+}
+
+fn widget_type_captures_text_input(widget_type: &str) -> bool {
+    matches!(widget_type, "text-input" | "textbox" | "patcher")
 }
 
 fn active_buffer_accepts_global_step_shortcuts(editor: &Editor) -> bool {
@@ -205,6 +205,19 @@ pub(crate) fn current_metal_param_mode(editor: &mut Editor) -> Option<usize> {
     match editor.runtime_mut().eval_str("param-mode") {
         Ok(Some(Value::Number(n))) if n >= 0.0 => Some(n as usize),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::widget_type_captures_text_input;
+
+    #[test]
+    fn patcher_captures_text_input_shortcuts() {
+        assert!(widget_type_captures_text_input("text-input"));
+        assert!(widget_type_captures_text_input("textbox"));
+        assert!(widget_type_captures_text_input("patcher"));
+        assert!(!widget_type_captures_text_input("button"));
     }
 }
 

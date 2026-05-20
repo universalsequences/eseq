@@ -971,6 +971,260 @@
     {
       "aliases": [],
       "arity": {
+        "maximum": 6,
+        "minimum": 6
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 6,
+        "minimum": 6
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "gate_sig",
+          "required": true,
+          "summary": "Gate signal; nonzero while the note is held."
+        },
+        {
+          "kind": "signal|float",
+          "name": "trigger_sig",
+          "required": true,
+          "summary": "Trigger signal for envelope restart."
+        },
+        {
+          "kind": "signal|float",
+          "name": "attack_ms",
+          "required": true,
+          "summary": "Attack time in milliseconds."
+        },
+        {
+          "kind": "signal|float",
+          "name": "decay_ms",
+          "required": true,
+          "summary": "Decay time in milliseconds."
+        },
+        {
+          "kind": "signal|float",
+          "name": "sustain",
+          "required": true,
+          "summary": "Sustain level, usually 0..1."
+        },
+        {
+          "kind": "signal|float",
+          "name": "release_ms",
+          "required": true,
+          "summary": "Release time in milliseconds."
+        }
+      ],
+      "name": "adsr",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(adsr gate_sig trigger_sig attack_ms decay_ms sustain release_ms)"
+      ],
+      "summary": "Instrument preamble envelope helper with attack, decay, sustain, and release controls. Returns an amplitude envelope signal."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "base",
+          "required": true,
+          "summary": "Base cutoff in Hz."
+        },
+        {
+          "kind": "signal|float",
+          "name": "mod",
+          "required": true,
+          "summary": "Modulation signal."
+        },
+        {
+          "kind": "signal|float",
+          "name": "amt",
+          "required": true,
+          "summary": "Modulation amount in Hz."
+        }
+      ],
+      "name": "apply_cutoff_mod_safe",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(apply_cutoff_mod_safe base mod amt)"
+      ],
+      "summary": "Instrument preamble helper that applies modulation to a cutoff value and clamps it to a safe audio range."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "base_hz",
+          "required": true,
+          "summary": "Base frequency in Hz."
+        },
+        {
+          "kind": "signal|float",
+          "name": "mod",
+          "required": true,
+          "summary": "Modulation signal."
+        },
+        {
+          "kind": "signal|float",
+          "name": "amt_semi",
+          "required": true,
+          "summary": "Modulation amount in semitones."
+        }
+      ],
+      "name": "apply_pitch_mod_semi",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(apply_pitch_mod_semi base_hz mod amt_semi)"
+      ],
+      "summary": "Instrument preamble helper that applies semitone modulation to a base frequency in Hz."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "base",
+          "required": true,
+          "summary": "Base pulse width."
+        },
+        {
+          "kind": "signal|float",
+          "name": "mod",
+          "required": true,
+          "summary": "Modulation signal."
+        },
+        {
+          "kind": "signal|float",
+          "name": "amt",
+          "required": true,
+          "summary": "Modulation amount."
+        }
+      ],
+      "name": "apply_pw_mod_safe",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(apply_pw_mod_safe base mod amt)"
+      ],
+      "summary": "Instrument preamble helper that applies pulse-width modulation and clips the result to a safe 0.03..0.97 range."
+    },
+    {
+      "aliases": [],
+      "arity": {
         "maximum": 1,
         "minimum": 1
       },
@@ -3505,6 +3759,100 @@
     {
       "aliases": [],
       "arity": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "special-form",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "dgenlisp-special-forms"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "DGenLisp special form"
+      },
+      "input_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "inputs": [
+        {
+          "kind": "symbol",
+          "name": "paramName",
+          "required": true,
+          "summary": "Name of a parameter declared with @mod true."
+        }
+      ],
+      "name": "mod",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Resolved modulated parameter value."
+        }
+      ],
+      "signatures": [
+        "(mod paramName)"
+      ],
+      "summary": "Resolve the lowered modulated value for a parameter declared with `@mod true`."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "m",
+          "required": true,
+          "summary": "Bipolar modulation signal."
+        }
+      ],
+      "name": "mod_unipolar",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(mod_unipolar m)"
+      ],
+      "summary": "Instrument preamble helper that converts a bipolar modulation signal into a unipolar 0..1 signal."
+    },
+    {
+      "aliases": [],
+      "arity": {
         "maximum": 2,
         "minimum": 2
       },
@@ -4584,6 +4932,61 @@
       "summary": "Convert rectangular complex spectrum to `(magnitude phase)`."
     },
     {
+      "aliases": [
+        "polypleb"
+      ],
+      "arity": {
+        "maximum": 2,
+        "minimum": 2
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 2,
+        "minimum": 2
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "phase",
+          "required": true,
+          "summary": "Phase signal, usually 0..1."
+        },
+        {
+          "kind": "signal|float",
+          "name": "freq",
+          "required": true,
+          "summary": "Frequency in Hz."
+        }
+      ],
+      "name": "polyblep",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(polyblep phase freq)"
+      ],
+      "summary": "Instrument preamble helper for polyBLEP edge correction. Usually used by anti-aliased oscillator helpers."
+    },
+    {
       "aliases": [],
       "arity": {
         "maximum": 3,
@@ -4694,6 +5097,59 @@
         "(polyblep_saw phase freq)"
       ],
       "summary": "Anti-aliased saw oscillator helper. Pass a phasor phase in 0..1 and frequency in Hz."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 2,
+        "minimum": 2
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 2,
+        "minimum": 2
+      },
+      "inputs": [
+        {
+          "kind": "signal|float",
+          "name": "phase",
+          "required": true,
+          "summary": "Phase signal, usually 0..1."
+        },
+        {
+          "kind": "signal|float",
+          "name": "freq",
+          "required": true,
+          "summary": "Frequency in Hz."
+        }
+      ],
+      "name": "polypleb",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(polypleb phase freq)"
+      ],
+      "summary": "Compatibility spelling for the instrument preamble polyBLEP edge-correction helper."
     },
     {
       "aliases": [],
@@ -6510,6 +6966,77 @@
     {
       "aliases": [],
       "arity": {
+        "maximum": 5,
+        "minimum": 5
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 5,
+        "minimum": 5
+      },
+      "inputs": [
+        {
+          "kind": "value",
+          "name": "table",
+          "required": true,
+          "summary": "Wavetable buffer."
+        },
+        {
+          "kind": "signal|float",
+          "name": "wave_a",
+          "required": true,
+          "summary": "First wave index."
+        },
+        {
+          "kind": "signal|float",
+          "name": "wave_b",
+          "required": true,
+          "summary": "Second wave index."
+        },
+        {
+          "kind": "signal|float",
+          "name": "phase",
+          "required": true,
+          "summary": "Phase signal, usually 0..1."
+        },
+        {
+          "kind": "signal|float",
+          "name": "morph",
+          "required": true,
+          "summary": "Crossfade amount, usually 0..1."
+        }
+      ],
+      "name": "wavetable-morph-512",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(wavetable-morph-512 table wave_a wave_b phase morph)"
+      ],
+      "summary": "Instrument preamble helper that reads and crossfades two 512-sample wavetable waves."
+    },
+    {
+      "aliases": [],
+      "arity": {
         "maximum": null,
         "minimum": 0
       },
@@ -6581,6 +7108,65 @@
         "(wavetable-param [512 32])"
       ],
       "summary": "Host-editable wavetable tensor initialized from JSON data or zeros."
+    },
+    {
+      "aliases": [],
+      "arity": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "attribute_docs": [],
+      "attributes": [],
+      "category": "preamble",
+      "documentation": {
+        "port_docs": "curated-from-signature",
+        "source": "curated-preamble"
+      },
+      "implementation": {
+        "function": null,
+        "source_file": "generated preamble"
+      },
+      "input_count": {
+        "maximum": 3,
+        "minimum": 3
+      },
+      "inputs": [
+        {
+          "kind": "value",
+          "name": "table",
+          "required": true,
+          "summary": "Wavetable buffer."
+        },
+        {
+          "kind": "signal|float",
+          "name": "wave",
+          "required": true,
+          "summary": "Wave index."
+        },
+        {
+          "kind": "signal|float",
+          "name": "phase",
+          "required": true,
+          "summary": "Phase signal, usually 0..1."
+        }
+      ],
+      "name": "wavetable-read-512",
+      "output_count": {
+        "maximum": 1,
+        "minimum": 1
+      },
+      "outputs": [
+        {
+          "index": 0,
+          "kind": "value",
+          "name": "out",
+          "summary": "Operator result."
+        }
+      ],
+      "signatures": [
+        "(wavetable-read-512 table wave phase)"
+      ],
+      "summary": "Instrument preamble helper that reads a 512-sample wavetable wave with interpolation."
     },
     {
       "aliases": [],

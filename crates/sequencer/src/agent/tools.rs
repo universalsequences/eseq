@@ -484,6 +484,14 @@ mod tests {
     }
 
     #[test]
+    fn lookup_docs_finds_mod_and_preamble_envelope_helpers() {
+        let tools = AgentToolRegistry::load_default().expect("load tools");
+        let result = tools.lookup_dgen_docs(&["mod".to_string(), "adsr".to_string()], 3);
+        assert!(result.content.contains("operator mod"));
+        assert!(result.content.contains("operator adsr"));
+    }
+
+    #[test]
     fn lookup_docs_finds_polyblep_helpers() {
         let tools = AgentToolRegistry::load_default().expect("load tools");
         let result = tools.lookup_dgen_docs(

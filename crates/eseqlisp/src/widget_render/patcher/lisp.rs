@@ -5,7 +5,7 @@ use crate::parser::{ASTParser, Expression, Parser, format_expression};
 use super::model::{ConnectionKind, NodeKind, OperatorPortShape, Patch, PatcherIntent};
 use super::project::{Projector, dgenlisp_constant_names, dgenlisp_operator_port_shapes};
 
-pub fn parse_patch_source(source: &str, _intent: PatcherIntent) -> Result<Patch, String> {
+pub fn parse_patch_source(source: &str, intent: PatcherIntent) -> Result<Patch, String> {
     let tokens = Parser::new(source.to_string())
         .parse()
         .map_err(|error| format!("failed to tokenize dsp.lisp: {error:?}"))?;
@@ -23,7 +23,7 @@ pub fn parse_patch_source(source: &str, _intent: PatcherIntent) -> Result<Patch,
                 .flatten()
         })
         .collect();
-    Ok(Projector::new(macros).project(&exprs))
+    Ok(Projector::new(macros, intent).project(&exprs))
 }
 
 pub(super) fn symbol_at(items: &[Expression], idx: usize) -> Option<&str> {
@@ -40,6 +40,13 @@ pub(super) fn attribute_value(items: &[Expression], attr: &str) -> Option<String
             (Expression::Symbol(key), value) if key == attr => Some(format_expression(value)),
             _ => None,
         })
+}
+
+pub(super) fn attribute_symbol_value<'a>(items: &'a [Expression], attr: &str) -> Option<&'a str> {
+    items.windows(2).find_map(|pair| match (&pair[0], &pair[1]) {
+        (Expression::Symbol(key), Expression::Symbol(value)) if key == attr => Some(value.as_str()),
+        _ => None,
+    })
 }
 
 pub(super) fn node_kind_for_op(op: &str, macros: &HashSet<String>) -> NodeKind {
@@ -99,7 +106,7 @@ pub(super) fn connection_kind_for_op(op: &str) -> ConnectionKind {
 
 pub(super) fn node_label(op: &str, items: &[Expression], def_name: Option<&str>) -> String {
     match op {
-        "in" => attribute_value(items, "@name").unwrap_or_else(|| "in".to_string()),
+        "in" => in_label(items),
         "out" => attribute_value(items, "@name").unwrap_or_else(|| "out".to_string()),
         "param" => param_label(items),
         "history" | "make-history" => "history".to_string(),
@@ -107,6 +114,19 @@ pub(super) fn node_label(op: &str, items: &[Expression], def_name: Option<&str>)
             .map(|name| format!("{op} {name}"))
             .unwrap_or_else(|| op.to_string()),
     }
+}
+
+fn in_label(items: &[Expression]) -> String {
+    let mut label = String::from("in");
+    if let Some(channel) = positional_args(items, 1).first() {
+        label.push(' ');
+        label.push_str(&format_patch_literal(channel));
+    }
+    if let Some(name) = attribute_symbol_value(items, "@name") {
+        label.push_str(" @name ");
+        label.push_str(name);
+    }
+    label
 }
 
 fn param_label(items: &[Expression]) -> String {

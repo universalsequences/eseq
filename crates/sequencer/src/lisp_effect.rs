@@ -9075,6 +9075,66 @@ mod tests {
     }
 
     #[test]
+    fn patcher_writeback_for_real_instrument_compiles() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
+        let emitted = eseqlisp::widget_render::patcher::emit_patch_writeback_source(
+            &source,
+            eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+        )
+        .expect("patcher writeback should emit source");
+
+        compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
+            |error| panic!("patcher-emitted instrument source should compile:\n{error}\n{emitted}"),
+        );
+    }
+
+    #[test]
+    fn patcher_insert_unity_gain_before_real_instrument_output_compiles() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
+        let emitted =
+            eseqlisp::widget_render::patcher::emit_patch_writeback_with_inserted_node_before_first_output(
+                &source,
+                eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                "* 1",
+            )
+            .expect("patcher writeback should insert unity gain node");
+
+        assert!(
+            emitted.contains("(* "),
+            "emitted source should contain an inserted multiply node:\n{emitted}"
+        );
+        compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
+            |error| panic!("patcher-edited instrument source should compile:\n{error}\n{emitted}"),
+        );
+    }
+
+    #[test]
+    fn patcher_insert_created_phasor_multiply_before_real_instrument_output_compiles() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("instruments/bass/bad-subbass1/dsp.lisp");
+        let source = std::fs::read_to_string(&path).expect("read bad-subbass1 dsp source");
+        let emitted =
+            eseqlisp::widget_render::patcher::emit_patch_writeback_with_created_phasor_multiply_before_first_output(
+                &source,
+                eseqlisp::widget_render::patcher::PatcherIntent::Instrument,
+                "5",
+            )
+            .expect("patcher writeback should insert created phasor multiply chain");
+
+        assert!(
+            emitted.contains("(phasor 5.0)") && emitted.contains("(* "),
+            "emitted source should contain the inserted phasor multiply chain:\n{emitted}"
+        );
+        compile_instrument_with_asset_base(&emitted, 44_100, path.parent()).unwrap_or_else(
+            |error| panic!("patcher-edited instrument source should compile:\n{error}\n{emitted}"),
+        );
+    }
+
+    #[test]
     fn save_folder_instrument_writes_dsp_lisp_even_when_folder_is_new() {
         let name = format!("__test-agent-folder-{}/", std::process::id());
         let folder = std::path::Path::new(super::INSTRUMENTS_DIR).join(name.trim_end_matches('/'));

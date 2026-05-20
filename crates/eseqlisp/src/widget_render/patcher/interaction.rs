@@ -516,18 +516,18 @@ pub(super) fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, loc
     set_patcher_interaction_state(key, state);
 }
 
-pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local_row: f32) {
+pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local_row: f32) -> bool {
     let key = patcher_state_key(node);
     let mut state = get_patcher_interaction_state(key);
+    let mut semantic_changed = false;
     if let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) {
-        let mut semantic_changed = false;
         if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone())
             && let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
             && let Some(edit) = &mut state.text_edit
         {
             update_patcher_text_edit_pointer(edit, *rect, local_col, true, true);
             set_patcher_interaction_state(key, state);
-            return;
+            return false;
         }
         if let Some(PatcherDragState::Cable {
             from,
@@ -576,6 +576,7 @@ pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local
     }
     state.drag = None;
     set_patcher_interaction_state(key, state);
+    semantic_changed
 }
 
 pub(super) fn handle_patcher_pointer_moved(node: &LayoutNode, local_col: f32, local_row: f32) {

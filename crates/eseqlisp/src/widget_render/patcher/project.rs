@@ -5,15 +5,16 @@ use crate::parser::{Expression, format_expression};
 
 use super::display::{node_size, preview};
 use super::lisp::{
-    attribute_value, connection_kind_for_op, default_outputs, format_patch_literal,
-    is_numeric_literal, is_unsupported_call_head, node_kind_for_op, node_label, symbol_at,
+    attribute_symbol_value, attribute_value, connection_kind_for_op, default_outputs,
+    format_patch_literal, is_numeric_literal, is_unsupported_call_head, node_kind_for_op,
+    node_label, symbol_at,
 };
 use super::metrics::{LAYER_SPACING, NODE_COLUMN_GAP, VIEW_PADDING_X, VIEW_PADDING_Y};
 use super::model::{
     ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
     ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch, NodeKind, NodeSource,
-    OperatorPortShape, Patch, PatchConnection, PatchNode, SourceArgValue, SourceExprId,
-    SourceFormId, SourceOwner, SourceScopeId,
+    OperatorPortShape, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue,
+    SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
 };
 
 pub(super) struct Projector {
@@ -26,14 +27,19 @@ pub(super) struct Projector {
     known_ops: &'static HashSet<String>,
     known_macros: HashSet<String>,
     scope: SourceScopeId,
+    intent: PatcherIntent,
 }
 
 impl Projector {
-    pub(super) fn new(known_macros: HashSet<String>) -> Self {
-        Self::new_in_scope(known_macros, SourceScopeId::Root)
+    pub(super) fn new(known_macros: HashSet<String>, intent: PatcherIntent) -> Self {
+        Self::new_in_scope(known_macros, SourceScopeId::Root, intent)
     }
 
-    fn new_in_scope(known_macros: HashSet<String>, scope: SourceScopeId) -> Self {
+    fn new_in_scope(
+        known_macros: HashSet<String>,
+        scope: SourceScopeId,
+        intent: PatcherIntent,
+    ) -> Self {
         Self {
             patch: Patch::default(),
             symbol_sources: HashMap::new(),
@@ -44,6 +50,7 @@ impl Projector {
             known_ops: dgenlisp_operator_names(),
             known_macros,
             scope,
+            intent,
         }
     }
 
@@ -221,6 +228,9 @@ impl Projector {
 
         match &items[1] {
             Expression::Symbol(name) => {
+                if self.is_hidden_instrument_modulator_def(name, &items[2]) {
+                    return;
+                }
                 let binding = self.binding_id(name, BindingKind::Def);
                 let value_expr = self.child_expr(&source_expr, 2);
                 let Some((node_id, output_idx)) = self.project_value(
@@ -336,6 +346,7 @@ impl Projector {
             SourceScopeId::Macro {
                 name: name.to_string(),
             },
+            self.intent,
         );
         for (idx, param) in param_names.iter().enumerate() {
             let id = projector.unique_id(param);
@@ -380,6 +391,14 @@ impl Projector {
             params: param_names,
             patch,
         });
+    }
+
+    fn is_hidden_instrument_modulator_def(&self, name: &str, expr: &Expression) -> bool {
+        self.intent == PatcherIntent::Instrument
+            && self.scope == SourceScopeId::Root
+            && expected_instrument_modulator_slot(name).is_some_and(|slot| {
+                instrument_input_signature(expr) == Some((slot + 4, name, slot))
+            })
     }
 
     fn project_macro_return(&mut self, expr: &Expression, form_id: SourceFormId) {
@@ -977,6 +996,46 @@ impl Projector {
     }
 }
 
+fn expected_instrument_modulator_slot(name: &str) -> Option<usize> {
+    match name {
+        "mod1" => Some(1),
+        "mod2" => Some(2),
+        "mod3" => Some(3),
+        "mod4" => Some(4),
+        "mod5" => Some(5),
+        "mod6" => Some(6),
+        "ext1" => Some(7),
+        "ext2" => Some(8),
+        "ext3" => Some(9),
+        "ext4" => Some(10),
+        _ => None,
+    }
+}
+
+fn instrument_input_signature(expr: &Expression) -> Option<(usize, &str, usize)> {
+    let Expression::List(items) = expr else {
+        return None;
+    };
+    if symbol_at(items, 0) != Some("in") {
+        return None;
+    }
+    let channel = match items.get(1) {
+        Some(Expression::Number(value)) if value.fract() == 0.0 && *value > 0.0 => *value as usize,
+        _ => return None,
+    };
+    let name = attribute_symbol_value(items, "@name")?;
+    let modulator = match items.windows(2).find_map(|pair| match (&pair[0], &pair[1]) {
+        (Expression::Symbol(key), Expression::Number(value)) if key == "@modulator" => {
+            Some(*value)
+        }
+        _ => None,
+    }) {
+        Some(value) if value.fract() == 0.0 && value > 0.0 => value as usize,
+        _ => return None,
+    };
+    Some((channel, name, modulator))
+}
+
 pub(super) fn assign_layout(patch: &mut Patch) {
     let mut id_to_idx = HashMap::new();
     for (idx, node) in patch.nodes.iter().enumerate() {
@@ -1090,6 +1149,11 @@ pub(super) fn dgenlisp_operator_names() -> &'static HashSet<String> {
                 }
             }
         }
+        for special_form in expression_special_forms(&metadata) {
+            if let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) {
+                names.insert(name.to_string());
+            }
+        }
         names
     })
 }
@@ -1126,8 +1190,46 @@ pub(super) fn dgenlisp_operator_port_shapes() -> &'static HashMap<String, Operat
                 }
             }
         }
+        for special_form in expression_special_forms(&metadata) {
+            let Some(name) = special_form.get("name").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            shapes.insert(
+                name.to_string(),
+                OperatorPortShape {
+                    input_count: documented_special_form_input_count(special_form),
+                    output_count: 1,
+                },
+            );
+        }
         shapes
     })
+}
+
+fn expression_special_forms(metadata: &serde_json::Value) -> Vec<&serde_json::Value> {
+    metadata
+        .get("special_forms")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|form| {
+            form.get("name").and_then(serde_json::Value::as_str) == Some("mod")
+        })
+        .collect()
+}
+
+fn documented_special_form_input_count(form: &serde_json::Value) -> usize {
+    form.get("signatures")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|signatures| signatures.first())
+        .and_then(serde_json::Value::as_str)
+        .and_then(|signature| {
+            let inner = signature
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))?;
+            Some(inner.split_whitespace().count().saturating_sub(1))
+        })
+        .unwrap_or(1)
 }
 
 fn documented_port_count(operator: &serde_json::Value, array_key: &str, count_key: &str) -> usize {

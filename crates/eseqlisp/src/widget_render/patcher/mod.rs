@@ -13,8 +13,10 @@ mod tests;
 mod text;
 mod writeback;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
@@ -25,6 +27,173 @@ pub use model::{
     NodeKind, NodeSource, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue,
     SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
 };
+
+pub fn emit_patch_writeback_source(source: &str, intent: PatcherIntent) -> Result<String, String> {
+    let state = state::PatcherInteractionState::default();
+    writeback::emit_patch_writeback(source, intent, &state)
+        .map_err(|error| format!("{error:?}"))
+}
+
+#[cfg(any(test, feature = "patcher-test-support"))]
+pub fn emit_patch_writeback_with_inserted_node_before_first_output(
+    source: &str,
+    intent: PatcherIntent,
+    node_text: &str,
+) -> Result<String, String> {
+    let patch = parse_patch_source(source, intent)?;
+    let output_node = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .ok_or_else(|| "patch has no output node".to_string())?;
+    let incoming = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == output_node.id && connection.to_input == 0)
+        .ok_or_else(|| "output node has no incoming signal connection".to_string())?;
+    let mut state = state::PatcherInteractionState::default();
+    let view_key = "root";
+    let inserted = state::allocate_created_node(&mut state, view_key, (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&state::node_edit_key(view_key, &inserted))
+        .expect("created node edit should be present")
+        .text = node_text.to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(state::connection_edit_key(
+            view_key,
+            &state::source_connection_id(incoming),
+        ));
+    state::allocate_created_connection(
+        &mut state,
+        view_key,
+        model::OutputPortRef {
+            node_id: incoming.from_node.clone(),
+            output_index: incoming.from_output,
+        },
+        model::InputPortRef {
+            node_id: inserted.clone(),
+            input_index: 0,
+        },
+    );
+    state::allocate_created_connection(
+        &mut state,
+        view_key,
+        model::OutputPortRef {
+            node_id: inserted,
+            output_index: 0,
+        },
+        model::InputPortRef {
+            node_id: output_node.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    writeback::emit_patch_writeback(source, intent, &state)
+        .map_err(|error| format!("{error:?}"))
+}
+
+#[cfg(any(test, feature = "patcher-test-support"))]
+pub fn emit_patch_writeback_with_created_phasor_multiply_before_first_output(
+    source: &str,
+    intent: PatcherIntent,
+    phasor_frequency_text: &str,
+) -> Result<String, String> {
+    let patch = parse_patch_source(source, intent)?;
+    let output_node = patch
+        .nodes
+        .iter()
+        .find(|node| node.kind == NodeKind::Out)
+        .ok_or_else(|| "patch has no output node".to_string())?;
+    let incoming = patch
+        .connections
+        .iter()
+        .find(|connection| connection.to_node == output_node.id && connection.to_input == 0)
+        .ok_or_else(|| "output node has no incoming signal connection".to_string())?;
+    let mut state = state::PatcherInteractionState::default();
+    let view_key = "root";
+    let multiply = state::allocate_created_node(&mut state, view_key, (1.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&state::node_edit_key(view_key, &multiply))
+        .expect("created multiply edit should be present")
+        .text = "*".to_string();
+    let phasor = state::allocate_created_node(&mut state, view_key, (2.0, 1.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&state::node_edit_key(view_key, &phasor))
+        .expect("created phasor edit should be present")
+        .text = "phasor".to_string();
+    let frequency = state::allocate_created_node(&mut state, view_key, (2.0, 0.0));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&state::node_edit_key(view_key, &frequency))
+        .expect("created frequency edit should be present")
+        .text = phasor_frequency_text.to_string();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(state::connection_edit_key(
+            view_key,
+            &state::source_connection_id(incoming),
+        ));
+    state::allocate_created_connection(
+        &mut state,
+        view_key,
+        model::OutputPortRef {
+            node_id: incoming.from_node.clone(),
+            output_index: incoming.from_output,
+        },
+        model::InputPortRef {
+            node_id: multiply.clone(),
+            input_index: 0,
+        },
+    );
+    state::allocate_created_connection(
+        &mut state,
+        view_key,
+        model::OutputPortRef {
+            node_id: frequency,
+            output_index: 0,
+        },
+        model::InputPortRef {
+            node_id: phasor.clone(),
+            input_index: 0,
+        },
+    );
+    state::allocate_created_connection(
+        &mut state,
+        view_key,
+        model::OutputPortRef {
+            node_id: phasor,
+            output_index: 0,
+        },
+        model::InputPortRef {
+            node_id: multiply.clone(),
+            input_index: 1,
+        },
+    );
+    state::allocate_created_connection(
+        &mut state,
+        view_key,
+        model::OutputPortRef {
+            node_id: multiply,
+            output_index: 0,
+        },
+        model::InputPortRef {
+            node_id: output_node.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    writeback::emit_patch_writeback(source, intent, &state).map_err(|error| format!("{error:?}"))
+}
 
 use display::node_display_label;
 use emit::debug_log_patch_lisp;
@@ -41,6 +210,7 @@ use state::{
     set_patcher_interaction_state,
 };
 use text::{cancel_patcher_text_edit, commit_patcher_text_edit};
+use writeback::emit_patch_writeback;
 
 use super::text_input::{TextEditOutcome, apply_text_entry_key, cache_char_widths};
 use super::{CellBuffer, MouseEventOutcome, WidgetDefinition, WidgetEvent, WidgetKeyEvent};
@@ -119,10 +289,9 @@ impl WidgetDefinition for PatcherWidget {
                 handle_patcher_pointer_drag(node, local_col, local_row);
                 MouseEventOutcome::Consume
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                handle_patcher_pointer_up(node, local_col, local_row);
-                MouseEventOutcome::Consume
-            }
+            MouseEventKind::Up(MouseButton::Left) => MouseEventOutcome::Dispatch(
+                patcher_widget_event(handle_patcher_pointer_up(node, local_col, local_row)),
+            ),
             MouseEventKind::Moved => {
                 handle_patcher_pointer_moved(node, local_col, local_row);
                 MouseEventOutcome::Consume
@@ -202,7 +371,7 @@ impl WidgetDefinition for PatcherWidget {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
                 set_patcher_interaction_state(key, state);
-                Some(WidgetEvent::Custom(Value::Nil))
+                Some(patcher_widget_event(changed))
             }
             KeyCode::Enter if open_selected_macro_node(node, &mut state) => {
                 set_patcher_interaction_state(key, state);
@@ -223,7 +392,7 @@ impl WidgetDefinition for PatcherWidget {
                         debug_log_patch_lisp(&view_key, &patch);
                     }
                     set_patcher_interaction_state(key, state);
-                    Some(WidgetEvent::Custom(Value::Nil))
+                    Some(patcher_widget_event(changed))
                 } else {
                     None
                 }
@@ -236,7 +405,7 @@ impl WidgetDefinition for PatcherWidget {
                     debug_log_patch_lisp(&view_key, &patch);
                 }
                 set_patcher_interaction_state(key, state);
-                Some(WidgetEvent::Custom(Value::Nil))
+                Some(patcher_widget_event(changed))
             }
             _ => {
                 let edit = state.text_edit.as_mut()?;
@@ -255,9 +424,10 @@ impl WidgetDefinition for PatcherWidget {
         }
     }
 
-    fn handle_event(&self, _node: &LayoutNode, event: WidgetEvent) -> Option<super::EventOutput> {
+    fn handle_event(&self, node: &LayoutNode, event: WidgetEvent) -> Option<super::EventOutput> {
         match event {
-            WidgetEvent::Custom(Value::Nil) => None,
+            WidgetEvent::Custom(Value::Bool(true)) => patcher_change_output(node),
+            WidgetEvent::Custom(Value::Nil) | WidgetEvent::Custom(Value::Bool(false)) => None,
             _ => None,
         }
     }
@@ -275,6 +445,80 @@ impl WidgetDefinition for PatcherWidget {
     ) -> Vec<MetalPrimitive> {
         render::build_metal_primitives_for_patcher(node, viewport)
     }
+}
+
+fn patcher_widget_event(changed: bool) -> WidgetEvent {
+    WidgetEvent::Custom(Value::Bool(changed))
+}
+
+fn patcher_change_output(node: &LayoutNode) -> Option<super::EventOutput> {
+    let callback = node.props.get("on-change")?.clone();
+    Some(super::EventOutput {
+        callback,
+        args: vec![patcher_writeback_payload(node)],
+    })
+}
+
+fn patcher_writeback_payload(node: &LayoutNode) -> Value {
+    let path = prop_str(&node.props, "path").or_else(|| prop_str(&node.props, "file"));
+    let intent = patcher_intent_from_props(&node.props);
+    let key = patcher_state_key(node);
+    let state = get_patcher_interaction_state(key);
+
+    let Some(path_str) = path else {
+        return map_value(vec![
+            ("status", Value::Keyword("invalid".to_string())),
+            (
+                "diagnostic",
+                Value::String("patcher requires :path".to_string()),
+            ),
+        ]);
+    };
+    let path_buf = PathBuf::from(&path_str);
+    let source = match std::fs::read_to_string(&path_buf) {
+        Ok(source) => source,
+        Err(error) => {
+            return map_value(vec![
+                ("status", Value::Keyword("invalid".to_string())),
+                ("path", Value::String(path_str)),
+                (
+                    "diagnostic",
+                    Value::String(format!("failed to read '{}': {error}", path_buf.display())),
+                ),
+            ]);
+        }
+    };
+
+    match emit_patch_writeback(&source, intent, &state) {
+        Ok(source) => map_value(vec![
+            ("status", Value::Keyword("valid".to_string())),
+            ("path", Value::String(path_str)),
+            ("source", Value::String(source)),
+        ]),
+        Err(error) => map_value(vec![
+            ("status", Value::Keyword("invalid".to_string())),
+            ("path", Value::String(path_str)),
+            ("diagnostic", Value::String(format!("{error:?}"))),
+        ]),
+    }
+}
+
+fn patcher_intent_from_props(props: &HashMap<String, Value>) -> PatcherIntent {
+    match props.get("intent") {
+        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "effect" => {
+            PatcherIntent::Effect
+        }
+        _ => PatcherIntent::Instrument,
+    }
+}
+
+fn map_value(entries: Vec<(&str, Value)>) -> Value {
+    Value::Map(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), Rc::new(RefCell::new(value))))
+            .collect(),
+    )
 }
 
 fn prop_keyword(node: &Value, key: &str) -> Option<String> {
@@ -355,12 +599,7 @@ pub(super) fn load_patch_from_props(
     let path = PathBuf::from(path);
     let source = std::fs::read_to_string(&path)
         .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    let intent = match props.get("intent") {
-        Some(Value::Keyword(value)) | Some(Value::String(value)) if value == "effect" => {
-            PatcherIntent::Effect
-        }
-        _ => PatcherIntent::Instrument,
-    };
+    let intent = patcher_intent_from_props(props);
     let patch = parse_patch_source(&source, intent)?;
     Ok((path, patch))
 }

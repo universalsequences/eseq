@@ -3741,7 +3741,7 @@ pub(crate) fn extract_path_from_payload(payload: &Value) -> Option<String> {
 pub(crate) fn extract_string_from_payload(payload: &Value, key: &str) -> Option<String> {
     if let Value::Map(map) = payload {
         if let Some(cell) = map.get(key) {
-            if let Value::String(s) = &*cell.borrow() {
+            if let Value::String(s) | Value::Keyword(s) | Value::Symbol(s) = &*cell.borrow() {
                 return Some(s.clone());
             }
         }

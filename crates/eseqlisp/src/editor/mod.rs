@@ -2290,6 +2290,23 @@ impl Editor {
         }
     }
 
+    pub fn create_scratch_buffer(&mut self, name: &str, text: &str, mode: BufferMode) -> BufferId {
+        let id = self.alloc_buffer_id();
+        let mut buffer = Buffer::new(id, name);
+        buffer.set_text(text);
+        buffer.set_mode(mode);
+        self.buffers.push(buffer);
+        id
+    }
+
+    pub fn set_buffer_view_mode_by_name(&mut self, name: &str, view_mode: ViewMode) -> bool {
+        let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.name == name) else {
+            return false;
+        };
+        buffer.view_mode = view_mode;
+        true
+    }
+
     fn ensure_scratch_buffer_named(&mut self, name: &str) -> usize {
         if let Some(idx) = self.buffers.iter().position(|buffer| buffer.name == name) {
             return idx;

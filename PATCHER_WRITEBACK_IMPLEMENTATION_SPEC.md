@@ -1390,29 +1390,71 @@ Tests:
 - Macro parameter rename collision returns a blocker.
 - Macro parameter rename with a macro-scope code island returns a blocker.
 
-### Phase 7: File Save Wiring
+### Phase 7: Instrument Edit Session Preview and Save Wiring
 
-Goal: connect the normalized emitter to an explicit save operation.
+Goal: connect the normalized emitter to the existing edit-instrument workflow
+as an in-memory preview source first, with disk persistence only when the user
+presses Save.
 
 Prerequisites:
 
 - Phase 2 complete.
 - Phase 3 complete.
 - Save blockers return structured diagnostics.
+- Instrument compilation can accept source text plus a source path/base
+  directory, not only read from disk.
 
 Responsibilities:
 
-- Add a save command/path that calls `emit_patch_writeback`.
-- Write the emitted Lisp to the source file only after successful emission.
-- Block normal save for compile-invalid sentinel output.
-- Add an explicit incomplete-save path if desired.
-- Keep debug preview separate from save behavior.
+- Introduce an instrument edit session owned by the host/sequencer, keyed by
+  the saved instrument identity rather than a single track or raw file path.
+- `BeginInstrumentEdit` captures the current persisted source, source path,
+  target instrument identity, rollback live engine, and initial valid source.
+- Track the current patch revision separately from the last successfully
+  compiled preview source. The visible patch can be temporarily invalid while
+  the live engine continues running the last valid preview.
+- On every committed patcher edit, immediately attempt writeback and preview:
+  call `emit_patch_writeback`, then send the emitted source to the host as the
+  session draft if writeback succeeds.
+- If writeback fails because the patch is structurally incomplete or blocked,
+  keep the previous live engine active, preserve the current invalid patch
+  revision in the edit session, and surface diagnostics. For example, deleting
+  the cable feeding `out 1` should not hotswap an incomplete instrument while
+  the user is preparing to connect another expression.
+- `PreviewInstrumentEdit` compiles the provided draft source in memory using
+  the source path only for asset/base-directory resolution.
+- If preview compilation succeeds, record that source as the last valid preview
+  and hotswap the shared instrument engine so all tracks using that instrument
+  hear the draft immediately.
+- If preview compilation fails, keep the previous live engine active, preserve
+  the invalid draft in the edit session, and surface diagnostics.
+- `SaveInstrumentEdit` writes only the current valid preview source to the
+  instrument source file and keeps the current preview engine active. If the
+  visible patch revision is currently invalid, normal Save is blocked instead
+  of silently saving an older valid preview.
+- `CancelInstrumentEdit` restores the pre-edit live engine and discards the
+  draft session without writing to disk.
+- Block normal save for compile-invalid sentinel output unless an explicit
+  incomplete-save path is added later.
+- Keep debug preview/log emit separate from edit-session preview/save behavior.
+- Scope this phase to instruments only; effects can use the same session model
+  in a later phase.
 
 Tests:
 
-- Save writes expected normalized source to a temp file.
-- Save refuses unresolved blockers.
-- Save does not modify file on error.
+- Patcher edit emits a draft source and dispatches an instrument preview command
+  without writing the source file.
+- Structurally invalid patch edits, such as disconnecting the expression feeding
+  `out 1`, do not dispatch a successful preview and leave the last valid engine
+  live.
+- Preview compile success hotswaps the shared instrument engine for all tracks
+  using that instrument identity.
+- Preview compile failure keeps the previous live engine active and records
+  diagnostics.
+- Save writes the current valid preview source to a temp instrument file.
+- Save refuses unresolved writeback blockers, including a currently invalid
+  visible patch revision, and does not modify the file.
+- Cancel restores the rollback engine and does not modify the file.
 
 ### Phase 8: Layout Sidecar Persistence
 

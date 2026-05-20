@@ -86,6 +86,75 @@ pub(crate) enum ActiveDeleteTarget {
     },
 }
 
+#[derive(Debug, Clone)]
+struct InstrumentEditSession {
+    name: String,
+    path: PathBuf,
+    buffer_name: String,
+    engine_id: usize,
+    persisted_source: String,
+    last_valid_source: String,
+    visible_revision_valid: bool,
+    preview_generation: u64,
+}
+
+impl InstrumentEditSession {
+    fn begin(
+        name: String,
+        path: PathBuf,
+        buffer_name: String,
+        engine_id: usize,
+        persisted_source: String,
+    ) -> Self {
+        Self {
+            name,
+            path,
+            buffer_name,
+            engine_id,
+            last_valid_source: persisted_source.clone(),
+            persisted_source,
+            visible_revision_valid: true,
+            preview_generation: 0,
+        }
+    }
+}
+
+struct PendingInstrumentPreview {
+    generation: u64,
+    source: String,
+    receiver: std::sync::mpsc::Receiver<Result<sequencer::lisp_effect::CompileResult, String>>,
+}
+
+fn instrument_patcher_buffer_source(buffer_name: &str, path: &Path) -> String {
+    let buffer_name = escape_lisp_string(buffer_name);
+    let path = escape_lisp_string(&path.to_string_lossy());
+    format!(
+        "(effect-buffer \"{buffer_name}\"\n  (patcher\n    :intent :instrument\n    :width :fill\n    :height :fill\n    :path \"{path}\"\n    :on-change (lambda (event)\n      (host-command \"preview-instrument-patch\" event))))\n"
+    )
+}
+
+fn show_instrument_patcher_layout_source(buffer_name: &str) -> String {
+    let buffer_name = escape_lisp_string(buffer_name);
+    format!(
+        "(do\n  (set! remembered-step-panel-buffer (seq-current-step-buffer))\n  (set! step-panel-buffer \"{buffer_name}\")\n  (if (= lower-panel-buffer \"*piano-roll*\")\n    (seq-apply-piano-roll-layout)\n    (seq-apply-fx-layout)))"
+    )
+}
+
+fn restore_instrument_patcher_layout_source() -> &'static str {
+    "(do\n  (set! step-panel-buffer remembered-step-panel-buffer)\n  (if (= lower-panel-buffer \"*piano-roll*\")\n    (seq-apply-piano-roll-layout)\n    (seq-apply-fx-layout)))"
+}
+
+fn escape_lisp_string(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            '\\' => "\\\\".chars().collect::<Vec<_>>(),
+            '"' => "\\\"".chars().collect::<Vec<_>>(),
+            _ => vec![ch],
+        })
+        .collect()
+}
+
 impl ActiveDeleteTarget {
     fn buffer_name(&self) -> &'static str {
         match self {
@@ -1274,11 +1343,14 @@ fn agent_generation_watermark(app: &ui::App) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_custom_instrument_ui_source_with_overlay, reconciled_track_index,
-        should_clear_active_delete_target_for_buffer, ActiveDeleteTarget, FxDeleteChain, Runtime,
-        Value, AGENT_INSTRUMENT_STUB_UI,
+        build_custom_instrument_ui_source_with_overlay, escape_lisp_string,
+        instrument_patcher_buffer_source, reconciled_track_index,
+        restore_instrument_patcher_layout_source, should_clear_active_delete_target_for_buffer,
+        show_instrument_patcher_layout_source, ActiveDeleteTarget, FxDeleteChain, Runtime, Value,
+        AGENT_INSTRUMENT_STUB_UI,
     };
     use eseqlisp::parser::{ASTParser, Parser};
+    use std::path::Path;
 
     #[test]
     fn active_delete_target_buffer_switch_preserves_target_claimed_in_new_buffer() {
@@ -1313,6 +1385,44 @@ mod tests {
         assert_eq!(reconciled_track_index(7, 1, 4), Some(1));
         assert_eq!(reconciled_track_index(7, 9, 4), Some(3));
         assert_eq!(reconciled_track_index(0, 0, 0), None);
+    }
+
+    #[test]
+    fn instrument_patcher_buffer_uses_user_source_path_and_preview_command() {
+        let source = instrument_patcher_buffer_source(
+            "*instrument-patcher:digitone*",
+            Path::new("instruments/digitone/dsp.lisp"),
+        );
+
+        assert!(source.contains("(effect-buffer \"*instrument-patcher:digitone*\""));
+        assert!(source.contains(":intent :instrument"));
+        assert!(source.contains(":path \"instruments/digitone/dsp.lisp\""));
+        assert!(source.contains("(host-command \"preview-instrument-patch\" event)"));
+        assert!(!source.contains("defmacro"));
+    }
+
+    #[test]
+    fn instrument_patcher_buffer_escapes_lisp_path_strings() {
+        assert_eq!(escape_lisp_string("a\\b\"c"), "a\\\\b\\\"c");
+    }
+
+    #[test]
+    fn instrument_patcher_layout_preserves_lower_panel_buffer() {
+        let source = show_instrument_patcher_layout_source("*instrument-patcher:digitone*");
+
+        assert!(source.contains("(set! remembered-step-panel-buffer (seq-current-step-buffer))"));
+        assert!(source.contains("(set! step-panel-buffer \"*instrument-patcher:digitone*\")"));
+        assert!(source.contains("(= lower-panel-buffer \"*piano-roll*\")"));
+        assert!(source.contains("(seq-apply-fx-layout)"));
+    }
+
+    #[test]
+    fn instrument_patcher_layout_restore_uses_remembered_step_panel() {
+        let source = restore_instrument_patcher_layout_source();
+
+        assert!(source.contains("(set! step-panel-buffer remembered-step-panel-buffer)"));
+        assert!(source.contains("(= lower-panel-buffer \"*piano-roll*\")"));
+        assert!(source.contains("(seq-apply-fx-layout)"));
     }
 
     #[test]
@@ -1478,6 +1588,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Inline editor session state (instrument/effect creation/editing)
     let mut editor_buffer_name: Option<String> = None;
     let mut editor_mode: Option<String> = None;
+    let mut instrument_edit_session: Option<InstrumentEditSession> = None;
+    let mut pending_instrument_preview: Option<PendingInstrumentPreview> = None;
     let mut editor_effect_name: Option<String> = None; // original effect name (without .lisp)
     let mut editor_effect_slot: Option<usize> = None; // effect slot index for hot-swap
     let mut editor_effect_bus: Option<usize> = None; // bus index for bus effect hot-swap
@@ -6555,20 +6667,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         )));
                                         continue;
                                     }
-                                    let buf_name = match editor
-                                        .create_file_buffer(&file_path, BufferMode::DGenLisp)
+                                    let track = current_track.load(Ordering::Relaxed);
+                                    let Some(engine_id) =
+                                        app.graph.track_engine_ids.get(track).and_then(|id| *id)
+                                    else {
+                                        editor.handle_host_event(HostEvent::Error(
+                                            "Current instrument track has no engine binding"
+                                                .to_string(),
+                                        ));
+                                        continue;
+                                    };
+                                    let persisted_source = match std::fs::read_to_string(&file_path)
                                     {
-                                        Ok(name) => name,
-                                        Err(e) => {
+                                        Ok(source) => source,
+                                        Err(error) => {
                                             editor.handle_host_event(HostEvent::Error(format!(
-                                                "Failed to open buffer: {e:?}"
+                                                "Failed to read '{}': {error}",
+                                                file_path.display()
                                             )));
                                             continue;
                                         }
                                     };
-                                    editor.swap_buffer_in_tile_showing("*metal*", &buf_name);
+                                    let buf_name = format!("*instrument-patcher:{inst_name}*");
+                                    editor.remove_buffer_by_name(&buf_name);
+                                    editor.create_scratch_buffer(
+                                        &buf_name,
+                                        "",
+                                        BufferMode::ESeqLisp,
+                                    );
+                                    let patcher_source =
+                                        instrument_patcher_buffer_source(&buf_name, &file_path);
+                                    if let Err(error) =
+                                        editor.runtime_mut().eval_str(&patcher_source)
+                                    {
+                                        editor.handle_host_event(HostEvent::Error(format!(
+                                            "Failed to build patch editor: {error:?}"
+                                        )));
+                                        editor.remove_buffer_by_name(&buf_name);
+                                        continue;
+                                    }
+                                    let layout_source =
+                                        show_instrument_patcher_layout_source(&buf_name);
+                                    if let Err(error) =
+                                        editor.runtime_mut().eval_str(&layout_source)
+                                    {
+                                        editor.handle_host_event(HostEvent::Error(format!(
+                                            "Failed to show patch editor: {error:?}"
+                                        )));
+                                        editor.remove_buffer_by_name(&buf_name);
+                                        continue;
+                                    }
+                                    editor.refresh_runtime_side_effects();
                                     editor_buffer_name = Some(buf_name.clone());
                                     editor_mode = Some("edit-instrument".to_string());
+                                    instrument_edit_session = Some(InstrumentEditSession::begin(
+                                        inst_name,
+                                        file_path,
+                                        buf_name.clone(),
+                                        engine_id,
+                                        persisted_source,
+                                    ));
                                     let rt = editor.runtime_mut();
                                     rt.set_reactive("SEQ", "editor-active", Value::Bool(true));
                                     rt.set_reactive(
@@ -6598,6 +6756,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(cell) = map.get("name") {
                                 if let Value::String(inst_name) = &*cell.borrow() {
                                     let inst_name = inst_name.clone();
+                                    if let Some(session) = instrument_edit_session.as_ref() {
+                                        if !session.visible_revision_valid {
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-error",
+                                                Value::String(
+                                                    "Cannot save: the current patch has errors"
+                                                        .to_string(),
+                                                ),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            continue;
+                                        }
+                                        if let Err(e) = std::fs::write(
+                                            &session.path,
+                                            &session.last_valid_source,
+                                        ) {
+                                            let rt = editor.runtime_mut();
+                                            rt.set_reactive(
+                                                "SEQ",
+                                                "editor-error",
+                                                Value::String(format!("Failed to save: {e}")),
+                                            );
+                                            rt.run_reactive_cycle();
+                                            editor.refresh_runtime_side_effects();
+                                            continue;
+                                        }
+
+                                        let buf_name = session.buffer_name.clone();
+                                        if let Err(error) = editor
+                                            .runtime_mut()
+                                            .eval_str(restore_instrument_patcher_layout_source())
+                                        {
+                                            editor.handle_host_event(HostEvent::Error(format!(
+                                                "Failed to restore main editor layout: {error:?}"
+                                            )));
+                                            continue;
+                                        }
+                                        editor.refresh_runtime_side_effects();
+                                        editor.remove_buffer_by_name(&buf_name);
+                                        editor_buffer_name = None;
+                                        editor_mode = None;
+                                        instrument_edit_session = None;
+
+                                        let ct = current_track.load(Ordering::Relaxed);
+                                        track_names[ct] = inst_name.clone();
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive("SEQ", "editor-active", Value::Bool(false));
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-mode",
+                                            Value::String(String::new()),
+                                        );
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(String::new()),
+                                        );
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-buffer-name",
+                                            Value::String(String::new()),
+                                        );
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "track-names",
+                                            build_track_names(&track_names),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Saved instrument '{inst_name}'"
+                                        )));
+                                        continue;
+                                    }
                                     let buf_name = editor_buffer_name.clone().unwrap_or_default();
                                     let source =
                                         editor.read_buffer_text(&buf_name).unwrap_or_default();
@@ -6707,6 +6943,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                    }
+
+                    "preview-instrument-patch" => {
+                        let Some(session) = instrument_edit_session.as_mut() else {
+                            editor.handle_host_event(HostEvent::Status(
+                                "No instrument edit session is active".to_string(),
+                            ));
+                            continue;
+                        };
+                        let status = extract_string_from_payload(&payload, "status")
+                            .unwrap_or_else(|| "invalid".to_string());
+                        if status != "valid" {
+                            session.preview_generation = session.preview_generation.wrapping_add(1);
+                            session.visible_revision_valid = false;
+                            pending_instrument_preview = None;
+                            let diagnostic = extract_string_from_payload(&payload, "diagnostic")
+                                .unwrap_or_else(|| "Patch writeback failed".to_string());
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive("SEQ", "editor-error", Value::String(diagnostic));
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            continue;
+                        }
+                        let Some(source) = extract_string_from_payload(&payload, "source") else {
+                            session.preview_generation = session.preview_generation.wrapping_add(1);
+                            session.visible_revision_valid = false;
+                            pending_instrument_preview = None;
+                            let rt = editor.runtime_mut();
+                            rt.set_reactive(
+                                "SEQ",
+                                "editor-error",
+                                Value::String(
+                                    "Patch preview did not include emitted source".to_string(),
+                                ),
+                            );
+                            rt.run_reactive_cycle();
+                            editor.refresh_runtime_side_effects();
+                            continue;
+                        };
+
+                        session.preview_generation = session.preview_generation.wrapping_add(1);
+                        session.visible_revision_valid = false;
+                        let generation = session.preview_generation;
+                        let sample_rate = app.graph.sample_rate;
+                        let asset_base = session.path.parent().map(|parent| parent.to_path_buf());
+                        let compile_source = source.clone();
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let result =
+                                sequencer::lisp_effect::compile_and_load_instrument_with_asset_base(
+                                    &compile_source,
+                                    sample_rate,
+                                    asset_base.as_deref(),
+                                );
+                            let _ = tx.send(result);
+                        });
+                        pending_instrument_preview = Some(PendingInstrumentPreview {
+                            generation,
+                            source,
+                            receiver: rx,
+                        });
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-error",
+                            Value::String("Preview compiling...".to_string()),
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
                     }
 
                     "enter-new-effect-editor" => {
@@ -7024,8 +7329,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     "cancel-editor" => {
+                        let cancelled_instrument_patcher = instrument_edit_session.is_some();
+                        if let Some(session) = instrument_edit_session.take() {
+                            pending_instrument_preview = None;
+                            if let Err(error) = app.replace_custom_instrument_engine_sync(
+                                session.engine_id,
+                                &session.name,
+                                &session.persisted_source,
+                            ) {
+                                editor.handle_host_event(HostEvent::Error(format!(
+                                    "Failed to restore instrument '{}': {error}",
+                                    session.name
+                                )));
+                            }
+                        }
                         if let Some(buf_name) = editor_buffer_name.take() {
-                            editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                            if cancelled_instrument_patcher {
+                                if let Err(error) = editor
+                                    .runtime_mut()
+                                    .eval_str(restore_instrument_patcher_layout_source())
+                                {
+                                    editor.handle_host_event(HostEvent::Error(format!(
+                                        "Failed to restore main editor layout: {error:?}"
+                                    )));
+                                }
+                                editor.refresh_runtime_side_effects();
+                            } else {
+                                editor.swap_buffer_in_tile_showing(&buf_name, "*metal*");
+                            }
                             editor.remove_buffer_by_name(&buf_name);
                         }
 
@@ -7270,6 +7601,90 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         ui_loop_stats.note_host_commands(host_commands_started.elapsed());
+
+        if let Some(completed_preview) = pending_instrument_preview.as_ref().and_then(|pending| {
+            match pending.receiver.try_recv() {
+                Ok(result) => Some(Ok((pending.generation, pending.source.clone(), result))),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(())),
+            }
+        }) {
+            let _ = pending_instrument_preview.take();
+            match completed_preview {
+                Ok((generation, source, compile_result)) => {
+                    if let Some(session) = instrument_edit_session.as_mut() {
+                        if session.preview_generation == generation {
+                            match compile_result {
+                                Ok(result) => match app.apply_compiled_instrument_engine(
+                                    session.engine_id,
+                                    &session.name,
+                                    &source,
+                                    result,
+                                ) {
+                                    Ok(()) => {
+                                        session.last_valid_source = source;
+                                        session.visible_revision_valid = true;
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(String::new()),
+                                        );
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "instrument-panel",
+                                            build_instrument_panel_value(
+                                                &app,
+                                                current_track.load(Ordering::Relaxed),
+                                                &selected_steps,
+                                            ),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                        ui_epoch.fetch_add(1, Ordering::Relaxed);
+                                        editor.handle_host_event(HostEvent::Status(format!(
+                                            "Previewed instrument '{}'",
+                                            session.name
+                                        )));
+                                    }
+                                    Err(error) => {
+                                        session.visible_revision_valid = false;
+                                        let rt = editor.runtime_mut();
+                                        rt.set_reactive(
+                                            "SEQ",
+                                            "editor-error",
+                                            Value::String(error),
+                                        );
+                                        rt.run_reactive_cycle();
+                                        editor.refresh_runtime_side_effects();
+                                    }
+                                },
+                                Err(error) => {
+                                    session.visible_revision_valid = false;
+                                    let rt = editor.runtime_mut();
+                                    rt.set_reactive("SEQ", "editor-error", Value::String(error));
+                                    rt.run_reactive_cycle();
+                                    editor.refresh_runtime_side_effects();
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(()) => {
+                    if let Some(session) = instrument_edit_session.as_mut() {
+                        session.visible_revision_valid = false;
+                        let rt = editor.runtime_mut();
+                        rt.set_reactive(
+                            "SEQ",
+                            "editor-error",
+                            Value::String("Instrument preview compile thread crashed".to_string()),
+                        );
+                        rt.run_reactive_cycle();
+                        editor.refresh_runtime_side_effects();
+                    }
+                }
+            }
+        }
         if project_load_still_pending {
             continue;
         }
