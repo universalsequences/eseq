@@ -83,7 +83,7 @@ pub(super) fn emit_patch_writeback(
     let root_patch = parse_patch_source(source, intent).map_err(WriteBackError::Parse)?;
 
     validate_connection_edits(&root_patch, interaction_state)?;
-    reject_unsupported_deletions(interaction_state)?;
+    apply_node_deletions(&mut document, &root_patch, interaction_state)?;
 
     let active_view_key = active_patcher_view_key(interaction_state);
     if let Some(text_edit) = interaction_state.text_edit.as_ref() {
@@ -162,6 +162,7 @@ pub(super) fn emit_patch_writeback(
 
     let generated =
         apply_generated_binding_writeback(&mut document, &root_patch, interaction_state)?;
+    apply_cable_writeback(&mut document, &root_patch, interaction_state, &generated)?;
     apply_history_writeback(&mut document, &root_patch, interaction_state, &generated)?;
 
     Ok(document.emit())
@@ -176,6 +177,7 @@ fn validate_connection_edits(
             PatcherConnectionOrigin::Created { .. } => {
                 if !connection_edit_touches_history(root_patch, interaction_state, edit)
                     && !connection_edit_touches_created_value(interaction_state, edit)
+                    && !connection_edit_has_source_destination(root_patch, edit)
                 {
                     return Err(WriteBackError::UnsupportedCreatedConnection {
                         view_key: edit.view_key.clone(),
@@ -204,7 +206,14 @@ fn validate_connection_edits(
             interaction_state,
             &view_key,
             &connection_id,
-        ) {
+        ) && !source_connection_is_deletable(root_patch, &view_key, &connection_id)
+            && !deleted_connection_is_incident_to_deleted_node(
+                root_patch,
+                interaction_state,
+                &view_key,
+                &connection_id,
+            )
+        {
             return Err(WriteBackError::UnsupportedDeletedConnection {
                 view_key,
                 connection_id,
@@ -215,14 +224,167 @@ fn validate_connection_edits(
     Ok(())
 }
 
-fn reject_unsupported_deletions(
+#[derive(Debug, Clone)]
+enum SourceDeletionTarget {
+    Form(SourceFormId),
+    Expr(SourceExprId),
+}
+
+fn apply_node_deletions(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
 ) -> Result<(), WriteBackError> {
-    if let Some(key) = interaction_state.edit_state.deleted_nodes.iter().next() {
-        let (view_key, node_id) = split_scoped_key(key);
-        return Err(WriteBackError::UnsupportedDeletedNode { view_key, node_id });
+    let deletion_targets = interaction_state
+        .edit_state
+        .deleted_nodes
+        .iter()
+        .map(|key| split_scoped_key(key))
+        .map(|(view_key, node_id)| {
+            let Some(node) =
+                patch_for_view(root_patch, &view_key).and_then(|patch| patch_node(patch, &node_id))
+            else {
+                return Err(WriteBackError::UnsupportedDeletedNode { view_key, node_id });
+            };
+            let Some(source) = node.source.as_ref() else {
+                return Err(WriteBackError::MissingSourceOwner { view_key, node_id });
+            };
+            match &source.owner {
+                SourceOwner::TopLevelForm { form_id } => Ok((
+                    view_key,
+                    node_id,
+                    SourceDeletionTarget::Form(form_id.clone()),
+                )),
+                SourceOwner::BindingValue { form_id, .. } => Ok((
+                    view_key,
+                    node_id,
+                    SourceDeletionTarget::Form(form_id.clone()),
+                )),
+                SourceOwner::NestedExpr { expr } => {
+                    Ok((view_key, node_id, SourceDeletionTarget::Expr(expr.clone())))
+                }
+                SourceOwner::CodeIsland { .. } => {
+                    return Err(WriteBackError::EditedCodeIsland { view_key, node_id });
+                }
+                _ => {
+                    return Err(WriteBackError::UnsupportedDeletedNode { view_key, node_id });
+                }
+            }
+        })
+        .collect::<Result<Vec<_>, WriteBackError>>()?;
+
+    let mut deleted_forms = deletion_targets
+        .iter()
+        .filter_map(|(_, _, target)| match target {
+            SourceDeletionTarget::Form(form_id) => Some(form_id.clone()),
+            SourceDeletionTarget::Expr(_) => None,
+        })
+        .collect::<Vec<_>>();
+    deleted_forms.sort_by(|left, right| {
+        source_scope_sort_key(&left.scope)
+            .cmp(&source_scope_sort_key(&right.scope))
+            .then_with(|| right.index.cmp(&left.index))
+    });
+    deleted_forms.dedup();
+
+    let mut deleted_exprs = deletion_targets
+        .iter()
+        .filter_map(|(_, _, target)| match target {
+            SourceDeletionTarget::Form(_) => None,
+            SourceDeletionTarget::Expr(expr) => Some(expr.clone()),
+        })
+        .filter(|expr| !deleted_forms.iter().any(|form_id| form_id == &expr.form_id))
+        .collect::<Vec<_>>();
+    deleted_exprs.sort_by(|left, right| {
+        source_scope_sort_key(&left.form_id.scope)
+            .cmp(&source_scope_sort_key(&right.form_id.scope))
+            .then_with(|| left.form_id.index.cmp(&right.form_id.index))
+            .then_with(|| expr_path_indexes(left).cmp(&expr_path_indexes(right)))
+    });
+    deleted_exprs.dedup();
+    deleted_exprs = deleted_exprs
+        .iter()
+        .filter(|expr| {
+            !deleted_exprs
+                .iter()
+                .any(|candidate| candidate != *expr && source_expr_is_ancestor(candidate, expr))
+        })
+        .cloned()
+        .collect();
+
+    for expr in deleted_exprs {
+        document.replace_expr(
+            &expr,
+            Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
+        )?;
+    }
+
+    for form_id in deleted_forms {
+        document.remove_form(&form_id)?;
     }
     Ok(())
+}
+
+fn source_expr_is_ancestor(candidate: &SourceExprId, expr: &SourceExprId) -> bool {
+    candidate.form_id == expr.form_id
+        && candidate.path.0.len() < expr.path.0.len()
+        && expr.path.0.starts_with(&candidate.path.0)
+}
+
+fn expr_path_indexes(expr: &SourceExprId) -> Vec<usize> {
+    expr.path
+        .0
+        .iter()
+        .map(|segment| match segment {
+            ExprPathSegment::ListItem(index) => *index,
+        })
+        .collect()
+}
+
+fn source_scope_sort_key(scope: &SourceScopeId) -> (&str, &str) {
+    match scope {
+        SourceScopeId::Root => ("", ""),
+        SourceScopeId::Macro { name } => ("macro", name.as_str()),
+    }
+}
+
+fn deleted_connection_is_incident_to_deleted_node(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    connection_id: &str,
+) -> bool {
+    let Some(connection) = source_connection(root_patch, view_key, connection_id) else {
+        return false;
+    };
+    interaction_state
+        .edit_state
+        .deleted_nodes
+        .contains(&node_edit_key(view_key, &connection.from_node))
+        || interaction_state
+            .edit_state
+            .deleted_nodes
+            .contains(&node_edit_key(view_key, &connection.to_node))
+}
+
+fn connection_edit_has_source_destination(
+    root_patch: &Patch,
+    edit: &PatcherConnectionEdit,
+) -> bool {
+    patch_for_view(root_patch, &edit.view_key)
+        .and_then(|patch| patch_node(patch, &edit.to.node_id))
+        .and_then(|node| node.source.as_ref())
+        .is_some()
+}
+
+fn source_connection_is_deletable(root_patch: &Patch, view_key: &str, connection_id: &str) -> bool {
+    let Some(connection) = source_connection(root_patch, view_key, connection_id) else {
+        return false;
+    };
+    patch_for_view(root_patch, view_key)
+        .and_then(|patch| patch_node(patch, &connection.to_node))
+        .and_then(|node| node.source.as_ref())
+        .is_some()
 }
 
 fn split_scoped_key(key: &str) -> (String, String) {
@@ -830,6 +992,14 @@ fn rewrite_node_input(
             && input_index == 0
             && let SourceOwner::TopLevelForm { form_id } = &source.owner
         {
+            if let Some(call_shape) = source.call_shape.as_ref()
+                && let Some(arg) = call_shape
+                    .positional_args
+                    .iter()
+                    .find(|arg| arg.semantic_index == input_index)
+            {
+                return document.replace_expr(&arg.expr, value);
+            }
             return document.replace_expr(
                 &SourceExprId {
                     form_id: form_id.clone(),
@@ -844,6 +1014,99 @@ fn rewrite_node_input(
         node_id: node.id.clone(),
         reason: "generated binding consumer has no source-owned positional argument".to_string(),
     })
+}
+
+fn apply_cable_writeback(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+) -> Result<(), WriteBackError> {
+    let mut deleted = interaction_state
+        .edit_state
+        .deleted_connections
+        .iter()
+        .map(|key| split_scoped_key(key))
+        .collect::<Vec<_>>();
+    deleted.sort();
+    for (view_key, connection_id) in deleted {
+        if deleted_connection_is_incident_to_deleted_node(
+            root_patch,
+            interaction_state,
+            &view_key,
+            &connection_id,
+        ) || deleted_connection_has_history_replacement(
+            root_patch,
+            interaction_state,
+            &view_key,
+            &connection_id,
+        ) || deleted_connection_has_created_value_replacement(
+            root_patch,
+            interaction_state,
+            &view_key,
+            &connection_id,
+        ) {
+            continue;
+        }
+        let Some(connection) = source_connection(root_patch, &view_key, &connection_id) else {
+            return Err(WriteBackError::UnsupportedDeletedConnection {
+                view_key,
+                connection_id,
+            });
+        };
+        let Some(dest) = patch_for_view(root_patch, &view_key)
+            .and_then(|patch| patch_node(patch, &connection.to_node))
+        else {
+            return Err(WriteBackError::UnsupportedDeletedConnection {
+                view_key,
+                connection_id,
+            });
+        };
+        rewrite_node_input(
+            document,
+            &view_key,
+            dest,
+            connection.to_input,
+            Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()),
+        )?;
+    }
+
+    let mut created = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .collect::<Vec<_>>();
+    created.sort_by(|a, b| a.id.cmp(&b.id));
+    for connection in created {
+        if connection_edit_touches_history(root_patch, interaction_state, connection)
+            || connection_edit_touches_created_value(interaction_state, connection)
+        {
+            continue;
+        }
+        let value = value_reference_expr(
+            document,
+            root_patch,
+            generated,
+            &connection.view_key,
+            &connection.from,
+        )?;
+        let Some(dest) = patch_for_view(root_patch, &connection.view_key)
+            .and_then(|patch| patch_node(patch, &connection.to.node_id))
+        else {
+            return Err(WriteBackError::UnsupportedCreatedConnection {
+                view_key: connection.view_key.clone(),
+                connection_id: connection.id.clone(),
+            });
+        };
+        rewrite_node_input(
+            document,
+            &connection.view_key,
+            dest,
+            connection.to.input_index,
+            value,
+        )?;
+    }
+    Ok(())
 }
 
 fn apply_history_writeback(
@@ -948,6 +1211,7 @@ fn apply_history_writeback(
             } else {
                 if generated.get(&view_key, &connection.from.node_id).is_some()
                     || generated.get(&view_key, &connection.to.node_id).is_some()
+                    || connection_edit_has_source_destination(root_patch, connection)
                 {
                     continue;
                 }
@@ -1489,6 +1753,40 @@ impl SourceDocument {
                 reason,
             }
         })
+    }
+
+    fn remove_form(&mut self, form_id: &SourceFormId) -> Result<(), WriteBackError> {
+        match &form_id.scope {
+            SourceScopeId::Root => {
+                if form_id.index >= self.forms.len() {
+                    return Err(WriteBackError::InvalidEdit {
+                        view_key: view_key_for_scope(&form_id.scope),
+                        node_id: String::new(),
+                        reason: format!("missing root source form {}", form_id.index),
+                    });
+                }
+                self.forms.remove(form_id.index);
+                Ok(())
+            }
+            SourceScopeId::Macro { name } => {
+                let Some(macro_doc) = self.macros.get_mut(name) else {
+                    return Err(WriteBackError::InvalidEdit {
+                        view_key: view_key_for_scope(&form_id.scope),
+                        node_id: String::new(),
+                        reason: "missing macro scope for form removal".to_string(),
+                    });
+                };
+                if form_id.index >= macro_doc.body.len() {
+                    return Err(WriteBackError::InvalidEdit {
+                        view_key: view_key_for_scope(&form_id.scope),
+                        node_id: String::new(),
+                        reason: format!("missing macro source form {}", form_id.index),
+                    });
+                }
+                macro_doc.body.remove(form_id.index);
+                Ok(())
+            }
+        }
     }
 
     fn form_expr(&self, scope: &SourceScopeId, index: usize) -> Option<&Expression> {

@@ -1324,16 +1324,22 @@ Completed requirements:
 
 ### Phase 5: Cable and Node Semantic Write-Back
 
+Status: implemented as a conservative semantic write-back slice.
+
 Goal: cover the core patch editing operations as saveable normalized output.
 
 Responsibilities:
 
-- Cable creation rewrites the destination semantic arg slot.
+- Cable creation rewrites the destination semantic arg slot for source-backed
+  destination nodes.
 - Cable deletion emits `__patcher_missing_input__` when the required input is
   truly missing.
-- Source node deletion removes the owned top-level form or replaces the owned
-  nested expression with a missing sentinel where necessary.
-- Created node deletion removes the temporary edit.
+- Source node deletion removes the owned top-level/root or macro-body form when
+  the node owns that form. Nested source node deletion replaces the exact owned
+  nested expression with `__patcher_missing_input__`; it never promotes or
+  reconnects the deleted node's upstream inputs into the parent expression.
+- Created node deletion removes the temporary edit before write-back because the
+  deleted created node no longer appears in the edit-state graph.
 - Deleted nodes remove or rewrite incident connections deterministically.
 - Attributes remain inline and never become cable-addressable.
 
@@ -1341,11 +1347,18 @@ Tests:
 
 - Cable create updates the intended semantic arg index.
 - Raw child indexes remain correct when attributes are present.
+- Rewiring a source cable replaces the destination argument exactly once.
 - Cable delete in root emits the missing-input sentinel.
 - Cable delete in macro emits the missing-input sentinel inside `defmacro`.
 - Deleting a source-backed top-level node removes that form.
+- Deleting multiple top-level source forms removes the expected original forms
+  without index-shift errors.
+- Deleted top-level nodes ignore incident deleted connections because removing
+  the owned form is authoritative for that node.
 - Deleting a nested producer preserves downstream source with an explicit
-  missing input or blocks save when no unambiguous representation exists.
+  missing input.
+- Deleting a nested producer does not promote one of its upstream inputs into
+  the parent expression.
 
 ### Phase 6: Param and Macro Parameter Rename
 

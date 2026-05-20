@@ -1346,6 +1346,275 @@ fn writeback_shared_created_node_emits_one_generated_def_and_multiple_refs() {
 }
 
 #[test]
+fn writeback_cable_create_updates_destination_semantic_arg() {
+    let source = r#"
+        (def a (in 1))
+        (def b (in 2))
+        (def result (+ a 1))
+    "#;
+    let patch = parse(source);
+    let b = patch.nodes.iter().find(|node| node.id == "b").unwrap();
+    let plus = patch.nodes.iter().find(|node| node.op == "+").unwrap();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: b.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: plus.id.clone(),
+            input_index: 1,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def a (in 1.0))\n(def b (in 2.0))\n(def result (+ a b))"
+    );
+}
+
+#[test]
+fn writeback_cable_create_uses_semantic_arg_index_with_attributes() {
+    let source = r#"
+        (def a (in 1))
+        (def b (in 2))
+        (def result (foo a @mode fast 1))
+    "#;
+    let patch = parse(source);
+    let b = patch.nodes.iter().find(|node| node.id == "b").unwrap();
+    let foo = patch.nodes.iter().find(|node| node.op == "foo").unwrap();
+    let mut state = PatcherInteractionState::default();
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: b.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: foo.id.clone(),
+            input_index: 1,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def a (in 1.0))\n(def b (in 2.0))\n(def result (foo a @mode fast b))"
+    );
+}
+
+#[test]
+fn writeback_source_cable_rewire_replaces_destination_arg_once() {
+    let source = r#"
+        (def a (in 1))
+        (def b (in 2))
+        (def result (+ a 1))
+    "#;
+    let patch = parse(source);
+    let a = patch.nodes.iter().find(|node| node.id == "a").unwrap();
+    let b = patch.nodes.iter().find(|node| node.id == "b").unwrap();
+    let plus = patch.nodes.iter().find(|node| node.op == "+").unwrap();
+    let a_to_plus = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == a.id && connection.to_node == plus.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(a_to_plus),
+        ));
+    allocate_created_connection(
+        &mut state,
+        "root",
+        OutputPortRef {
+            node_id: b.id.clone(),
+            output_index: 0,
+        },
+        InputPortRef {
+            node_id: plus.id.clone(),
+            input_index: 0,
+        },
+    );
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def a (in 1.0))\n(def b (in 2.0))\n(def result (+ b 1.0))"
+    );
+}
+
+#[test]
+fn writeback_cable_delete_in_root_emits_missing_input_sentinel() {
+    let source = r#"
+        (def sig (in 1))
+        (out sig 1)
+    "#;
+    let patch = parse(source);
+    let connection = patch.connections.first().unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(connection),
+        ));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1.0))\n(out __patcher_missing_input__ 1.0)"
+    );
+}
+
+#[test]
+fn writeback_cable_delete_in_macro_emits_missing_input_sentinel() {
+    let source = "(defmacro ap (sig) (out sig 1))";
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+    let connection = macro_patch.patch.connections.first().unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "macro:ap",
+            &source_connection_id(connection),
+        ));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro ap (sig) (out __patcher_missing_input__ 1.0))"
+    );
+}
+
+#[test]
+fn writeback_deleting_source_backed_top_level_node_removes_form() {
+    let source = r#"
+        (def sig (in 1))
+        (def result (phasor sig))
+        (out result 1)
+    "#;
+    let patch = parse(source);
+    let result = patch.nodes.iter().find(|node| node.id == "result").unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &result.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1.0))\n(out result 1.0)"
+    );
+}
+
+#[test]
+fn writeback_deleting_multiple_top_level_nodes_removes_expected_forms() {
+    let source = r#"
+        (def sig (in 1))
+        (def carrier (phasor sig))
+        (def shaped (* carrier 0.5))
+        (out shaped 1)
+    "#;
+    let patch = parse(source);
+    let sig = patch.nodes.iter().find(|node| node.id == "sig").unwrap();
+    let shaped = patch.nodes.iter().find(|node| node.id == "shaped").unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &sig.id));
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &shaped.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def carrier (phasor sig))\n(out shaped 1.0)"
+    );
+}
+
+#[test]
+fn writeback_deleted_top_level_node_ignores_incident_deleted_connections() {
+    let source = r#"
+        (def sig (in 1))
+        (def result (phasor sig))
+        (out result 1)
+    "#;
+    let patch = parse(source);
+    let result = patch.nodes.iter().find(|node| node.id == "result").unwrap();
+    let result_to_out = patch
+        .connections
+        .iter()
+        .find(|connection| connection.from_node == result.id)
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &result.id));
+    state
+        .edit_state
+        .deleted_connections
+        .insert(connection_edit_key(
+            "root",
+            &source_connection_id(result_to_out),
+        ));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1.0))\n(out result 1.0)"
+    );
+}
+
+#[test]
+fn writeback_deleting_nested_source_node_replaces_it_with_missing_input() {
+    let source = r#"
+        (def sig (in 1))
+        (def result (phasor (* sig 2)))
+    "#;
+    let patch = parse(source);
+    let nested = patch.nodes.iter().find(|node| node.op == "*").unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &nested.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1.0))\n(def result (phasor __patcher_missing_input__))"
+    );
+}
+
+#[test]
+fn writeback_deleting_nested_source_node_does_not_promote_its_input() {
+    let source = "(def result (phasor (* (noise) 2)))";
+    let patch = parse(source);
+    let nested = patch.nodes.iter().find(|node| node.op == "*").unwrap();
+    let mut state = PatcherInteractionState::default();
+    state
+        .edit_state
+        .deleted_nodes
+        .insert(node_edit_key("root", &nested.id));
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def result (phasor __patcher_missing_input__))"
+    );
+}
+
+#[test]
 fn literal_args_are_inlined_and_do_not_create_visible_ports() {
     let patch = parse(
         r#"
