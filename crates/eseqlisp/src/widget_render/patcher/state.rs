@@ -11,8 +11,8 @@ use crate::vm::Value;
 use super::lisp::{editor_node_port_shape, node_kind_for_op, parse_editor_node_text};
 use super::metrics::{PAN_OVERSCROLL_MIN_CELLS, PAN_OVERSCROLL_VIEWPORT_FACTOR};
 use super::model::{
-    ArgValue, CableEndpoint, ConnectionKind, InputPortRef, NodeKind, OutputPortRef, Patch,
-    PatchConnection, PatchNode,
+    ArgValue, CableEndpoint, CableSegmentInfo, ConnectionKind, InputPortRef, NodeKind,
+    OutputPortRef, Patch, PatchConnection, PatchNode,
 };
 use super::project::dgenlisp_operator_names;
 use super::prop_str;
@@ -125,6 +125,7 @@ pub(super) struct PatcherConnectionEdit {
     pub(super) from: OutputPortRef,
     pub(super) to: InputPortRef,
     pub(super) kind: ConnectionKind,
+    pub(super) segment: Option<CableSegmentInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,6 +177,13 @@ pub(super) enum PatcherDragState {
         current_row: f32,
         target_from: Option<OutputPortRef>,
         target_to: Option<InputPortRef>,
+    },
+    CableSegment {
+        cable_id: String,
+        start_col: f32,
+        start_row: f32,
+        end_col: f32,
+        end_row: f32,
     },
 }
 
@@ -275,9 +283,49 @@ pub(super) fn allocate_created_connection(
             from,
             to,
             kind: ConnectionKind::Forward,
+            segment: None,
         },
     );
     id
+}
+
+pub(super) fn set_connection_segment_edit(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+    connection: &PatchConnection,
+    segment: Option<CableSegmentInfo>,
+) {
+    let cable_id = source_connection_id(connection);
+    let existing_key = state.edit_state.connections.iter().find_map(|(key, edit)| {
+        let edit_cable_id = connection_id_from_ports(&edit.from, &edit.to);
+        (edit.view_key == view_key && edit_cable_id == cable_id).then(|| key.clone())
+    });
+    if let Some(key) = existing_key {
+        if let Some(edit) = state.edit_state.connections.get_mut(&key) {
+            edit.segment = segment;
+        }
+        return;
+    }
+    state.edit_state.connections.insert(
+        connection_edit_key(view_key, &cable_id),
+        PatcherConnectionEdit {
+            view_key: view_key.to_string(),
+            id: cable_id,
+            origin: PatcherConnectionOrigin::Source {
+                source_connection_id: source_connection_id(connection),
+            },
+            from: OutputPortRef {
+                node_id: connection.from_node.clone(),
+                output_index: connection.from_output,
+            },
+            to: InputPortRef {
+                node_id: connection.to_node.clone(),
+                input_index: connection.to_input,
+            },
+            kind: connection.kind,
+            segment,
+        },
+    );
 }
 
 pub(super) fn delete_connection_edit_or_mark_deleted(
@@ -287,12 +335,19 @@ pub(super) fn delete_connection_edit_or_mark_deleted(
 ) -> bool {
     let created_key = state.edit_state.connections.iter().find_map(|(key, edit)| {
         let edit_cable_id = connection_id_from_ports(&edit.from, &edit.to);
-        (edit.view_key == view_key && edit_cable_id == cable_id).then(|| key.clone())
+        (edit.view_key == view_key
+            && edit_cable_id == cable_id
+            && matches!(edit.origin, PatcherConnectionOrigin::Created { .. }))
+        .then(|| key.clone())
     });
 
     let changed = if let Some(key) = created_key {
         state.edit_state.connections.remove(&key).is_some()
     } else {
+        state
+            .edit_state
+            .connections
+            .remove(&connection_edit_key(view_key, cable_id));
         state
             .edit_state
             .deleted_connections
@@ -463,6 +518,14 @@ pub(super) fn patch_with_interaction_state(
             apply_node_text_override(node, &edit.text, &macro_arities);
         }
     }
+    for connection in &mut patch.connections {
+        let edit_key = connection_edit_key(view_key, &source_connection_id(connection));
+        if let Some(edit) = interaction_state.edit_state.connections.get(&edit_key)
+            && matches!(edit.origin, PatcherConnectionOrigin::Source { .. })
+        {
+            connection.segment = edit.segment;
+        }
+    }
     for edit in interaction_state
         .edit_state
         .nodes
@@ -502,6 +565,7 @@ pub(super) fn patch_with_interaction_state(
                 to_node: edit.to.node_id.clone(),
                 to_input: edit.to.input_index,
                 kind: edit.kind,
+                segment: edit.segment,
                 source: None,
             }),
     );

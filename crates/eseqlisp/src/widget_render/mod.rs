@@ -500,6 +500,9 @@ pub struct MetalPatchCablePrimitive {
     pub end: [f32; 2],
     pub radius_px: f32,
     pub color: Color,
+    pub is_segmented: bool,
+    pub segment_row: f32,
+    pub corner_radius_cells: f32,
 }
 
 #[cfg(target_os = "macos")]
@@ -1098,6 +1101,7 @@ fn offset_primitive_y_mut(prim: &mut MetalPrimitive, dy: f32, viewport: WidgetVi
             c.control1[1] += dy;
             c.control2[1] += dy;
             c.end[1] += dy;
+            c.segment_row += dy;
         }
         MetalPrimitive::Circle(c) => c.center[1] += dy,
         MetalPrimitive::Waveform(w) => w.rect.row += dy,

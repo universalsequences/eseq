@@ -246,9 +246,9 @@ struct PatchCableInstance {
     packed_float2 end;
     float4 color;
     float radius_px;
-    float pad0;
-    float pad1;
-    float pad2;
+    float is_segmented;
+    float segment_y_px;
+    float corner_radius_px;
 };
 
 struct PatchCableVaryings {
@@ -260,6 +260,9 @@ struct PatchCableVaryings {
     float2 end;
     float4 color;
     float radius_px;
+    float is_segmented;
+    float segment_y_px;
+    float corner_radius_px;
 };
 
 float2 patch_cable_quad_corner(uint vid) {
@@ -290,6 +293,9 @@ vertex PatchCableVaryings patch_cable_vert(
     out.end = float2(cable.end);
     out.color = cable.color;
     out.radius_px = cable.radius_px;
+    out.is_segmented = cable.is_segmented;
+    out.segment_y_px = cable.segment_y_px;
+    out.corner_radius_px = cable.corner_radius_px;
     return out;
 }
 
@@ -324,14 +330,142 @@ float patch_cable_curve_distance(
     return min_dist;
 }
 
+float patch_cable_segment_distance(float2 point, float2 seg_start, float2 seg_end) {
+    float2 seg_vec = seg_end - seg_start;
+    float seg_len_sq = dot(seg_vec, seg_vec);
+    if (seg_len_sq < 0.00001) {
+        return length(point - seg_start);
+    }
+    float t = clamp(dot(point - seg_start, seg_vec) / seg_len_sq, 0.0, 1.0);
+    return length(point - (seg_start + t * seg_vec));
+}
+
+float patch_cable_arc_distance(float2 point, float2 center, float radius, float2 corner) {
+    float2 to_corner = corner - center;
+    float2 to_point = point - center;
+    bool valid_x = (to_corner.x > 0.0) ? (to_point.x >= 0.0) : (to_point.x <= 0.0);
+    bool valid_y = (to_corner.y > 0.0) ? (to_point.y >= 0.0) : (to_point.y <= 0.0);
+    if (valid_x && valid_y) {
+        return abs(length(to_point) - radius);
+    }
+    return 1000000.0;
+}
+
+float patch_cable_segmented_distance_y_up(
+    float2 p,
+    float2 start,
+    float2 end,
+    float segment_y,
+    float corner_radius)
+{
+    bool needs_five = end.y > segment_y;
+    if (!needs_five) {
+        bool going_down1 = start.y > segment_y;
+        bool going_right = end.x > start.x;
+        bool going_down2 = end.y < segment_y;
+        float2 corner1 = float2(start.x, segment_y);
+        float2 corner2 = float2(end.x, segment_y);
+        float2 corner1_center;
+        float2 corner2_center;
+        if (going_down1) {
+            corner1_center = going_right
+                ? float2(start.x + corner_radius, segment_y + corner_radius)
+                : float2(start.x - corner_radius, segment_y + corner_radius);
+        } else {
+            corner1_center = going_right
+                ? float2(start.x + corner_radius, segment_y - corner_radius)
+                : float2(start.x - corner_radius, segment_y - corner_radius);
+        }
+        if (going_down2) {
+            corner2_center = going_right
+                ? float2(end.x - corner_radius, segment_y - corner_radius)
+                : float2(end.x + corner_radius, segment_y - corner_radius);
+        } else {
+            corner2_center = going_right
+                ? float2(end.x - corner_radius, segment_y + corner_radius)
+                : float2(end.x + corner_radius, segment_y + corner_radius);
+        }
+        float2 seg1_end = float2(start.x, going_down1 ? segment_y + corner_radius : segment_y - corner_radius);
+        float2 seg3_start = float2(end.x, going_down2 ? segment_y - corner_radius : segment_y + corner_radius);
+        float2 seg2_start = float2(going_right ? start.x + corner_radius : start.x - corner_radius, segment_y);
+        float2 seg2_end = float2(going_right ? end.x - corner_radius : end.x + corner_radius, segment_y);
+        return min(
+            min(min(patch_cable_segment_distance(p, start, seg1_end), patch_cable_segment_distance(p, seg2_start, seg2_end)),
+                min(patch_cable_segment_distance(p, seg3_start, end), patch_cable_arc_distance(p, corner1_center, corner_radius, corner1))),
+            patch_cable_arc_distance(p, corner2_center, corner_radius, corner2));
+    }
+
+    bool going_right = end.x > start.x;
+    float clearance = corner_radius * 2.0;
+    float turnaround_y = end.y + clearance;
+    float turnaround_x = end.x - clearance;
+    bool seg4_going_right = end.x > turnaround_x;
+    float2 corner1 = float2(start.x, segment_y);
+    float2 corner1_center = going_right
+        ? float2(start.x + corner_radius, segment_y + corner_radius)
+        : float2(start.x - corner_radius, segment_y + corner_radius);
+    float2 seg1_end = float2(start.x, segment_y + corner_radius);
+    float2 corner2 = float2(turnaround_x, segment_y);
+    float2 corner2_center = going_right
+        ? float2(turnaround_x - corner_radius, segment_y + corner_radius)
+        : float2(turnaround_x + corner_radius, segment_y + corner_radius);
+    float2 seg2_start = float2(going_right ? start.x + corner_radius : start.x - corner_radius, segment_y);
+    float2 seg2_end = float2(going_right ? turnaround_x - corner_radius : turnaround_x + corner_radius, segment_y);
+    float2 corner3 = float2(turnaround_x, turnaround_y);
+    float2 corner3_center = seg4_going_right
+        ? float2(turnaround_x + corner_radius, turnaround_y - corner_radius)
+        : float2(turnaround_x - corner_radius, turnaround_y - corner_radius);
+    float2 seg3_start = float2(turnaround_x, segment_y + corner_radius);
+    float2 seg3_end = float2(turnaround_x, turnaround_y - corner_radius);
+    float2 corner4 = float2(end.x, turnaround_y);
+    float2 corner4_center = seg4_going_right
+        ? float2(end.x - corner_radius, turnaround_y - corner_radius)
+        : float2(end.x + corner_radius, turnaround_y - corner_radius);
+    float2 seg4_start = float2(seg4_going_right ? turnaround_x + corner_radius : turnaround_x - corner_radius, turnaround_y);
+    float2 seg4_end = float2(seg4_going_right ? end.x - corner_radius : end.x + corner_radius, turnaround_y);
+    float2 seg5_start = float2(end.x, turnaround_y - corner_radius);
+    float min_seg = min(
+        min(min(patch_cable_segment_distance(p, start, seg1_end), patch_cable_segment_distance(p, seg2_start, seg2_end)),
+            min(patch_cable_segment_distance(p, seg3_start, seg3_end), patch_cable_segment_distance(p, seg4_start, seg4_end))),
+        patch_cable_segment_distance(p, seg5_start, end));
+    float min_corner = min(
+        min(patch_cable_arc_distance(p, corner1_center, corner_radius, corner1),
+            patch_cable_arc_distance(p, corner2_center, corner_radius, corner2)),
+        min(patch_cable_arc_distance(p, corner3_center, corner_radius, corner3),
+            patch_cable_arc_distance(p, corner4_center, corner_radius, corner4)));
+    return min(min_seg, min_corner);
+}
+
+float patch_cable_segmented_distance(
+    float2 p,
+    float2 start,
+    float2 end,
+    float segment_y_px,
+    float corner_radius)
+{
+    return patch_cable_segmented_distance_y_up(
+        float2(p.x, -p.y),
+        float2(start.x, -start.y),
+        float2(end.x, -end.y),
+        -segment_y_px,
+        corner_radius);
+}
+
 fragment float4 patch_cable_frag(PatchCableVaryings in [[stage_in]])
 {
-    float min_dist_to_line = patch_cable_curve_distance(
-        in.pixel_pos,
-        in.start,
-        in.control1,
-        in.control2,
-        in.end);
+    float min_dist_to_line = in.is_segmented > 0.5
+        ? patch_cable_segmented_distance(
+            in.pixel_pos,
+            in.start,
+            in.end,
+            in.segment_y_px,
+            in.corner_radius_px)
+        : patch_cable_curve_distance(
+            in.pixel_pos,
+            in.start,
+            in.control1,
+            in.control2,
+            in.end);
 
     float sdf = min_dist_to_line - in.radius_px;
     float derivative = max(fwidth(sdf), 0.0001);
@@ -834,7 +968,9 @@ fragment float4 waveform_frag(
         end: [f32; 2],
         color: [f32; 4],
         radius_px: f32,
-        _pad: [f32; 3],
+        is_segmented: f32,
+        segment_y_px: f32,
+        corner_radius_px: f32,
     }
 
     #[derive(Clone, Copy)]
@@ -4661,11 +4797,37 @@ fragment float4 waveform_frag(
         let c1 = (cable.control1[0] * cell_w, cable.control1[1] * cell_h);
         let c2 = (cable.control2[0] * cell_w, cable.control2[1] * cell_h);
         let end = (cable.end[0] * cell_w, cable.end[1] * cell_h);
+        let segment_y_px = cable.segment_row * cell_h;
+        let corner_radius_px = cable.corner_radius_cells * cell_w.min(cell_h);
         let padding = cable.radius_px + 16.0;
-        let min_x = start.0.min(end.0).min(c1.0).min(c2.0) - padding;
-        let max_x = start.0.max(end.0).max(c1.0).max(c2.0) + padding;
-        let min_y = start.1.min(end.1).min(c1.1).min(c2.1) - padding;
-        let max_y = start.1.max(end.1).max(c1.1).max(c2.1) + padding;
+        let (min_x, max_x, min_y, max_y) = if cable.is_segmented {
+            let needs_five = end.1 < segment_y_px;
+            if needs_five {
+                let clearance = corner_radius_px * 2.0;
+                let turnaround_y = end.1 - clearance;
+                let turnaround_x = end.0 - clearance;
+                (
+                    start.0.min(end.0).min(turnaround_x) - padding,
+                    start.0.max(end.0).max(turnaround_x) + padding,
+                    start.1.min(end.1).min(segment_y_px).min(turnaround_y) - padding,
+                    start.1.max(end.1).max(segment_y_px).max(turnaround_y) + padding,
+                )
+            } else {
+                (
+                    start.0.min(end.0) - padding,
+                    start.0.max(end.0) + padding,
+                    start.1.min(end.1).min(segment_y_px) - padding,
+                    start.1.max(end.1).max(segment_y_px) + padding,
+                )
+            }
+        } else {
+            (
+                start.0.min(end.0).min(c1.0).min(c2.0) - padding,
+                start.0.max(end.0).max(c1.0).max(c2.0) + padding,
+                start.1.min(end.1).min(c1.1).min(c2.1) - padding,
+                start.1.max(end.1).max(c1.1).max(c2.1) + padding,
+            )
+        };
         if min_x >= vp_w || max_x <= 0.0 || min_y >= vp_h || max_y <= 0.0 {
             return None;
         }
@@ -4683,7 +4845,9 @@ fragment float4 waveform_frag(
                 end: [end.0, end.1],
                 color: cable.color.to_rgba(),
                 radius_px: cable.radius_px,
-                _pad: [0.0; 3],
+                is_segmented: if cable.is_segmented { 1.0 } else { 0.0 },
+                segment_y_px,
+                corner_radius_px,
             },
             clip,
         })
@@ -5055,7 +5219,9 @@ fragment float4 waveform_frag(
                 end: [end.0, end.1],
                 color: color.to_rgba(),
                 radius_px,
-                _pad: [0.0; 3],
+                is_segmented: 0.0,
+                segment_y_px: 0.0,
+                corner_radius_px: 0.0,
             },
             clip,
         });
@@ -6072,6 +6238,7 @@ fragment float4 waveform_frag(
                 c.control2[1] += row_off;
                 c.end[0] += col_off;
                 c.end[1] += row_off;
+                c.segment_row += row_off;
                 widget_render::MetalPrimitive::PatchCable(c)
             }
             widget_render::MetalPrimitive::Circle(mut c) => {

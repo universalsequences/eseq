@@ -14,6 +14,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run() -> Result<(), String> {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
     use eseqlisp::backend::Backend;
     use eseqlisp::editor::ViewMode;
     use eseqlisp::frame::build_render_frame;
@@ -54,6 +55,20 @@ fn run() -> Result<(), String> {
             return Err("synthetic touchpad scroll was not handled by a widget".to_string());
         }
     }
+    if let Some((click_col, click_row)) = args.click {
+        let _ = build_render_frame(&mut editor, cols, rows);
+        send_mouse(
+            &mut editor,
+            cols,
+            rows,
+            MouseEventKind::Down(MouseButton::Left),
+            click_col,
+            click_row,
+        );
+    }
+    if args.super_y {
+        editor.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::SUPER));
+    }
     let frame = build_render_frame(&mut editor, cols, rows);
     backend
         .render_frame_to_png(&frame, args.width, args.height, &args.out)
@@ -64,6 +79,32 @@ fn run() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
+fn send_mouse(
+    editor: &mut eseqlisp::Editor,
+    cols: usize,
+    rows: usize,
+    kind: crossterm::event::MouseEventKind,
+    precise_col: f32,
+    precise_row: f32,
+) {
+    let mouse = crossterm::event::MouseEvent {
+        kind,
+        column: precise_col.max(0.0).floor() as u16,
+        row: precise_row.max(0.0).floor() as u16,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    editor.handle_mouse_precise(
+        mouse,
+        0,
+        0,
+        cols as u16,
+        rows as u16,
+        precise_col,
+        precise_row,
+    );
+}
+
+#[cfg(target_os = "macos")]
 struct CaptureArgs {
     source: Option<String>,
     source_file: Option<std::path::PathBuf>,
@@ -71,6 +112,8 @@ struct CaptureArgs {
     height: u32,
     out: std::path::PathBuf,
     touchpad_scroll: Option<(f32, f32)>,
+    click: Option<(f32, f32)>,
+    super_y: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -86,6 +129,8 @@ impl CaptureArgs {
             height: 1000,
             out: std::path::PathBuf::from("/tmp/eseqlisp-capture.png"),
             touchpad_scroll: None,
+            click: None,
+            super_y: false,
         };
 
         while let Some(arg) = args.next() {
@@ -104,6 +149,12 @@ impl CaptureArgs {
                     let delta_y = parse_f32(&mut args, "--touchpad-scroll delta-y")?;
                     parsed.touchpad_scroll = Some((delta_x, delta_y));
                 }
+                "--click" => {
+                    let col = parse_f32(&mut args, "--click col")?;
+                    let row = parse_f32(&mut args, "--click row")?;
+                    parsed.click = Some((col, row));
+                }
+                "--super-y" => parsed.super_y = true,
                 "--out" => parsed.out = std::path::PathBuf::from(next_value(&mut args, "--out")?),
                 "-h" | "--help" => return Err(Self::usage()),
                 other => return Err(format!("unknown argument {other}\n{}", Self::usage())),
@@ -131,7 +182,7 @@ impl CaptureArgs {
     }
 
     fn usage() -> String {
-        "usage: eseqlisp_capture (--source LISP | --source-file PATH) [--width PX] [--height PX] [--touchpad-scroll DX DY] --out PATH"
+        "usage: eseqlisp_capture (--source LISP | --source-file PATH) [--width PX] [--height PX] [--touchpad-scroll DX DY] [--click COL ROW] [--super-y] --out PATH"
             .to_string()
     }
 }

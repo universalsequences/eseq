@@ -17,15 +17,16 @@ use crate::vm::Value;
 
 use super::display::{node_display_label, preview};
 use super::geometry::{
-    cable_edit_points, connection_endpoints, patch_content_size, patch_node_rects,
+    connection_cable_edit_points, connection_endpoints, patch_content_size, patch_node_rects,
     patcher_back_button_rect, patcher_macro_drill_in_rect, port_center, rect_from_points,
 };
 use super::load_patch_from_props;
 use super::metrics::{
     CABLE_HANDLE_RADIUS_PX, CODE_NODE_FONT_SIZE, NODE_BORDER_WIDTH_PX, NODE_CORNER_RADIUS_PX,
     NODE_FONT_SIZE, NODE_TEXT_COL_OFFSET, PORT_INNER_DIAMETER_PX, PORT_OUTER_DIAMETER_PX,
+    SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
 };
-use super::model::{ArgValue, ConnectionKind, NodeKind, Patch, PatchNode};
+use super::model::{ArgValue, ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode};
 use super::state::{
     PatcherDragState, PatcherInteractionState, PatcherPanState, PatcherTextEdit,
     active_patcher_patch, active_patcher_view_key, get_patcher_interaction_state,
@@ -280,6 +281,7 @@ pub(super) fn draw_patch(
     interaction_state: &PatcherInteractionState,
 ) {
     let node_rects = patch_node_rects(patch, rect, pan_state);
+    let origin = super::geometry::patcher_origin(rect, pan_state);
     let input_indices = patch_input_indices(patch);
     let input_slot_counts = patch_input_slot_counts(patch, &input_indices);
     let output_counts = patch_output_counts(patch);
@@ -303,9 +305,9 @@ pub(super) fn draw_patch(
             continue;
         };
         let selected = interaction_state.selected_cable.as_deref() == Some(connection_id.as_str());
-        push_cable(prims, start, end, connection.kind, selected);
+        push_cable(prims, start, end, connection, origin.1, selected);
         if selected {
-            push_cable_handles(prims, start, end);
+            push_cable_handles(prims, connection, start, end);
         }
     }
     if let Some(PatcherDragState::Cable {
@@ -316,7 +318,7 @@ pub(super) fn draw_patch(
         ..
     }) = &interaction_state.drag
     {
-        push_cable(
+        push_preview_cable(
             prims,
             (*start_col, *start_row),
             (*current_col, *current_row),
@@ -343,8 +345,17 @@ pub(super) fn draw_patch(
                 ((*start_col, *start_row), (*current_col, *current_row))
             }
         };
-        push_cable(prims, start, end, ConnectionKind::Forward, true);
-        push_cable_handles(prims, start, end);
+        push_preview_cable(prims, start, end, ConnectionKind::Forward, true);
+        let preview_connection = PatchConnection {
+            from_node: String::new(),
+            from_output: 0,
+            to_node: String::new(),
+            to_input: 0,
+            kind: ConnectionKind::Forward,
+            segment: None,
+            source: None,
+        };
+        push_cable_handles(prims, &preview_connection, start, end);
     }
 
     for node in &patch.nodes {
@@ -435,13 +446,14 @@ fn push_cable(
     prims: &mut Vec<MetalPrimitive>,
     start: (f32, f32),
     end: (f32, f32),
-    kind: ConnectionKind,
+    connection: &PatchConnection,
+    origin_row: f32,
     selected: bool,
 ) {
     let color = if selected {
         theme::PATCHER_ERROR()
     } else {
-        match kind {
+        match connection.kind {
             ConnectionKind::Forward => theme::PATCHER_CABLE(),
             ConnectionKind::Feedback => theme::PATCHER_FEEDBACK_CABLE(),
         }
@@ -452,18 +464,51 @@ fn push_cable(
         control1: [curve.p1.0, curve.p1.1],
         control2: [curve.p2.0, curve.p2.1],
         end: [curve.p3.0, curve.p3.1],
-        radius_px: if kind == ConnectionKind::Feedback {
+        radius_px: if connection.kind == ConnectionKind::Feedback {
             3.6
         } else {
             4.4
         },
         color,
+        is_segmented: connection
+            .segment
+            .is_some_and(|segment| segment.is_segmented),
+        segment_row: connection
+            .segment
+            .map(|segment| origin_row + segment.segment_row)
+            .unwrap_or(0.0),
+        corner_radius_cells: SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
     }));
 }
 
 #[cfg(target_os = "macos")]
-fn push_cable_handles(prims: &mut Vec<MetalPrimitive>, start: (f32, f32), end: (f32, f32)) {
-    let (from_handle, to_handle) = cable_edit_points(start, end);
+fn push_preview_cable(
+    prims: &mut Vec<MetalPrimitive>,
+    start: (f32, f32),
+    end: (f32, f32),
+    kind: ConnectionKind,
+    selected: bool,
+) {
+    let connection = PatchConnection {
+        from_node: String::new(),
+        from_output: 0,
+        to_node: String::new(),
+        to_input: 0,
+        kind,
+        segment: None,
+        source: None,
+    };
+    push_cable(prims, start, end, &connection, 0.0, selected);
+}
+
+#[cfg(target_os = "macos")]
+fn push_cable_handles(
+    prims: &mut Vec<MetalPrimitive>,
+    connection: &PatchConnection,
+    start: (f32, f32),
+    end: (f32, f32),
+) {
+    let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end);
     for center in [from_handle, to_handle] {
         prims.push(MetalPrimitive::Circle(MetalCirclePrimitive {
             center: [center.0, center.1],

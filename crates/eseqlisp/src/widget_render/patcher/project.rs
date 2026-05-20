@@ -436,6 +436,7 @@ impl Projector {
             to_node: id,
             to_input: 0,
             kind: ConnectionKind::Forward,
+            segment: None,
             source: None,
         });
     }
@@ -586,6 +587,7 @@ impl Projector {
             to_node: history_node,
             to_input: 0,
             kind: ConnectionKind::Feedback,
+            segment: None,
             source: Some(ConnectionSource {
                 from_expr: Some(value_arg.expr.clone()),
                 to_call: source_expr.clone(),
@@ -666,6 +668,7 @@ impl Projector {
                             to_node: node.id.clone(),
                             to_input: idx,
                             kind: connection_kind_for_op(&op),
+                            segment: None,
                             source: Some(ConnectionSource {
                                 from_expr: None,
                                 to_call: source_expr.clone(),
@@ -705,6 +708,7 @@ impl Projector {
                             to_node: node.id.clone(),
                             to_input: idx,
                             kind: connection_kind_for_op(&op),
+                            segment: None,
                             source: Some(ConnectionSource {
                                 from_expr: Some(arg_source.expr.clone()),
                                 to_call: source_expr.clone(),
@@ -770,6 +774,7 @@ impl Projector {
                 to_node: node.id.clone(),
                 to_input: arg_source.semantic_index,
                 kind: connection_kind_for_op(&node.op),
+                segment: None,
                 source: Some(ConnectionSource {
                     from_expr: Some(arg_source.expr.clone()),
                     to_call,

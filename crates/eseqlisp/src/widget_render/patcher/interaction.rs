@@ -8,21 +8,24 @@ use super::display::node_display_label;
 use super::emit::debug_log_patch_lisp;
 use super::geometry::{
     connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_macro_drill_in,
-    hit_patcher_node, hit_patcher_output_port, nearest_patcher_input_port,
-    nearest_patcher_output_port, patch_content_size, patch_node_rects, patcher_back_button_rect,
-    patcher_breadcrumb_rect, patcher_origin, port_center, rect_contains, rect_from_points,
-    rects_intersect,
+    hit_patcher_node, hit_patcher_output_port, hit_patcher_segmented_cable_horizontal_segment,
+    nearest_patcher_input_port, nearest_patcher_output_port, patch_content_size, patch_node_rects,
+    patcher_back_button_rect, patcher_breadcrumb_rect, patcher_origin, port_center, rect_contains,
+    rect_from_points, rects_intersect,
 };
-use super::metrics::WHEEL_PAN_STEP_CELLS;
-use super::model::{CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch};
+use super::metrics::{
+    SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS, SEGMENTED_CABLE_DRAG_PADDING_CELLS,
+    WHEEL_PAN_STEP_CELLS,
+};
+use super::model::{CableEndpoint, CableSegmentInfo, InputPortRef, NodeKind, OutputPortRef, Patch};
 use super::render::{patch_input_indices, patch_input_slot_counts, patch_output_counts};
 use super::state::{
     PatcherDragState, PatcherInteractionState, PatcherPanState, active_patcher_patch,
     active_patcher_view_key, allocate_created_connection, allocate_created_node,
     connection_id_from_ports, delete_connection_edit_or_mark_deleted, ensure_source_node_edit,
     get_patcher_interaction_state, get_patcher_pan_state, patch_with_interaction_state,
-    patcher_state_key, set_node_edit_position, set_patcher_interaction_state,
-    set_patcher_pan_state, source_connection_id,
+    patcher_state_key, set_connection_segment_edit, set_node_edit_position,
+    set_patcher_interaction_state, set_patcher_pan_state, source_connection_id,
 };
 use super::text::{
     begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col,
@@ -234,6 +237,40 @@ pub(super) fn handle_patcher_pointer_down(
         set_patcher_interaction_state(key, state);
         return;
     }
+    if let Some(cable_id) = hit_patcher_segmented_cable_horizontal_segment(
+        &patch,
+        node.rect,
+        &pan_state,
+        &input_indices,
+        &input_slot_counts,
+        &output_counts,
+        local_col,
+        local_row,
+    ) && let Some(connection) = patch
+        .connections
+        .iter()
+        .find(|connection| source_connection_id(connection) == cable_id)
+        && let Some((start, end)) = connection_endpoints(
+            connection,
+            &patch_node_rects(&patch, node.rect, &pan_state),
+            &input_indices,
+            &input_slot_counts,
+            &output_counts,
+        )
+    {
+        let origin = patcher_origin(node.rect, &pan_state);
+        state.selected_nodes.clear();
+        state.selected_cable = Some(cable_id.clone());
+        state.drag = Some(PatcherDragState::CableSegment {
+            cable_id,
+            start_col: start.0,
+            start_row: start.1 - origin.1,
+            end_col: end.0,
+            end_row: end.1 - origin.1,
+        });
+        set_patcher_interaction_state(key, state);
+        return;
+    }
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     match hit {
         Some(node_id) => {
@@ -409,6 +446,45 @@ pub(super) fn handle_patcher_pointer_drag(node: &LayoutNode, local_col: f32, loc
                     );
                 }
             }
+        }
+        Some(PatcherDragState::CableSegment {
+            cable_id,
+            start_col,
+            start_row,
+            end_col,
+            end_row,
+        }) => {
+            if let Some(connection) = patch
+                .connections
+                .iter()
+                .find(|connection| source_connection_id(connection) == cable_id)
+                .cloned()
+            {
+                let origin = patcher_origin(node.rect, &pan_state);
+                let segment_row = super::super::cable::segment_row_for_drag(
+                    (start_col, start_row),
+                    (end_col, end_row),
+                    local_row - origin.1,
+                    SEGMENTED_CABLE_DRAG_PADDING_CELLS,
+                    SEGMENTED_CABLE_DRAG_EXTRA_RANGE_CELLS,
+                );
+                set_connection_segment_edit(
+                    &mut state,
+                    &view_key,
+                    &connection,
+                    Some(CableSegmentInfo {
+                        is_segmented: true,
+                        segment_row,
+                    }),
+                );
+            }
+            state.drag = Some(PatcherDragState::CableSegment {
+                cable_id,
+                start_col,
+                start_row,
+                end_col,
+                end_row,
+            });
         }
         Some(PatcherDragState::Marquee {
             start_col,

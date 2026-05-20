@@ -20,10 +20,10 @@ use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 
 pub use lisp::parse_patch_source;
 pub use model::{
-    ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CallSourceShape,
-    ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch, NodeKind, NodeSource,
-    Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue, SourceExprId, SourceFormId,
-    SourceOwner, SourceScopeId,
+    ArgSource, ArgValue, AttributeSource, BindingId, BindingKind, BindingTarget, CableSegmentInfo,
+    CallSourceShape, ConnectionKind, ConnectionSource, ExprPath, ExprPathSegment, MacroPatch,
+    NodeKind, NodeSource, Patch, PatchConnection, PatchNode, PatcherIntent, SourceArgValue,
+    SourceExprId, SourceFormId, SourceOwner, SourceScopeId,
 };
 
 use display::node_display_label;
@@ -37,7 +37,8 @@ use metrics::{DEFAULT_HEIGHT, DEFAULT_WIDTH, NODE_FONT_SIZE, TOUCHPAD_PAN_SPEED_
 use state::{
     active_patcher_patch, active_patcher_view_key, delete_connection_edit_or_mark_deleted,
     delete_selected_nodes, get_patcher_interaction_state, patch_with_interaction_state,
-    patcher_state_key, patcher_state_key_from_parts, set_patcher_interaction_state,
+    patcher_state_key, patcher_state_key_from_parts, set_connection_segment_edit,
+    set_patcher_interaction_state,
 };
 use text::{cancel_patcher_text_edit, commit_patcher_text_edit};
 
@@ -183,6 +184,18 @@ impl WidgetDefinition for PatcherWidget {
         let mut state = get_patcher_interaction_state(key);
         let view_key = active_patcher_view_key(&state);
         match key_event.code {
+            KeyCode::Char('y') | KeyCode::Char('Y')
+                if state.text_edit.is_none()
+                    && state.selected_cable.is_some()
+                    && key_event.modifiers.contains(KeyModifiers::SUPER) =>
+            {
+                if toggle_selected_cable_segmented(node, &mut state, &view_key) {
+                    set_patcher_interaction_state(key, state);
+                    Some(WidgetEvent::Custom(Value::Nil))
+                } else {
+                    None
+                }
+            }
             KeyCode::Enter if state.text_edit.is_some() => {
                 let changed = commit_patcher_text_edit(&mut state, &view_key);
                 if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
@@ -282,6 +295,55 @@ fn debug_patch_for_state(
     let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
     let patch = active_patcher_patch(&root_patch, state);
     Some(patch_with_interaction_state(patch, state, view_key))
+}
+
+fn toggle_selected_cable_segmented(
+    node: &LayoutNode,
+    state: &mut state::PatcherInteractionState,
+    view_key: &str,
+) -> bool {
+    let selected_cable = match state.selected_cable.clone() {
+        Some(selected_cable) => selected_cable,
+        None => return false,
+    };
+    let Ok((_, root_patch)) = load_patch_from_props(&node.props) else {
+        return false;
+    };
+    let patch = active_patcher_patch(&root_patch, state);
+    let patch = patch_with_interaction_state(patch, state, view_key);
+    let Some(connection) = patch
+        .connections
+        .iter()
+        .find(|connection| state::source_connection_id(connection) == selected_cable)
+        .cloned()
+    else {
+        return false;
+    };
+    let mut segment = connection.segment.unwrap_or(CableSegmentInfo {
+        is_segmented: false,
+        segment_row: 0.0,
+    });
+    segment.is_segmented = !segment.is_segmented;
+    if segment.is_segmented && segment.segment_row == 0.0 {
+        let pan_state = state::get_patcher_pan_state(patcher_state_key(node));
+        let node_rects = geometry::patch_node_rects(&patch, node.rect, &pan_state);
+        let input_indices = render::patch_input_indices(&patch);
+        let input_slot_counts = render::patch_input_slot_counts(&patch, &input_indices);
+        let output_counts = render::patch_output_counts(&patch);
+        if let Some((start, end)) = geometry::connection_endpoints(
+            &connection,
+            &node_rects,
+            &input_indices,
+            &input_slot_counts,
+            &output_counts,
+        ) {
+            let origin = geometry::patcher_origin(node.rect, &pan_state);
+            segment.segment_row = ((start.1 + end.1) * 0.5) - origin.1;
+        }
+    }
+    set_connection_segment_edit(state, view_key, &connection, Some(segment));
+    state.drag = None;
+    true
 }
 
 pub(super) fn load_patch_from_props(

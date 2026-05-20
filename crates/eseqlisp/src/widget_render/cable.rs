@@ -143,6 +143,293 @@ pub fn distance_to_cable_px(start: (f32, f32), end: (f32, f32), point: (f32, f32
     best
 }
 
+pub fn segmented_cable_edit_points(
+    start: (f32, f32),
+    end: (f32, f32),
+    distance: f32,
+) -> ((f32, f32), (f32, f32)) {
+    ((start.0, start.1 + distance), (end.0, end.1 - distance))
+}
+
+pub fn segment_row_for_drag(
+    start: (f32, f32),
+    end: (f32, f32),
+    pointer_row: f32,
+    padding: f32,
+    extra_range: f32,
+) -> f32 {
+    if end.1 < start.1 {
+        let min_row = start.1 + padding;
+        let max_row = start.1.max(end.1) + extra_range;
+        pointer_row.clamp(min_row, max_row)
+    } else {
+        let min_row = start.1.min(end.1) + padding;
+        let max_row = start.1.max(end.1) - padding;
+        if min_row <= max_row {
+            pointer_row.clamp(min_row, max_row)
+        } else {
+            (start.1 + end.1) * 0.5
+        }
+    }
+}
+
+pub fn distance_to_segmented_cable_px(
+    start: (f32, f32),
+    end: (f32, f32),
+    segment_row: f32,
+    corner_radius: f32,
+    point: (f32, f32),
+) -> f32 {
+    let start = (start.0, -start.1);
+    let end = (end.0, -end.1);
+    let point = (point.0, -point.1);
+    let segment_y = -segment_row;
+    distance_to_segmented_path_y_up(point, start, end, segment_y, corner_radius)
+}
+
+pub fn segmented_horizontal_segment_hit(
+    start: (f32, f32),
+    end: (f32, f32),
+    segment_row: f32,
+    corner_radius: f32,
+    point: (f32, f32),
+) -> bool {
+    let going_right = end.0 > start.0;
+    let start_x = if going_right {
+        start.0 + corner_radius
+    } else {
+        start.0 - corner_radius
+    };
+    let end_x = if going_right {
+        end.0 - corner_radius
+    } else {
+        end.0 + corner_radius
+    };
+    point.0 >= start_x.min(end_x)
+        && point.0 <= start_x.max(end_x)
+        && (point.1 - segment_row).abs() < corner_radius
+}
+
+fn distance_to_segmented_path_y_up(
+    point: (f32, f32),
+    start: (f32, f32),
+    end: (f32, f32),
+    segment_y: f32,
+    corner_radius: f32,
+) -> f32 {
+    if end.1 > segment_y {
+        distance_to_five_segment_path_y_up(point, start, end, segment_y, corner_radius)
+    } else {
+        distance_to_three_segment_path_y_up(point, start, end, segment_y, corner_radius)
+    }
+}
+
+fn distance_to_three_segment_path_y_up(
+    point: (f32, f32),
+    start: (f32, f32),
+    end: (f32, f32),
+    segment_y: f32,
+    corner_radius: f32,
+) -> f32 {
+    let going_down1 = start.1 > segment_y;
+    let going_right = end.0 > start.0;
+    let going_down2 = end.1 < segment_y;
+    let corner1 = (start.0, segment_y);
+    let corner2 = (end.0, segment_y);
+    let corner1_center = match (going_down1, going_right) {
+        (true, true) => (start.0 + corner_radius, segment_y + corner_radius),
+        (true, false) => (start.0 - corner_radius, segment_y + corner_radius),
+        (false, true) => (start.0 + corner_radius, segment_y - corner_radius),
+        (false, false) => (start.0 - corner_radius, segment_y - corner_radius),
+    };
+    let corner2_center = match (going_down2, going_right) {
+        (true, true) => (end.0 - corner_radius, segment_y - corner_radius),
+        (true, false) => (end.0 + corner_radius, segment_y - corner_radius),
+        (false, true) => (end.0 - corner_radius, segment_y + corner_radius),
+        (false, false) => (end.0 + corner_radius, segment_y + corner_radius),
+    };
+    let seg1_end = (
+        start.0,
+        if going_down1 {
+            segment_y + corner_radius
+        } else {
+            segment_y - corner_radius
+        },
+    );
+    let seg3_start = (
+        end.0,
+        if going_down2 {
+            segment_y - corner_radius
+        } else {
+            segment_y + corner_radius
+        },
+    );
+    let seg2_start = (
+        if going_right {
+            start.0 + corner_radius
+        } else {
+            start.0 - corner_radius
+        },
+        segment_y,
+    );
+    let seg2_end = (
+        if going_right {
+            end.0 - corner_radius
+        } else {
+            end.0 + corner_radius
+        },
+        segment_y,
+    );
+    distance_to_segment(point, start, seg1_end)
+        .min(distance_to_segment(point, seg2_start, seg2_end))
+        .min(distance_to_segment(point, seg3_start, end))
+        .min(distance_to_quarter_arc(
+            point,
+            corner1_center,
+            corner_radius,
+            corner1,
+        ))
+        .min(distance_to_quarter_arc(
+            point,
+            corner2_center,
+            corner_radius,
+            corner2,
+        ))
+}
+
+fn distance_to_five_segment_path_y_up(
+    point: (f32, f32),
+    start: (f32, f32),
+    end: (f32, f32),
+    segment_y: f32,
+    corner_radius: f32,
+) -> f32 {
+    let going_right = end.0 > start.0;
+    let clearance = corner_radius * 2.0;
+    let turnaround_y = end.1 + clearance;
+    let turnaround_x = end.0 - clearance;
+    let seg4_going_right = end.0 > turnaround_x;
+
+    let corner1 = (start.0, segment_y);
+    let corner1_center = if going_right {
+        (start.0 + corner_radius, segment_y + corner_radius)
+    } else {
+        (start.0 - corner_radius, segment_y + corner_radius)
+    };
+    let seg1_end = (start.0, segment_y + corner_radius);
+
+    let corner2 = (turnaround_x, segment_y);
+    let corner2_center = if going_right {
+        (turnaround_x - corner_radius, segment_y + corner_radius)
+    } else {
+        (turnaround_x + corner_radius, segment_y + corner_radius)
+    };
+    let seg2_start = (
+        if going_right {
+            start.0 + corner_radius
+        } else {
+            start.0 - corner_radius
+        },
+        segment_y,
+    );
+    let seg2_end = (
+        if going_right {
+            turnaround_x - corner_radius
+        } else {
+            turnaround_x + corner_radius
+        },
+        segment_y,
+    );
+
+    let corner3 = (turnaround_x, turnaround_y);
+    let corner3_center = if seg4_going_right {
+        (turnaround_x + corner_radius, turnaround_y - corner_radius)
+    } else {
+        (turnaround_x - corner_radius, turnaround_y - corner_radius)
+    };
+    let seg3_start = (turnaround_x, segment_y + corner_radius);
+    let seg3_end = (turnaround_x, turnaround_y - corner_radius);
+
+    let corner4 = (end.0, turnaround_y);
+    let corner4_center = if seg4_going_right {
+        (end.0 - corner_radius, turnaround_y - corner_radius)
+    } else {
+        (end.0 + corner_radius, turnaround_y - corner_radius)
+    };
+    let seg4_start = (
+        if seg4_going_right {
+            turnaround_x + corner_radius
+        } else {
+            turnaround_x - corner_radius
+        },
+        turnaround_y,
+    );
+    let seg4_end = (
+        if seg4_going_right {
+            end.0 - corner_radius
+        } else {
+            end.0 + corner_radius
+        },
+        turnaround_y,
+    );
+    let seg5_start = (end.0, turnaround_y - corner_radius);
+
+    distance_to_segment(point, start, seg1_end)
+        .min(distance_to_segment(point, seg2_start, seg2_end))
+        .min(distance_to_segment(point, seg3_start, seg3_end))
+        .min(distance_to_segment(point, seg4_start, seg4_end))
+        .min(distance_to_segment(point, seg5_start, end))
+        .min(distance_to_quarter_arc(
+            point,
+            corner1_center,
+            corner_radius,
+            corner1,
+        ))
+        .min(distance_to_quarter_arc(
+            point,
+            corner2_center,
+            corner_radius,
+            corner2,
+        ))
+        .min(distance_to_quarter_arc(
+            point,
+            corner3_center,
+            corner_radius,
+            corner3,
+        ))
+        .min(distance_to_quarter_arc(
+            point,
+            corner4_center,
+            corner_radius,
+            corner4,
+        ))
+}
+
+fn distance_to_quarter_arc(
+    point: (f32, f32),
+    center: (f32, f32),
+    radius: f32,
+    corner: (f32, f32),
+) -> f32 {
+    let to_corner = (corner.0 - center.0, corner.1 - center.1);
+    let to_point = (point.0 - center.0, point.1 - center.1);
+    let valid_x = if to_corner.0 > 0.0 {
+        to_point.0 >= 0.0
+    } else {
+        to_point.0 <= 0.0
+    };
+    let valid_y = if to_corner.1 > 0.0 {
+        to_point.1 >= 0.0
+    } else {
+        to_point.1 <= 0.0
+    };
+    if valid_x && valid_y {
+        ((to_point.0 * to_point.0 + to_point.1 * to_point.1).sqrt() - radius).abs()
+    } else {
+        1000.0
+    }
+}
+
 fn distance_to_segment(point: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     let ab = (b.0 - a.0, b.1 - a.1);
     let ap = (point.0 - a.0, point.1 - a.1);

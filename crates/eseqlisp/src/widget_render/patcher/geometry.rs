@@ -5,8 +5,8 @@ use crate::layout::Rect;
 use super::display::node_size;
 use super::metrics::{
     CABLE_HANDLE_DISTANCE_CELLS, CABLE_HANDLE_HIT_RADIUS_CELLS, CABLE_HIT_RADIUS_CELLS,
-    CABLE_TARGET_RADIUS_CELLS, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX, VIEW_PADDING_X,
-    VIEW_PADDING_Y,
+    CABLE_TARGET_RADIUS_CELLS, PORT_EDGE_PADDING_CELLS, PORT_OUTER_DIAMETER_PX,
+    SEGMENTED_CABLE_CORNER_RADIUS_CELLS, VIEW_PADDING_X, VIEW_PADDING_Y,
 };
 use super::model::{CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch, PatchConnection};
 use super::state::{PatcherPanState, source_connection_id};
@@ -282,6 +282,7 @@ pub(super) fn hit_patcher_cable(
     local_row: f32,
 ) -> Option<String> {
     let node_rects = patch_node_rects(patch, rect, pan_state);
+    let origin = patcher_origin(rect, pan_state);
     patch
         .connections
         .iter()
@@ -293,8 +294,20 @@ pub(super) fn hit_patcher_cable(
                 input_slot_counts,
                 output_counts,
             )?;
-            let distance =
-                super::super::cable::distance_to_cable_px(start, end, (local_col, local_row));
+            let distance = if connection
+                .segment
+                .is_some_and(|segment| segment.is_segmented)
+            {
+                super::super::cable::distance_to_segmented_cable_px(
+                    start,
+                    end,
+                    origin.1 + connection.segment.unwrap().segment_row,
+                    SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+                    (local_col, local_row),
+                )
+            } else {
+                super::super::cable::distance_to_cable_px(start, end, (local_col, local_row))
+            };
             (distance <= CABLE_HIT_RADIUS_CELLS)
                 .then(|| (distance, source_connection_id(connection)))
         })
@@ -304,6 +317,56 @@ pub(super) fn hit_patcher_cable(
 
 pub(super) fn cable_edit_points(start: (f32, f32), end: (f32, f32)) -> ((f32, f32), (f32, f32)) {
     super::super::cable::cable_edit_points(start, end, CABLE_HANDLE_DISTANCE_CELLS)
+}
+
+pub(super) fn connection_cable_edit_points(
+    connection: &PatchConnection,
+    start: (f32, f32),
+    end: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    if connection
+        .segment
+        .is_some_and(|segment| segment.is_segmented)
+    {
+        super::super::cable::segmented_cable_edit_points(start, end, CABLE_HANDLE_DISTANCE_CELLS)
+    } else {
+        cable_edit_points(start, end)
+    }
+}
+
+pub(super) fn hit_patcher_segmented_cable_horizontal_segment(
+    patch: &Patch,
+    rect: Rect,
+    pan_state: &PatcherPanState,
+    input_indices: &HashMap<String, Vec<usize>>,
+    input_slot_counts: &HashMap<String, usize>,
+    output_counts: &HashMap<String, usize>,
+    local_col: f32,
+    local_row: f32,
+) -> Option<String> {
+    let node_rects = patch_node_rects(patch, rect, pan_state);
+    let origin = patcher_origin(rect, pan_state);
+    patch.connections.iter().find_map(|connection| {
+        let segment = connection.segment?;
+        if !segment.is_segmented {
+            return None;
+        }
+        let (start, end) = connection_endpoints(
+            connection,
+            &node_rects,
+            input_indices,
+            input_slot_counts,
+            output_counts,
+        )?;
+        super::super::cable::segmented_horizontal_segment_hit(
+            start,
+            end,
+            origin.1 + segment.segment_row,
+            SEGMENTED_CABLE_CORNER_RADIUS_CELLS,
+            (local_col, local_row),
+        )
+        .then(|| source_connection_id(connection))
+    })
 }
 
 pub(super) fn hit_patcher_cable_handle(
@@ -332,7 +395,7 @@ pub(super) fn hit_patcher_cable_handle(
             input_slot_counts,
             output_counts,
         )?;
-        let (from_handle, to_handle) = cable_edit_points(start, end);
+        let (from_handle, to_handle) = connection_cable_edit_points(connection, start, end);
         if distance_squared(from_handle, (local_col, local_row)) <= threshold {
             Some((cable_id, CableEndpoint::From))
         } else if distance_squared(to_handle, (local_col, local_row)) <= threshold {

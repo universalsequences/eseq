@@ -179,6 +179,12 @@ pub enum ConnectionKind {
     Feedback,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CableSegmentInfo {
+    pub is_segmented: bool,
+    pub segment_row: f32,
+}
+
 #[derive(Debug, Clone)]
 pub struct PatchConnection {
     pub from_node: String,
@@ -186,6 +192,7 @@ pub struct PatchConnection {
     pub to_node: String,
     pub to_input: usize,
     pub kind: ConnectionKind,
+    pub segment: Option<CableSegmentInfo>,
     pub source: Option<ConnectionSource>,
 }
 
