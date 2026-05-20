@@ -1610,6 +1610,11 @@ fn apply_node_text_edit(
             view_key: view_key.to_string(),
             node_id: node.id.clone(),
         })?;
+    if let SourceOwner::MacroParameter { binding, index } = &source.owner {
+        return apply_macro_parameter_text_edit(
+            document, root_patch, view_key, node, binding, *index, text,
+        );
+    }
     let replacement = edited_expression_for_node(text, node, source.expr.as_ref(), document)
         .map_err(|reason| WriteBackError::InvalidEdit {
             view_key: view_key.to_string(),
@@ -1652,11 +1657,6 @@ fn apply_node_text_edit(
             };
             document.replace_expr(&expr_id, replacement)
         }
-        SourceOwner::MacroParameter { .. } => Err(WriteBackError::UnsupportedSourceOwner {
-            view_key: view_key.to_string(),
-            node_id: node.id.clone(),
-            owner: "macro parameter rename belongs to Phase 6".to_string(),
-        }),
         SourceOwner::CodeIsland { .. } => Err(WriteBackError::EditedCodeIsland {
             view_key: view_key.to_string(),
             node_id: node.id.clone(),
@@ -1738,6 +1738,112 @@ fn apply_param_text_edit(
             node_id: node.id.clone(),
             reason: "param rename targets a missing patch view".to_string(),
         })?;
+    for expr in resolved_binding_references(patch, &binding) {
+        document.replace_expr(&expr, Expression::Symbol(new_name.clone()))?;
+    }
+    Ok(())
+}
+
+fn apply_macro_parameter_text_edit(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    view_key: &str,
+    node: &PatchNode,
+    binding: &BindingId,
+    index: usize,
+    text: &str,
+) -> Result<(), WriteBackError> {
+    let old_name = binding.name.clone();
+    let new_name = macro_parameter_edit_name(text, index, &old_name).map_err(|reason| {
+        WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason,
+        }
+    })?;
+    if new_name == old_name {
+        return Ok(());
+    }
+    let reserved = document.reserved_names(&binding.scope);
+    if reserved.contains(&new_name) {
+        return Err(WriteBackError::BindingRenameCollision {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            name: new_name,
+        });
+    }
+    if patch_for_view(root_patch, view_key).is_some_and(|patch| {
+        patch
+            .nodes
+            .iter()
+            .any(|node| node.kind == NodeKind::CodeIsland)
+    }) {
+        return Err(WriteBackError::BindingRenameBlockedByCodeIsland {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            name: old_name,
+        });
+    }
+
+    document.replace_macro_param(&binding.scope, index, new_name.clone())?;
+    let patch =
+        patch_for_view(root_patch, view_key).ok_or_else(|| WriteBackError::InvalidEdit {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "macro parameter rename targets a missing patch view".to_string(),
+        })?;
+    for expr in resolved_binding_references(patch, binding) {
+        document.replace_expr(&expr, Expression::Symbol(new_name.clone()))?;
+    }
+    Ok(())
+}
+
+fn macro_parameter_edit_name(text: &str, index: usize, old_name: &str) -> Result<String, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("macro parameter edit cannot be empty".to_string());
+    }
+
+    if let Ok(Expression::Symbol(name)) = parse_single_expression(trimmed) {
+        return Ok(name);
+    }
+
+    let edited = parse_single_expression(&format!("({trimmed})"))?;
+    let Expression::List(items) = edited else {
+        return Err("macro parameter edit must be a symbol or in form".to_string());
+    };
+    if symbol_at(&items, 0) != Some("in") {
+        return Err("macro parameter edit must be a symbol or in form".to_string());
+    }
+    match items.get(1) {
+        Some(Expression::Number(channel))
+            if (*channel - (index + 1) as f64).abs() < f64::EPSILON => {}
+        Some(_) => {
+            return Err(format!(
+                "macro parameter edit must keep input channel {}",
+                index + 1
+            ));
+        }
+        None => return Err("macro parameter in form must include an input channel".to_string()),
+    }
+    Ok(symbol_attribute_value(&items, "@name")?.unwrap_or_else(|| old_name.to_string()))
+}
+
+fn symbol_attribute_value(items: &[Expression], attr: &str) -> Result<Option<String>, String> {
+    for pair in items.windows(2) {
+        if let Expression::Symbol(key) = &pair[0]
+            && key == attr
+        {
+            return match &pair[1] {
+                Expression::Symbol(value) => Ok(Some(value.clone())),
+                _ => Err(format!("{attr} must be followed by a symbol")),
+            };
+        }
+    }
+    Ok(None)
+}
+
+fn resolved_binding_references(patch: &Patch, binding: &BindingId) -> Vec<SourceExprId> {
     let mut refs = patch
         .connections
         .iter()
@@ -1747,7 +1853,7 @@ fn apply_param_text_edit(
                 expr,
                 resolved_binding: Some(resolved_binding),
                 ..
-            } if resolved_binding == &binding => Some(expr.clone()),
+            } if resolved_binding == binding => Some(expr.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1758,10 +1864,7 @@ fn apply_param_text_edit(
             .then_with(|| expr_path_indexes(left).cmp(&expr_path_indexes(right)))
     });
     refs.dedup();
-    for expr in refs {
-        document.replace_expr(&expr, Expression::Symbol(new_name.clone()))?;
-    }
-    Ok(())
+    refs
 }
 
 fn param_name(expr: &Expression) -> Option<&str> {
@@ -1923,6 +2026,37 @@ impl SourceDocument {
                 Ok(())
             }
         }
+    }
+
+    fn replace_macro_param(
+        &mut self,
+        scope: &SourceScopeId,
+        index: usize,
+        name: String,
+    ) -> Result<(), WriteBackError> {
+        let SourceScopeId::Macro { name: macro_name } = scope else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(scope),
+                node_id: String::new(),
+                reason: "macro parameter rename requires a macro scope".to_string(),
+            });
+        };
+        let Some(macro_doc) = self.macros.get_mut(macro_name) else {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(scope),
+                node_id: String::new(),
+                reason: "missing macro scope for parameter rename".to_string(),
+            });
+        };
+        if index >= macro_doc.params.len() {
+            return Err(WriteBackError::InvalidEdit {
+                view_key: view_key_for_scope(scope),
+                node_id: String::new(),
+                reason: format!("missing macro parameter {}", index),
+            });
+        }
+        macro_doc.params[index] = Expression::Symbol(name);
+        Ok(())
     }
 
     fn form_expr(&self, scope: &SourceScopeId, index: usize) -> Option<&Expression> {

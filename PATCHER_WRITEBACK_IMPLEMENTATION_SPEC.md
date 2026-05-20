@@ -1362,8 +1362,7 @@ Tests:
 
 ### Phase 6: Param and Macro Parameter Rename
 
-Status: first root-param slice implemented. Macro parameter rename remains
-pending.
+Status: implemented.
 
 Goal: rename binding identities, not text occurrences.
 
@@ -1373,7 +1372,9 @@ Responsibilities:
 - All resolved references to that root param binding emit the new name.
 - Unresolved same-text symbols are not rewritten.
 - Macro parameter rename updates the `defmacro` header and resolved references
-  inside the macro scope, if macro parameter rename is enabled.
+  inside the macro scope.
+- Macro parameter edit text keeps `in N` as the stable patcher entry point; an
+  optional `@name symbol` performs the rename.
 - Collisions block save.
 - Code islands in the renamed binding's scope block save because they may
   contain references that source metadata cannot prove safe to rewrite.
@@ -1384,7 +1385,10 @@ Tests:
 - Unresolved symbols with the old text remain unchanged.
 - Param rename collision returns a blocker.
 - Code islands that may reference the old name produce a diagnostic or blocker.
-- Macro parameter rename updates header and macro-local references. Pending.
+- Macro parameter rename updates header and macro-local references.
+- Macro parameter `in N` edit without `@name` preserves the existing symbol.
+- Macro parameter rename collision returns a blocker.
+- Macro parameter rename with a macro-scope code island returns a blocker.
 
 ### Phase 7: File Save Wiring
 

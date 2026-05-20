@@ -845,6 +845,131 @@ fn writeback_macro_node_text_edit_rewrites_inside_defmacro() {
 }
 
 #[test]
+fn writeback_macro_parameter_rename_updates_header_and_resolved_references() {
+    let source = r#"
+        (def sig (in 1))
+        (defmacro ap (sig g)
+          (def node (+ sig g))
+          (phasor node))
+    "#;
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+    let sig = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.outputs == vec!["sig".to_string()])
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "macro:ap", sig, node_display_label(sig));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:ap", &sig.id))
+        .unwrap()
+        .text = "in 1 @name input".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(def sig (in 1.0))\n(defmacro ap (input g) (def node (+ input g)) (phasor node))"
+    );
+}
+
+#[test]
+fn writeback_macro_parameter_in_form_without_name_preserves_existing_symbol() {
+    let source = "(defmacro ap (sig g) (+ sig g))";
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+    let sig = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.outputs == vec!["sig".to_string()])
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "macro:ap", sig, node_display_label(sig));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:ap", &sig.id))
+        .unwrap()
+        .text = "in 1".to_string();
+
+    assert_eq!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state).unwrap(),
+        "(defmacro ap (sig g) (+ sig g))"
+    );
+}
+
+#[test]
+fn writeback_macro_parameter_rename_collision_returns_blocker() {
+    let source = "(defmacro ap (sig g) (+ sig g))";
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+    let sig = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.outputs == vec!["sig".to_string()])
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "macro:ap", sig, node_display_label(sig));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:ap", &sig.id))
+        .unwrap()
+        .text = "in 1 @name g".to_string();
+
+    assert!(matches!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state),
+        Err(WriteBackError::BindingRenameCollision { name, .. }) if name == "g"
+    ));
+}
+
+#[test]
+fn writeback_macro_parameter_rename_with_code_island_returns_blocker() {
+    let source = "(defmacro ap (sig) (if gate sig 0) sig)";
+    let patch = parse(source);
+    let macro_patch = patch
+        .macros
+        .iter()
+        .find(|macro_patch| macro_patch.name == "ap")
+        .unwrap();
+    let sig = macro_patch
+        .patch
+        .nodes
+        .iter()
+        .find(|node| node.outputs == vec!["sig".to_string()])
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "macro:ap", sig, node_display_label(sig));
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("macro:ap", &sig.id))
+        .unwrap()
+        .text = "in 1 @name input".to_string();
+
+    assert!(matches!(
+        emit_patch_writeback(source, PatcherIntent::Instrument, &state),
+        Err(WriteBackError::BindingRenameBlockedByCodeIsland { name, .. }) if name == "sig"
+    ));
+}
+
+#[test]
 fn writeback_synthetic_macro_return_out_is_not_emitted() {
     let source = "(defmacro passthrough (sig) sig)";
 
