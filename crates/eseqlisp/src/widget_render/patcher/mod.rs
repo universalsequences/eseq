@@ -1,4 +1,5 @@
 mod display;
+mod emit;
 mod geometry;
 mod interaction;
 mod lisp;
@@ -25,6 +26,7 @@ pub use model::{
 };
 
 use display::node_display_label;
+use emit::debug_log_patch_lisp;
 use interaction::{
     handle_patcher_double_click, handle_patcher_pointer_down, handle_patcher_pointer_drag,
     handle_patcher_pointer_moved, handle_patcher_pointer_up, open_selected_macro_node,
@@ -179,7 +181,10 @@ impl WidgetDefinition for PatcherWidget {
         let view_key = active_patcher_view_key(&state);
         match key_event.code {
             KeyCode::Enter if state.text_edit.is_some() => {
-                commit_patcher_text_edit(&mut state, &view_key);
+                let changed = commit_patcher_text_edit(&mut state, &view_key);
+                if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                    debug_log_patch_lisp(&view_key, &patch);
+                }
                 set_patcher_interaction_state(key, state);
                 Some(WidgetEvent::Custom(Value::Nil))
             }
@@ -195,8 +200,12 @@ impl WidgetDefinition for PatcherWidget {
             }
             KeyCode::Backspace | KeyCode::Delete if state.selected_cable.is_some() => {
                 if let Some(cable_id) = state.selected_cable.clone() {
-                    delete_connection_edit_or_mark_deleted(&mut state, &view_key, &cable_id);
+                    let changed =
+                        delete_connection_edit_or_mark_deleted(&mut state, &view_key, &cable_id);
                     state.drag = None;
+                    if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+                        debug_log_patch_lisp(&view_key, &patch);
+                    }
                     set_patcher_interaction_state(key, state);
                     Some(WidgetEvent::Custom(Value::Nil))
                 } else {
@@ -250,6 +259,16 @@ fn prop_keyword(node: &Value, key: &str) -> Option<String> {
         Value::Keyword(value) | Value::String(value) => Some(value.clone()),
         _ => None,
     })
+}
+
+fn debug_patch_for_state(
+    node: &LayoutNode,
+    state: &state::PatcherInteractionState,
+    view_key: &str,
+) -> Option<Patch> {
+    let (_, root_patch) = load_patch_from_props(&node.props).ok()?;
+    let patch = active_patcher_patch(&root_patch, state);
+    Some(patch_with_interaction_state(patch, state, view_key))
 }
 
 pub(super) fn load_patch_from_props(

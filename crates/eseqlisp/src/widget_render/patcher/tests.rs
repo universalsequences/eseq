@@ -2,6 +2,7 @@ use super::super::WidgetDefinition;
 use super::super::WidgetKeyEvent;
 use super::super::text_input::TextInputState;
 use super::display::*;
+use super::emit::emit_patch_debug_lisp;
 use super::geometry::*;
 use super::interaction::*;
 use super::metrics::*;
@@ -493,6 +494,46 @@ fn source_metadata_scopes_macro_subpatches_separately() {
             ))
     );
     assert_ne!(node_expr(root_phasor).form_id.scope, macro_scope);
+}
+
+#[test]
+fn debug_emit_preserves_nested_structure_for_source_backed_patch() {
+    let patch = parse("(def result (phasor (* 25 (param freq @min 1 @max 100)) (rampToTrig xyz)))");
+
+    assert_eq!(
+        emit_patch_debug_lisp(&patch),
+        "(def result (phasor (* 25 (param freq @min 1 @max 100)) (rampToTrig xyz)))"
+    );
+}
+
+#[test]
+fn debug_emit_reflects_committed_node_text_edits_without_saving() {
+    let source = parse(
+        r#"
+            (param freq)
+            (def result (phasor freq))
+            "#,
+    );
+    let phasor = source
+        .nodes
+        .iter()
+        .find(|node| node.op == "phasor")
+        .unwrap();
+    let mut state = PatcherInteractionState::default();
+    ensure_source_node_edit(&mut state, "root", phasor, "phasor".to_string());
+    state
+        .edit_state
+        .nodes
+        .get_mut(&node_edit_key("root", &phasor.id))
+        .unwrap()
+        .text = "sine".to_string();
+
+    let patch = patch_with_interaction_state(source, &state, "root");
+
+    assert_eq!(
+        emit_patch_debug_lisp(&patch),
+        "(param freq)\n(def result (sine freq))"
+    );
 }
 
 #[test]

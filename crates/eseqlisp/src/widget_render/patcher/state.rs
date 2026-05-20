@@ -284,24 +284,25 @@ pub(super) fn delete_connection_edit_or_mark_deleted(
     state: &mut PatcherInteractionState,
     view_key: &str,
     cable_id: &str,
-) {
+) -> bool {
     let created_key = state.edit_state.connections.iter().find_map(|(key, edit)| {
         let edit_cable_id = connection_id_from_ports(&edit.from, &edit.to);
         (edit.view_key == view_key && edit_cable_id == cable_id).then(|| key.clone())
     });
 
-    if let Some(key) = created_key {
-        state.edit_state.connections.remove(&key);
+    let changed = if let Some(key) = created_key {
+        state.edit_state.connections.remove(&key).is_some()
     } else {
         state
             .edit_state
             .deleted_connections
-            .insert(connection_edit_key(view_key, cable_id));
-    }
+            .insert(connection_edit_key(view_key, cable_id))
+    };
 
     if state.selected_cable.as_deref() == Some(cable_id) {
         state.selected_cable = None;
     }
+    changed
 }
 
 pub(super) fn ensure_source_node_edit(

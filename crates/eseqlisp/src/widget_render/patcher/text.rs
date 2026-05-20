@@ -55,20 +55,26 @@ pub(super) fn begin_patcher_text_edit(
     state.hover_back_button = false;
 }
 
-pub(super) fn commit_patcher_text_edit(state: &mut PatcherInteractionState, view_key: &str) {
+pub(super) fn commit_patcher_text_edit(
+    state: &mut PatcherInteractionState,
+    view_key: &str,
+) -> bool {
     let Some(edit) = state.text_edit.take() else {
-        return;
+        return false;
     };
     let committed_text = edit.text.trim().to_string();
     let key = node_edit_key(view_key, &edit.node_id);
     let Some(node_edit) = state.edit_state.nodes.get_mut(&key) else {
-        return;
+        return false;
     };
+    let changed = node_edit.text != committed_text;
     node_edit.text = committed_text;
     if node_edit.text.is_empty() && matches!(node_edit.origin, PatcherNodeOrigin::Created { .. }) {
         state.edit_state.nodes.remove(&key);
         state.selected_nodes.remove(&edit.node_id);
+        return true;
     }
+    changed
 }
 
 pub(super) fn cancel_patcher_text_edit(state: &mut PatcherInteractionState, view_key: &str) {

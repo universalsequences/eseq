@@ -5,6 +5,7 @@ use crossterm::event::{KeyModifiers, MouseEventKind};
 use crate::layout::LayoutNode;
 
 use super::display::node_display_label;
+use super::emit::debug_log_patch_lisp;
 use super::geometry::{
     connection_endpoints, hit_patcher_cable, hit_patcher_cable_handle, hit_patcher_macro_drill_in,
     hit_patcher_node, hit_patcher_output_port, nearest_patcher_input_port,
@@ -12,7 +13,6 @@ use super::geometry::{
     patcher_breadcrumb_rect, patcher_origin, port_center, rect_contains, rect_from_points,
     rects_intersect,
 };
-use super::load_patch_from_props;
 use super::metrics::WHEEL_PAN_STEP_CELLS;
 use super::model::{CableEndpoint, InputPortRef, NodeKind, OutputPortRef, Patch};
 use super::render::{patch_input_indices, patch_input_slot_counts, patch_output_counts};
@@ -28,6 +28,7 @@ use super::text::{
     begin_patcher_text_edit, commit_patcher_text_edit, patcher_text_cursor_at_col,
     update_patcher_text_edit_pointer,
 };
+use super::{debug_patch_for_state, load_patch_from_props};
 
 pub(super) fn pan_patcher_by_wheel(node: &LayoutNode, mouse_kind: MouseEventKind) {
     let (delta_x, delta_y) = match mouse_kind {
@@ -133,7 +134,10 @@ pub(super) fn handle_patcher_pointer_down(
             return;
         }
         let view_key = active_patcher_view_key(&state);
-        commit_patcher_text_edit(&mut state, &view_key);
+        let changed = commit_patcher_text_edit(&mut state, &view_key);
+        if changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+            debug_log_patch_lisp(&view_key, &patch);
+        }
     }
     state.hovered_node = hit.clone();
     let input_indices = patch_input_indices(&patch);
@@ -436,6 +440,7 @@ pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local
     let key = patcher_state_key(node);
     let mut state = get_patcher_interaction_state(key);
     if let Some((patch, pan_state, view_key)) = load_interactive_patch_for_node(node) {
+        let mut semantic_changed = false;
         if let Some(edit_node_id) = state.text_edit.as_ref().map(|edit| edit.node_id.clone())
             && let Some(rect) = patch_node_rects(&patch, node.rect, &pan_state).get(&edit_node_id)
             && let Some(edit) = &mut state.text_edit
@@ -451,6 +456,7 @@ pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local
         }) = state.drag.clone()
         {
             allocate_created_connection(&mut state, &view_key, from, target);
+            semantic_changed = true;
         }
         if let Some(PatcherDragState::CableEndpoint {
             cable_id,
@@ -469,6 +475,7 @@ pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local
                         state.selected_cable =
                             Some(connection_id_from_ports(&new_from, &original_to));
                         allocate_created_connection(&mut state, &view_key, new_from, original_to);
+                        semantic_changed = true;
                     }
                 }
                 CableEndpoint::To => {
@@ -477,11 +484,15 @@ pub(super) fn handle_patcher_pointer_up(node: &LayoutNode, local_col: f32, local
                         state.selected_cable =
                             Some(connection_id_from_ports(&original_from, &new_to));
                         allocate_created_connection(&mut state, &view_key, original_from, new_to);
+                        semantic_changed = true;
                     }
                 }
             }
         }
         state.hovered_node = hit_patcher_node(&patch, node.rect, &pan_state, local_col, local_row);
+        if semantic_changed && let Some(patch) = debug_patch_for_state(node, &state, &view_key) {
+            debug_log_patch_lisp(&view_key, &patch);
+        }
     }
     state.drag = None;
     set_patcher_interaction_state(key, state);
