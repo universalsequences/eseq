@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 
 use super::model::{
     ArgValue, BindingTarget, ConnectionKind, NodeKind, Patch, PatchConnection, PatchNode,
@@ -6,6 +7,7 @@ use super::model::{
 };
 
 const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
+const DEBUG_LISP_ENV: &str = "ESEQ_PATCHER_DEBUG_LISP";
 
 pub(super) fn emit_patch_debug_lisp(patch: &Patch) -> String {
     let inbound = inbound_connections(patch);
@@ -40,13 +42,42 @@ pub(super) fn emit_patch_debug_lisp(patch: &Patch) -> String {
 }
 
 pub(super) fn debug_log_patch_lisp(view_key: &str, patch: &Patch) {
-    #[cfg(all(debug_assertions, not(test)))]
+    if !debug_lisp_logging_enabled() {
+        return;
+    }
     eprintln!(
         "[patcher writeback debug:{view_key}]\n{}\n[/patcher writeback debug]",
         emit_patch_debug_lisp(patch)
     );
-    #[cfg(any(not(debug_assertions), test))]
-    let _ = (view_key, patch);
+}
+
+fn debug_lisp_logging_enabled() -> bool {
+    env::var(DEBUG_LISP_ENV)
+        .ok()
+        .is_some_and(|value| env_flag_enabled(&value))
+}
+
+fn env_flag_enabled(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::env_flag_enabled;
+
+    #[test]
+    fn debug_lisp_env_flag_accepts_only_explicit_truthy_values() {
+        for value in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(env_flag_enabled(value), "{value:?} should enable logging");
+        }
+        for value in ["", "0", "false", "no", "off", "anything"] {
+            assert!(
+                !env_flag_enabled(value),
+                "{value:?} should not enable logging"
+            );
+        }
+    }
 }
 
 fn inbound_connections(patch: &Patch) -> HashMap<(String, usize), &PatchConnection> {
