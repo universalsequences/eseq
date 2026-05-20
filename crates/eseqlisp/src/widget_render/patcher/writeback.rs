@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::parser::{ASTParser, Expression, Parser, format_expression};
 
@@ -11,8 +11,10 @@ use super::model::{
 use super::project::dgenlisp_operator_names;
 use super::state::{
     PatcherConnectionEdit, PatcherConnectionOrigin, PatcherInteractionState, PatcherNodeOrigin,
-    active_patcher_view_key, connection_edit_key, source_connection_id,
+    active_patcher_view_key, connection_edit_key, node_edit_key, source_connection_id,
 };
+
+const MISSING_INPUT_SENTINEL: &str = "__patcher_missing_input__";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WriteBackError {
@@ -53,6 +55,11 @@ pub(super) enum WriteBackError {
     UnsupportedHistoryEdit {
         view_key: String,
         history_id: String,
+        reason: String,
+    },
+    UnsupportedGeneratedBinding {
+        view_key: String,
+        node_id: String,
         reason: String,
     },
     UnsupportedSourceOwner {
@@ -121,7 +128,7 @@ pub(super) fn emit_patch_writeback(
     for edit in node_edits {
         match &edit.origin {
             PatcherNodeOrigin::Created { .. } => {
-                if !created_history_edit(edit) {
+                if !created_history_edit(edit) && !created_value_edit(edit) {
                     return Err(WriteBackError::UnsupportedCreatedNode {
                         view_key: edit.view_key.clone(),
                         node_id: edit.id.clone(),
@@ -153,7 +160,9 @@ pub(super) fn emit_patch_writeback(
         }
     }
 
-    apply_history_writeback(&mut document, &root_patch, interaction_state)?;
+    let generated =
+        apply_generated_binding_writeback(&mut document, &root_patch, interaction_state)?;
+    apply_history_writeback(&mut document, &root_patch, interaction_state, &generated)?;
 
     Ok(document.emit())
 }
@@ -165,7 +174,9 @@ fn validate_connection_edits(
     for edit in interaction_state.edit_state.connections.values() {
         match edit.origin {
             PatcherConnectionOrigin::Created { .. } => {
-                if !connection_edit_touches_history(root_patch, interaction_state, edit) {
+                if !connection_edit_touches_history(root_patch, interaction_state, edit)
+                    && !connection_edit_touches_created_value(interaction_state, edit)
+                {
                     return Err(WriteBackError::UnsupportedCreatedConnection {
                         view_key: edit.view_key.clone(),
                         connection_id: edit.id.clone(),
@@ -184,6 +195,11 @@ fn validate_connection_edits(
     for key in interaction_state.edit_state.deleted_connections.iter() {
         let (view_key, connection_id) = split_scoped_key(key);
         if !deleted_connection_has_history_replacement(
+            root_patch,
+            interaction_state,
+            &view_key,
+            &connection_id,
+        ) && !deleted_connection_has_created_value_replacement(
             root_patch,
             interaction_state,
             &view_key,
@@ -234,6 +250,20 @@ fn created_history_edit(edit: &super::state::PatcherNodeEdit) -> bool {
     edit.text.trim() == "history"
 }
 
+fn created_value_edit(edit: &super::state::PatcherNodeEdit) -> bool {
+    matches!(&edit.origin, PatcherNodeOrigin::Created { .. })
+        && !edit.text.trim().is_empty()
+        && !created_history_edit(edit)
+}
+
+fn connection_edit_touches_created_value(
+    interaction_state: &PatcherInteractionState,
+    edit: &PatcherConnectionEdit,
+) -> bool {
+    created_value_node(interaction_state, &edit.view_key, &edit.from.node_id).is_some()
+        || created_value_node(interaction_state, &edit.view_key, &edit.to.node_id).is_some()
+}
+
 fn connection_edit_touches_history(
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
@@ -250,6 +280,30 @@ fn connection_edit_touches_history(
         &edit.view_key,
         &edit.to.node_id,
     )
+}
+
+fn deleted_connection_has_created_value_replacement(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    connection_id: &str,
+) -> bool {
+    let Some(connection) = source_connection(root_patch, view_key, connection_id) else {
+        return false;
+    };
+    let to = InputPortRef {
+        node_id: connection.to_node.clone(),
+        input_index: connection.to_input,
+    };
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|edit| edit.view_key == view_key)
+        .any(|edit| {
+            created_value_node(interaction_state, view_key, &edit.from.node_id).is_some()
+                && edit.to == to
+        })
 }
 
 fn deleted_connection_has_history_replacement(
@@ -305,6 +359,18 @@ fn node_is_history(
             .is_some_and(created_history_edit)
 }
 
+fn created_value_node<'a>(
+    interaction_state: &'a PatcherInteractionState,
+    view_key: &str,
+    node_id: &str,
+) -> Option<&'a super::state::PatcherNodeEdit> {
+    interaction_state
+        .edit_state
+        .nodes
+        .get(&node_edit_key(view_key, node_id))
+        .filter(|edit| created_value_edit(edit))
+}
+
 fn source_edit_sort_key(
     root_patch: &Patch,
     edit: &super::state::PatcherNodeEdit,
@@ -340,10 +406,451 @@ fn source_owner_location<'a>(
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct GeneratedBindings {
+    names: HashMap<(String, String), String>,
+}
+
+impl GeneratedBindings {
+    fn insert(&mut self, view_key: &str, node_id: &str, name: String) {
+        self.names
+            .insert((view_key.to_string(), node_id.to_string()), name);
+    }
+
+    fn get(&self, view_key: &str, node_id: &str) -> Option<&str> {
+        self.names
+            .get(&(view_key.to_string(), node_id.to_string()))
+            .map(String::as_str)
+    }
+}
+
+fn apply_generated_binding_writeback(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+) -> Result<GeneratedBindings, WriteBackError> {
+    let mut generated = GeneratedBindings::default();
+    let mut allocator = GeneratedNameAllocator::new(document);
+    let mut views = vec!["root".to_string()];
+    views.extend(
+        root_patch
+            .macros
+            .iter()
+            .map(|macro_patch| format!("macro:{}", macro_patch.name)),
+    );
+    for edit in interaction_state.edit_state.nodes.values() {
+        if !views.contains(&edit.view_key) {
+            views.push(edit.view_key.clone());
+        }
+    }
+
+    let mut pending_defs: Vec<(SourceScopeId, usize, usize, Expression)> = Vec::new();
+    let mut next_generated_def_order = 0usize;
+    for view_key in views {
+        let scope = scope_for_view_key(&view_key);
+        let mut created_nodes = interaction_state
+            .edit_state
+            .nodes
+            .values()
+            .filter(|edit| edit.view_key == view_key)
+            .filter(|edit| created_value_edit(edit))
+            .collect::<Vec<_>>();
+        created_nodes.sort_by(|a, b| a.id.cmp(&b.id));
+
+        for edit in &created_nodes {
+            let op = created_node_operator(edit)?;
+            let name = allocator.allocate(&scope, &op);
+            generated.insert(&view_key, &edit.id, name);
+        }
+
+        for edit in created_nodes {
+            let name = generated
+                .get(&view_key, &edit.id)
+                .expect("created node name allocated before emission")
+                .to_string();
+            let generated_expr = created_node_expression(
+                document,
+                root_patch,
+                interaction_state,
+                &generated,
+                &view_key,
+                edit,
+            )?;
+            let insertion_index = generated_def_insertion_index(
+                document,
+                root_patch,
+                interaction_state,
+                &generated,
+                &view_key,
+                edit,
+            )?;
+            pending_defs.push((
+                scope.clone(),
+                insertion_index,
+                next_generated_def_order,
+                Expression::List(vec![
+                    Expression::Symbol("def".to_string()),
+                    Expression::Symbol(name),
+                    generated_expr,
+                ]),
+            ));
+            next_generated_def_order += 1;
+            rewrite_created_value_consumers(
+                document,
+                root_patch,
+                interaction_state,
+                &generated,
+                &view_key,
+                edit,
+            )?;
+        }
+    }
+
+    pending_defs.sort_by(
+        |(scope_a, index_a, order_a, _), (scope_b, index_b, order_b, _)| {
+            view_key_for_scope(scope_b)
+                .cmp(&view_key_for_scope(scope_a))
+                .then(index_b.cmp(index_a))
+                .then(order_b.cmp(order_a))
+        },
+    );
+    for (scope, index, _, expr) in pending_defs {
+        document.insert_form(&scope, index, expr)?;
+    }
+    Ok(generated)
+}
+
+fn created_node_operator(edit: &super::state::PatcherNodeEdit) -> Result<String, WriteBackError> {
+    let expr = parse_created_node_text(edit)?;
+    let Some(op) = edited_operator(&expr) else {
+        return Err(WriteBackError::UnsupportedGeneratedBinding {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason: "created value node text must start with an operator".to_string(),
+        });
+    };
+    Ok(op.to_string())
+}
+
+fn parse_created_node_text(
+    edit: &super::state::PatcherNodeEdit,
+) -> Result<Expression, WriteBackError> {
+    parse_single_expression(&format!("({})", edit.text.trim())).map_err(|reason| {
+        WriteBackError::InvalidEdit {
+            view_key: edit.view_key.clone(),
+            node_id: edit.id.clone(),
+            reason,
+        }
+    })
+}
+
+fn created_node_expression(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+) -> Result<Expression, WriteBackError> {
+    let mut expr = parse_created_node_text(edit)?;
+    let Expression::List(items) = &mut expr else {
+        return Err(WriteBackError::UnsupportedGeneratedBinding {
+            view_key: view_key.to_string(),
+            node_id: edit.id.clone(),
+            reason: "created value node text must parse as a call".to_string(),
+        });
+    };
+    let Some(op) = symbol_at(items, 0) else {
+        return Err(WriteBackError::UnsupportedGeneratedBinding {
+            view_key: view_key.to_string(),
+            node_id: edit.id.clone(),
+            reason: "created value node operator must be a symbol".to_string(),
+        });
+    };
+    if !document.is_known_operator(op) {
+        return Err(WriteBackError::UnknownOperator {
+            view_key: view_key.to_string(),
+            node_id: edit.id.clone(),
+            operator: op.to_string(),
+        });
+    }
+
+    let mut inbound = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.to.node_id == edit.id)
+        .collect::<Vec<_>>();
+    inbound.sort_by_key(|connection| connection.to.input_index);
+    for connection in inbound {
+        let value =
+            value_reference_expr(document, root_patch, generated, view_key, &connection.from)?;
+        let item_index = connection.to.input_index + 1;
+        while items.len() <= item_index {
+            items.push(Expression::Symbol(MISSING_INPUT_SENTINEL.to_string()));
+        }
+        items[item_index] = value;
+    }
+    Ok(expr)
+}
+
+fn value_reference_expr(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    from: &OutputPortRef,
+) -> Result<Expression, WriteBackError> {
+    if let Some(name) = generated.get(view_key, &from.node_id) {
+        return Ok(Expression::Symbol(name.to_string()));
+    }
+    let Some(node) =
+        patch_for_view(root_patch, view_key).and_then(|patch| patch_node(patch, &from.node_id))
+    else {
+        return Err(WriteBackError::UnsupportedGeneratedBinding {
+            view_key: view_key.to_string(),
+            node_id: from.node_id.clone(),
+            reason: "generated binding source must be source-backed or generated".to_string(),
+        });
+    };
+    node_reference_expr(document, node, view_key)
+}
+
+fn node_reference_expr(
+    document: &SourceDocument,
+    node: &PatchNode,
+    view_key: &str,
+) -> Result<Expression, WriteBackError> {
+    let source = node
+        .source
+        .as_ref()
+        .ok_or_else(|| WriteBackError::MissingSourceOwner {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+        })?;
+    match &source.owner {
+        SourceOwner::BindingValue {
+            binding: BindingTarget::Symbol(name),
+            ..
+        } => Ok(Expression::Symbol(name.clone())),
+        SourceOwner::TopLevelForm { .. } if node.kind == NodeKind::Param => {
+            let Some(name) = node.label.split_whitespace().nth(1) else {
+                return Err(WriteBackError::UnsupportedGeneratedBinding {
+                    view_key: view_key.to_string(),
+                    node_id: node.id.clone(),
+                    reason: "param source has no parameter name".to_string(),
+                });
+            };
+            Ok(Expression::Symbol(name.to_string()))
+        }
+        SourceOwner::MacroParameter { binding, .. } => Ok(Expression::Symbol(binding.name.clone())),
+        _ if node.kind == NodeKind::Constant => {
+            parse_single_expression(&node.op).map_err(|reason| WriteBackError::InvalidEdit {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                reason,
+            })
+        }
+        SourceOwner::NestedExpr { expr } => document.expr(expr).cloned().ok_or_else(|| {
+            WriteBackError::UnsupportedGeneratedBinding {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                reason: "nested source expression is missing".to_string(),
+            }
+        }),
+        SourceOwner::TopLevelForm { .. } => source
+            .expr
+            .as_ref()
+            .and_then(|expr| document.expr(expr))
+            .cloned()
+            .ok_or_else(|| WriteBackError::UnsupportedGeneratedBinding {
+                view_key: view_key.to_string(),
+                node_id: node.id.clone(),
+                reason: "top-level source expression is missing".to_string(),
+            }),
+        _ => Err(WriteBackError::UnsupportedGeneratedBinding {
+            view_key: view_key.to_string(),
+            node_id: node.id.clone(),
+            reason: "source owner cannot be referenced by generated binding".to_string(),
+        }),
+    }
+}
+
+fn generated_def_insertion_index(
+    document: &SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+) -> Result<usize, WriteBackError> {
+    let scope = scope_for_view_key(view_key);
+    let dependency_index =
+        generated_node_dependencies(root_patch, interaction_state, view_key, edit)
+            .into_iter()
+            .filter_map(|node_id| {
+                patch_for_view(root_patch, view_key)
+                    .and_then(|patch| patch_node(patch, &node_id))
+                    .and_then(|node| source_owner_location_for_node(node))
+                    .filter(|(form_id, _)| form_id.scope == scope)
+                    .map(|(form_id, _)| form_id.index)
+            })
+            .max()
+            .map(|index| index + 1)
+            .unwrap_or(0);
+    let consumer_index =
+        generated_node_consumers(root_patch, interaction_state, view_key, edit, generated)
+            .into_iter()
+            .filter_map(|node_id| {
+                patch_for_view(root_patch, view_key)
+                    .and_then(|patch| patch_node(patch, &node_id))
+                    .and_then(|node| source_owner_location_for_node(node))
+                    .filter(|(form_id, _)| form_id.scope == scope)
+                    .map(|(form_id, _)| form_id.index)
+            })
+            .min()
+            .unwrap_or_else(|| document.scope_len(&scope));
+    if dependency_index > consumer_index {
+        return Err(WriteBackError::UnsupportedGeneratedBinding {
+            view_key: view_key.to_string(),
+            node_id: edit.id.clone(),
+            reason: "generated binding dependencies appear after its consumers".to_string(),
+        });
+    }
+    Ok(dependency_index)
+}
+
+fn generated_node_dependencies(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+) -> Vec<String> {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.to.node_id == edit.id)
+        .filter(|connection| {
+            created_value_node(interaction_state, view_key, &connection.from.node_id).is_none()
+        })
+        .filter(|connection| {
+            patch_for_view(root_patch, view_key)
+                .and_then(|patch| patch_node(patch, &connection.from.node_id))
+                .is_some()
+        })
+        .map(|connection| connection.from.node_id.clone())
+        .collect()
+}
+
+fn generated_node_consumers(
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+    generated: &GeneratedBindings,
+) -> Vec<String> {
+    interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
+        .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
+        .filter(|connection| {
+            patch_for_view(root_patch, view_key)
+                .and_then(|patch| patch_node(patch, &connection.to.node_id))
+                .is_some()
+        })
+        .map(|connection| connection.to.node_id.clone())
+        .collect()
+}
+
+fn source_owner_location_for_node(node: &PatchNode) -> Option<(&SourceFormId, usize)> {
+    let source = node.source.as_ref()?;
+    source_owner_location(&source.owner, source.expr.as_ref())
+}
+
+fn rewrite_created_value_consumers(
+    document: &mut SourceDocument,
+    root_patch: &Patch,
+    interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
+    view_key: &str,
+    edit: &super::state::PatcherNodeEdit,
+) -> Result<(), WriteBackError> {
+    let Some(name) = generated.get(view_key, &edit.id) else {
+        return Ok(());
+    };
+    let mut consumers = interaction_state
+        .edit_state
+        .connections
+        .values()
+        .filter(|connection| connection.view_key == view_key && connection.from.node_id == edit.id)
+        .filter(|connection| generated.get(view_key, &connection.to.node_id).is_none())
+        .collect::<Vec<_>>();
+    consumers.sort_by_key(|connection| (connection.to.node_id.clone(), connection.to.input_index));
+    for connection in consumers {
+        let Some(dest) = patch_for_view(root_patch, view_key)
+            .and_then(|patch| patch_node(patch, &connection.to.node_id))
+        else {
+            return Err(WriteBackError::UnsupportedGeneratedBinding {
+                view_key: view_key.to_string(),
+                node_id: edit.id.clone(),
+                reason: "generated binding consumer must be source-backed".to_string(),
+            });
+        };
+        rewrite_node_input(
+            document,
+            view_key,
+            dest,
+            connection.to.input_index,
+            Expression::Symbol(name.to_string()),
+        )?;
+    }
+    Ok(())
+}
+
+fn rewrite_node_input(
+    document: &mut SourceDocument,
+    view_key: &str,
+    node: &PatchNode,
+    input_index: usize,
+    value: Expression,
+) -> Result<(), WriteBackError> {
+    if let Some(source) = node.source.as_ref() {
+        if let Some(call_shape) = source.call_shape.as_ref()
+            && let Some(arg) = call_shape
+                .positional_args
+                .iter()
+                .find(|arg| arg.semantic_index == input_index)
+        {
+            return document.replace_expr(&arg.expr, value);
+        }
+        if node.kind == NodeKind::Out
+            && input_index == 0
+            && let SourceOwner::TopLevelForm { form_id } = &source.owner
+        {
+            return document.replace_expr(
+                &SourceExprId {
+                    form_id: form_id.clone(),
+                    path: Default::default(),
+                },
+                value,
+            );
+        }
+    }
+    Err(WriteBackError::UnsupportedGeneratedBinding {
+        view_key: view_key.to_string(),
+        node_id: node.id.clone(),
+        reason: "generated binding consumer has no source-owned positional argument".to_string(),
+    })
+}
+
 fn apply_history_writeback(
     document: &mut SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
 ) -> Result<(), WriteBackError> {
     let mut allocator = HistoryNameAllocator::new(document);
     let mut pending_make_forms = Vec::new();
@@ -417,6 +924,7 @@ fn apply_history_writeback(
                     document,
                     root_patch,
                     interaction_state,
+                    generated,
                     &view_key,
                     &connection.from,
                 )?;
@@ -438,6 +946,11 @@ fn apply_history_writeback(
                     pending_write_forms.push((scope.clone(), history_name.clone(), value));
                 }
             } else {
+                if generated.get(&view_key, &connection.from.node_id).is_some()
+                    || generated.get(&view_key, &connection.to.node_id).is_some()
+                {
+                    continue;
+                }
                 return Err(WriteBackError::UnsupportedCreatedConnection {
                     view_key: view_key.clone(),
                     connection_id: connection.id.clone(),
@@ -598,9 +1111,16 @@ fn connection_source_expr(
     document: &SourceDocument,
     root_patch: &Patch,
     interaction_state: &PatcherInteractionState,
+    generated: &GeneratedBindings,
     view_key: &str,
     from: &OutputPortRef,
 ) -> Result<(Expression, SourceScopeId), WriteBackError> {
+    if let Some(name) = generated.get(view_key, &from.node_id) {
+        return Ok((
+            Expression::Symbol(name.to_string()),
+            scope_for_view_key(view_key),
+        ));
+    }
     let Some(node) =
         patch_for_view(root_patch, view_key).and_then(|patch| patch_node(patch, &from.node_id))
     else {
@@ -706,6 +1226,72 @@ impl HistoryNameAllocator {
         *next += 1;
         name
     }
+}
+
+#[derive(Debug)]
+struct GeneratedNameAllocator {
+    used_by_scope: HashMap<SourceScopeId, HashSet<String>>,
+    next_by_scope_stem: HashMap<(SourceScopeId, String), usize>,
+}
+
+impl GeneratedNameAllocator {
+    fn new(document: &SourceDocument) -> Self {
+        let mut used_by_scope = HashMap::new();
+        for scope in document.scopes() {
+            used_by_scope.insert(scope.clone(), document.reserved_names(&scope));
+        }
+        Self {
+            used_by_scope,
+            next_by_scope_stem: HashMap::new(),
+        }
+    }
+
+    fn allocate(&mut self, scope: &SourceScopeId, operator: &str) -> String {
+        let stem = generated_binding_stem(operator);
+        let used = self.used_by_scope.entry(scope.clone()).or_default();
+        let key = (scope.clone(), stem.clone());
+        let mut next = self
+            .next_by_scope_stem
+            .remove(&key)
+            .unwrap_or_else(|| next_suffix_for_stem(used, &stem));
+        loop {
+            let candidate = format!("{stem}{next}");
+            next += 1;
+            if used.insert(candidate.clone()) {
+                self.next_by_scope_stem.insert(key, next);
+                return candidate;
+            }
+        }
+    }
+}
+
+fn generated_binding_stem(operator: &str) -> String {
+    let mapped = match operator {
+        "*" => "mul",
+        "+" => "add",
+        "-" => "sub",
+        "/" => "div",
+        _ => operator,
+    };
+    let stem = mapped
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        .collect::<String>();
+    if stem.is_empty() || stem.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        "generated".to_string()
+    } else {
+        stem
+    }
+}
+
+fn next_suffix_for_stem(used: &HashSet<String>, stem: &str) -> usize {
+    used.iter()
+        .filter_map(|name| name.strip_prefix(stem))
+        .filter(|suffix| !suffix.is_empty())
+        .filter_map(|suffix| suffix.parse::<usize>().ok())
+        .max()
+        .map(|value| value + 1)
+        .unwrap_or(1)
 }
 
 fn scope_for_view_key(view_key: &str) -> SourceScopeId {
@@ -960,6 +1546,33 @@ impl SourceDocument {
         }
     }
 
+    fn insert_form(
+        &mut self,
+        scope: &SourceScopeId,
+        index: usize,
+        expr: Expression,
+    ) -> Result<(), WriteBackError> {
+        match scope {
+            SourceScopeId::Root => {
+                let index = index.min(self.forms.len());
+                self.forms.insert(index, SourceForm::Expr(expr));
+                Ok(())
+            }
+            SourceScopeId::Macro { name } => {
+                let Some(macro_doc) = self.macros.get_mut(name) else {
+                    return Err(WriteBackError::InvalidEdit {
+                        view_key: view_key_for_scope(scope),
+                        node_id: String::new(),
+                        reason: "missing macro scope for generated binding".to_string(),
+                    });
+                };
+                let index = index.min(macro_doc.body.len());
+                macro_doc.body.insert(index, expr);
+                Ok(())
+            }
+        }
+    }
+
     fn insert_history_write(
         &mut self,
         scope: &SourceScopeId,
@@ -1000,6 +1613,46 @@ impl SourceDocument {
                 .map(|name| SourceScopeId::Macro { name }),
         );
         scopes
+    }
+
+    fn scope_len(&self, scope: &SourceScopeId) -> usize {
+        match scope {
+            SourceScopeId::Root => self.forms.len(),
+            SourceScopeId::Macro { name } => self
+                .macros
+                .get(name)
+                .map(|macro_doc| macro_doc.body.len())
+                .unwrap_or(0),
+        }
+    }
+
+    fn reserved_names(&self, scope: &SourceScopeId) -> HashSet<String> {
+        let mut names = HashSet::new();
+        match scope {
+            SourceScopeId::Root => {
+                for form in &self.forms {
+                    match form {
+                        SourceForm::Expr(expr) => collect_scope_binding_names(expr, &mut names),
+                        SourceForm::Macro(name) => {
+                            names.insert(name.clone());
+                        }
+                    }
+                }
+            }
+            SourceScopeId::Macro { name } => {
+                if let Some(macro_doc) = self.macros.get(name) {
+                    for param in &macro_doc.params {
+                        if let Expression::Symbol(name) = param {
+                            names.insert(name.clone());
+                        }
+                    }
+                    for expr in &macro_doc.body {
+                        collect_scope_binding_names(expr, &mut names);
+                    }
+                }
+            }
+        }
+        names
     }
 
     fn next_history_suffix(&self, scope: &SourceScopeId) -> usize {
@@ -1145,6 +1798,33 @@ fn collect_history_suffixes(expr: &Expression, max_suffix: &mut usize) {
         }
         Expression::Quasiquote(inner) | Expression::Unquote(inner) => {
             collect_history_suffixes(inner, max_suffix);
+        }
+        _ => {}
+    }
+}
+
+fn collect_scope_binding_names(expr: &Expression, names: &mut HashSet<String>) {
+    let Expression::List(items) = expr else {
+        return;
+    };
+    match symbol_at(items, 0) {
+        Some("def") => match items.get(1) {
+            Some(Expression::Symbol(name)) => {
+                names.insert(name.clone());
+            }
+            Some(Expression::List(outputs)) => {
+                for output in outputs {
+                    if let Expression::Symbol(name) = output {
+                        names.insert(name.clone());
+                    }
+                }
+            }
+            _ => {}
+        },
+        Some("param" | "make-history") => {
+            if let Some(name) = symbol_at(items, 1) {
+                names.insert(name.to_string());
+            }
         }
         _ => {}
     }

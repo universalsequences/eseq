@@ -1284,6 +1284,8 @@ Completed requirements:
 
 ### Phase 4: Generated Binding Allocation
 
+Status: implemented.
+
 Goal: allocate deterministic source names for created or lifted value nodes.
 
 Responsibilities:
@@ -1303,6 +1305,22 @@ Tests:
 - Deleted generated names are not reused during the same session.
 - Macro-local generated names do not collide with root generated names.
 - Shared created node emits one generated `def` and multiple references.
+
+Completed requirements:
+
+- The real normalized write-back emitter now has a scoped generated binding
+  allocator for created value nodes.
+- Generated binding names use sanitized operator stems, high-water suffixes,
+  and per-scope collision checks against defs, params, macro params, histories,
+  and macro names.
+- Created value nodes emit generated `def` forms when connected into
+  source-backed consumers.
+- Root and macro-local generated names are allocated independently.
+- Shared created value nodes emit one generated `def` and all consumers
+  reference that generated symbol.
+- Generated defs are inserted after source-backed dependencies and before the
+  earliest source-backed consumer; ambiguous ordering remains a structured
+  blocker.
 
 ### Phase 5: Cable and Node Semantic Write-Back
 
